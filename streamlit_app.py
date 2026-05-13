@@ -7,7 +7,7 @@ from market_memory.config import SECTOR_SETTINGS
 from market_memory.data import fetch_ohlcv
 from market_memory.indicators import add_indicators
 from market_memory.pivots import Pivot, detect_pivots
-from market_memory.similarity import MatchResult, find_best_matches
+from market_memory.similarity import MatchResult, find_best_matches, normalize_similarity_weights
 from market_memory.visualization import plot_overlay
 
 
@@ -23,6 +23,7 @@ def run_analysis(
     pivot_source: str,
     manual_pivot_type: str,
     manual_pivot_dates_text: str,
+    similarity_weights: dict[str, float],
     period: str = "5y",
 ) -> tuple[pd.DataFrame, list[MatchResult], list[str]]:
     raw = fetch_ohlcv(ticker=ticker, period=period)
@@ -80,7 +81,13 @@ def run_analysis(
             pivot_mode=pivot_mode,
         )
 
-    matches = find_best_matches(enriched, pivots, current_window=15, top_k=8)
+    matches = find_best_matches(
+        enriched,
+        pivots,
+        current_window=15,
+        top_k=8,
+        similarity_weights=similarity_weights,
+    )
     return enriched, matches, notes
 
 
@@ -129,6 +136,40 @@ with st.sidebar:
         disabled=pivot_source != "manual",
         help="Syötä päivämäärät riveittäin tai pilkulla eroteltuna (YYYY-MM-DD).",
     )
+
+    st.markdown("---")
+    st.subheader("Similarity weights")
+    preset_options = {
+        "balanced": {"price": 0.20, "rsi": 0.20, "volume": 0.20, "volatility": 0.20, "trend": 0.20},
+        "rebound hunter": {"price": 0.10, "rsi": 0.35, "volume": 0.20, "volatility": 0.25, "trend": 0.10},
+        "panic reversal": {"price": 0.10, "rsi": 0.30, "volume": 0.25, "volatility": 0.30, "trend": 0.05},
+        "trend continuation": {"price": 0.30, "rsi": 0.10, "volume": 0.15, "volatility": 0.10, "trend": 0.35},
+    }
+    selected_preset = st.selectbox("Preset", options=list(preset_options.keys()), index=0)
+    selected_weights = preset_options[selected_preset]
+    price_weight = st.slider("price weight", min_value=0.0, max_value=1.0, value=float(selected_weights["price"]), step=0.01)
+    rsi_weight = st.slider("RSI weight", min_value=0.0, max_value=1.0, value=float(selected_weights["rsi"]), step=0.01)
+    volume_weight = st.slider("volume weight", min_value=0.0, max_value=1.0, value=float(selected_weights["volume"]), step=0.01)
+    volatility_weight = st.slider("volatility weight", min_value=0.0, max_value=1.0, value=float(selected_weights["volatility"]), step=0.01)
+    trend_weight = st.slider("trend weight", min_value=0.0, max_value=1.0, value=float(selected_weights["trend"]), step=0.01)
+    similarity_weights = normalize_similarity_weights(
+        {
+            "price": price_weight,
+            "rsi": rsi_weight,
+            "volume": volume_weight,
+            "volatility": volatility_weight,
+            "trend": trend_weight,
+        }
+    )
+    st.caption(
+        "Normalized weights: "
+        f"price {similarity_weights['price']:.2f}, "
+        f"RSI {similarity_weights['rsi']:.2f}, "
+        f"volume {similarity_weights['volume']:.2f}, "
+        f"volatility {similarity_weights['volatility']:.2f}, "
+        f"trend {similarity_weights['trend']:.2f}"
+    )
+    st.caption(f"Weight sum = {sum(similarity_weights.values()):.2f}")
     run = st.button("Suorita analyysi", type="primary", use_container_width=True)
 
 if run:
@@ -145,6 +186,7 @@ if run:
                     pivot_source=pivot_source,
                     manual_pivot_type=manual_pivot_type,
                     manual_pivot_dates_text=manual_pivot_dates_text,
+                    similarity_weights=similarity_weights,
                 )
             except Exception as exc:
                 st.exception(exc)
@@ -188,6 +230,28 @@ if run:
                             f"{top_match.historical_return_after_pivot:+.2f}%",
                         )
                         st.metric("Detected pivots", f"{len(matches)} shown")
+
+                    st.subheader("Similarity formula")
+                    st.code(
+                        "\n".join(
+                            [
+                                f"{similarity_weights['price']:.2f} * price +",
+                                f"{similarity_weights['rsi']:.2f} * RSI +",
+                                f"{similarity_weights['volume']:.2f} * volume +",
+                                f"{similarity_weights['volatility']:.2f} * volatility +",
+                                f"{similarity_weights['trend']:.2f} * trend",
+                            ]
+                        ),
+                        language="text",
+                    )
+                    st.caption(
+                        "Top match score = "
+                        f"{similarity_weights['price']:.2f}×{top_match.price_similarity:.3f} + "
+                        f"{similarity_weights['rsi']:.2f}×{top_match.rsi_similarity:.3f} + "
+                        f"{similarity_weights['volume']:.2f}×{top_match.volume_similarity:.3f} + "
+                        f"{similarity_weights['volatility']:.2f}×{top_match.volatility_similarity:.3f} + "
+                        f"{similarity_weights['trend']:.2f}×{top_match.trend_similarity:.3f}"
+                    )
 
                     st.subheader("Plotly overlay")
                     current = enriched.iloc[-15:]

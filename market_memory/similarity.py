@@ -19,6 +19,13 @@ SIMILARITY_WEIGHTS = {
 }
 
 
+def normalize_similarity_weights(weights: dict[str, float]) -> dict[str, float]:
+    total = sum(weights.values())
+    if total <= 0:
+        return SIMILARITY_WEIGHTS.copy()
+    return {name: value / total for name, value in weights.items()}
+
+
 @dataclass
 class MatchResult:
     pivot: Pivot
@@ -75,12 +82,14 @@ def find_best_matches(
     current_window: int = 15,
     top_k: int = 5,
     post_pivot_window: int = 15,
+    similarity_weights: dict[str, float] | None = None,
 ) -> list[MatchResult]:
     if len(df) < current_window:
         raise ValueError("Not enough rows for current window")
 
     current = df.iloc[-current_window:]
     current_vec = _flatten_features(current).reshape(1, -1)
+    weights = normalize_similarity_weights(similarity_weights or SIMILARITY_WEIGHTS)
 
     matches: list[MatchResult] = []
 
@@ -103,7 +112,7 @@ def find_best_matches(
         hist_vec = _flatten_features(hist_pre).reshape(1, -1)
         base_score = float(cosine_similarity(current_vec, hist_vec)[0][0])
         components = _component_similarities(current=current, historical=hist_pre)
-        weighted_score = sum(components[name] * weight for name, weight in SIMILARITY_WEIGHTS.items())
+        weighted_score = sum(components[name] * weight for name, weight in weights.items())
         score = (base_score * 0.15) + (weighted_score * 0.85)
 
         def compute_forward_return(days: int) -> float | None:
