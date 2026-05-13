@@ -49,24 +49,26 @@ def detect_pivots(
     atr_pct_series = _as_1d_series(df, "atr_pct")
 
     for i in range(window, len(df) - window):
-        sl = slice(i - window, i + window + 1)
         center_idx = df.index[i]
         atr_ok = min_atr_pct <= float(atr_pct_series.iloc[i]) <= max_atr_pct
         if not atr_ok:
             continue
 
-        local_high = float(highs.iloc[sl].max())
-        local_low = float(lows.iloc[sl].min())
+        local_high = float(highs.iloc[i - window : i + window + 1].max())
+        local_low = float(lows.iloc[i - window : i + window + 1].min())
         local_range = max(local_high - local_low, 1e-9)
         current_high = float(highs.iloc[i])
         current_low = float(lows.iloc[i])
-        close = float(closes.iloc[i])
-        move_pct = (local_range / close) * 100
+        current_close = float(closes.iloc[i])
+        move_pct = (local_range / current_close) * 100
         rsi = float(rsi_series.iloc[i])
 
-        if pivot_mode in {"all", "peak"} and current_high == local_high and rsi >= rsi_high and move_pct >= peak_threshold_pct:
+        is_peak = current_high == local_high
+        is_bottom = current_low == local_low
+
+        if pivot_mode in {"all", "peak"} and is_peak and rsi >= rsi_high and move_pct >= peak_threshold_pct:
             pivots.append(Pivot(index=center_idx, pivot_type="peak", pivot_move_pct=move_pct))
-        if pivot_mode in {"all", "bottom"} and current_low == local_low and rsi <= rsi_low and move_pct >= dip_threshold_pct:
+        if pivot_mode in {"all", "bottom"} and is_bottom and rsi <= rsi_low and move_pct >= dip_threshold_pct:
             pivots.append(Pivot(index=center_idx, pivot_type="bottom", pivot_move_pct=move_pct))
 
     return sorted(pivots, key=lambda p: p.index)
