@@ -16,6 +16,7 @@ class MatchResult:
     pivot: Pivot
     score: float
     historical_window: pd.DataFrame
+    historical_return_after_pivot: float
 
 
 def _flatten_features(window_df: pd.DataFrame) -> np.ndarray:
@@ -27,6 +28,7 @@ def find_best_matches(
     pivots: list[Pivot],
     current_window: int = 15,
     top_k: int = 5,
+    forward_window: int = 10,
 ) -> list[MatchResult]:
     if len(df) < current_window:
         raise ValueError("Not enough rows for current window")
@@ -49,7 +51,18 @@ def find_best_matches(
 
         hist_vec = _flatten_features(hist).reshape(1, -1)
         score = float(cosine_similarity(current_vec, hist_vec)[0][0])
-        matches.append(MatchResult(pivot=pivot, score=score, historical_window=hist))
+        forward_end = min(pivot_loc + forward_window, len(df) - 1)
+        pivot_close = float(df["Close"].iloc[pivot_loc])
+        next_close = float(df["Close"].iloc[forward_end])
+        hist_ret = ((next_close / pivot_close) - 1.0) * 100
+        matches.append(
+            MatchResult(
+                pivot=pivot,
+                score=score,
+                historical_window=hist,
+                historical_return_after_pivot=hist_ret,
+            )
+        )
 
     matches.sort(key=lambda m: m.score, reverse=True)
     return matches[:top_k]

@@ -33,7 +33,7 @@ def plot_overlay(current: pd.DataFrame, matches: list[MatchResult]) -> go.Figure
                 y=normalize_close(m.historical_window),
                 mode="lines",
                 name=label,
-                line=dict(color=color, width=1.5),
+                line=dict(color=color, width=2, dash="dash"),
                 opacity=0.75,
             )
         )
