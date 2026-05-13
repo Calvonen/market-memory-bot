@@ -103,6 +103,9 @@ def build_matches_table(matches: list[MatchResult], ticker: str, threshold: floa
                 "Pivot source": pivot_source,
                 "Alert status": f"{status}: {alert_text if status == 'ALERT' else 'no alert'}",
                 "Historical return after pivot": round(match.historical_return_after_pivot, 2),
+                "return +5d": round(match.return_plus_5d, 2) if match.return_plus_5d is not None else None,
+                "return +10d": round(match.return_plus_10d, 2) if match.return_plus_10d is not None else None,
+                "return +15d": round(match.return_plus_15d, 2) if match.return_plus_15d is not None else None,
             }
         )
     return pd.DataFrame(rows)
@@ -173,7 +176,13 @@ if run:
                         st.dataframe(table, use_container_width=True, hide_index=True)
                     with c2:
                         avg_ret = table["Historical return after pivot"].mean()
+                        avg_ret_5 = table["return +5d"].mean()
+                        avg_ret_10 = table["return +10d"].mean()
+                        avg_ret_15 = table["return +15d"].mean()
                         st.metric("Average historical return after pivot", f"{avg_ret:+.2f}%")
+                        st.metric("avg return +5d", f"{avg_ret_5:+.2f}%")
+                        st.metric("avg return +10d", f"{avg_ret_10:+.2f}%")
+                        st.metric("avg return +15d", f"{avg_ret_15:+.2f}%")
                         st.metric(
                             "Top historical return after pivot",
                             f"{top_match.historical_return_after_pivot:+.2f}%",

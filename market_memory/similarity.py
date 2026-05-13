@@ -29,7 +29,12 @@ class MatchResult:
     volatility_similarity: float
     trend_similarity: float
     historical_window: pd.DataFrame
+    historical_pre_window: pd.DataFrame
+    historical_post_window: pd.DataFrame
     historical_return_after_pivot: float
+    return_plus_5d: float | None
+    return_plus_10d: float | None
+    return_plus_15d: float | None
 
 
 def _flatten_features(window_df: pd.DataFrame) -> np.ndarray:
@@ -69,7 +74,7 @@ def find_best_matches(
     pivots: list[Pivot],
     current_window: int = 15,
     top_k: int = 5,
-    forward_window: int = 10,
+    post_pivot_window: int = 15,
 ) -> list[MatchResult]:
     if len(df) < current_window:
         raise ValueError("Not enough rows for current window")
@@ -82,20 +87,34 @@ def find_best_matches(
     for pivot in pivots:
         pivot_loc = df.index.get_loc(pivot.index)
         start = pivot_loc - current_window
-        end = pivot_loc
+        end = pivot_loc + post_pivot_window
         if start < 0:
             continue
-
-        hist = df.iloc[start:end]
-        if len(hist) != current_window:
+        if end >= len(df):
             continue
 
-        hist_vec = _flatten_features(hist).reshape(1, -1)
+        hist = df.iloc[start : end + 1]
+        if len(hist) != (current_window + post_pivot_window + 1):
+            continue
+
+        hist_pre = hist.iloc[:current_window]
+        hist_post = hist.iloc[current_window + 1 :]
+
+        hist_vec = _flatten_features(hist_pre).reshape(1, -1)
         base_score = float(cosine_similarity(current_vec, hist_vec)[0][0])
-        components = _component_similarities(current=current, historical=hist)
+        components = _component_similarities(current=current, historical=hist_pre)
         weighted_score = sum(components[name] * weight for name, weight in SIMILARITY_WEIGHTS.items())
         score = (base_score * 0.15) + (weighted_score * 0.85)
-        forward_end = min(pivot_loc + forward_window, len(df) - 1)
+
+        def compute_forward_return(days: int) -> float | None:
+            target_loc = pivot_loc + days
+            if target_loc >= len(df):
+                return None
+            pivot_close = float(df["Close"].iloc[pivot_loc])
+            target_close = float(df["Close"].iloc[target_loc])
+            return ((target_close / pivot_close) - 1.0) * 100
+
+        forward_end = pivot_loc + post_pivot_window
         pivot_close = float(df["Close"].iloc[pivot_loc])
         next_close = float(df["Close"].iloc[forward_end])
         hist_ret = ((next_close / pivot_close) - 1.0) * 100
@@ -109,7 +128,12 @@ def find_best_matches(
                 volatility_similarity=components["volatility"],
                 trend_similarity=components["trend"],
                 historical_window=hist,
+                historical_pre_window=hist_pre,
+                historical_post_window=hist_post,
                 historical_return_after_pivot=hist_ret,
+                return_plus_5d=compute_forward_return(5),
+                return_plus_10d=compute_forward_return(10),
+                return_plus_15d=compute_forward_return(15),
             )
         )
 
