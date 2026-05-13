@@ -20,7 +20,13 @@ def _as_1d_series(df: pd.DataFrame, column: str) -> pd.Series:
     data = df[column]
     if isinstance(data, pd.Series):
         return data
-    return data.squeeze("columns")
+    squeezed = data.squeeze("columns")
+    if isinstance(squeezed, pd.Series):
+        return squeezed
+
+    # If duplicate column names exist, selecting df[column] can still yield a
+    # DataFrame after squeezing. Use the first matching column consistently.
+    return data.iloc[:, 0]
 
 
 def detect_pivots(
