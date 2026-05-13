@@ -50,6 +50,11 @@ def build_matches_table(matches: list[MatchResult], ticker: str, threshold: floa
             {
                 "Ticker": ticker,
                 "Similarity": round(match.score, 3),
+                "price similarity": round(match.price_similarity, 3),
+                "RSI similarity": round(match.rsi_similarity, 3),
+                "volume similarity": round(match.volume_similarity, 3),
+                "volatility similarity": round(match.volatility_similarity, 3),
+                "trend similarity": round(match.trend_similarity, 3),
                 "Pivot date": match.pivot.index.date().isoformat(),
                 "Pivot type": match.pivot.pivot_type,
                 "Alert status": f"{status}: {alert_text if status == 'ALERT' else 'no alert'}",
