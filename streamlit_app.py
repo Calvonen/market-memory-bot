@@ -243,6 +243,33 @@ def run_news_fetch(ticker: str, company_name: str | None = None, limit: int = 5)
     return fetch_latest_news(ticker=ticker, company_name=company_name, limit=limit)
 
 
+@st.cache_data(show_spinner=False)
+def fetch_next_earnings_date(ticker: str) -> pd.Timestamp | None:
+    symbol = yf.Ticker(ticker)
+
+    calendar = getattr(symbol, "calendar", None)
+    if isinstance(calendar, pd.DataFrame) and not calendar.empty:
+        for column in calendar.columns:
+            values = pd.to_datetime(calendar[column], errors="coerce").dropna()
+            if not values.empty:
+                return pd.Timestamp(values.iloc[0]).normalize()
+
+    try:
+        earnings_dates = symbol.get_earnings_dates(limit=8)
+    except Exception:
+        earnings_dates = None
+
+    if isinstance(earnings_dates, pd.DataFrame) and not earnings_dates.empty:
+        dates = pd.to_datetime(earnings_dates.index, errors="coerce").dropna()
+        if not dates.empty:
+            today = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
+            future_dates = [pd.Timestamp(dt).tz_localize(None).normalize() for dt in dates if pd.Timestamp(dt).tz_localize(None).normalize() >= today]
+            if future_dates:
+                return min(future_dates)
+
+    return None
+
+
 def build_matches_table(matches: list[MatchResult], ticker: str, threshold: float, pivot_source: str) -> pd.DataFrame:
     rows: list[dict[str, str | float]] = []
     for match in matches:
@@ -529,6 +556,31 @@ if run:
                         f"{similarity_weights['trend']:.2f}×{top_match.trend_similarity:.3f}"
                     )
 
+                st.subheader("Seuraava tulosjulkistus")
+                next_earnings_date = fetch_next_earnings_date(ticker)
+                if next_earnings_date is None:
+                    st.info("Seuraavaa tulosjulkistusta ei löytynyt.")
+                else:
+                    today = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
+                    days_left = int((next_earnings_date - today).days)
+
+                    if days_left < 7:
+                        status_color = "#dc2626"
+                    elif days_left < 30:
+                        status_color = "#f97316"
+                    else:
+                        status_color = "#16a34a"
+
+                    st.markdown(
+                        (
+                            f"<div style='border-left: 8px solid {status_color}; padding: 0.75rem 1rem; "
+                            "border-radius: 0.25rem; background: rgba(148, 163, 184, 0.08);'>"
+                            f"<strong>Päivämäärä:</strong> {next_earnings_date.date().isoformat()}<br>"
+                            f"<strong>Päiviä jäljellä:</strong> {days_left}"
+                            "</div>"
+                        ),
+                        unsafe_allow_html=True,
+                    )
 
                 st.subheader("Kvartaalitiedot")
                 try:
