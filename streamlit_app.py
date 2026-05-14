@@ -11,7 +11,7 @@ from market_memory.news import fetch_latest_news
 from market_memory.pivots import Pivot, detect_pivots, detect_reversal_zones
 from market_memory.sector_resolver import resolve_sector
 from market_memory.similarity import MatchResult, find_best_matches, normalize_similarity_weights
-from market_memory.visualization import plot_overlay
+from market_memory.visualization import plot_5y_pivot_map, plot_overlay
 
 
 st.set_page_config(page_title="Market Memory", page_icon="📈", layout="wide")
@@ -484,6 +484,10 @@ if run:
                         "top historical return",
                         f"{top_match.historical_return_after_pivot:+.2f}%",
                     )
+
+                    st.subheader("5y pivot map")
+                    pivot_map_fig = plot_5y_pivot_map(history=enriched, matches=matches)
+                    st.plotly_chart(pivot_map_fig, use_container_width=True)
 
                     st.subheader("Plotly overlay")
                     current = enriched.iloc[-15:]
