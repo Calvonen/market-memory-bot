@@ -402,26 +402,36 @@ if run:
                     else:
                         st.caption("Valitse metsästystapa, jotta alert-status näytetään.")
 
-                    col_table, col_metrics = st.columns([5, 1])
-                    with col_table:
-                        st.subheader("Parhaat historialliset osumat")
-                        table = build_matches_table(
-                            matches, ticker=ticker, threshold=similarity_alert, pivot_source=pivot_source
-                        )
-                        st.dataframe(table, use_container_width=True, height=450, hide_index=True)
-                        st.caption(f"Detected pivots: {len(matches)} shown")
-                    with col_metrics:
-                        st.markdown("<div style='height: 0.25rem'></div>", unsafe_allow_html=True)
-                        avg_ret_5 = table["return +5d"].mean()
-                        avg_ret_10 = table["return +10d"].mean()
-                        avg_ret_15 = table["return +15d"].mean()
-                        st.metric("avg return +5d", f"{avg_ret_5:+.2f}%")
-                        st.metric("avg return +10d", f"{avg_ret_10:+.2f}%")
-                        st.metric("avg return +15d", f"{avg_ret_15:+.2f}%")
-                        st.metric(
-                            "Top historical return after pivot",
-                            f"{top_match.historical_return_after_pivot:+.2f}%",
-                        )
+                    st.subheader("Parhaat historialliset osumat")
+                    table = build_matches_table(
+                        matches, ticker=ticker, threshold=similarity_alert, pivot_source=pivot_source
+                    )
+                    table_height = min(420, 38 * len(table) + 40)
+                    st.dataframe(
+                        table,
+                        use_container_width=True,
+                        hide_index=True,
+                        height=table_height,
+                    )
+                    st.caption(f"Detected pivots: {len(matches)} shown")
+
+                    avg_ret_5 = table["return +5d"].mean()
+                    avg_ret_10 = table["return +10d"].mean()
+                    avg_ret_15 = table["return +15d"].mean()
+                    metric_cols = st.columns(4)
+                    metric_cols[0].metric("avg return +5d", f"{avg_ret_5:+.2f}%")
+                    metric_cols[1].metric("avg return +10d", f"{avg_ret_10:+.2f}%")
+                    metric_cols[2].metric("avg return +15d", f"{avg_ret_15:+.2f}%")
+                    metric_cols[3].metric(
+                        "top historical return",
+                        f"{top_match.historical_return_after_pivot:+.2f}%",
+                    )
+
+                    st.subheader("Plotly overlay")
+                    current = enriched.iloc[-15:]
+                    fig = plot_overlay(current=current, matches=matches)
+                    fig.update_layout(legend_title_text=f"Similarity score ({sector})")
+                    st.plotly_chart(fig, use_container_width=True)
 
                     st.subheader("Similarity formula")
                     st.code(
@@ -444,12 +454,6 @@ if run:
                         f"{similarity_weights['volatility']:.2f}×{top_match.volatility_similarity:.3f} + "
                         f"{similarity_weights['trend']:.2f}×{top_match.trend_similarity:.3f}"
                     )
-
-                    st.subheader("Plotly overlay")
-                    current = enriched.iloc[-15:]
-                    fig = plot_overlay(current=current, matches=matches)
-                    fig.update_layout(legend_title_text=f"Similarity score ({sector})")
-                    st.plotly_chart(fig, use_container_width=True)
 
 
                 st.subheader("Viimeisimmät uutiset")
