@@ -6,6 +6,7 @@ import yfinance as yf
 
 from market_memory.config import SECTOR_SETTINGS
 from market_memory.data import fetch_ohlcv
+from market_memory.fundamentals import fetch_quarterly_fundamentals
 from market_memory.indicators import add_indicators
 from market_memory.market_state import get_current_market_state
 from market_memory.news import fetch_latest_news
@@ -231,6 +232,11 @@ def _get_company_name(ticker: str) -> str | None:
             return value.strip()
     return None
 
+
+
+@st.cache_data(show_spinner=False)
+def run_quarterly_fundamentals_fetch(ticker: str) -> pd.DataFrame:
+    return fetch_quarterly_fundamentals(ticker)
 
 @st.cache_data(show_spinner=False)
 def run_news_fetch(ticker: str, company_name: str | None = None, limit: int = 5) -> list[dict[str, str | None]]:
@@ -523,6 +529,17 @@ if run:
                         f"{similarity_weights['trend']:.2f}×{top_match.trend_similarity:.3f}"
                     )
 
+
+                st.subheader("Kvartaalitiedot")
+                try:
+                    quarterly = run_quarterly_fundamentals_fetch(ticker)
+                except Exception:
+                    quarterly = pd.DataFrame()
+
+                if quarterly.empty:
+                    st.info("Kvartaalitietoja ei löytynyt tälle tickerille.")
+                else:
+                    st.dataframe(quarterly, use_container_width=True, hide_index=True)
 
                 st.subheader("Viimeisimmät uutiset")
                 st.caption("Näytetään viimeisen 90 päivän uutiset")
