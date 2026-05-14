@@ -312,7 +312,6 @@ def fetch_next_earnings_date(ticker: str, company_name: str | None = None) -> tu
     ]
     queries = [query for query in raw_queries if query]
 
-    fallback_link: str | None = None
     for query in queries:
         rss_url = f"https://news.google.com/rss/search?q={quote_plus(query)}"
         try:
@@ -325,17 +324,9 @@ def fetch_next_earnings_date(ticker: str, company_name: str | None = None) -> tu
             text = " ".join(text_parts)
             candidates = _extract_future_date_candidates(text, today=today)
             if candidates:
-                link = str(entry.get("link") or rss_url)
-                return min(candidates), link
+                return min(candidates), None
 
-        if entries:
-            first_link = str(entries[0].get("link") or "").strip() or rss_url
-            fallback_link = fallback_link or first_link
-            continue
-
-        fallback_link = fallback_link or rss_url
-
-    return None, fallback_link
+    return None, None
 
 
 def build_matches_table(matches: list[MatchResult], ticker: str, threshold: float, pivot_source: str) -> pd.DataFrame:
@@ -626,11 +617,9 @@ if run:
 
                 st.subheader("Seuraava tulosjulkistus")
                 company_name = _get_company_name(ticker)
-                next_earnings_date, earnings_info_link = fetch_next_earnings_date(ticker, company_name=company_name)
+                next_earnings_date, _ = fetch_next_earnings_date(ticker, company_name=company_name)
                 if next_earnings_date is None:
                     st.info("Seuraavaa tulosjulkistusta ei löytynyt automaattisesti.")
-                    if earnings_info_link:
-                        st.caption(f"Lisätietoa: {earnings_info_link}")
                 else:
                     today = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
                     days_left = int((next_earnings_date - today).days)
@@ -652,8 +641,6 @@ if run:
                         ),
                         unsafe_allow_html=True,
                     )
-                    if earnings_info_link:
-                        st.caption(f"Lähde: {earnings_info_link}")
 
                 st.subheader("Kvartaalitiedot")
                 try:
