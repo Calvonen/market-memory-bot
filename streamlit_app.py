@@ -98,6 +98,7 @@ DEFAULT_TICKER_SETTINGS = {
     "selected_preset": "Valitse metsästystapa",
     "last_applied_preset": None,
     "similarity_weights": DEFAULT_SIMILARITY_WEIGHTS,
+    "pivot_window": 5,
 }
 
 
@@ -138,6 +139,7 @@ def run_analysis(
     manual_pivot_type: str,
     manual_pivot_dates_text: str,
     similarity_weights: dict[str, float],
+    pivot_window: int,
     period: str = "5y",
 ) -> tuple[pd.DataFrame, list[MatchResult], list[str]]:
     raw = fetch_ohlcv(ticker=ticker, period=period)
@@ -185,7 +187,7 @@ def run_analysis(
     else:
         pivots = detect_pivots(
             enriched,
-            window=5,
+            pivot_window=pivot_window,
             rsi_low=settings.rsi_low,
             rsi_high=settings.rsi_high,
             dip_threshold_pct=settings.dip_threshold_pct,
@@ -301,6 +303,7 @@ with st.sidebar:
         st.session_state["volume_weight_widget"] = float(ticker_settings["similarity_weights"]["volume"])
         st.session_state["volatility_weight_widget"] = float(ticker_settings["similarity_weights"]["volatility"])
         st.session_state["trend_weight_widget"] = float(ticker_settings["similarity_weights"]["trend"])
+        st.session_state["pivot_window_widget"] = int(ticker_settings["pivot_window"])
         st.session_state["active_ticker"] = current_ticker
 
     st.caption("Ticker-kohtaiset asetukset tallennetaan tämän session ajaksi.")
@@ -319,6 +322,13 @@ with st.sidebar:
         disabled=pivot_source != "manual",
         help="Syötä päivämäärät riveittäin tai pilkulla eroteltuna (YYYY-MM-DD).",
     )
+    pivot_window = st.select_slider(
+        "Osuman merkittävyys",
+        options=[5, 10, 15, 20, 30],
+        key="pivot_window_widget",
+        disabled=pivot_source != "automatic",
+    )
+    st.caption("Pieni arvo löytää nopeat swingit. Suuri arvo löytää suuremmat sykliset käänteet.")
 
     st.markdown("---")
     st.subheader("Käännepisteen painotukset")
@@ -381,6 +391,7 @@ with st.sidebar:
             "selected_preset": selected_preset,
             "last_applied_preset": st.session_state.get("last_applied_preset_widget", selected_preset),
             "similarity_weights": similarity_weights,
+            "pivot_window": pivot_window,
         },
     )
     run = st.button("Suorita analyysi", type="primary", use_container_width=True)
@@ -400,6 +411,7 @@ if run:
                     manual_pivot_type=manual_pivot_type,
                     manual_pivot_dates_text=manual_pivot_dates_text,
                     similarity_weights=similarity_weights,
+                    pivot_window=pivot_window,
                 )
             except Exception as exc:
                 st.exception(exc)
@@ -407,6 +419,7 @@ if run:
                 st.success(
                     f"Analyysi valmis: {ticker} | sektori: {sector} | pivot source: {pivot_source} | moodi: {pivot_mode}"
                 )
+                st.caption(f"Pivot significance window: {pivot_window}d")
 
                 for note in notes:
                     st.caption(note)
