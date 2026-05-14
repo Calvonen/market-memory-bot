@@ -94,8 +94,8 @@ DEFAULT_TICKER_SETTINGS = {
     "pivot_mode": "all",
     "sector": list(SECTOR_SETTINGS.keys())[0],
     "similarity_alert": 0.75,
-    "selected_preset": "pohjan metsästys",
-    "last_applied_preset": "pohjan metsästys",
+    "selected_preset": "Valitse metsästystapa",
+    "last_applied_preset": None,
     "similarity_weights": DEFAULT_SIMILARITY_WEIGHTS,
 }
 
@@ -285,17 +285,19 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("Käännepisteen painotukset")
+    preset_placeholder = "Valitse metsästystapa"
     preset_options = {
         "pohjan metsästys": {"price": 0.10, "rsi": 0.35, "volume": 0.20, "volatility": 0.25, "trend": 0.10},
         "paniikkipohja": {"price": 0.05, "rsi": 0.30, "volume": 0.25, "volatility": 0.30, "trend": 0.10},
         "huipun metsästys": {"price": 0.30, "rsi": 0.30, "volume": 0.15, "volatility": 0.15, "trend": 0.10},
         "väsyvä huippu": {"price": 0.25, "rsi": 0.20, "volume": 0.10, "volatility": 0.10, "trend": 0.35},
     }
-    if st.session_state.get("selected_preset_widget") not in preset_options:
-        st.session_state["selected_preset_widget"] = "pohjan metsästys"
-    selected_preset = st.selectbox("Metsästystapa", options=list(preset_options.keys()), key="selected_preset_widget")
+    preset_select_options = [preset_placeholder, *list(preset_options.keys())]
+    if st.session_state.get("selected_preset_widget") not in preset_select_options:
+        st.session_state["selected_preset_widget"] = preset_placeholder
+    selected_preset = st.selectbox("Metsästystapa", options=preset_select_options, key="selected_preset_widget")
     last_applied_preset = st.session_state.get("last_applied_preset_widget")
-    if selected_preset != last_applied_preset:
+    if selected_preset in preset_options and selected_preset != last_applied_preset:
         preset_weights = preset_options[selected_preset]
         st.session_state["price_weight_widget"] = float(preset_weights["price"])
         st.session_state["rsi_weight_widget"] = float(preset_weights["rsi"])
@@ -376,12 +378,15 @@ if run:
                     st.warning("Ei historiallisia osumia valituilla ehdoilla.")
                 else:
                     top_match = matches[0]
+                    show_alert_status = selected_preset in preset_options
                     is_alert = top_match.score >= similarity_alert
-                    if is_alert:
+                    if show_alert_status and is_alert:
                         kind = "REBOUND WATCH" if top_match.pivot.pivot_type == "bottom" else "SHORT WATCH"
                         st.error(f"Alert status: ALERT — {kind} (top score {top_match.score:.3f})")
-                    else:
+                    elif show_alert_status:
                         st.info(f"Alert status: INFO — no alert (top score {top_match.score:.3f})")
+                    else:
+                        st.caption("Valitse metsästystapa, jotta alert-status näytetään.")
 
                     col_table, col_metrics = st.columns([5, 1])
                     with col_table:
