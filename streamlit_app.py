@@ -30,6 +30,7 @@ DEFAULT_TICKER_SETTINGS = {
     "sector": list(SECTOR_SETTINGS.keys())[0],
     "similarity_alert": 0.75,
     "selected_preset": "balanced",
+    "last_applied_preset": "balanced",
     "similarity_weights": DEFAULT_SIMILARITY_WEIGHTS,
 }
 
@@ -170,6 +171,7 @@ with st.sidebar:
         st.session_state["manual_pivot_type_widget"] = ticker_settings["manual_pivot_type"]
         st.session_state["manual_pivot_dates_text_widget"] = ticker_settings["manual_pivot_dates_text"]
         st.session_state["selected_preset_widget"] = ticker_settings["selected_preset"]
+        st.session_state["last_applied_preset_widget"] = ticker_settings.get("last_applied_preset", ticker_settings["selected_preset"])
         st.session_state["price_weight_widget"] = float(ticker_settings["similarity_weights"]["price"])
         st.session_state["rsi_weight_widget"] = float(ticker_settings["similarity_weights"]["rsi"])
         st.session_state["volume_weight_widget"] = float(ticker_settings["similarity_weights"]["volume"])
@@ -201,6 +203,16 @@ with st.sidebar:
         "trend continuation": {"price": 0.30, "rsi": 0.10, "volume": 0.15, "volatility": 0.10, "trend": 0.35},
     }
     selected_preset = st.selectbox("Preset", options=list(preset_options.keys()), key="selected_preset_widget")
+    last_applied_preset = st.session_state.get("last_applied_preset_widget")
+    if selected_preset != last_applied_preset:
+        preset_weights = preset_options[selected_preset]
+        st.session_state["price_weight_widget"] = float(preset_weights["price"])
+        st.session_state["rsi_weight_widget"] = float(preset_weights["rsi"])
+        st.session_state["volume_weight_widget"] = float(preset_weights["volume"])
+        st.session_state["volatility_weight_widget"] = float(preset_weights["volatility"])
+        st.session_state["trend_weight_widget"] = float(preset_weights["trend"])
+        st.session_state["last_applied_preset_widget"] = selected_preset
+
     price_weight = st.slider("price weight", min_value=0.0, max_value=1.0, step=0.01, key="price_weight_widget")
     rsi_weight = st.slider("RSI weight", min_value=0.0, max_value=1.0, step=0.01, key="rsi_weight_widget")
     volume_weight = st.slider("volume weight", min_value=0.0, max_value=1.0, step=0.01, key="volume_weight_widget")
@@ -235,6 +247,7 @@ with st.sidebar:
             "sector": sector,
             "similarity_alert": similarity_alert,
             "selected_preset": selected_preset,
+            "last_applied_preset": st.session_state.get("last_applied_preset_widget", selected_preset),
             "similarity_weights": similarity_weights,
         },
     )
