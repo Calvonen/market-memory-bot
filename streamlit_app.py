@@ -9,6 +9,7 @@ from market_memory.data import fetch_ohlcv
 from market_memory.indicators import add_indicators
 from market_memory.news import fetch_latest_news
 from market_memory.pivots import Pivot, detect_pivots
+from market_memory.sector_resolver import resolve_sector
 from market_memory.similarity import MatchResult, find_best_matches, normalize_similarity_weights
 from market_memory.visualization import plot_overlay
 
@@ -92,7 +93,7 @@ DEFAULT_TICKER_SETTINGS = {
     "manual_pivot_type": "bottom",
     "pivot_source": "automatic",
     "pivot_mode": "all",
-    "sector": list(SECTOR_SETTINGS.keys())[0],
+    "sector": "yleinen",
     "similarity_alert": 0.75,
     "selected_preset": "Valitse metsästystapa",
     "last_applied_preset": None,
@@ -113,6 +114,19 @@ def _save_ticker_settings(ticker: str, settings: dict) -> None:
     settings_store = st.session_state.setdefault("ticker_settings", {})
     settings_store[ticker.upper()] = settings
 
+
+
+
+@st.cache_data(show_spinner=False)
+def _resolve_sector_for_ticker(ticker: str) -> tuple[str, str]:
+    return resolve_sector(ticker)
+
+
+def _mark_sector_manual() -> None:
+    active_ticker = st.session_state.get("active_ticker", "")
+    if not active_ticker:
+        return
+    st.session_state.setdefault("manual_sector_by_ticker", {})[active_ticker] = True
 
 @st.cache_data(show_spinner=False)
 def run_analysis(
@@ -267,7 +281,14 @@ with st.sidebar:
 
     if previous_ticker != current_ticker:
         ticker_settings = _get_ticker_settings(current_ticker)
-        st.session_state["sector_widget"] = ticker_settings["sector"]
+        manual_sector_by_ticker = st.session_state.setdefault("manual_sector_by_ticker", {})
+        auto_sector, yahoo_sector_info = _resolve_sector_for_ticker(current_ticker)
+        auto_sector = auto_sector if auto_sector in SECTOR_SETTINGS else "yleinen"
+        if not manual_sector_by_ticker.get(current_ticker):
+            st.session_state["sector_widget"] = auto_sector
+            ticker_settings["sector"] = auto_sector
+        st.session_state["auto_sector_name"] = auto_sector
+        st.session_state["auto_sector_source"] = yahoo_sector_info
         st.session_state["similarity_alert_widget"] = float(ticker_settings["similarity_alert"])
         st.session_state["pivot_source_widget"] = ticker_settings["pivot_source"]
         st.session_state["pivot_mode_widget"] = ticker_settings["pivot_mode"]
@@ -284,7 +305,9 @@ with st.sidebar:
 
     st.caption("Ticker-kohtaiset asetukset tallennetaan tämän session ajaksi.")
 
-    sector = st.selectbox("Sektori", options=list(SECTOR_SETTINGS.keys()), key="sector_widget")
+    sector = st.selectbox("Sektori", options=list(SECTOR_SETTINGS.keys()), key="sector_widget", on_change=_mark_sector_manual)
+    st.caption(f"Automaattisesti tunnistettu sektori: {st.session_state.get('auto_sector_name', 'yleinen')}")
+    st.caption(f"Yahoo: {st.session_state.get('auto_sector_source') or 'Ei saatavilla'}")
     similarity_alert = st.slider("Similarity-alert", min_value=0.50, max_value=0.99, step=0.01, key="similarity_alert_widget")
     pivot_source = st.radio("Pivot source", options=["automatic", "manual"], horizontal=True, key="pivot_source_widget")
     pivot_mode = st.radio("Pivot mode", options=["all", "bottom", "peak"], horizontal=True, disabled=pivot_source == "manual", key="pivot_mode_widget")
