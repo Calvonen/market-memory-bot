@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
+import yfinance as yf
 
 from market_memory.config import SECTOR_SETTINGS
 from market_memory.data import fetch_ohlcv
@@ -14,6 +15,69 @@ from market_memory.visualization import plot_overlay
 
 st.set_page_config(page_title="Market Memory", page_icon="📈", layout="wide")
 
+
+
+
+TICKER_ALIASES = {
+    "apple": "AAPL",
+    "microsoft": "MSFT",
+    "valmet": "VALMT.HE",
+    "konecranes": "KCR.HE",
+    "fortum": "FORTUM.HE",
+}
+
+
+def _clean_user_symbol(value: str) -> str:
+    return value.strip()
+
+
+def _looks_like_ticker(value: str) -> bool:
+    return any(ch in value for ch in ".-=") or (value.isupper() and 1 <= len(value) <= 12)
+
+
+@st.cache_data(show_spinner=False)
+def _search_ticker_candidates(query: str) -> list[dict[str, str]]:
+    search = yf.Search(query=query, max_results=8, news_count=0)
+    quotes = getattr(search, "quotes", []) or []
+    candidates: list[dict[str, str]] = []
+    seen = set()
+    for quote in quotes:
+        symbol = str(quote.get("symbol") or "").strip().upper()
+        name = str(quote.get("shortname") or quote.get("longname") or symbol).strip()
+        exchange = str(quote.get("exchange") or quote.get("fullExchangeName") or "").strip()
+        country = str(quote.get("region") or quote.get("country") or "").strip()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        location = " / ".join([part for part in [exchange, country] if part])
+        candidates.append({"symbol": symbol, "name": name, "location": location})
+    return candidates
+
+
+def resolve_ticker_input(user_input: str) -> tuple[str | None, list[dict[str, str]], str | None]:
+    cleaned = _clean_user_symbol(user_input)
+    if not cleaned:
+        return None, [], None
+
+    alias_hit = TICKER_ALIASES.get(cleaned.lower())
+    if alias_hit:
+        return alias_hit, [], None
+
+    if _looks_like_ticker(cleaned):
+        return cleaned.upper(), [], None
+
+    try:
+        candidates = _search_ticker_candidates(cleaned)
+    except Exception:
+        return cleaned.upper(), [], None
+
+    if not candidates:
+        return None, [], "Tickeriä ei löytynyt. Kokeile kirjoittaa virallinen ticker, esim. VALMT.HE."
+
+    if len(candidates) == 1:
+        return candidates[0]["symbol"], candidates, None
+
+    return None, candidates, None
 
 DEFAULT_SIMILARITY_WEIGHTS = {
     "price": 0.20,
@@ -166,7 +230,24 @@ st.caption("Historiallisten markkinatilanteiden vertailu nykyiseen rakenteeseen"
 
 with st.sidebar:
     st.subheader("Asetukset")
-    ticker = st.text_input("Ticker", value=st.session_state.get("ticker_input", "AAPL"), max_chars=12, key="ticker_input").strip().upper()
+    ticker_input = st.text_input("Ticker tai yrityksen nimi", value=st.session_state.get("ticker_input", "AAPL"), max_chars=32, key="ticker_input").strip()
+    resolved_ticker, ticker_candidates, ticker_error = resolve_ticker_input(ticker_input)
+
+    if ticker_candidates and not resolved_ticker:
+        options = {
+            f"{item['name']} ({item['symbol']})" + (f" — {item['location']}" if item['location'] else ""): item['symbol']
+            for item in ticker_candidates
+        }
+        selected_label = st.selectbox("Valitse ticker", options=list(options.keys()), key="ticker_candidate_widget")
+        resolved_ticker = options[selected_label]
+
+    if ticker_error:
+        st.error(ticker_error)
+
+    if resolved_ticker and resolved_ticker != ticker_input.upper():
+        st.caption(f"Käytetään tickeriä: {resolved_ticker}")
+
+    ticker = resolved_ticker or ""
     current_ticker = ticker or "AAPL"
     previous_ticker = st.session_state.get("active_ticker")
 
@@ -263,7 +344,7 @@ with st.sidebar:
 
 if run:
     if not ticker:
-        st.error("Syötä ticker ennen analyysiä.")
+        st.error("Tickeriä ei löytynyt. Kokeile kirjoittaa virallinen ticker, esim. VALMT.HE.")
     else:
         with st.spinner("Haetaan dataa ja lasketaan osumat..."):
             try:
