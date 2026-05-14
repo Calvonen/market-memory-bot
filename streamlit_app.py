@@ -14,6 +14,40 @@ from market_memory.visualization import plot_overlay
 st.set_page_config(page_title="Market Memory", page_icon="📈", layout="wide")
 
 
+DEFAULT_SIMILARITY_WEIGHTS = {
+    "price": 0.20,
+    "rsi": 0.20,
+    "volume": 0.20,
+    "volatility": 0.20,
+    "trend": 0.20,
+}
+
+DEFAULT_TICKER_SETTINGS = {
+    "manual_pivot_dates_text": "",
+    "manual_pivot_type": "bottom",
+    "pivot_source": "automatic",
+    "pivot_mode": "all",
+    "sector": list(SECTOR_SETTINGS.keys())[0],
+    "similarity_alert": 0.75,
+    "selected_preset": "balanced",
+    "similarity_weights": DEFAULT_SIMILARITY_WEIGHTS,
+}
+
+
+def _get_ticker_settings(ticker: str) -> dict:
+    settings_store = st.session_state.setdefault("ticker_settings", {})
+    base = DEFAULT_TICKER_SETTINGS | {"similarity_weights": DEFAULT_SIMILARITY_WEIGHTS.copy()}
+    saved = settings_store.get(ticker.upper(), {})
+    merged = base | saved
+    merged["similarity_weights"] = (base["similarity_weights"] | saved.get("similarity_weights", {})).copy()
+    return merged
+
+
+def _save_ticker_settings(ticker: str, settings: dict) -> None:
+    settings_store = st.session_state.setdefault("ticker_settings", {})
+    settings_store[ticker.upper()] = settings
+
+
 @st.cache_data(show_spinner=False)
 def run_analysis(
     ticker: str,
@@ -123,15 +157,36 @@ st.caption("Historiallisten markkinatilanteiden vertailu nykyiseen rakenteeseen"
 
 with st.sidebar:
     st.subheader("Asetukset")
-    ticker = st.text_input("Ticker", value="AAPL", max_chars=12).strip().upper()
-    sector = st.selectbox("Sektori", options=list(SECTOR_SETTINGS.keys()), index=0)
-    similarity_alert = st.slider("Similarity-alert", min_value=0.50, max_value=0.99, value=0.75, step=0.01)
-    pivot_source = st.radio("Pivot source", options=["automatic", "manual"], horizontal=True)
-    pivot_mode = st.radio("Pivot mode", options=["all", "bottom", "peak"], horizontal=True, disabled=pivot_source == "manual")
-    manual_pivot_type = st.radio("Manual pivot type", options=["bottom", "peak"], horizontal=True, disabled=pivot_source != "manual")
+    ticker = st.text_input("Ticker", value=st.session_state.get("ticker_input", "AAPL"), max_chars=12, key="ticker_input").strip().upper()
+    current_ticker = ticker or "AAPL"
+    previous_ticker = st.session_state.get("active_ticker")
+
+    if previous_ticker != current_ticker:
+        ticker_settings = _get_ticker_settings(current_ticker)
+        st.session_state["sector_widget"] = ticker_settings["sector"]
+        st.session_state["similarity_alert_widget"] = float(ticker_settings["similarity_alert"])
+        st.session_state["pivot_source_widget"] = ticker_settings["pivot_source"]
+        st.session_state["pivot_mode_widget"] = ticker_settings["pivot_mode"]
+        st.session_state["manual_pivot_type_widget"] = ticker_settings["manual_pivot_type"]
+        st.session_state["manual_pivot_dates_text_widget"] = ticker_settings["manual_pivot_dates_text"]
+        st.session_state["selected_preset_widget"] = ticker_settings["selected_preset"]
+        st.session_state["price_weight_widget"] = float(ticker_settings["similarity_weights"]["price"])
+        st.session_state["rsi_weight_widget"] = float(ticker_settings["similarity_weights"]["rsi"])
+        st.session_state["volume_weight_widget"] = float(ticker_settings["similarity_weights"]["volume"])
+        st.session_state["volatility_weight_widget"] = float(ticker_settings["similarity_weights"]["volatility"])
+        st.session_state["trend_weight_widget"] = float(ticker_settings["similarity_weights"]["trend"])
+        st.session_state["active_ticker"] = current_ticker
+
+    st.caption("Ticker-kohtaiset asetukset tallennetaan tämän session ajaksi.")
+
+    sector = st.selectbox("Sektori", options=list(SECTOR_SETTINGS.keys()), key="sector_widget")
+    similarity_alert = st.slider("Similarity-alert", min_value=0.50, max_value=0.99, step=0.01, key="similarity_alert_widget")
+    pivot_source = st.radio("Pivot source", options=["automatic", "manual"], horizontal=True, key="pivot_source_widget")
+    pivot_mode = st.radio("Pivot mode", options=["all", "bottom", "peak"], horizontal=True, disabled=pivot_source == "manual", key="pivot_mode_widget")
+    manual_pivot_type = st.radio("Manual pivot type", options=["bottom", "peak"], horizontal=True, disabled=pivot_source != "manual", key="manual_pivot_type_widget")
     manual_pivot_dates_text = st.text_area(
         "Manual pivot dates",
-        value="",
+        key="manual_pivot_dates_text_widget",
         placeholder="2023-10-04\n2024-10-31\n2025-04-25",
         disabled=pivot_source != "manual",
         help="Syötä päivämäärät riveittäin tai pilkulla eroteltuna (YYYY-MM-DD).",
@@ -145,13 +200,12 @@ with st.sidebar:
         "panic reversal": {"price": 0.10, "rsi": 0.30, "volume": 0.25, "volatility": 0.30, "trend": 0.05},
         "trend continuation": {"price": 0.30, "rsi": 0.10, "volume": 0.15, "volatility": 0.10, "trend": 0.35},
     }
-    selected_preset = st.selectbox("Preset", options=list(preset_options.keys()), index=0)
-    selected_weights = preset_options[selected_preset]
-    price_weight = st.slider("price weight", min_value=0.0, max_value=1.0, value=float(selected_weights["price"]), step=0.01)
-    rsi_weight = st.slider("RSI weight", min_value=0.0, max_value=1.0, value=float(selected_weights["rsi"]), step=0.01)
-    volume_weight = st.slider("volume weight", min_value=0.0, max_value=1.0, value=float(selected_weights["volume"]), step=0.01)
-    volatility_weight = st.slider("volatility weight", min_value=0.0, max_value=1.0, value=float(selected_weights["volatility"]), step=0.01)
-    trend_weight = st.slider("trend weight", min_value=0.0, max_value=1.0, value=float(selected_weights["trend"]), step=0.01)
+    selected_preset = st.selectbox("Preset", options=list(preset_options.keys()), key="selected_preset_widget")
+    price_weight = st.slider("price weight", min_value=0.0, max_value=1.0, step=0.01, key="price_weight_widget")
+    rsi_weight = st.slider("RSI weight", min_value=0.0, max_value=1.0, step=0.01, key="rsi_weight_widget")
+    volume_weight = st.slider("volume weight", min_value=0.0, max_value=1.0, step=0.01, key="volume_weight_widget")
+    volatility_weight = st.slider("volatility weight", min_value=0.0, max_value=1.0, step=0.01, key="volatility_weight_widget")
+    trend_weight = st.slider("trend weight", min_value=0.0, max_value=1.0, step=0.01, key="trend_weight_widget")
     similarity_weights = normalize_similarity_weights(
         {
             "price": price_weight,
@@ -170,6 +224,20 @@ with st.sidebar:
         f"trend {similarity_weights['trend']:.2f}"
     )
     st.caption(f"Weight sum = {sum(similarity_weights.values()):.2f}")
+
+    _save_ticker_settings(
+        current_ticker,
+        {
+            "manual_pivot_dates_text": manual_pivot_dates_text,
+            "manual_pivot_type": manual_pivot_type,
+            "pivot_source": pivot_source,
+            "pivot_mode": pivot_mode,
+            "sector": sector,
+            "similarity_alert": similarity_alert,
+            "selected_preset": selected_preset,
+            "similarity_weights": similarity_weights,
+        },
+    )
     run = st.button("Suorita analyysi", type="primary", use_container_width=True)
 
 if run:
