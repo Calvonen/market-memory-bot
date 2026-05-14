@@ -194,8 +194,22 @@ def run_analysis(
 
 
 @st.cache_data(show_spinner=False)
-def run_news_fetch(ticker: str, limit: int = 5) -> list[dict[str, str | None]]:
-    return fetch_latest_news(ticker=ticker, limit=limit)
+def _get_company_name(ticker: str) -> str | None:
+    try:
+        info = yf.Ticker(ticker).info or {}
+    except Exception:
+        return None
+
+    for key in ("shortName", "longName", "displayName", "name"):
+        value = info.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+@st.cache_data(show_spinner=False)
+def run_news_fetch(ticker: str, company_name: str | None = None, limit: int = 5) -> list[dict[str, str | None]]:
+    return fetch_latest_news(ticker=ticker, company_name=company_name, limit=limit)
 
 
 def build_matches_table(matches: list[MatchResult], ticker: str, threshold: float, pivot_source: str) -> pd.DataFrame:
@@ -439,24 +453,32 @@ if run:
 
 
                 st.subheader("Viimeisimmät uutiset")
+                news_source_note = None
                 try:
-                    latest_news = run_news_fetch(ticker=ticker, limit=5)
-                except Exception as news_exc:
-                    st.caption(f"Uutisten haku epäonnistui: {news_exc}")
-                else:
-                    if not latest_news:
-                        st.info("Uutisia ei löytynyt tälle tickerille.")
-                    else:
-                        for news in latest_news:
-                            meta_parts = []
-                            if news.get("published"):
-                                meta_parts.append(str(news["published"]))
-                            if news.get("publisher"):
-                                meta_parts.append(str(news["publisher"]))
-                            meta_text = " | ".join(meta_parts)
+                    company_name = _get_company_name(ticker)
+                    latest_news = run_news_fetch(ticker=ticker, company_name=company_name, limit=5)
+                    if latest_news:
+                        news_source_note = latest_news[0].get("source")
+                except Exception:
+                    latest_news = []
+                    st.caption("⚠️ Uutisten haussa tapahtui virhe.")
 
-                            st.markdown(f"- [{news['title']}]({news['link']})")
-                            if meta_text:
-                                st.caption(meta_text)
+                if news_source_note:
+                    st.caption(f"News source: {news_source_note}")
+
+                if not latest_news:
+                    st.info("Uutisia ei löytynyt tälle tickerille.")
+                else:
+                    for news in latest_news:
+                        meta_parts = []
+                        if news.get("publisher"):
+                            meta_parts.append(str(news["publisher"]))
+                        if news.get("published"):
+                            meta_parts.append(str(news["published"]))
+                        meta_text = " • ".join(meta_parts)
+
+                        st.markdown(f"- [{news['title']}]({news['link']})")
+                        if meta_text:
+                            st.caption(meta_text)
 else:
     st.info("Valitse asetukset vasemmalta ja suorita analyysi.")
