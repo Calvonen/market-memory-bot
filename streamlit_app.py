@@ -8,7 +8,7 @@ from market_memory.config import SECTOR_SETTINGS
 from market_memory.data import fetch_ohlcv
 from market_memory.indicators import add_indicators
 from market_memory.news import fetch_latest_news
-from market_memory.pivots import Pivot, detect_pivots
+from market_memory.pivots import Pivot, detect_pivots, detect_reversal_zones
 from market_memory.sector_resolver import resolve_sector
 from market_memory.similarity import MatchResult, find_best_matches, normalize_similarity_weights
 from market_memory.visualization import plot_overlay
@@ -99,6 +99,7 @@ DEFAULT_TICKER_SETTINGS = {
     "last_applied_preset": None,
     "similarity_weights": DEFAULT_SIMILARITY_WEIGHTS,
     "pivot_window": 5,
+    "pivot_detection_method": "exact pivot",
 }
 
 
@@ -140,6 +141,7 @@ def run_analysis(
     manual_pivot_dates_text: str,
     similarity_weights: dict[str, float],
     pivot_window: int,
+    pivot_detection_method: str,
     period: str = "5y",
 ) -> tuple[pd.DataFrame, list[MatchResult], list[str]]:
     raw = fetch_ohlcv(ticker=ticker, period=period)
@@ -185,17 +187,23 @@ def run_analysis(
 
         pivots = sorted(pivots, key=lambda p: p.index)
     else:
-        pivots = detect_pivots(
-            enriched,
-            pivot_window=pivot_window,
-            rsi_low=settings.rsi_low,
-            rsi_high=settings.rsi_high,
-            dip_threshold_pct=settings.dip_threshold_pct,
-            peak_threshold_pct=settings.peak_threshold_pct,
-            min_atr_pct=settings.min_atr_pct,
-            max_atr_pct=settings.max_atr_pct,
-            pivot_mode=pivot_mode,
-        )
+        if pivot_detection_method == "reversal zone":
+            pivots = detect_reversal_zones(
+                enriched,
+                pivot_mode=pivot_mode,
+            )
+        else:
+            pivots = detect_pivots(
+                enriched,
+                pivot_window=pivot_window,
+                rsi_low=settings.rsi_low,
+                rsi_high=settings.rsi_high,
+                dip_threshold_pct=settings.dip_threshold_pct,
+                peak_threshold_pct=settings.peak_threshold_pct,
+                min_atr_pct=settings.min_atr_pct,
+                max_atr_pct=settings.max_atr_pct,
+                pivot_mode=pivot_mode,
+            )
 
     matches = find_best_matches(
         enriched,
@@ -244,7 +252,7 @@ def build_matches_table(matches: list[MatchResult], ticker: str, threshold: floa
                 "trend similarity": round(match.trend_similarity, 3),
                 "Pivot date": match.pivot.index.date().isoformat(),
                 "Pivot type": match.pivot.pivot_type,
-                "Pivot source": pivot_source,
+                "Pivot source": "manual" if pivot_source == "manual" else match.pivot.source,
                 "Alert status": f"{status}: {alert_text if status == 'ALERT' else 'no alert'}",
                 "Historical return after pivot": round(match.historical_return_after_pivot, 2),
                 "return +5d": round(match.return_plus_5d, 2) if match.return_plus_5d is not None else None,
@@ -304,6 +312,10 @@ with st.sidebar:
         st.session_state["volatility_weight_widget"] = float(ticker_settings["similarity_weights"]["volatility"])
         st.session_state["trend_weight_widget"] = float(ticker_settings["similarity_weights"]["trend"])
         st.session_state["pivot_window_widget"] = int(ticker_settings["pivot_window"])
+        st.session_state["pivot_detection_method_widget"] = ticker_settings["pivot_detection_method"]
+        st.session_state["pivot_detection_method_ui_widget"] = (
+            "Käännealue" if ticker_settings["pivot_detection_method"] == "reversal zone" else "Tarkka pivot"
+        )
         st.session_state["active_ticker"] = current_ticker
 
     st.caption("Ticker-kohtaiset asetukset tallennetaan tämän session ajaksi.")
@@ -313,6 +325,14 @@ with st.sidebar:
     st.caption(f"Yahoo: {st.session_state.get('auto_sector_source') or 'Ei saatavilla'}")
     similarity_alert = st.slider("Similarity-alert", min_value=0.50, max_value=0.99, step=0.01, key="similarity_alert_widget")
     pivot_source = st.radio("Pivot source", options=["automatic", "manual"], horizontal=True, key="pivot_source_widget")
+    pivot_detection_method_label = st.radio(
+        "Käänteen tunnistustapa",
+        options=["Tarkka pivot", "Käännealue"],
+        horizontal=True,
+        disabled=pivot_source != "automatic",
+        key="pivot_detection_method_ui_widget",
+    )
+    pivot_detection_method = "reversal zone" if pivot_detection_method_label == "Käännealue" else "exact pivot"
     pivot_mode = st.radio("Pivot mode", options=["all", "bottom", "peak"], horizontal=True, disabled=pivot_source == "manual", key="pivot_mode_widget")
     manual_pivot_type = st.radio("Manual pivot type", options=["bottom", "peak"], horizontal=True, disabled=pivot_source != "manual", key="manual_pivot_type_widget")
     manual_pivot_dates_text = st.text_area(
@@ -392,6 +412,7 @@ with st.sidebar:
             "last_applied_preset": st.session_state.get("last_applied_preset_widget", selected_preset),
             "similarity_weights": similarity_weights,
             "pivot_window": pivot_window,
+            "pivot_detection_method": pivot_detection_method,
         },
     )
     run = st.button("Suorita analyysi", type="primary", use_container_width=True)
@@ -412,12 +433,13 @@ if run:
                     manual_pivot_dates_text=manual_pivot_dates_text,
                     similarity_weights=similarity_weights,
                     pivot_window=pivot_window,
+                    pivot_detection_method=pivot_detection_method,
                 )
             except Exception as exc:
                 st.exception(exc)
             else:
                 st.success(
-                    f"Analyysi valmis: {ticker} | sektori: {sector} | pivot source: {pivot_source} | moodi: {pivot_mode}"
+                    f"Analyysi valmis: {ticker} | sektori: {sector} | pivot source: {pivot_source} | moodi: {pivot_mode} | tunnistus: {pivot_detection_method}"
                 )
                 st.caption(f"Pivot significance window: {pivot_window}d")
 
