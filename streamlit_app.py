@@ -453,6 +453,7 @@ if run:
 
 
                 st.subheader("Viimeisimmät uutiset")
+                st.caption("Näytetään viimeisen 90 päivän uutiset")
                 news_source_note = None
                 try:
                     company_name = _get_company_name(ticker)
@@ -467,7 +468,7 @@ if run:
                     st.caption(f"News source: {news_source_note}")
 
                 if not latest_news:
-                    st.info("Uutisia ei löytynyt tälle tickerille.")
+                    st.info("Viimeisen 90 päivän uutisia ei löytynyt.")
                 else:
                     for news in latest_news:
                         meta_parts = []
