@@ -7,6 +7,7 @@ import yfinance as yf
 from market_memory.config import SECTOR_SETTINGS
 from market_memory.data import fetch_ohlcv
 from market_memory.indicators import add_indicators
+from market_memory.market_state import get_current_market_state
 from market_memory.news import fetch_latest_news
 from market_memory.pivots import Pivot, detect_pivots, detect_reversal_zones
 from market_memory.sector_resolver import resolve_sector
@@ -459,6 +460,11 @@ if run:
                         st.info(f"Alert status: INFO — no alert (top score {top_match.score:.3f})")
                     else:
                         st.caption("Valitse metsästystapa, jotta alert-status näytetään.")
+
+                    st.subheader("Nykyinen markkinatila")
+                    market_state_rows = get_current_market_state(enriched)
+                    market_state_df = pd.DataFrame(market_state_rows, columns=["Mittari", "Tila"])
+                    st.table(market_state_df)
 
                     st.subheader("Parhaat historialliset osumat")
                     table = build_matches_table(
