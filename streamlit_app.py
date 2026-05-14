@@ -6,6 +6,7 @@ import streamlit as st
 from market_memory.config import SECTOR_SETTINGS
 from market_memory.data import fetch_ohlcv
 from market_memory.indicators import add_indicators
+from market_memory.news import fetch_latest_news
 from market_memory.pivots import Pivot, detect_pivots
 from market_memory.similarity import MatchResult, find_best_matches, normalize_similarity_weights
 from market_memory.visualization import plot_overlay
@@ -124,6 +125,13 @@ def run_analysis(
         similarity_weights=similarity_weights,
     )
     return enriched, matches, notes
+
+
+
+
+@st.cache_data(show_spinner=False)
+def run_news_fetch(ticker: str, limit: int = 5) -> list[dict[str, str | None]]:
+    return fetch_latest_news(ticker=ticker, limit=limit)
 
 
 def build_matches_table(matches: list[MatchResult], ticker: str, threshold: float, pivot_source: str) -> pd.DataFrame:
@@ -339,5 +347,27 @@ if run:
                     fig = plot_overlay(current=current, matches=matches)
                     fig.update_layout(legend_title_text=f"Similarity score ({sector})")
                     st.plotly_chart(fig, use_container_width=True)
+
+
+                st.subheader("Viimeisimmät uutiset")
+                try:
+                    latest_news = run_news_fetch(ticker=ticker, limit=5)
+                except Exception as news_exc:
+                    st.caption(f"Uutisten haku epäonnistui: {news_exc}")
+                else:
+                    if not latest_news:
+                        st.info("Uutisia ei löytynyt tälle tickerille.")
+                    else:
+                        for news in latest_news:
+                            meta_parts = []
+                            if news.get("published"):
+                                meta_parts.append(str(news["published"]))
+                            if news.get("publisher"):
+                                meta_parts.append(str(news["publisher"]))
+                            meta_text = " | ".join(meta_parts)
+
+                            st.markdown(f"- [{news['title']}]({news['link']})")
+                            if meta_text:
+                                st.caption(meta_text)
 else:
     st.info("Valitse asetukset vasemmalta ja suorita analyysi.")
