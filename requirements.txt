@@ -5,3 +5,4 @@ plotly
 ta
 scikit-learn
 streamlit
+feedparser
