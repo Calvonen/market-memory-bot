@@ -31,7 +31,7 @@ def _as_1d_series(df: pd.DataFrame, column: str) -> pd.Series:
 
 def detect_pivots(
     df: pd.DataFrame,
-    window: int = 5,
+    pivot_window: int = 5,
     rsi_low: float = 30,
     rsi_high: float = 70,
     dip_threshold_pct: float = 2.0,
@@ -48,14 +48,14 @@ def detect_pivots(
     rsi_series = _as_1d_series(df, "rsi")
     atr_pct_series = _as_1d_series(df, "atr_pct")
 
-    for i in range(window, len(df) - window):
+    for i in range(pivot_window, len(df) - pivot_window):
         center_idx = df.index[i]
         atr_ok = min_atr_pct <= float(atr_pct_series.iloc[i]) <= max_atr_pct
         if not atr_ok:
             continue
 
-        local_high = float(highs.iloc[i - window : i + window + 1].max())
-        local_low = float(lows.iloc[i - window : i + window + 1].min())
+        local_high = float(highs.iloc[i - pivot_window : i + pivot_window + 1].max())
+        local_low = float(lows.iloc[i - pivot_window : i + pivot_window + 1].min())
         local_range = max(local_high - local_low, 1e-9)
         current_high = float(highs.iloc[i])
         current_low = float(lows.iloc[i])
