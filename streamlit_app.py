@@ -139,12 +139,16 @@ def resolve_ticker_input(user_input: str) -> tuple[str | None, list[dict[str, st
 
     return None, candidates, None
 
-def _resolve_trade_ticker(user_input: str) -> tuple[str | None, str | None]:
+def _resolve_trade_ticker(user_input: str, selected_candidate_symbol: str | None = None) -> tuple[str | None, str | None]:
     resolved, candidates, _ = resolve_ticker_input(user_input)
     if resolved:
         return resolved, None
     if candidates:
-        return str(candidates[0].get("symbol") or "").upper() or None, None
+        if selected_candidate_symbol:
+            selected = selected_candidate_symbol.strip().upper()
+            if any(str(item.get("symbol") or "").upper() == selected for item in candidates):
+                return selected, None
+        return None, "Valitse ticker listasta ennen trade:n lisäämistä."
     return None, "Tickeriä ei voitu ratkaista. Käytä tickeriä tai yrityksen virallista nimeä."
 
 DEFAULT_SIMILARITY_WEIGHTS = {
@@ -400,7 +404,7 @@ def fetch_next_earnings_date(ticker: str, company_name: str | None = None) -> tu
 
 
 @st.cache_data(show_spinner=False)
-def _fetch_latest_price(ticker: str) -> float | None:
+def _fetch_latest_price(ticker: str, refresh_key: str | None = None) -> float | None:
     try:
         history = yf.Ticker(ticker).history(period="5d", interval="1d")
     except Exception:
@@ -414,7 +418,7 @@ def _fetch_latest_price(ticker: str) -> float | None:
 
 
 @st.cache_data(show_spinner=False)
-def _fetch_trend_sma20(ticker: str) -> tuple[float | None, float | None]:
+def _fetch_trend_sma20(ticker: str, refresh_key: str | None = None) -> tuple[float | None, float | None]:
     try:
         history = yf.Ticker(ticker).history(period="3mo", interval="1d")
     except Exception:
@@ -453,10 +457,10 @@ def _calc_trade_status_reason(status: str) -> str:
         return "Stop loss saavutettu"
     if status == "TARGET HIT":
         return "Target saavutettu"
-    return "Nykyhintaa ei saatu"
+    return "Hintaa ei saatu haettua"
 
 
-def _refresh_open_trade(trade: dict[str, object]) -> None:
+def _refresh_open_trade(trade: dict[str, object], refresh_key: str | None = None) -> None:
     ticker_symbol = str(trade.get("ticker") or "")
     direction = str(trade.get("direction") or "")
     entry = float(trade.get("entry_price") or 0.0)
@@ -464,8 +468,8 @@ def _refresh_open_trade(trade: dict[str, object]) -> None:
     target_price = float(trade.get("target_price") or 0.0)
     leverage = int(trade.get("leverage", 1))
 
-    current_price = _fetch_latest_price(ticker_symbol)
-    latest_close, sma20 = _fetch_trend_sma20(ticker_symbol)
+    current_price = _fetch_latest_price(ticker_symbol, refresh_key=refresh_key)
+    latest_close, sma20 = _fetch_trend_sma20(ticker_symbol, refresh_key=refresh_key)
     trend_against = False
     if latest_close is not None and sma20 is not None:
         trend_against = (direction == "long" and latest_close < sma20) or (direction == "short" and latest_close > sma20)
@@ -500,9 +504,11 @@ def _refresh_open_trade(trade: dict[str, object]) -> None:
     trade["status_reason"] = _calc_trade_status_reason(status)
 
 
-def _refresh_all_open_trades(trades: list[dict[str, object]]) -> None:
+def _refresh_all_open_trades(trades: list[dict[str, object]], closed_trades: list[dict[str, object]]) -> None:
+    refresh_key = pd.Timestamp.now(tz="UTC").isoformat()
     for trade in trades:
-        _refresh_open_trade(trade)
+        _refresh_open_trade(trade, refresh_key=refresh_key)
+    _save_trades(trades, closed_trades)
     st.session_state["trades_last_updated"] = pd.Timestamp.now(tz="UTC")
 
 def build_matches_table(matches: list[MatchResult], ticker: str, threshold: float, pivot_source: str) -> pd.DataFrame:
@@ -1007,7 +1013,7 @@ if st.session_state["view"] == "Avoimet tradet":
         st.caption(f"Viimeksi päivitetty: {last_updated_ts.strftime('%d.%m.%Y %H:%M')}")
 
     if refresh_clicked and trades:
-        _refresh_all_open_trades(trades)
+        _refresh_all_open_trades(trades, closed_trades)
         st.success("Avoimien tradejen hinnat päivitetty.")
     elif refresh_clicked:
         st.info("Ei avoimia tradeja päivitettäväksi.")
@@ -1015,6 +1021,20 @@ if st.session_state["view"] == "Avoimet tradet":
     with st.form("add_trade_form", clear_on_submit=True):
         c1, c2, c3, c4 = st.columns(4)
         ticker_input_new = c1.text_input("Ticker / yritys", max_chars=32).strip()
+        resolved_ticker_new, ticker_candidates_new, ticker_error_new = resolve_ticker_input(ticker_input_new)
+        selected_candidate_trade = None
+        if ticker_candidates_new and not resolved_ticker_new:
+            candidate_options = {
+                f"{item['name']} ({item['symbol']}) - {item['location'] or 'N/A'}": item["symbol"]
+                for item in ticker_candidates_new
+            }
+            selected_label_trade = c1.selectbox(
+                "Valitse ticker",
+                options=["Valitse..."] + list(candidate_options.keys()),
+                key="trade_ticker_candidate_widget",
+            )
+            if selected_label_trade != "Valitse...":
+                selected_candidate_trade = candidate_options[selected_label_trade]
         direction_new = c2.selectbox("Suunta", options=["long", "short"])
         entry_price_new = c3.number_input("Entry price", min_value=0.0, value=100.0, step=0.01)
         leverage_new = c4.selectbox("Vipu / leverage", options=[1, 2, 3, 5, 10], index=0)
@@ -1032,8 +1052,10 @@ if st.session_state["view"] == "Avoimet tradet":
             elif entry_price_new <= 0:
                 st.error("Entry price pitää olla suurempi kuin 0.")
             else:
-                resolved_ticker_new, resolve_error = _resolve_trade_ticker(ticker_input_new)
-                if not resolved_ticker_new:
+                resolved_ticker_new, resolve_error = _resolve_trade_ticker(ticker_input_new, selected_candidate_trade)
+                if ticker_error_new and not ticker_candidates_new:
+                    st.error(ticker_error_new)
+                elif not resolved_ticker_new:
                     st.error(resolve_error or "Tickeriä ei voitu ratkaista.")
                 else:
                     trades.append(
@@ -1049,7 +1071,7 @@ if st.session_state["view"] == "Avoimet tradet":
                             "leverage": int(leverage_new),
                         }
                     )
-                    _refresh_open_trade(trades[-1])
+                    _refresh_open_trade(trades[-1], refresh_key=pd.Timestamp.now(tz="UTC").isoformat())
                     st.session_state["trades_last_updated"] = pd.Timestamp.now(tz="UTC")
                     _save_trades(trades, closed_trades)
                     st.success(f"Trade lisätty: {ticker_input_new} -> {resolved_ticker_new} ({direction_new})")
