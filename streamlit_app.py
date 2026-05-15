@@ -17,6 +17,7 @@ from market_memory.news import fetch_latest_news
 from market_memory.pivots import Pivot, detect_pivots, detect_reversal_zones
 from market_memory.sector_resolver import resolve_sector
 from market_memory.similarity import MatchResult, find_best_matches, normalize_similarity_weights
+from market_memory.universe import MARKET_TICKERS
 from market_memory.visualization import plot_5y_pivot_map, plot_overlay
 
 
@@ -683,3 +684,110 @@ if run:
                             st.caption(meta_text)
 else:
     st.info("Valitse asetukset vasemmalta ja suorita analyysi.")
+
+
+def _analyze_scanner_ticker(
+    ticker: str,
+    similarity_alert: float,
+    pivot_mode: str,
+    pivot_source: str,
+    manual_pivot_type: str,
+    manual_pivot_dates_text: str,
+    similarity_weights: dict[str, float],
+    pivot_window: int,
+    pivot_detection_method: str,
+) -> dict[str, object] | None:
+    auto_sector, _ = _resolve_sector_for_ticker(ticker)
+    sector = auto_sector if auto_sector in SECTOR_SETTINGS else "yleinen"
+    enriched, matches, _ = run_analysis(
+        ticker=ticker,
+        sector=sector,
+        similarity_alert=similarity_alert,
+        pivot_mode=pivot_mode,
+        pivot_source=pivot_source,
+        manual_pivot_type=manual_pivot_type,
+        manual_pivot_dates_text=manual_pivot_dates_text,
+        similarity_weights=similarity_weights,
+        pivot_window=pivot_window,
+        pivot_detection_method=pivot_detection_method,
+    )
+    if not matches:
+        return None
+
+    best = matches[0]
+    market_state_rows = dict(get_current_market_state(enriched))
+    current = enriched.iloc[-1]
+    signal_type = "REBOUND WATCH" if best.pivot.pivot_type == "bottom" else "SHORT WATCH"
+    return {
+        "ticker": ticker,
+        "company_name": _get_company_name(ticker) or "",
+        "sector": sector,
+        "best_similarity": round(best.score, 3),
+        "signal_type": signal_type,
+        "RSI": round(float(current.get("RSI14", float("nan"))), 2),
+        "trend_state": market_state_rows.get("Trend", "-"),
+        "volatility_state": market_state_rows.get("Volatility", "-"),
+        "volume_ratio": round(float(current.get("Volume_Ratio", float("nan"))), 2),
+        "avg_return_5d": round(float(pd.Series([m.return_plus_5d for m in matches]).dropna().mean()), 2),
+        "avg_return_15d": round(float(pd.Series([m.return_plus_15d for m in matches]).dropna().mean()), 2),
+    }
+
+
+single_tab, scanner_tab = st.tabs(["Yksittäinen osake", "Scanner"])
+with single_tab:
+    pass
+with scanner_tab:
+    st.subheader("Scanner")
+    market = st.selectbox("Valitse markkina", options=list(MARKET_TICKERS.keys()), key="scanner_market")
+    if st.button("Suorita scanner", key="run_scanner", use_container_width=True):
+        rows: list[dict[str, object]] = []
+        skipped: list[str] = []
+        with st.spinner("Ajetaan scanner..."):
+            for scanner_ticker in MARKET_TICKERS[market]:
+                try:
+                    row = _analyze_scanner_ticker(
+                        ticker=scanner_ticker,
+                        similarity_alert=similarity_alert,
+                        pivot_mode=pivot_mode,
+                        pivot_source=pivot_source,
+                        manual_pivot_type=manual_pivot_type,
+                        manual_pivot_dates_text=manual_pivot_dates_text,
+                        similarity_weights=similarity_weights,
+                        pivot_window=pivot_window,
+                        pivot_detection_method=pivot_detection_method,
+                    )
+                    if row:
+                        rows.append(row)
+                except Exception:
+                    skipped.append(scanner_ticker)
+                    continue
+
+        scanner_df = pd.DataFrame(rows)
+        if scanner_df.empty:
+            st.warning("Scanner ei löytänyt tuloksia valitulle markkinalle.")
+        else:
+            scanner_df = scanner_df.sort_values("best_similarity", ascending=False).reset_index(drop=True)
+            st.dataframe(
+                scanner_df.rename(
+                    columns={
+                        "ticker": "ticker",
+                        "company_name": "company name",
+                        "sector": "sector",
+                        "best_similarity": "best similarity",
+                        "signal_type": "signal type",
+                        "trend_state": "trend state",
+                        "volatility_state": "volatility state",
+                        "volume_ratio": "volume ratio",
+                        "avg_return_5d": "avg return +5d",
+                        "avg_return_15d": "avg return +15d",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            chosen = st.selectbox("Valitse ticker analysoitavaksi", options=scanner_df["ticker"].tolist(), key="scanner_pick")
+            if st.button("Analysoi valittu osake", key="scanner_to_single"):
+                st.session_state["ticker_input"] = chosen
+                st.rerun()
+        if skipped:
+            st.caption(f"Ohitettiin virheen vuoksi: {', '.join(skipped)}")
