@@ -351,6 +351,51 @@ def fetch_next_earnings_date(ticker: str, company_name: str | None = None) -> tu
     return None, None
 
 
+
+
+@st.cache_data(show_spinner=False)
+def _fetch_latest_price(ticker: str) -> float | None:
+    try:
+        history = yf.Ticker(ticker).history(period="5d", interval="1d")
+    except Exception:
+        return None
+    if history.empty:
+        return None
+    close = history["Close"].dropna()
+    if close.empty:
+        return None
+    return float(close.iloc[-1])
+
+
+@st.cache_data(show_spinner=False)
+def _fetch_trend_sma20(ticker: str) -> tuple[float | None, float | None]:
+    try:
+        history = yf.Ticker(ticker).history(period="3mo", interval="1d")
+    except Exception:
+        return None, None
+    if history.empty or "Close" not in history:
+        return None, None
+    closes = history["Close"].dropna()
+    if closes.empty:
+        return None, None
+    sma20 = closes.rolling(20).mean().iloc[-1]
+    return float(closes.iloc[-1]), (float(sma20) if pd.notna(sma20) else None)
+
+
+def _calc_trade_status(direction: str, current_price: float | None, stop_loss: float, target_price: float, trend_warning: bool) -> str:
+    if current_price is None:
+        return "NO PRICE"
+    if direction == "long" and current_price <= stop_loss:
+        return "STOP HIT"
+    if direction == "short" and current_price >= stop_loss:
+        return "STOP HIT"
+    if direction == "long" and current_price >= target_price:
+        return "TARGET HIT"
+    if direction == "short" and current_price <= target_price:
+        return "TARGET HIT"
+    if trend_warning:
+        return "WARNING"
+    return "OK"
 def build_matches_table(matches: list[MatchResult], ticker: str, threshold: float, pivot_source: str) -> pd.DataFrame:
     rows: list[dict[str, str | float]] = []
     for match in matches:
@@ -768,7 +813,7 @@ if "view" not in st.session_state:
 
 st.radio(
     "Näkymä",
-    options=["Yksittäinen osake", "Scanner"],
+    options=["Yksittäinen osake", "Scanner", "Avoimet tradet"],
     horizontal=True,
     key="view",
 )
@@ -828,3 +873,94 @@ if st.session_state["view"] == "Scanner":
             )
         if skipped:
             st.caption(f"Ohitettiin virheen vuoksi: {', '.join(skipped)}")
+
+
+if st.session_state["view"] == "Avoimet tradet":
+    st.subheader("Avoimet tradet")
+    trades = st.session_state.setdefault("open_trades", [])
+
+    with st.form("add_trade_form", clear_on_submit=True):
+        c1, c2, c3 = st.columns(3)
+        ticker_new = c1.text_input("Ticker", max_chars=16).strip().upper()
+        direction_new = c2.selectbox("Suunta", options=["long", "short"])
+        entry_price_new = c3.number_input("Entry price", min_value=0.0, value=100.0, step=0.01)
+
+        c4, c5, c6, c7 = st.columns(4)
+        entry_date_new = c4.date_input("Entry date")
+        stop_loss_new = c5.number_input("Stop loss", min_value=0.0, value=95.0, step=0.01)
+        target_price_new = c6.number_input("Target price", min_value=0.0, value=110.0, step=0.01)
+        position_size_new = c7.number_input("Position size", min_value=0.0, value=1.0, step=0.01)
+
+        submit_trade = st.form_submit_button("Lisää trade", type="primary")
+        if submit_trade:
+            if not ticker_new:
+                st.error("Ticker on pakollinen.")
+            elif entry_price_new <= 0:
+                st.error("Entry price pitää olla suurempi kuin 0.")
+            else:
+                trades.append(
+                    {
+                        "ticker": ticker_new,
+                        "direction": direction_new,
+                        "entry_price": float(entry_price_new),
+                        "entry_date": str(entry_date_new),
+                        "stop_loss": float(stop_loss_new),
+                        "target_price": float(target_price_new),
+                        "position_size": float(position_size_new),
+                    }
+                )
+                st.success(f"Trade lisätty: {ticker_new} ({direction_new})")
+
+    if not trades:
+        st.info("Ei avoimia tradeja vielä.")
+    else:
+        rows = []
+        for trade in trades:
+            ticker_symbol = str(trade["ticker"])
+            direction = str(trade["direction"])
+            entry = float(trade["entry_price"])
+            stop_loss = float(trade["stop_loss"])
+            target_price = float(trade["target_price"])
+
+            current_price = _fetch_latest_price(ticker_symbol)
+            latest_close, sma20 = _fetch_trend_sma20(ticker_symbol)
+            trend_against = False
+            if latest_close is not None and sma20 is not None:
+                trend_against = (direction == "long" and latest_close < sma20) or (direction == "short" and latest_close > sma20)
+
+            pl_pct = None
+            stop_distance_pct = None
+            target_distance_pct = None
+            rr = None
+            if current_price is not None and entry != 0:
+                if direction == "long":
+                    pl_pct = ((current_price - entry) / entry) * 100
+                    stop_distance_pct = ((current_price - stop_loss) / current_price) * 100 if current_price != 0 else None
+                    target_distance_pct = ((target_price - current_price) / current_price) * 100 if current_price != 0 else None
+                    risk = entry - stop_loss
+                    reward = target_price - entry
+                else:
+                    pl_pct = ((entry - current_price) / entry) * 100
+                    stop_distance_pct = ((stop_loss - current_price) / current_price) * 100 if current_price != 0 else None
+                    target_distance_pct = ((current_price - target_price) / current_price) * 100 if current_price != 0 else None
+                    risk = stop_loss - entry
+                    reward = entry - target_price
+                if risk > 0:
+                    rr = reward / risk
+
+            status = _calc_trade_status(direction, current_price, stop_loss, target_price, trend_against)
+            rows.append(
+                {
+                    "ticker": ticker_symbol,
+                    "suunta": direction,
+                    "entry": round(entry, 4),
+                    "current price": round(current_price, 4) if current_price is not None else None,
+                    "P/L %": round(pl_pct, 2) if pl_pct is not None else None,
+                    "stop distance %": round(stop_distance_pct, 2) if stop_distance_pct is not None else None,
+                    "target distance %": round(target_distance_pct, 2) if target_distance_pct is not None else None,
+                    "risk/reward": round(rr, 2) if rr is not None else None,
+                    "status": status,
+                }
+            )
+
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
