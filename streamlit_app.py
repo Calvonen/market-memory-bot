@@ -101,6 +101,14 @@ def resolve_ticker_input(user_input: str) -> tuple[str | None, list[dict[str, st
 
     return None, candidates, None
 
+def _resolve_trade_ticker(user_input: str) -> tuple[str | None, str | None]:
+    resolved, candidates, _ = resolve_ticker_input(user_input)
+    if resolved:
+        return resolved, None
+    if candidates:
+        return str(candidates[0].get("symbol") or "").upper() or None, None
+    return None, "Tickeriä ei voitu ratkaista. Käytä tickeriä tai yrityksen virallista nimeä."
+
 DEFAULT_SIMILARITY_WEIGHTS = {
     "price": 0.20,
     "rsi": 0.20,
@@ -878,49 +886,61 @@ if st.session_state["view"] == "Scanner":
 if st.session_state["view"] == "Avoimet tradet":
     st.subheader("Avoimet tradet")
     trades = st.session_state.setdefault("open_trades", [])
+    closed_trades = st.session_state.setdefault("closed_trades", [])
 
     with st.form("add_trade_form", clear_on_submit=True):
-        c1, c2, c3 = st.columns(3)
-        ticker_new = c1.text_input("Ticker", max_chars=16).strip().upper()
+        c1, c2, c3, c4 = st.columns(4)
+        ticker_input_new = c1.text_input("Ticker / yritys", max_chars=32).strip()
         direction_new = c2.selectbox("Suunta", options=["long", "short"])
         entry_price_new = c3.number_input("Entry price", min_value=0.0, value=100.0, step=0.01)
+        leverage_new = c4.selectbox("Vipu / leverage", options=[1, 2, 3, 5, 10], index=0)
 
-        c4, c5, c6, c7 = st.columns(4)
-        entry_date_new = c4.date_input("Entry date")
-        stop_loss_new = c5.number_input("Stop loss", min_value=0.0, value=95.0, step=0.01)
-        target_price_new = c6.number_input("Target price", min_value=0.0, value=110.0, step=0.01)
-        position_size_new = c7.number_input("Position size", min_value=0.0, value=1.0, step=0.01)
+        c5, c6, c7, c8 = st.columns(4)
+        entry_date_new = c5.date_input("Entry date")
+        stop_loss_new = c6.number_input("Stop loss", min_value=0.0, value=95.0, step=0.01)
+        target_price_new = c7.number_input("Target price", min_value=0.0, value=110.0, step=0.01)
+        position_size_new = c8.number_input("Position size", min_value=0.0, value=1.0, step=0.01)
 
         submit_trade = st.form_submit_button("Lisää trade", type="primary")
         if submit_trade:
-            if not ticker_new:
+            if not ticker_input_new:
                 st.error("Ticker on pakollinen.")
             elif entry_price_new <= 0:
                 st.error("Entry price pitää olla suurempi kuin 0.")
             else:
-                trades.append(
-                    {
-                        "ticker": ticker_new,
-                        "direction": direction_new,
-                        "entry_price": float(entry_price_new),
-                        "entry_date": str(entry_date_new),
-                        "stop_loss": float(stop_loss_new),
-                        "target_price": float(target_price_new),
-                        "position_size": float(position_size_new),
-                    }
-                )
-                st.success(f"Trade lisätty: {ticker_new} ({direction_new})")
+                resolved_ticker_new, resolve_error = _resolve_trade_ticker(ticker_input_new)
+                if not resolved_ticker_new:
+                    st.error(resolve_error or "Tickeriä ei voitu ratkaista.")
+                else:
+                    trades.append(
+                        {
+                            "ticker_input": ticker_input_new,
+                            "ticker": resolved_ticker_new,
+                            "direction": direction_new,
+                            "entry_price": float(entry_price_new),
+                            "entry_date": str(entry_date_new),
+                            "stop_loss": float(stop_loss_new),
+                            "target_price": float(target_price_new),
+                            "position_size": float(position_size_new),
+                            "leverage": int(leverage_new),
+                        }
+                    )
+                    st.success(f"Trade lisätty: {ticker_input_new} -> {resolved_ticker_new} ({direction_new})")
 
     if not trades:
         st.info("Ei avoimia tradeja vielä.")
     else:
         rows = []
-        for trade in trades:
-            ticker_symbol = str(trade["ticker"])
+        remove_index = None
+        close_index = None
+        for idx, trade in enumerate(trades):
+            ticker_symbol = str(trade.get("ticker") or "")
+            ticker_input = str(trade.get("ticker_input") or ticker_symbol)
             direction = str(trade["direction"])
             entry = float(trade["entry_price"])
             stop_loss = float(trade["stop_loss"])
             target_price = float(trade["target_price"])
+            leverage = int(trade.get("leverage", 1))
 
             current_price = _fetch_latest_price(ticker_symbol)
             latest_close, sma20 = _fetch_trend_sma20(ticker_symbol)
@@ -934,14 +954,14 @@ if st.session_state["view"] == "Avoimet tradet":
             rr = None
             if current_price is not None and entry != 0:
                 if direction == "long":
-                    pl_pct = ((current_price - entry) / entry) * 100
-                    stop_distance_pct = ((current_price - stop_loss) / current_price) * 100 if current_price != 0 else None
+                    pl_pct = ((current_price - entry) / entry) * 100 * leverage
+                    stop_distance_pct = ((entry - stop_loss) / entry) * 100 * leverage
                     target_distance_pct = ((target_price - current_price) / current_price) * 100 if current_price != 0 else None
                     risk = entry - stop_loss
                     reward = target_price - entry
                 else:
-                    pl_pct = ((entry - current_price) / entry) * 100
-                    stop_distance_pct = ((stop_loss - current_price) / current_price) * 100 if current_price != 0 else None
+                    pl_pct = ((entry - current_price) / entry) * 100 * leverage
+                    stop_distance_pct = ((stop_loss - entry) / entry) * 100 * leverage
                     target_distance_pct = ((current_price - target_price) / current_price) * 100 if current_price != 0 else None
                     risk = stop_loss - entry
                     reward = entry - target_price
@@ -951,7 +971,9 @@ if st.session_state["view"] == "Avoimet tradet":
             status = _calc_trade_status(direction, current_price, stop_loss, target_price, trend_against)
             rows.append(
                 {
-                    "ticker": ticker_symbol,
+                    "user ticker": ticker_input,
+                    "resolved ticker": ticker_symbol,
+                    "leverage": leverage,
                     "suunta": direction,
                     "entry": round(entry, 4),
                     "current price": round(current_price, 4) if current_price is not None else None,
@@ -963,4 +985,59 @@ if st.session_state["view"] == "Avoimet tradet":
                 }
             )
 
+            action_cols = st.columns([5, 1, 1])
+            action_cols[0].caption(f"{ticker_input} → {ticker_symbol} | {direction} | status: {status}")
+            if action_cols[1].button("Poista", key=f"remove_trade_{idx}"):
+                remove_index = idx
+            close_disabled = current_price is None
+            if action_cols[2].button("Sulje", key=f"close_trade_{idx}", disabled=close_disabled):
+                close_index = idx
+
+            if close_disabled:
+                st.caption("NO PRICE: Tradea ei voi sulkea ilman nykyhintaa.")
+
+        if remove_index is not None:
+            removed = trades.pop(remove_index)
+            st.success(f"Trade poistettu: {removed.get('ticker_input', removed.get('ticker', ''))}")
+            st.rerun()
+
+        if close_index is not None:
+            closed = trades.pop(close_index)
+            close_price = _fetch_latest_price(str(closed.get("ticker") or ""))
+            if close_price is None:
+                st.warning("NO PRICE: Tradea ei voitu sulkea juuri nyt.")
+                trades.insert(close_index, closed)
+            else:
+                entry = float(closed["entry_price"])
+                lev = int(closed.get("leverage", 1))
+                if str(closed["direction"]) == "long":
+                    final_pl = ((close_price - entry) / entry) * 100 * lev if entry != 0 else None
+                else:
+                    final_pl = ((entry - close_price) / entry) * 100 * lev if entry != 0 else None
+                closed_trades.append(closed | {
+                    "close_price": float(close_price),
+                    "close_date": str(pd.Timestamp.now(tz="UTC").date()),
+                    "final_pl_pct": final_pl,
+                })
+                st.success("Trade suljettu.")
+            st.rerun()
+
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    st.subheader("Suljetut tradet")
+    if not closed_trades:
+        st.info("Ei suljettuja tradeja vielä.")
+    else:
+        closed_rows = []
+        for trade in closed_trades:
+            closed_rows.append({
+                "user ticker": str(trade.get("ticker_input") or ""),
+                "resolved ticker": str(trade.get("ticker") or ""),
+                "suunta": str(trade.get("direction") or ""),
+                "leverage": int(trade.get("leverage", 1)),
+                "entry": round(float(trade.get("entry_price", 0.0)), 4),
+                "close price": round(float(trade.get("close_price", 0.0)), 4),
+                "close date": str(trade.get("close_date") or ""),
+                "final P/L %": round(float(trade.get("final_pl_pct")), 2) if trade.get("final_pl_pct") is not None else None,
+            })
+        st.dataframe(pd.DataFrame(closed_rows), use_container_width=True, hide_index=True)
