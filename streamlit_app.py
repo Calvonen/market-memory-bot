@@ -362,7 +362,9 @@ st.caption("Historiallisten markkinatilanteiden vertailu nykyiseen rakenteeseen"
 
 with st.sidebar:
     st.subheader("Asetukset")
-    ticker_input = st.text_input("Ticker tai yrityksen nimi", value=st.session_state.get("ticker_input", "AAPL"), max_chars=32, key="ticker_input").strip()
+    if "ticker_input" not in st.session_state:
+        st.session_state["ticker_input"] = st.session_state.get("active_ticker", "AAPL")
+    ticker_input = st.text_input("Ticker tai yrityksen nimi", value=st.session_state["ticker_input"], max_chars=32, key="ticker_input").strip()
     resolved_ticker, ticker_candidates, ticker_error = resolve_ticker_input(ticker_input)
 
     if ticker_candidates and not resolved_ticker:
@@ -510,6 +512,9 @@ with st.sidebar:
         },
     )
     run = st.button("Suorita analyysi", type="primary", use_container_width=True)
+
+run_from_scanner = bool(st.session_state.pop("run_single_analysis", False))
+run = run or run_from_scanner
 
 if run:
     if not ticker:
@@ -733,10 +738,19 @@ def _analyze_scanner_ticker(
     }
 
 
-single_tab, scanner_tab = st.tabs(["Yksittäinen osake", "Scanner"])
-with single_tab:
-    pass
-with scanner_tab:
+if "view" not in st.session_state:
+    st.session_state["view"] = "single"
+
+selected_view_label = st.radio(
+    "Näkymä",
+    options=["Yksittäinen osake", "Scanner"],
+    horizontal=True,
+    index=0 if st.session_state.get("view") == "single" else 1,
+    key="view_selector",
+)
+st.session_state["view"] = "single" if selected_view_label == "Yksittäinen osake" else "scanner"
+
+if st.session_state["view"] == "scanner":
     st.subheader("Scanner")
     market = st.selectbox("Valitse markkina", options=list(MARKET_TICKERS.keys()), key="scanner_market")
     if st.button("Suorita scanner", key="run_scanner", use_container_width=True):
@@ -787,7 +801,10 @@ with scanner_tab:
             )
             chosen = st.selectbox("Valitse ticker analysoitavaksi", options=scanner_df["ticker"].tolist(), key="scanner_pick")
             if st.button("Analysoi valittu osake", key="scanner_to_single"):
+                st.session_state["active_ticker"] = chosen
                 st.session_state["ticker_input"] = chosen
+                st.session_state["view"] = "single"
+                st.session_state["run_single_analysis"] = True
                 st.rerun()
         if skipped:
             st.caption(f"Ohitettiin virheen vuoksi: {', '.join(skipped)}")
