@@ -997,10 +997,7 @@ if st.session_state["view"] == "Avoimet tradet":
     trades = st.session_state["open_trades"]
     closed_trades = st.session_state["closed_trades"]
 
-    title_col, action_col = st.columns([5, 1])
-    title_col.subheader("Avoimet tradet")
-    with action_col:
-        refresh_clicked = st.button("Päivitä hinnat", type="primary")
+    st.subheader("Avoimet tradet")
 
     last_updated = st.session_state.get("trades_last_updated")
     if last_updated is not None:
@@ -1012,69 +1009,75 @@ if st.session_state["view"] == "Avoimet tradet":
         last_updated_ts = last_updated_ts.tz_convert(ZoneInfo("Europe/Helsinki"))
         st.caption(f"Viimeksi päivitetty: {last_updated_ts.strftime('%d.%m.%Y %H:%M')}")
 
+    refresh_clicked = st.button("Päivitä hinnat", type="primary")
+
     if refresh_clicked and trades:
         _refresh_all_open_trades(trades, closed_trades)
         st.success("Avoimien tradejen hinnat päivitetty.")
     elif refresh_clicked:
         st.info("Ei avoimia tradeja päivitettäväksi.")
 
-    with st.form("add_trade_form", clear_on_submit=True):
-        c1, c2, c3, c4 = st.columns(4)
-        ticker_input_new = c1.text_input("Ticker / yritys", max_chars=32).strip()
-        resolved_ticker_new, ticker_candidates_new, ticker_error_new = resolve_ticker_input(ticker_input_new)
-        selected_candidate_trade = None
-        if ticker_candidates_new and not resolved_ticker_new:
-            candidate_options = {
-                f"{item['name']} ({item['symbol']}) - {item['location'] or 'N/A'}": item["symbol"]
-                for item in ticker_candidates_new
-            }
-            selected_label_trade = c1.selectbox(
-                "Valitse ticker",
-                options=["Valitse..."] + list(candidate_options.keys()),
-                key="trade_ticker_candidate_widget",
-            )
-            if selected_label_trade != "Valitse...":
-                selected_candidate_trade = candidate_options[selected_label_trade]
-        direction_new = c2.selectbox("Suunta", options=["long", "short"])
-        entry_price_new = c3.number_input("Entry price", min_value=0.0, value=100.0, step=0.01)
-        leverage_new = c4.selectbox("Vipu / leverage", options=[1, 2, 3, 5, 10], index=0)
+    c1, c2, c3, c4 = st.columns(4)
+    ticker_input_new = c1.text_input(
+        "Ticker / yritys",
+        max_chars=32,
+        key="trade_ticker_input_widget",
+        placeholder="Kirjoita yrityksen nimi tai ticker",
+    ).strip()
+    resolved_ticker_new, ticker_candidates_new, ticker_error_new = resolve_ticker_input(ticker_input_new)
+    selected_candidate_trade = None
+    if ticker_candidates_new and not resolved_ticker_new:
+        candidate_options = {
+            f"{item['name']} ({item['symbol']}) - {item['location'] or 'N/A'}": item["symbol"]
+            for item in ticker_candidates_new
+        }
+        selected_label_trade = c1.selectbox(
+            "Valitse ticker",
+            options=["Valitse..."] + list(candidate_options.keys()),
+            key="trade_ticker_candidate_widget",
+        )
+        if selected_label_trade != "Valitse...":
+            selected_candidate_trade = candidate_options[selected_label_trade]
+    direction_new = c2.selectbox("Suunta", options=["long", "short"], key="trade_direction_widget")
+    entry_price_new = c3.number_input("Entry price", min_value=0.0, value=100.0, step=0.01, key="trade_entry_price_widget")
+    leverage_new = c4.selectbox("Vipu / leverage", options=[1, 2, 3, 5, 10], index=0, key="trade_leverage_widget")
 
-        c5, c6, c7, c8 = st.columns(4)
-        entry_date_new = c5.date_input("Entry date")
-        stop_loss_new = c6.number_input("Stop loss", min_value=0.0, value=95.0, step=0.01)
-        target_price_new = c7.number_input("Target price", min_value=0.0, value=110.0, step=0.01)
-        position_size_new = c8.number_input("Position size", min_value=0.0, value=1.0, step=0.01)
+    c5, c6, c7, c8 = st.columns(4)
+    entry_date_new = c5.date_input("Entry date", key="trade_entry_date_widget")
+    stop_loss_new = c6.number_input("Stop loss", min_value=0.0, value=95.0, step=0.01, key="trade_stop_loss_widget")
+    target_price_new = c7.number_input("Target price", min_value=0.0, value=110.0, step=0.01, key="trade_target_price_widget")
+    position_size_new = c8.number_input("Position size", min_value=0.0, value=1.0, step=0.01, key="trade_position_size_widget")
 
-        submit_trade = st.form_submit_button("Lisää trade", type="primary")
-        if submit_trade:
-            if not ticker_input_new:
-                st.error("Ticker on pakollinen.")
-            elif entry_price_new <= 0:
-                st.error("Entry price pitää olla suurempi kuin 0.")
+    submit_trade = st.button("Lisää trade", type="primary")
+    if submit_trade:
+        if not ticker_input_new:
+            st.error("Ticker on pakollinen.")
+        elif entry_price_new <= 0:
+            st.error("Entry price pitää olla suurempi kuin 0.")
+        else:
+            resolved_ticker_new, resolve_error = _resolve_trade_ticker(ticker_input_new, selected_candidate_trade)
+            if ticker_error_new and not ticker_candidates_new:
+                st.error(ticker_error_new)
+            elif not resolved_ticker_new:
+                st.error(resolve_error or "Tickeriä ei voitu ratkaista.")
             else:
-                resolved_ticker_new, resolve_error = _resolve_trade_ticker(ticker_input_new, selected_candidate_trade)
-                if ticker_error_new and not ticker_candidates_new:
-                    st.error(ticker_error_new)
-                elif not resolved_ticker_new:
-                    st.error(resolve_error or "Tickeriä ei voitu ratkaista.")
-                else:
-                    trades.append(
-                        {
-                            "ticker_input": ticker_input_new,
-                            "ticker": resolved_ticker_new,
-                            "direction": direction_new,
-                            "entry_price": float(entry_price_new),
-                            "entry_date": str(entry_date_new),
-                            "stop_loss": float(stop_loss_new),
-                            "target_price": float(target_price_new),
-                            "position_size": float(position_size_new),
-                            "leverage": int(leverage_new),
-                        }
-                    )
-                    _refresh_open_trade(trades[-1], refresh_key=pd.Timestamp.now(tz="UTC").isoformat())
-                    st.session_state["trades_last_updated"] = pd.Timestamp.now(tz="UTC")
-                    _save_trades(trades, closed_trades)
-                    st.success(f"Trade lisätty: {ticker_input_new} -> {resolved_ticker_new} ({direction_new})")
+                trades.append(
+                    {
+                        "ticker_input": ticker_input_new,
+                        "ticker": resolved_ticker_new,
+                        "direction": direction_new,
+                        "entry_price": float(entry_price_new),
+                        "entry_date": str(entry_date_new),
+                        "stop_loss": float(stop_loss_new),
+                        "target_price": float(target_price_new),
+                        "position_size": float(position_size_new),
+                        "leverage": int(leverage_new),
+                    }
+                )
+                _refresh_open_trade(trades[-1], refresh_key=pd.Timestamp.now(tz="UTC").isoformat())
+                st.session_state["trades_last_updated"] = pd.Timestamp.now(tz="UTC")
+                _save_trades(trades, closed_trades)
+                st.success(f"Trade lisätty: {ticker_input_new} -> {resolved_ticker_new} ({direction_new})")
 
     if not trades:
         st.info("Ei avoimia tradeja vielä.")
