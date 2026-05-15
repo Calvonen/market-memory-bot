@@ -23,7 +23,21 @@ from market_memory.visualization import plot_5y_pivot_map, plot_overlay
 
 st.set_page_config(page_title="Market Memory", page_icon="📈", layout="wide")
 
-
+st.markdown(
+    """
+    <style>
+    [data-testid="stSidebar"] {min-width: 290px; max-width: 290px;}
+    [data-testid="stSidebar"] .block-container {padding-top: 0.6rem; padding-bottom: 0.6rem; padding-left: 0.7rem; padding-right: 0.7rem;}
+    [data-testid="stSidebar"] .stRadio,
+    [data-testid="stSidebar"] .stSelectbox,
+    [data-testid="stSidebar"] .stTextInput,
+    [data-testid="stSidebar"] .stTextArea,
+    [data-testid="stSidebar"] .stSlider {margin-bottom: 0.25rem;}
+    [data-testid="stSidebar"] p {margin-bottom: 0.2rem;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 TICKER_ALIASES = {
@@ -101,7 +115,7 @@ DEFAULT_TICKER_SETTINGS = {
     "pivot_source": "automatic",
     "pivot_mode": "all",
     "sector": "yleinen",
-    "similarity_alert": 0.75,
+    "similarity_alert": 0.85,
     "selected_preset": "Valitse metsästystapa",
     "last_applied_preset": None,
     "similarity_weights": DEFAULT_SIMILARITY_WEIGHTS,
@@ -136,6 +150,13 @@ def _mark_sector_manual() -> None:
     if not active_ticker:
         return
     st.session_state.setdefault("manual_sector_by_ticker", {})[active_ticker] = True
+
+
+
+def _resolve_similarity_threshold(pivot_source: str, pivot_detection_method: str) -> float:
+    if pivot_source == "automatic" and pivot_detection_method == "exact pivot":
+        return 0.90
+    return 0.85
 
 @st.cache_data(show_spinner=False)
 def run_analysis(
@@ -361,7 +382,7 @@ st.title("Market Memory")
 st.caption("Historiallisten markkinatilanteiden vertailu nykyiseen rakenteeseen")
 
 with st.sidebar:
-    st.subheader("Asetukset")
+    st.subheader("Asetukset", divider="gray")
     if "ticker_input" not in st.session_state:
         st.session_state["ticker_input"] = st.session_state.get("active_ticker", "AAPL")
     ticker_input = st.text_input("Ticker tai yrityksen nimi", value=st.session_state["ticker_input"], max_chars=32, key="ticker_input").strip()
@@ -416,19 +437,22 @@ with st.sidebar:
 
     st.caption("Ticker-kohtaiset asetukset tallennetaan tämän session ajaksi.")
 
+    st.caption("### Markkina")
     sector = st.selectbox("Sektori", options=list(SECTOR_SETTINGS.keys()), key="sector_widget", on_change=_mark_sector_manual)
     st.caption(f"Automaattisesti tunnistettu sektori: {st.session_state.get('auto_sector_name', 'yleinen')}")
     st.caption(f"Yahoo: {st.session_state.get('auto_sector_source') or 'Ei saatavilla'}")
-    similarity_alert = st.slider("Similarity-alert", min_value=0.50, max_value=0.99, step=0.01, key="similarity_alert_widget")
+    st.caption("### Pivot-asetukset")
     pivot_source = st.radio("Pivot source", options=["automatic", "manual"], horizontal=True, key="pivot_source_widget")
+    st.caption("### Käänteen tunnistus")
     pivot_detection_method_label = st.radio(
-        "Käänteen tunnistustapa",
+        "Tunnistustapa",
         options=["Tarkka pivot", "Käännealue"],
         horizontal=True,
         disabled=pivot_source != "automatic",
         key="pivot_detection_method_ui_widget",
     )
     pivot_detection_method = "reversal zone" if pivot_detection_method_label == "Käännealue" else "exact pivot"
+    similarity_alert = _resolve_similarity_threshold(pivot_source=pivot_source, pivot_detection_method=pivot_detection_method)
     pivot_mode = st.radio("Pivot mode", options=["all", "bottom", "peak"], horizontal=True, disabled=pivot_source == "manual", key="pivot_mode_widget")
     manual_pivot_type = st.radio("Manual pivot type", options=["bottom", "peak"], horizontal=True, disabled=pivot_source != "manual", key="manual_pivot_type_widget")
     manual_pivot_dates_text = st.text_area(
@@ -446,8 +470,7 @@ with st.sidebar:
     )
     st.caption("Pieni arvo löytää nopeat swingit. Suuri arvo löytää suuremmat sykliset käänteet.")
 
-    st.markdown("---")
-    st.subheader("Käännepisteen painotukset")
+    st.caption("### Painotukset")
     preset_placeholder = "Valitse metsästystapa"
     preset_options = {
         "pohjan metsästys": {"price": 0.10, "rsi": 0.35, "volume": 0.20, "volatility": 0.25, "trend": 0.10},
