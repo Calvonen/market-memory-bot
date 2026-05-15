@@ -946,15 +946,13 @@ if st.session_state["view"] == "Scanner":
 
 
 if st.session_state["view"] == "Avoimet tradet":
-    st.subheader("Avoimet tradet")
     trades = st.session_state.setdefault("open_trades", [])
     closed_trades = st.session_state.setdefault("closed_trades", [])
-    refresh_clicked = st.button("Päivitä hinnat", type="primary")
-    if refresh_clicked and trades:
-        _refresh_all_open_trades(trades)
-        st.success("Avoimien tradejen hinnat päivitetty.")
-    elif refresh_clicked:
-        st.info("Ei avoimia tradeja päivitettäväksi.")
+
+    title_col, action_col = st.columns([5, 1])
+    title_col.subheader("Avoimet tradet")
+    with action_col:
+        refresh_clicked = st.button("Päivitä hinnat", type="primary")
 
     last_updated = st.session_state.get("trades_last_updated")
     if last_updated is not None:
@@ -964,6 +962,12 @@ if st.session_state["view"] == "Avoimet tradet":
         else:
             last_updated_ts = last_updated_ts.tz_convert("UTC")
         st.caption(f"Viimeksi päivitetty: {last_updated_ts.strftime('%Y-%m-%d %H:%M')}")
+
+    if refresh_clicked and trades:
+        _refresh_all_open_trades(trades)
+        st.success("Avoimien tradejen hinnat päivitetty.")
+    elif refresh_clicked:
+        st.info("Ei avoimia tradeja päivitettäväksi.")
 
     with st.form("add_trade_form", clear_on_submit=True):
         c1, c2, c3, c4 = st.columns(4)
