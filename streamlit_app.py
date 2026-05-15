@@ -799,12 +799,9 @@ if st.session_state["view"] == "Scanner":
                 use_container_width=True,
                 hide_index=True,
             )
-            chosen = st.selectbox("Valitse ticker analysoitavaksi", options=scanner_df["ticker"].tolist(), key="scanner_pick")
-            if st.button("Analysoi valittu osake", key="scanner_to_single"):
-                st.session_state["active_ticker"] = chosen
-                st.session_state["ticker_input"] = chosen
-                st.session_state["view"] = "Yksittäinen osake"
-                st.session_state["run_single_analysis"] = True
-                st.rerun()
+            st.caption(
+                "Jos haluat analysoida jonkin scannerin löytämän osakkeen tarkemmin, "
+                "kopioi ticker ja syötä se Yksittäinen osake -näkymään."
+            )
         if skipped:
             st.caption(f"Ohitettiin virheen vuoksi: {', '.join(skipped)}")
