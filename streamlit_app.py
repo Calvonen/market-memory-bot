@@ -738,19 +738,19 @@ def _analyze_scanner_ticker(
     }
 
 
+if "active_ticker" not in st.session_state:
+    st.session_state["active_ticker"] = "AAPL"
 if "view" not in st.session_state:
-    st.session_state["view"] = "single"
+    st.session_state["view"] = "Yksittäinen osake"
 
-selected_view_label = st.radio(
+st.radio(
     "Näkymä",
     options=["Yksittäinen osake", "Scanner"],
     horizontal=True,
-    index=0 if st.session_state.get("view") == "single" else 1,
-    key="view_selector",
+    key="view",
 )
-st.session_state["view"] = "single" if selected_view_label == "Yksittäinen osake" else "scanner"
 
-if st.session_state["view"] == "scanner":
+if st.session_state["view"] == "Scanner":
     st.subheader("Scanner")
     market = st.selectbox("Valitse markkina", options=list(MARKET_TICKERS.keys()), key="scanner_market")
     if st.button("Suorita scanner", key="run_scanner", use_container_width=True):
@@ -803,7 +803,7 @@ if st.session_state["view"] == "scanner":
             if st.button("Analysoi valittu osake", key="scanner_to_single"):
                 st.session_state["active_ticker"] = chosen
                 st.session_state["ticker_input"] = chosen
-                st.session_state["view"] = "single"
+                st.session_state["view"] = "Yksittäinen osake"
                 st.session_state["run_single_analysis"] = True
                 st.rerun()
         if skipped:
