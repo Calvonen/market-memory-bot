@@ -2,16 +2,14 @@ from __future__ import annotations
 
 MARKET_TICKERS: dict[str, list[str]] = {
     "Suomi": [
-        "VALMT.HE",
-        "NOKIA.HE",
-        "KNEBV.HE",
-        "UPM.HE",
-        "STERV.HE",
-        "METSO.HE",
-        "NESTE.HE",
-        "FORTUM.HE",
-        "WRT1V.HE",
-        "KESKOB.HE",
+        "NOKIA.HE", "KNEBV.HE", "UPM.HE", "NESTE.HE", "FORTUM.HE", "WRT1V.HE", "KESKOB.HE", "METSO.HE", "STERV.HE", "VALMT.HE",
+        "ELISA.HE", "KEMIRA.HE", "ORNBV.HE", "OUT1V.HE", "CGCBV.HE", "MNDI.HE", "NDA-FI.HE", "SAMPO.HE", "TIETO.HE", "HUH1V.HE",
+        "KCR.HE", "KOJAMO.HE", "TELIA1.HE", "UPONOR.HE", "YIT.HE", "PON1V.HE", "BILOT.HE", "REVENIO.HE", "SCANFL.HE", "MEKKO.HE",
+        "ALBAV.HE", "ANORA.HE", "ATRAV.HE", "DIGIA.HE", "DNA.HE", "EEZY.HE", "FIA1S.HE", "FISKARS.HE", "GLA1V.HE", "HARVIA.HE",
+        "HONBS.HE", "ICP1V.HE", "INCAP.HE", "KSLAV.HE", "LASSILA.HE", "LETO1.HE", "MARAS.HE", "NOHO.HE", "OKDAV.HE", "QTCOM.HE",
+        "RAP1V.HE", "RAUTE.HE", "REG1V.HE", "ROVIO.HE", "SAGCV.HE", "SAA1V.HE", "SIILI.HE", "SRV1V.HE", "SUY1V.HE", "TAALA.HE",
+        "TKSAV.HE", "TOKMAN.HE", "TRH1V.HE", "TYRES.HE", "VAIAS.HE", "VERK.HE", "VIK1V.HE", "WUF1V.HE", "YHPO.HE", "SSH1V.HE",
+        "OMASP.HE", "PURMO.HE", "PIHLIS.HE", "ADMIN.HE", "KOSKI.HE", "NANOFH.HE", "PUUILO.HE", "SPINN.HE", "RELAIS.HE", "MANDATUM.HE",
     ],
     "Ruotsi": [
         "VOLV-B.ST",

@@ -941,8 +941,11 @@ if st.session_state["view"] == "Scanner":
     if st.button("Suorita scanner", key="run_scanner", use_container_width=True):
         rows: list[dict[str, object]] = []
         skipped: list[str] = []
+        analyzed_count = 0
+        failed_count = 0
         with st.spinner("Ajetaan scanner..."):
             for scanner_ticker in MARKET_TICKERS[market]:
+                analyzed_count += 1
                 try:
                     row = _analyze_scanner_ticker(
                         ticker=scanner_ticker,
@@ -958,6 +961,7 @@ if st.session_state["view"] == "Scanner":
                     if row:
                         rows.append(row)
                 except Exception:
+                    failed_count += 1
                     skipped.append(scanner_ticker)
                     continue
 
@@ -988,6 +992,7 @@ if st.session_state["view"] == "Scanner":
                 "Jos haluat analysoida jonkin scannerin löytämän osakkeen tarkemmin, "
                 "kopioi ticker ja syötä se Yksittäinen osake -näkymään."
             )
+        st.caption(f"Analysoitiin {analyzed_count} osaketta • epäonnistui {failed_count}")
         if skipped:
             st.caption(f"Ohitettiin virheen vuoksi: {', '.join(skipped)}")
 
