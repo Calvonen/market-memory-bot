@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from zoneinfo import ZoneInfo
 from urllib.parse import quote_plus
 
 import feedparser
@@ -961,7 +962,8 @@ if st.session_state["view"] == "Avoimet tradet":
             last_updated_ts = last_updated_ts.tz_localize("UTC")
         else:
             last_updated_ts = last_updated_ts.tz_convert("UTC")
-        st.caption(f"Viimeksi päivitetty: {last_updated_ts.strftime('%Y-%m-%d %H:%M')}")
+        last_updated_ts = last_updated_ts.tz_convert(ZoneInfo("Europe/Helsinki"))
+        st.caption(f"Viimeksi päivitetty: {last_updated_ts.strftime('%d.%m.%Y %H:%M')}")
 
     if refresh_clicked and trades:
         _refresh_all_open_trades(trades)
