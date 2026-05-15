@@ -1082,12 +1082,19 @@ if st.session_state["view"] == "Avoimet tradet":
     if not trades:
         st.info("Ei avoimia tradeja vielä.")
     else:
-        rows = []
         remove_index = None
         close_index = None
+
+        table_columns = [
+            "Toiminnot", "Ticker", "Suunta", "Vipu", "Entry", "Current", "P/L %",
+            "Stop", "Target", "R/R", "Status", "Syy",
+        ]
+        header_cols = st.columns([2.2, 1.1, 0.9, 0.7, 1, 1, 0.9, 1, 1, 0.8, 1, 1.4])
+        for col, header in zip(header_cols, table_columns):
+            col.markdown(f"**{header}**")
+
         for idx, trade in enumerate(trades):
             ticker_symbol = str(trade.get("ticker") or "")
-            ticker_input = str(trade.get("ticker_input") or ticker_symbol)
             direction = str(trade["direction"])
             entry = float(trade["entry_price"])
             stop_loss = float(trade["stop_loss"])
@@ -1096,38 +1103,32 @@ if st.session_state["view"] == "Avoimet tradet":
 
             current_price = trade.get("current_price")
             pl_pct = trade.get("pl_pct")
-            stop_distance_pct = trade.get("stop_distance_pct")
-            target_distance_pct = trade.get("target_distance_pct")
             rr = trade.get("risk_reward")
             status = str(trade.get("status") or "NO PRICE")
             status_reason = str(trade.get("status_reason") or _calc_trade_status_reason(status))
-            rows.append(
-                {
-                    "user ticker": ticker_input,
-                    "resolved ticker": ticker_symbol,
-                    "leverage": leverage,
-                    "suunta": direction,
-                    "entry": round(entry, 4),
-                    "current price": round(current_price, 4) if current_price is not None else None,
-                    "P/L %": round(pl_pct, 2) if pl_pct is not None else None,
-                    "stop distance %": round(stop_distance_pct, 2) if stop_distance_pct is not None else None,
-                    "target distance %": round(target_distance_pct, 2) if target_distance_pct is not None else None,
-                    "risk/reward": round(rr, 2) if rr is not None else None,
-                    "status": status,
-                    "status reason": status_reason,
-                }
-            )
 
-            action_cols = st.columns([5, 1, 1])
-            action_cols[0].caption(f"{ticker_input} → {ticker_symbol} | {direction} | status: {status} ({status_reason})")
-            if action_cols[1].button("Poista", key=f"remove_trade_{idx}"):
+            row_cols = st.columns([2.2, 1.1, 0.9, 0.7, 1, 1, 0.9, 1, 1, 0.8, 1, 1.4])
+            action_cols = row_cols[0].columns(2)
+            if action_cols[0].button("Poista", key=f"remove_trade_{idx}"):
                 remove_index = idx
             close_disabled = current_price is None
-            if action_cols[2].button("Sulje", key=f"close_trade_{idx}", disabled=close_disabled):
+            if action_cols[1].button("Sulje", key=f"close_trade_{idx}", disabled=close_disabled):
                 close_index = idx
 
+            row_cols[1].write(ticker_symbol)
+            row_cols[2].write(direction)
+            row_cols[3].write(leverage)
+            row_cols[4].write(round(entry, 4))
+            row_cols[5].write(round(current_price, 4) if current_price is not None else "-")
+            row_cols[6].write(round(pl_pct, 2) if pl_pct is not None else "-")
+            row_cols[7].write(round(stop_loss, 4))
+            row_cols[8].write(round(target_price, 4))
+            row_cols[9].write(round(rr, 2) if rr is not None else "-")
+            row_cols[10].write(status)
+            row_cols[11].write(status_reason)
+
             if close_disabled:
-                st.caption("NO PRICE: Tradea ei voi sulkea ilman nykyhintaa.")
+                st.caption(f"{ticker_symbol}: NO PRICE – Tradea ei voi sulkea ilman nykyhintaa.")
 
         if remove_index is not None:
             removed = trades.pop(remove_index)
@@ -1156,8 +1157,6 @@ if st.session_state["view"] == "Avoimet tradet":
                 _save_trades(trades, closed_trades)
                 st.success("Trade suljettu.")
             st.rerun()
-
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     st.subheader("Suljetut tradet")
     if not closed_trades:
