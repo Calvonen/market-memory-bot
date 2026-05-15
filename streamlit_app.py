@@ -404,6 +404,68 @@ def _calc_trade_status(direction: str, current_price: float | None, stop_loss: f
     if trend_warning:
         return "WARNING"
     return "OK"
+
+
+def _calc_trade_status_reason(status: str) -> str:
+    if status == "OK":
+        return "Hinta stopin ja targetin välissä"
+    if status == "WARNING":
+        return "Trendi liikkuu treidiä vastaan"
+    if status == "STOP HIT":
+        return "Stop loss saavutettu"
+    if status == "TARGET HIT":
+        return "Target saavutettu"
+    return "Nykyhintaa ei saatu"
+
+
+def _refresh_open_trade(trade: dict[str, object]) -> None:
+    ticker_symbol = str(trade.get("ticker") or "")
+    direction = str(trade.get("direction") or "")
+    entry = float(trade.get("entry_price") or 0.0)
+    stop_loss = float(trade.get("stop_loss") or 0.0)
+    target_price = float(trade.get("target_price") or 0.0)
+    leverage = int(trade.get("leverage", 1))
+
+    current_price = _fetch_latest_price(ticker_symbol)
+    latest_close, sma20 = _fetch_trend_sma20(ticker_symbol)
+    trend_against = False
+    if latest_close is not None and sma20 is not None:
+        trend_against = (direction == "long" and latest_close < sma20) or (direction == "short" and latest_close > sma20)
+
+    pl_pct = None
+    stop_distance_pct = None
+    target_distance_pct = None
+    rr = None
+    if current_price is not None and entry != 0:
+        if direction == "long":
+            pl_pct = ((current_price - entry) / entry) * 100 * leverage
+            stop_distance_pct = ((entry - stop_loss) / entry) * 100 * leverage
+            target_distance_pct = ((target_price - current_price) / current_price) * 100 if current_price != 0 else None
+            risk = entry - stop_loss
+            reward = target_price - entry
+        else:
+            pl_pct = ((entry - current_price) / entry) * 100 * leverage
+            stop_distance_pct = ((stop_loss - entry) / entry) * 100 * leverage
+            target_distance_pct = ((current_price - target_price) / current_price) * 100 if current_price != 0 else None
+            risk = stop_loss - entry
+            reward = entry - target_price
+        if risk > 0:
+            rr = reward / risk
+
+    status = _calc_trade_status(direction, current_price, stop_loss, target_price, trend_against)
+    trade["current_price"] = current_price
+    trade["pl_pct"] = pl_pct
+    trade["stop_distance_pct"] = stop_distance_pct
+    trade["target_distance_pct"] = target_distance_pct
+    trade["risk_reward"] = rr
+    trade["status"] = status
+    trade["status_reason"] = _calc_trade_status_reason(status)
+
+
+def _refresh_all_open_trades(trades: list[dict[str, object]]) -> None:
+    for trade in trades:
+        _refresh_open_trade(trade)
+    st.session_state["trades_last_updated"] = pd.Timestamp.now(tz="UTC")
 def build_matches_table(matches: list[MatchResult], ticker: str, threshold: float, pivot_source: str) -> pd.DataFrame:
     rows: list[dict[str, str | float]] = []
     for match in matches:
@@ -887,6 +949,21 @@ if st.session_state["view"] == "Avoimet tradet":
     st.subheader("Avoimet tradet")
     trades = st.session_state.setdefault("open_trades", [])
     closed_trades = st.session_state.setdefault("closed_trades", [])
+    refresh_clicked = st.button("Päivitä hinnat", type="primary")
+    if refresh_clicked and trades:
+        _refresh_all_open_trades(trades)
+        st.success("Avoimien tradejen hinnat päivitetty.")
+    elif refresh_clicked:
+        st.info("Ei avoimia tradeja päivitettäväksi.")
+
+    last_updated = st.session_state.get("trades_last_updated")
+    if last_updated is not None:
+        last_updated_ts = pd.Timestamp(last_updated)
+        if last_updated_ts.tzinfo is None:
+            last_updated_ts = last_updated_ts.tz_localize("UTC")
+        else:
+            last_updated_ts = last_updated_ts.tz_convert("UTC")
+        st.caption(f"Viimeksi päivitetty: {last_updated_ts.strftime('%Y-%m-%d %H:%M')}")
 
     with st.form("add_trade_form", clear_on_submit=True):
         c1, c2, c3, c4 = st.columns(4)
@@ -925,6 +1002,8 @@ if st.session_state["view"] == "Avoimet tradet":
                             "leverage": int(leverage_new),
                         }
                     )
+                    _refresh_open_trade(trades[-1])
+                    st.session_state["trades_last_updated"] = pd.Timestamp.now(tz="UTC")
                     st.success(f"Trade lisätty: {ticker_input_new} -> {resolved_ticker_new} ({direction_new})")
 
     if not trades:
@@ -942,33 +1021,13 @@ if st.session_state["view"] == "Avoimet tradet":
             target_price = float(trade["target_price"])
             leverage = int(trade.get("leverage", 1))
 
-            current_price = _fetch_latest_price(ticker_symbol)
-            latest_close, sma20 = _fetch_trend_sma20(ticker_symbol)
-            trend_against = False
-            if latest_close is not None and sma20 is not None:
-                trend_against = (direction == "long" and latest_close < sma20) or (direction == "short" and latest_close > sma20)
-
-            pl_pct = None
-            stop_distance_pct = None
-            target_distance_pct = None
-            rr = None
-            if current_price is not None and entry != 0:
-                if direction == "long":
-                    pl_pct = ((current_price - entry) / entry) * 100 * leverage
-                    stop_distance_pct = ((entry - stop_loss) / entry) * 100 * leverage
-                    target_distance_pct = ((target_price - current_price) / current_price) * 100 if current_price != 0 else None
-                    risk = entry - stop_loss
-                    reward = target_price - entry
-                else:
-                    pl_pct = ((entry - current_price) / entry) * 100 * leverage
-                    stop_distance_pct = ((stop_loss - entry) / entry) * 100 * leverage
-                    target_distance_pct = ((current_price - target_price) / current_price) * 100 if current_price != 0 else None
-                    risk = stop_loss - entry
-                    reward = entry - target_price
-                if risk > 0:
-                    rr = reward / risk
-
-            status = _calc_trade_status(direction, current_price, stop_loss, target_price, trend_against)
+            current_price = trade.get("current_price")
+            pl_pct = trade.get("pl_pct")
+            stop_distance_pct = trade.get("stop_distance_pct")
+            target_distance_pct = trade.get("target_distance_pct")
+            rr = trade.get("risk_reward")
+            status = str(trade.get("status") or "NO PRICE")
+            status_reason = str(trade.get("status_reason") or _calc_trade_status_reason(status))
             rows.append(
                 {
                     "user ticker": ticker_input,
@@ -982,11 +1041,12 @@ if st.session_state["view"] == "Avoimet tradet":
                     "target distance %": round(target_distance_pct, 2) if target_distance_pct is not None else None,
                     "risk/reward": round(rr, 2) if rr is not None else None,
                     "status": status,
+                    "status reason": status_reason,
                 }
             )
 
             action_cols = st.columns([5, 1, 1])
-            action_cols[0].caption(f"{ticker_input} → {ticker_symbol} | {direction} | status: {status}")
+            action_cols[0].caption(f"{ticker_input} → {ticker_symbol} | {direction} | status: {status} ({status_reason})")
             if action_cols[1].button("Poista", key=f"remove_trade_{idx}"):
                 remove_index = idx
             close_disabled = current_price is None
