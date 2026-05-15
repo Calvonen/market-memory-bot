@@ -938,6 +938,7 @@ st.radio(
 if st.session_state["view"] == "Scanner":
     st.subheader("Scanner")
     market = st.selectbox("Valitse markkina", options=list(MARKET_TICKERS.keys()), key="scanner_market")
+    st.caption(f"Scanning {len(MARKET_TICKERS[market])} liquid stocks")
     if st.button("Suorita scanner", key="run_scanner", use_container_width=True):
         rows: list[dict[str, object]] = []
         skipped: list[str] = []
