@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from urllib.parse import quote_plus
 
@@ -39,6 +41,41 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+
+
+
+DATA_DIR = Path("data")
+OPEN_TRADES_PATH = DATA_DIR / "open_trades.json"
+CLOSED_TRADES_PATH = DATA_DIR / "closed_trades.json"
+
+
+def _load_trades(path: Path) -> list[dict[str, object]]:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text("[]", encoding="utf-8")
+        return []
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            loaded = json.load(file)
+    except (json.JSONDecodeError, OSError):
+        loaded = []
+    return loaded if isinstance(loaded, list) else []
+
+
+def _save_trades(open_trades: list[dict[str, object]], closed_trades: list[dict[str, object]]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with OPEN_TRADES_PATH.open("w", encoding="utf-8") as file:
+        json.dump(open_trades, file, ensure_ascii=False, indent=2)
+    with CLOSED_TRADES_PATH.open("w", encoding="utf-8") as file:
+        json.dump(closed_trades, file, ensure_ascii=False, indent=2)
+
+
+def _ensure_trade_state_loaded() -> None:
+    if "open_trades" not in st.session_state:
+        st.session_state["open_trades"] = _load_trades(OPEN_TRADES_PATH)
+    if "closed_trades" not in st.session_state:
+        st.session_state["closed_trades"] = _load_trades(CLOSED_TRADES_PATH)
 
 
 TICKER_ALIASES = {
@@ -467,6 +504,7 @@ def _refresh_all_open_trades(trades: list[dict[str, object]]) -> None:
     for trade in trades:
         _refresh_open_trade(trade)
     st.session_state["trades_last_updated"] = pd.Timestamp.now(tz="UTC")
+
 def build_matches_table(matches: list[MatchResult], ticker: str, threshold: float, pivot_source: str) -> pd.DataFrame:
     rows: list[dict[str, str | float]] = []
     for match in matches:
@@ -496,6 +534,8 @@ def build_matches_table(matches: list[MatchResult], ticker: str, threshold: floa
 
 st.title("Market Memory")
 st.caption("Historiallisten markkinatilanteiden vertailu nykyiseen rakenteeseen")
+
+_ensure_trade_state_loaded()
 
 with st.sidebar:
     st.subheader("Asetukset", divider="gray")
@@ -947,8 +987,9 @@ if st.session_state["view"] == "Scanner":
 
 
 if st.session_state["view"] == "Avoimet tradet":
-    trades = st.session_state.setdefault("open_trades", [])
-    closed_trades = st.session_state.setdefault("closed_trades", [])
+    _ensure_trade_state_loaded()
+    trades = st.session_state["open_trades"]
+    closed_trades = st.session_state["closed_trades"]
 
     title_col, action_col = st.columns([5, 1])
     title_col.subheader("Avoimet tradet")
@@ -1010,6 +1051,7 @@ if st.session_state["view"] == "Avoimet tradet":
                     )
                     _refresh_open_trade(trades[-1])
                     st.session_state["trades_last_updated"] = pd.Timestamp.now(tz="UTC")
+                    _save_trades(trades, closed_trades)
                     st.success(f"Trade lisätty: {ticker_input_new} -> {resolved_ticker_new} ({direction_new})")
 
     if not trades:
@@ -1064,6 +1106,7 @@ if st.session_state["view"] == "Avoimet tradet":
 
         if remove_index is not None:
             removed = trades.pop(remove_index)
+            _save_trades(trades, closed_trades)
             st.success(f"Trade poistettu: {removed.get('ticker_input', removed.get('ticker', ''))}")
             st.rerun()
 
@@ -1085,6 +1128,7 @@ if st.session_state["view"] == "Avoimet tradet":
                     "close_date": str(pd.Timestamp.now(tz="UTC").date()),
                     "final_pl_pct": final_pl,
                 })
+                _save_trades(trades, closed_trades)
                 st.success("Trade suljettu.")
             st.rerun()
 
