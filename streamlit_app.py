@@ -940,6 +940,8 @@ if "active_ticker" not in st.session_state:
     st.session_state["active_ticker"] = "AAPL"
 if "view" not in st.session_state:
     st.session_state["view"] = "Yksittäinen osake"
+if "scanner_results" not in st.session_state:
+    st.session_state["scanner_results"] = []
 
 st.radio(
     "Näkymä",
@@ -978,37 +980,54 @@ if st.session_state["view"] == "Scanner":
                     failed_count += 1
                     skipped.append(scanner_ticker)
                     continue
+        st.session_state["scanner_results"] = rows
+        st.session_state["scanner_stats"] = {
+            "analyzed_count": analyzed_count,
+            "failed_count": failed_count,
+            "skipped": skipped,
+        }
 
-        scanner_df = pd.DataFrame(rows)
-        if scanner_df.empty:
-            st.warning("Scanner ei löytänyt tuloksia valitulle markkinalle.")
-        else:
-            scanner_df = scanner_df.sort_values("best_similarity", ascending=False).reset_index(drop=True)
-            st.dataframe(
-                scanner_df.rename(
-                    columns={
-                        "ticker": "ticker",
-                        "company_name": "company name",
-                        "sector": "sector",
-                        "best_similarity": "best similarity",
-                        "signal_type": "signal type",
-                        "trend_state": "trend state",
-                        "volatility_state": "volatility state",
-                        "volume_ratio": "volume ratio",
-                        "avg_return_5d": "avg return +5d",
-                        "avg_return_15d": "avg return +15d",
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-            st.caption(
-                "Jos haluat analysoida jonkin scannerin löytämän osakkeen tarkemmin, "
-                "kopioi ticker ja syötä se Yksittäinen osake -näkymään."
-            )
-        st.caption(f"Analysoitiin {analyzed_count} osaketta • epäonnistui {failed_count}")
-        if skipped:
-            st.caption(f"Ohitettiin virheen vuoksi: {', '.join(skipped)}")
+    scanner_df = pd.DataFrame(st.session_state.get("scanner_results", []))
+    if scanner_df.empty:
+        st.info("Suorita scanner nähdäksesi tulokset.")
+    else:
+        scanner_df = scanner_df.sort_values("best_similarity", ascending=False).reset_index(drop=True)
+        st.dataframe(
+            scanner_df.rename(
+                columns={
+                    "ticker": "ticker",
+                    "company_name": "company name",
+                    "sector": "sector",
+                    "best_similarity": "best similarity",
+                    "signal_type": "signal type",
+                    "trend_state": "trend state",
+                    "volatility_state": "volatility state",
+                    "volume_ratio": "volume ratio",
+                    "avg_return_5d": "avg return +5d",
+                    "avg_return_15d": "avg return +15d",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+        ticker_labels = {
+            f"{row['ticker']} — {row['company_name'] or row['ticker']}": row["ticker"] for row in scanner_df.to_dict("records")
+        }
+        selected_label = st.selectbox("Valitse analysoitava ticker", options=list(ticker_labels.keys()), key="scanner_selected_label")
+        _, analyze_col = st.columns([3, 1])
+        with analyze_col:
+            if st.button("Analysoi valittu", key="analyze_selected", use_container_width=True):
+                selected_ticker = ticker_labels[selected_label]
+                st.session_state["active_ticker"] = selected_ticker
+                st.session_state["ticker_input"] = selected_ticker
+                st.session_state["view"] = "Yksittäinen osake"
+                st.rerun()
+
+    stats = st.session_state.get("scanner_stats")
+    if stats:
+        st.caption(f"Analysoitiin {stats['analyzed_count']} osaketta • epäonnistui {stats['failed_count']}")
+        if stats["skipped"]:
+            st.caption(f"Ohitettiin virheen vuoksi: {', '.join(stats['skipped'])}")
 
 
 if st.session_state["view"] == "Avoimet tradet":
