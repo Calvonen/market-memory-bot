@@ -558,6 +558,8 @@ _ensure_trade_state_loaded()
 
 with st.sidebar:
     st.subheader("Asetukset", divider="gray")
+    if "pending_ticker" in st.session_state:
+        st.session_state["ticker_input"] = st.session_state.pop("pending_ticker")
     if "ticker_input" not in st.session_state:
         st.session_state["ticker_input"] = st.session_state.get("active_ticker", "AAPL")
     ticker_input = st.text_input("Ticker tai yrityksen nimi", value=st.session_state["ticker_input"], max_chars=32, key="ticker_input").strip()
@@ -1018,8 +1020,8 @@ if st.session_state["view"] == "Scanner":
         with analyze_col:
             if st.button("Analysoi valittu", key="analyze_selected", use_container_width=True):
                 selected_ticker = ticker_labels[selected_label]
+                st.session_state["pending_ticker"] = selected_ticker
                 st.session_state["active_ticker"] = selected_ticker
-                st.session_state["ticker_input"] = selected_ticker
                 st.session_state["view"] = "Yksittäinen osake"
                 st.rerun()
 
