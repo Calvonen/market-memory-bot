@@ -551,6 +551,30 @@ def build_matches_table(matches: list[MatchResult], ticker: str, threshold: floa
     return pd.DataFrame(rows)
 
 
+def _render_trade_mobile_card(trade: dict[str, object], idx: int) -> tuple[bool, bool]:
+    ticker_symbol = str(trade.get("ticker") or "")
+    direction = str(trade.get("direction") or "")
+    entry = float(trade.get("entry_price") or 0.0)
+    stop_loss = float(trade.get("stop_loss") or 0.0)
+    target_price = float(trade.get("target_price") or 0.0)
+    leverage = int(trade.get("leverage", 1))
+    current_price = trade.get("current_price")
+    pl_pct = trade.get("pl_pct")
+    status = str(trade.get("status") or "NO PRICE")
+
+    st.markdown("---")
+    st.markdown(f"**{ticker_symbol}** · {direction} · {leverage}x")
+    st.caption(f"P/L %: {round(pl_pct, 2) if pl_pct is not None else '-'} | Status: {status}")
+    st.caption(
+        f"Entry: {round(entry, 4)} | Current: {round(current_price, 4) if current_price is not None else '-'} | "
+        f"Stop: {round(stop_loss, 4)} | Target: {round(target_price, 4)}"
+    )
+    action_cols = st.columns(2)
+    remove_clicked = action_cols[0].button("Poista", key=f"remove_trade_mobile_{idx}")
+    close_clicked = action_cols[1].button("Sulje", key=f"close_trade_mobile_{idx}", disabled=current_price is None)
+    return remove_clicked, close_clicked
+
+
 st.title("Market Memory")
 st.caption("Historiallisten markkinatilanteiden vertailu nykyiseen rakenteeseen")
 
@@ -564,6 +588,7 @@ if "pending_ticker" in st.session_state:
 
 with st.sidebar:
     st.subheader("Asetukset", divider="gray")
+    view_mode = st.radio("Näkymätila", options=["Desktop", "Mobiili"], key="view_mode")
     if "ticker_input" not in st.session_state:
         st.session_state["ticker_input"] = st.session_state.get("active_ticker", "AAPL")
     ticker_input = st.text_input("Ticker tai yrityksen nimi", value=st.session_state["ticker_input"], max_chars=32, key="ticker_input").strip()
@@ -772,9 +797,14 @@ if run:
                     table = build_matches_table(
                         matches, ticker=ticker, threshold=similarity_alert, pivot_source=pivot_source
                     )
-                    table_height = min(420, 38 * len(table) + 40)
+                    display_table = table
+                    if view_mode == "Mobiili":
+                        display_table = table[
+                            ["Ticker", "Similarity", "Pivot date", "Pivot type", "Alert status", "return +5d", "return +15d"]
+                        ]
+                    table_height = 320 if view_mode == "Mobiili" else min(420, 38 * len(display_table) + 40)
                     st.dataframe(
-                        table,
+                        display_table,
                         use_container_width=True,
                         hide_index=True,
                         height=table_height,
@@ -795,12 +825,16 @@ if run:
 
                     st.subheader("5y pivot map")
                     pivot_map_fig = plot_5y_pivot_map(history=enriched, matches=matches)
+                    if view_mode == "Mobiili":
+                        pivot_map_fig.update_layout(height=320)
                     st.plotly_chart(pivot_map_fig, use_container_width=True)
 
                     st.subheader("Plotly overlay")
                     current = enriched.iloc[-15:]
                     fig = plot_overlay(current=current, matches=matches)
                     fig.update_layout(legend_title_text=f"Similarity score ({sector})")
+                    if view_mode == "Mobiili":
+                        fig.update_layout(height=320)
                     st.plotly_chart(fig, use_container_width=True)
 
                     st.subheader("Similarity formula")
@@ -861,7 +895,12 @@ if run:
                 if quarterly.empty:
                     st.info("Kvartaalitietoja ei löytynyt tälle tickerille.")
                 else:
-                    st.dataframe(quarterly, use_container_width=True, hide_index=True)
+                    quarterly_display = quarterly
+                    if view_mode == "Mobiili":
+                        keep_cols = [col for col in ["date", "revenue", "eps", "netIncome", "operatingIncome"] if col in quarterly.columns]
+                        if keep_cols:
+                            quarterly_display = quarterly[keep_cols]
+                    st.dataframe(quarterly_display, use_container_width=True, hide_index=True)
 
                 st.subheader("Viimeisimmät uutiset")
                 st.caption("Näytetään viimeisen 90 päivän uutiset")
@@ -998,24 +1037,27 @@ if st.session_state["view"] == "Scanner":
         st.info("Suorita scanner nähdäksesi tulokset.")
     else:
         scanner_df = scanner_df.sort_values("best_similarity", ascending=False).reset_index(drop=True)
-        st.dataframe(
-            scanner_df.rename(
-                columns={
-                    "ticker": "ticker",
-                    "company_name": "company name",
-                    "sector": "sector",
-                    "best_similarity": "best similarity",
-                    "signal_type": "signal type",
-                    "trend_state": "trend state",
-                    "volatility_state": "volatility state",
-                    "volume_ratio": "volume ratio",
-                    "avg_return_5d": "avg return +5d",
-                    "avg_return_15d": "avg return +15d",
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
+        scanner_display = scanner_df.rename(
+            columns={
+                "ticker": "ticker",
+                "company_name": "company name",
+                "sector": "sector",
+                "best_similarity": "best similarity",
+                "signal_type": "signal type",
+                "trend_state": "trend state",
+                "volatility_state": "volatility state",
+                "volume_ratio": "volume ratio",
+                "avg_return_5d": "avg return +5d",
+                "avg_return_15d": "avg return +15d",
+            }
         )
+        if view_mode == "Mobiili":
+            scanner_display = scanner_display[
+                ["ticker", "signal type", "best similarity", "avg return +5d", "avg return +15d"]
+            ]
+            st.dataframe(scanner_display, use_container_width=True, hide_index=True, height=320)
+        else:
+            st.dataframe(scanner_display, use_container_width=True, hide_index=True)
         ticker_labels = {
             f"{row['ticker']} — {row['company_name'] or row['ticker']}": row["ticker"] for row in scanner_df.to_dict("records")
         }
@@ -1065,7 +1107,8 @@ if st.session_state["view"] == "Avoimet tradet":
     elif refresh_clicked:
         st.info("Ei avoimia tradeja päivitettäväksi.")
 
-    c1, c2, c3, c4 = st.columns(4)
+    input_cols = 2 if view_mode == "Mobiili" else 4
+    c1, c2, c3, c4 = st.columns(input_cols if input_cols == 4 else 2)
     ticker_input_new = c1.text_input(
         "Ticker / yritys",
         max_chars=32,
@@ -1087,10 +1130,14 @@ if st.session_state["view"] == "Avoimet tradet":
         if selected_label_trade != "Valitse...":
             selected_candidate_trade = candidate_options[selected_label_trade]
     direction_new = c2.selectbox("Suunta", options=["long", "short"], key="trade_direction_widget")
+    if view_mode == "Mobiili":
+        c3, c4 = st.columns(2)
     entry_price_new = c3.number_input("Entry price", min_value=0.0, value=100.0, step=0.01, key="trade_entry_price_widget")
     leverage_new = c4.selectbox("Vipu / leverage", options=[1, 2, 3, 5, 10], index=0, key="trade_leverage_widget")
 
-    c5, c6, c7, c8 = st.columns(4)
+    c5, c6, c7, c8 = st.columns(4 if view_mode == "Desktop" else 2)
+    if view_mode == "Mobiili":
+        c7, c8 = st.columns(2)
     entry_date_new = c5.date_input("Entry date", key="trade_entry_date_widget")
     stop_loss_new = c6.number_input("Stop loss", min_value=0.0, value=95.0, step=0.01, key="trade_stop_loss_widget")
     target_price_new = c7.number_input("Target price", min_value=0.0, value=110.0, step=0.01, key="trade_target_price_widget")
@@ -1133,13 +1180,14 @@ if st.session_state["view"] == "Avoimet tradet":
         remove_index = None
         close_index = None
 
-        table_columns = [
-            "Toiminnot", "Ticker", "Suunta", "Vipu", "Entry", "Current", "P/L %",
-            "Stop", "Target", "R/R", "Status", "Syy",
-        ]
-        header_cols = st.columns([2.2, 1.1, 0.9, 0.7, 1, 1, 0.9, 1, 1, 0.8, 1, 1.4])
-        for col, header in zip(header_cols, table_columns):
-            col.markdown(f"**{header}**")
+        if view_mode == "Desktop":
+            table_columns = [
+                "Toiminnot", "Ticker", "Suunta", "Vipu", "Entry", "Current", "P/L %",
+                "Stop", "Target", "R/R", "Status", "Syy",
+            ]
+            header_cols = st.columns([2.2, 1.1, 0.9, 0.7, 1, 1, 0.9, 1, 1, 0.8, 1, 1.4])
+            for col, header in zip(header_cols, table_columns):
+                col.markdown(f"**{header}**")
 
         for idx, trade in enumerate(trades):
             ticker_symbol = str(trade.get("ticker") or "")
@@ -1155,25 +1203,33 @@ if st.session_state["view"] == "Avoimet tradet":
             status = str(trade.get("status") or "NO PRICE")
             status_reason = str(trade.get("status_reason") or _calc_trade_status_reason(status))
 
-            row_cols = st.columns([2.2, 1.1, 0.9, 0.7, 1, 1, 0.9, 1, 1, 0.8, 1, 1.4])
-            action_cols = row_cols[0].columns(2)
-            if action_cols[0].button("Poista", key=f"remove_trade_{idx}"):
-                remove_index = idx
-            close_disabled = current_price is None
-            if action_cols[1].button("Sulje", key=f"close_trade_{idx}", disabled=close_disabled):
-                close_index = idx
+            if view_mode == "Mobiili":
+                remove_clicked, close_clicked = _render_trade_mobile_card(trade=trade, idx=idx)
+                if remove_clicked:
+                    remove_index = idx
+                if close_clicked:
+                    close_index = idx
+                close_disabled = current_price is None
+            else:
+                row_cols = st.columns([2.2, 1.1, 0.9, 0.7, 1, 1, 0.9, 1, 1, 0.8, 1, 1.4])
+                action_cols = row_cols[0].columns(2)
+                if action_cols[0].button("Poista", key=f"remove_trade_{idx}"):
+                    remove_index = idx
+                close_disabled = current_price is None
+                if action_cols[1].button("Sulje", key=f"close_trade_{idx}", disabled=close_disabled):
+                    close_index = idx
 
-            row_cols[1].write(ticker_symbol)
-            row_cols[2].write(direction)
-            row_cols[3].write(leverage)
-            row_cols[4].write(round(entry, 4))
-            row_cols[5].write(round(current_price, 4) if current_price is not None else "-")
-            row_cols[6].write(round(pl_pct, 2) if pl_pct is not None else "-")
-            row_cols[7].write(round(stop_loss, 4))
-            row_cols[8].write(round(target_price, 4))
-            row_cols[9].write(round(rr, 2) if rr is not None else "-")
-            row_cols[10].write(status)
-            row_cols[11].write(status_reason)
+                row_cols[1].write(ticker_symbol)
+                row_cols[2].write(direction)
+                row_cols[3].write(leverage)
+                row_cols[4].write(round(entry, 4))
+                row_cols[5].write(round(current_price, 4) if current_price is not None else "-")
+                row_cols[6].write(round(pl_pct, 2) if pl_pct is not None else "-")
+                row_cols[7].write(round(stop_loss, 4))
+                row_cols[8].write(round(target_price, 4))
+                row_cols[9].write(round(rr, 2) if rr is not None else "-")
+                row_cols[10].write(status)
+                row_cols[11].write(status_reason)
 
             if close_disabled:
                 st.caption(f"{ticker_symbol}: NO PRICE – Tradea ei voi sulkea ilman nykyhintaa.")
