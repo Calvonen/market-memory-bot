@@ -50,17 +50,21 @@ OPEN_TRADES_PATH = DATA_DIR / "open_trades.json"
 CLOSED_TRADES_PATH = DATA_DIR / "closed_trades.json"
 
 
-def _load_trades(path: Path) -> list[dict[str, object]]:
+def _load_trades(path: Path) -> tuple[list[dict[str, object]], bool]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not path.exists():
-        path.write_text("[]", encoding="utf-8")
-        return []
+        return [], False
+
     try:
         with path.open("r", encoding="utf-8") as file:
             loaded = json.load(file)
     except (json.JSONDecodeError, OSError):
-        loaded = []
-    return loaded if isinstance(loaded, list) else []
+        return [], True
+
+    if not isinstance(loaded, list):
+        return [], True
+
+    return loaded, False
 
 
 def _save_trades(open_trades: list[dict[str, object]], closed_trades: list[dict[str, object]]) -> None:
@@ -72,10 +76,19 @@ def _save_trades(open_trades: list[dict[str, object]], closed_trades: list[dict[
 
 
 def _ensure_trade_state_loaded() -> None:
+    load_warnings = st.session_state.setdefault("trade_load_warnings", [])
+
     if "open_trades" not in st.session_state:
-        st.session_state["open_trades"] = _load_trades(OPEN_TRADES_PATH)
+        open_trades, open_failed = _load_trades(OPEN_TRADES_PATH)
+        st.session_state["open_trades"] = open_trades
+        if open_failed:
+            load_warnings.append("Avoimia tradeja ei voitu lukea tiedostosta, aloitetaan tyhjällä listalla.")
+
     if "closed_trades" not in st.session_state:
-        st.session_state["closed_trades"] = _load_trades(CLOSED_TRADES_PATH)
+        closed_trades, closed_failed = _load_trades(CLOSED_TRADES_PATH)
+        st.session_state["closed_trades"] = closed_trades
+        if closed_failed:
+            load_warnings.append("Suljettuja tradeja ei voitu lukea tiedostosta, aloitetaan tyhjällä listalla.")
 
 
 TICKER_ALIASES = {
@@ -1004,6 +1017,10 @@ if st.session_state["view"] == "Avoimet tradet":
     closed_trades = st.session_state["closed_trades"]
 
     st.subheader("Avoimet tradet")
+
+    trade_load_warnings = st.session_state.pop("trade_load_warnings", [])
+    for warning_message in trade_load_warnings:
+        st.warning(warning_message, icon="⚠️")
 
     last_updated = st.session_state.get("trades_last_updated")
     if last_updated is not None:
