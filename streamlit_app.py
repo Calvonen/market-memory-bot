@@ -75,6 +75,32 @@ def _save_trades(open_trades: list[dict[str, object]], closed_trades: list[dict[
         json.dump(closed_trades, file, ensure_ascii=False, indent=2)
 
 
+
+
+def _build_trade_export_payload(open_trades: list[dict[str, object]], closed_trades: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "open_trades": open_trades,
+        "closed_trades": closed_trades,
+        "exported_at": pd.Timestamp.now(tz="UTC").isoformat(),
+    }
+
+
+def _parse_trade_import_payload(raw_payload: bytes) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    try:
+        parsed = json.loads(raw_payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Trade-tiedostoa ei voitu lukea") from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError("Trade-tiedostoa ei voitu lukea")
+
+    imported_open_trades = parsed.get("open_trades")
+    imported_closed_trades = parsed.get("closed_trades")
+
+    if not isinstance(imported_open_trades, list) or not isinstance(imported_closed_trades, list):
+        raise ValueError("Trade-tiedostoa ei voitu lukea")
+
+    return imported_open_trades, imported_closed_trades
 def _ensure_trade_state_loaded() -> None:
     load_warnings = st.session_state.setdefault("trade_load_warnings", [])
 
@@ -1110,6 +1136,28 @@ if st.session_state["view"] == "Avoimet tradet":
         st.success("Avoimien tradejen hinnat päivitetty.")
     elif refresh_clicked:
         st.info("Ei avoimia tradeja päivitettäväksi.")
+
+    export_payload = _build_trade_export_payload(trades, closed_trades)
+    st.download_button(
+        "Lataa tradet",
+        data=json.dumps(export_payload, ensure_ascii=False, indent=2),
+        file_name="market_memory_trades.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+
+    imported_trade_file = st.file_uploader("Tuo tradet", type=["json"], key="trade_import_file")
+    if imported_trade_file is not None:
+        try:
+            imported_open_trades, imported_closed_trades = _parse_trade_import_payload(imported_trade_file.getvalue())
+        except ValueError:
+            st.error("Trade-tiedostoa ei voitu lukea")
+        else:
+            st.session_state["open_trades"] = imported_open_trades
+            st.session_state["closed_trades"] = imported_closed_trades
+            _save_trades(imported_open_trades, imported_closed_trades)
+            st.success("Tradet tuotu onnistuneesti")
+            st.rerun()
 
     input_cols = 2 if view_mode == "Mobiili" else 4
     c1, c2, c3, c4 = st.columns(input_cols if input_cols == 4 else 2)
