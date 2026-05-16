@@ -586,15 +586,22 @@ def _render_trade_mobile_card(trade: dict[str, object], idx: int) -> tuple[bool,
     leverage = int(trade.get("leverage", 1))
     current_price = trade.get("current_price")
     pl_pct = trade.get("pl_pct")
+    rr = trade.get("risk_reward")
     status = str(trade.get("status") or "NO PRICE")
+    status_reason = str(trade.get("status_reason") or _calc_trade_status_reason(status))
 
     st.markdown("---")
-    st.markdown(f"**{ticker_symbol}** · {direction} · {leverage}x")
-    st.caption(f"P/L %: {round(pl_pct, 2) if pl_pct is not None else '-'} | Status: {status}")
-    st.caption(
-        f"Entry: {round(entry, 4)} | Current: {round(current_price, 4) if current_price is not None else '-'} | "
-        f"Stop: {round(stop_loss, 4)} | Target: {round(target_price, 4)}"
-    )
+    st.markdown(f"**Ticker:** {ticker_symbol}")
+    st.write(f"**Suunta:** {direction}")
+    st.write(f"**Vipu:** {leverage}x")
+    st.write(f"**Entry:** {round(entry, 4)}")
+    st.write(f"**Current:** {round(current_price, 4) if current_price is not None else '-'}")
+    st.write(f"**P/L %:** {round(pl_pct, 2) if pl_pct is not None else '-'}")
+    st.write(f"**Stop:** {round(stop_loss, 4)}")
+    st.write(f"**Target:** {round(target_price, 4)}")
+    st.write(f"**R/R:** {round(rr, 2) if rr is not None else '-'}")
+    st.write(f"**Status:** {status}")
+    st.write(f"**Syy:** {status_reason}")
     action_cols = st.columns(2)
     remove_clicked = action_cols[0].button("Poista", key=f"remove_trade_mobile_{idx}")
     close_clicked = action_cols[1].button("Sulje", key=f"close_trade_mobile_{idx}", disabled=current_price is None)
@@ -1159,14 +1166,21 @@ if st.session_state["view"] == "Avoimet tradet":
             st.success("Tradet tuotu onnistuneesti")
             st.rerun()
 
-    input_cols = 2 if view_mode == "Mobiili" else 4
-    c1, c2, c3, c4 = st.columns(input_cols if input_cols == 4 else 2)
-    ticker_input_new = c1.text_input(
-        "Ticker / yritys",
-        max_chars=32,
-        key="trade_ticker_input_widget",
-        placeholder="Kirjoita yrityksen nimi tai ticker",
-    ).strip()
+    if view_mode == "Mobiili":
+        ticker_input_new = st.text_input(
+            "Ticker / yritys",
+            max_chars=32,
+            key="trade_ticker_input_widget",
+            placeholder="Kirjoita yrityksen nimi tai ticker",
+        ).strip()
+    else:
+        c1, c2, c3, c4 = st.columns(4)
+        ticker_input_new = c1.text_input(
+            "Ticker / yritys",
+            max_chars=32,
+            key="trade_ticker_input_widget",
+            placeholder="Kirjoita yrityksen nimi tai ticker",
+        ).strip()
     resolved_ticker_new, ticker_candidates_new, ticker_error_new = resolve_ticker_input(ticker_input_new)
     selected_candidate_trade = None
     if ticker_candidates_new and not resolved_ticker_new:
@@ -1174,26 +1188,31 @@ if st.session_state["view"] == "Avoimet tradet":
             f"{item['name']} ({item['symbol']}) - {item['location'] or 'N/A'}": item["symbol"]
             for item in ticker_candidates_new
         }
-        selected_label_trade = c1.selectbox(
+        selected_label_trade = (c1.selectbox if view_mode == "Desktop" else st.selectbox)(
             "Valitse ticker",
             options=["Valitse..."] + list(candidate_options.keys()),
             key="trade_ticker_candidate_widget",
         )
         if selected_label_trade != "Valitse...":
             selected_candidate_trade = candidate_options[selected_label_trade]
-    direction_new = c2.selectbox("Suunta", options=["long", "short"], key="trade_direction_widget")
     if view_mode == "Mobiili":
-        c3, c4 = st.columns(2)
-    entry_price_new = c3.number_input("Entry price", min_value=0.0, value=100.0, step=0.01, key="trade_entry_price_widget")
-    leverage_new = c4.selectbox("Vipu / leverage", options=[1, 2, 3, 5, 10], index=0, key="trade_leverage_widget")
+        direction_new = st.selectbox("Suunta", options=["long", "short"], key="trade_direction_widget")
+        entry_price_new = st.number_input("Entry price", min_value=0.0, value=100.0, step=0.01, key="trade_entry_price_widget")
+        leverage_new = st.selectbox("Vipu / leverage", options=[1, 2, 3, 5, 10], index=0, key="trade_leverage_widget")
+        entry_date_new = st.date_input("Entry date", key="trade_entry_date_widget")
+        stop_loss_new = st.number_input("Stop loss", min_value=0.0, value=95.0, step=0.01, key="trade_stop_loss_widget")
+        target_price_new = st.number_input("Target price", min_value=0.0, value=110.0, step=0.01, key="trade_target_price_widget")
+        position_size_new = st.number_input("Position size", min_value=0.0, value=1.0, step=0.01, key="trade_position_size_widget")
+    else:
+        direction_new = c2.selectbox("Suunta", options=["long", "short"], key="trade_direction_widget")
+        entry_price_new = c3.number_input("Entry price", min_value=0.0, value=100.0, step=0.01, key="trade_entry_price_widget")
+        leverage_new = c4.selectbox("Vipu / leverage", options=[1, 2, 3, 5, 10], index=0, key="trade_leverage_widget")
 
-    c5, c6, c7, c8 = st.columns(4 if view_mode == "Desktop" else 2)
-    if view_mode == "Mobiili":
-        c7, c8 = st.columns(2)
-    entry_date_new = c5.date_input("Entry date", key="trade_entry_date_widget")
-    stop_loss_new = c6.number_input("Stop loss", min_value=0.0, value=95.0, step=0.01, key="trade_stop_loss_widget")
-    target_price_new = c7.number_input("Target price", min_value=0.0, value=110.0, step=0.01, key="trade_target_price_widget")
-    position_size_new = c8.number_input("Position size", min_value=0.0, value=1.0, step=0.01, key="trade_position_size_widget")
+        c5, c6, c7, c8 = st.columns(4)
+        entry_date_new = c5.date_input("Entry date", key="trade_entry_date_widget")
+        stop_loss_new = c6.number_input("Stop loss", min_value=0.0, value=95.0, step=0.01, key="trade_stop_loss_widget")
+        target_price_new = c7.number_input("Target price", min_value=0.0, value=110.0, step=0.01, key="trade_target_price_widget")
+        position_size_new = c8.number_input("Position size", min_value=0.0, value=1.0, step=0.01, key="trade_position_size_widget")
 
     submit_trade = st.button("Lisää trade", type="primary")
     if submit_trade:
