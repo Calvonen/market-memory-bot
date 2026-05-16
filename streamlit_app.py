@@ -660,14 +660,17 @@ with st.sidebar:
     pivot_detection_method = "reversal zone" if pivot_detection_method_label == "Käännealue" else "exact pivot"
     similarity_alert = _resolve_similarity_threshold(pivot_source=pivot_source, pivot_detection_method=pivot_detection_method)
     pivot_mode = st.radio("Pivot mode", options=["all", "bottom", "peak"], horizontal=True, disabled=pivot_source == "manual", key="pivot_mode_widget")
-    manual_pivot_type = st.radio("Manual pivot type", options=["bottom", "peak"], horizontal=True, disabled=pivot_source != "manual", key="manual_pivot_type_widget")
-    manual_pivot_dates_text = st.text_area(
-        "Manual pivot dates",
-        key="manual_pivot_dates_text_widget",
-        placeholder="2023-10-04\n2024-10-31\n2025-04-25",
-        disabled=pivot_source != "manual",
-        help="Syötä päivämäärät riveittäin tai pilkulla eroteltuna (YYYY-MM-DD).",
-    )
+    if pivot_source == "manual":
+        manual_pivot_type = st.radio("Manual pivot type", options=["bottom", "peak"], horizontal=True, key="manual_pivot_type_widget")
+        manual_pivot_dates_text = st.text_area(
+            "Manual pivot dates",
+            key="manual_pivot_dates_text_widget",
+            placeholder="2023-10-04\n2024-10-31\n2025-04-25",
+            help="Syötä päivämäärät riveittäin tai pilkulla eroteltuna (YYYY-MM-DD).",
+        )
+    else:
+        manual_pivot_type = st.session_state.get("manual_pivot_type_widget", "bottom")
+        manual_pivot_dates_text = st.session_state.get("manual_pivot_dates_text_widget", "")
     pivot_window = st.select_slider(
         "Osuman merkittävyys",
         options=[5, 10, 15, 20, 30],
@@ -700,11 +703,12 @@ with st.sidebar:
 
     st.caption("Valitse haetko pohjaa vai huippua. Painotuksia voi säätää käsin.")
 
-    price_weight = st.slider("Hintakäyrä", min_value=0.0, max_value=1.0, step=0.01, key="price_weight_widget")
-    rsi_weight = st.slider("RSI", min_value=0.0, max_value=1.0, step=0.01, key="rsi_weight_widget")
-    volume_weight = st.slider("Volyymi", min_value=0.0, max_value=1.0, step=0.01, key="volume_weight_widget")
-    volatility_weight = st.slider("Volatiliteetti", min_value=0.0, max_value=1.0, step=0.01, key="volatility_weight_widget")
-    trend_weight = st.slider("Trendi", min_value=0.0, max_value=1.0, step=0.01, key="trend_weight_widget")
+    with st.expander("Lisäasetukset: painotukset", expanded=False):
+        price_weight = st.slider("Hintakäyrä", min_value=0.0, max_value=1.0, step=0.01, key="price_weight_widget")
+        rsi_weight = st.slider("RSI", min_value=0.0, max_value=1.0, step=0.01, key="rsi_weight_widget")
+        volume_weight = st.slider("Volyymi", min_value=0.0, max_value=1.0, step=0.01, key="volume_weight_widget")
+        volatility_weight = st.slider("Volatiliteetti", min_value=0.0, max_value=1.0, step=0.01, key="volatility_weight_widget")
+        trend_weight = st.slider("Trendi", min_value=0.0, max_value=1.0, step=0.01, key="trend_weight_widget")
     similarity_weights = normalize_similarity_weights(
         {
             "price": price_weight,
