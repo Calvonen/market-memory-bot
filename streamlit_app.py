@@ -789,7 +789,8 @@ with st.expander("Lisäasetukset", expanded=False):
             "pivot_detection_method": pivot_detection_method,
         },
     )
-    run = st.button("Suorita analyysi", type="primary", use_container_width=True)
+
+run = st.button("Suorita analyysi", type="primary", use_container_width=True)
 
 run_from_scanner = bool(st.session_state.pop("run_single_analysis", False))
 run = run or run_from_scanner
