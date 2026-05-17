@@ -29,14 +29,9 @@ st.set_page_config(page_title="Market Memory", page_icon="📈", layout="wide")
 st.markdown(
     """
     <style>
-    [data-testid="stSidebar"] {min-width: 290px; max-width: 290px;}
-    [data-testid="stSidebar"] .block-container {padding-top: 0.6rem; padding-bottom: 0.6rem; padding-left: 0.7rem; padding-right: 0.7rem;}
-    [data-testid="stSidebar"] .stRadio,
-    [data-testid="stSidebar"] .stSelectbox,
-    [data-testid="stSidebar"] .stTextInput,
-    [data-testid="stSidebar"] .stTextArea,
-    [data-testid="stSidebar"] .stSlider {margin-bottom: 0.25rem;}
-    [data-testid="stSidebar"] p {margin-bottom: 0.2rem;}
+    div[data-testid="stHorizontalBlock"] div[data-testid="column"] {
+        min-width: 180px;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -619,9 +614,9 @@ if "pending_view" in st.session_state:
 if "pending_ticker" in st.session_state:
     st.session_state["ticker_input"] = st.session_state.pop("pending_ticker")
 
-with st.sidebar:
-    st.subheader("Asetukset", divider="gray")
-    view_mode = st.radio("Näkymätila", options=["Desktop", "Mobiili"], key="view_mode")
+st.subheader("Asetukset", divider="gray")
+top_cols = st.columns(4)
+with top_cols[0]:
     if "ticker_input" not in st.session_state:
         st.session_state["ticker_input"] = st.session_state.get("active_ticker", "AAPL")
     ticker_input = st.text_input("Ticker tai yrityksen nimi", value=st.session_state["ticker_input"], max_chars=32, key="ticker_input").strip()
@@ -644,75 +639,17 @@ with st.sidebar:
     ticker = resolved_ticker or ""
     current_ticker = ticker or "AAPL"
     previous_ticker = st.session_state.get("active_ticker")
-
-    if previous_ticker != current_ticker:
-        ticker_settings = _get_ticker_settings(current_ticker)
-        manual_sector_by_ticker = st.session_state.setdefault("manual_sector_by_ticker", {})
-        auto_sector, yahoo_sector_info = _resolve_sector_for_ticker(current_ticker)
-        auto_sector = auto_sector if auto_sector in SECTOR_SETTINGS else "yleinen"
-        if not manual_sector_by_ticker.get(current_ticker):
-            st.session_state["sector_widget"] = auto_sector
-            ticker_settings["sector"] = auto_sector
-        st.session_state["auto_sector_name"] = auto_sector
-        st.session_state["auto_sector_source"] = yahoo_sector_info
-        st.session_state["similarity_alert_widget"] = float(ticker_settings["similarity_alert"])
-        st.session_state["pivot_source_widget"] = ticker_settings["pivot_source"]
-        st.session_state["pivot_mode_widget"] = ticker_settings["pivot_mode"]
-        st.session_state["manual_pivot_type_widget"] = ticker_settings["manual_pivot_type"]
-        st.session_state["manual_pivot_dates_text_widget"] = ticker_settings["manual_pivot_dates_text"]
-        st.session_state["selected_preset_widget"] = ticker_settings["selected_preset"]
-        st.session_state["last_applied_preset_widget"] = ticker_settings.get("last_applied_preset", ticker_settings["selected_preset"])
-        st.session_state["price_weight_widget"] = float(ticker_settings["similarity_weights"]["price"])
-        st.session_state["rsi_weight_widget"] = float(ticker_settings["similarity_weights"]["rsi"])
-        st.session_state["volume_weight_widget"] = float(ticker_settings["similarity_weights"]["volume"])
-        st.session_state["volatility_weight_widget"] = float(ticker_settings["similarity_weights"]["volatility"])
-        st.session_state["trend_weight_widget"] = float(ticker_settings["similarity_weights"]["trend"])
-        st.session_state["pivot_window_widget"] = int(ticker_settings["pivot_window"])
-        st.session_state["pivot_detection_method_widget"] = ticker_settings["pivot_detection_method"]
-        st.session_state["pivot_detection_method_ui_widget"] = (
-            "Käännealue" if ticker_settings["pivot_detection_method"] == "reversal zone" else "Tarkka pivot"
-        )
-        st.session_state["active_ticker"] = current_ticker
-
-    st.caption("Ticker-kohtaiset asetukset tallennetaan tämän session ajaksi.")
-
-    st.caption("### Markkina")
-    sector = st.selectbox("Sektori", options=list(SECTOR_SETTINGS.keys()), key="sector_widget", on_change=_mark_sector_manual)
-    st.caption(f"Automaattisesti tunnistettu sektori: {st.session_state.get('auto_sector_name', 'yleinen')}")
-    st.caption(f"Yahoo: {st.session_state.get('auto_sector_source') or 'Ei saatavilla'}")
-    st.caption("### Pivot-asetukset")
-    pivot_source = st.radio("Pivot source", options=["automatic", "manual"], horizontal=True, key="pivot_source_widget")
-    st.caption("### Käänteen tunnistus")
-    pivot_detection_method_label = st.radio(
-        "Tunnistustapa",
-        options=["Tarkka pivot", "Käännealue"],
+with top_cols[1]:
+    view_mode = st.radio("Näkymätila", options=["Desktop", "Mobiili"], key="view_mode", horizontal=True)
+with top_cols[2]:
+    pivot_mode = st.radio(
+        "Pivot mode",
+        options=["all", "bottom", "peak"],
         horizontal=True,
-        disabled=pivot_source != "automatic",
-        key="pivot_detection_method_ui_widget",
+        disabled=st.session_state.get("pivot_source_widget", "automatic") == "manual",
+        key="pivot_mode_widget",
     )
-    pivot_detection_method = "reversal zone" if pivot_detection_method_label == "Käännealue" else "exact pivot"
-    similarity_alert = _resolve_similarity_threshold(pivot_source=pivot_source, pivot_detection_method=pivot_detection_method)
-    pivot_mode = st.radio("Pivot mode", options=["all", "bottom", "peak"], horizontal=True, disabled=pivot_source == "manual", key="pivot_mode_widget")
-    if pivot_source == "manual":
-        manual_pivot_type = st.radio("Manual pivot type", options=["bottom", "peak"], horizontal=True, key="manual_pivot_type_widget")
-        manual_pivot_dates_text = st.text_area(
-            "Manual pivot dates",
-            key="manual_pivot_dates_text_widget",
-            placeholder="2023-10-04\n2024-10-31\n2025-04-25",
-            help="Syötä päivämäärät riveittäin tai pilkulla eroteltuna (YYYY-MM-DD).",
-        )
-    else:
-        manual_pivot_type = st.session_state.get("manual_pivot_type_widget", "bottom")
-        manual_pivot_dates_text = st.session_state.get("manual_pivot_dates_text_widget", "")
-    pivot_window = st.select_slider(
-        "Osuman merkittävyys",
-        options=[5, 10, 15, 20, 30],
-        key="pivot_window_widget",
-        disabled=pivot_source != "automatic",
-    )
-    st.caption("Pieni arvo löytää nopeat swingit. Suuri arvo löytää suuremmat sykliset käänteet.")
-
-    st.caption("### Painotukset")
+with top_cols[3]:
     preset_placeholder = "Valitse metsästystapa"
     preset_options = {
         "pohjan metsästys": {"price": 0.10, "rsi": 0.35, "volume": 0.20, "volatility": 0.25, "trend": 0.10},
@@ -724,24 +661,91 @@ with st.sidebar:
     if st.session_state.get("selected_preset_widget") not in preset_select_options:
         st.session_state["selected_preset_widget"] = preset_placeholder
     selected_preset = st.selectbox("Metsästystapa", options=preset_select_options, key="selected_preset_widget")
-    last_applied_preset = st.session_state.get("last_applied_preset_widget")
-    if selected_preset in preset_options and selected_preset != last_applied_preset:
-        preset_weights = preset_options[selected_preset]
-        st.session_state["price_weight_widget"] = float(preset_weights["price"])
-        st.session_state["rsi_weight_widget"] = float(preset_weights["rsi"])
-        st.session_state["volume_weight_widget"] = float(preset_weights["volume"])
-        st.session_state["volatility_weight_widget"] = float(preset_weights["volatility"])
-        st.session_state["trend_weight_widget"] = float(preset_weights["trend"])
-        st.session_state["last_applied_preset_widget"] = selected_preset
 
-    st.caption("Valitse haetko pohjaa vai huippua. Painotuksia voi säätää käsin.")
+if previous_ticker != current_ticker:
+    ticker_settings = _get_ticker_settings(current_ticker)
+    manual_sector_by_ticker = st.session_state.setdefault("manual_sector_by_ticker", {})
+    auto_sector, yahoo_sector_info = _resolve_sector_for_ticker(current_ticker)
+    auto_sector = auto_sector if auto_sector in SECTOR_SETTINGS else "yleinen"
+    if not manual_sector_by_ticker.get(current_ticker):
+        st.session_state["sector_widget"] = auto_sector
+        ticker_settings["sector"] = auto_sector
+    st.session_state["auto_sector_name"] = auto_sector
+    st.session_state["auto_sector_source"] = yahoo_sector_info
+    st.session_state["similarity_alert_widget"] = float(ticker_settings["similarity_alert"])
+    st.session_state["pivot_source_widget"] = ticker_settings["pivot_source"]
+    st.session_state["pivot_mode_widget"] = ticker_settings["pivot_mode"]
+    st.session_state["manual_pivot_type_widget"] = ticker_settings["manual_pivot_type"]
+    st.session_state["manual_pivot_dates_text_widget"] = ticker_settings["manual_pivot_dates_text"]
+    st.session_state["selected_preset_widget"] = ticker_settings["selected_preset"]
+    st.session_state["last_applied_preset_widget"] = ticker_settings.get("last_applied_preset", ticker_settings["selected_preset"])
+    st.session_state["price_weight_widget"] = float(ticker_settings["similarity_weights"]["price"])
+    st.session_state["rsi_weight_widget"] = float(ticker_settings["similarity_weights"]["rsi"])
+    st.session_state["volume_weight_widget"] = float(ticker_settings["similarity_weights"]["volume"])
+    st.session_state["volatility_weight_widget"] = float(ticker_settings["similarity_weights"]["volatility"])
+    st.session_state["trend_weight_widget"] = float(ticker_settings["similarity_weights"]["trend"])
+    st.session_state["pivot_window_widget"] = int(ticker_settings["pivot_window"])
+    st.session_state["pivot_detection_method_widget"] = ticker_settings["pivot_detection_method"]
+    st.session_state["pivot_detection_method_ui_widget"] = (
+        "Käännealue" if ticker_settings["pivot_detection_method"] == "reversal zone" else "Tarkka pivot"
+    )
+    st.session_state["active_ticker"] = current_ticker
 
-    with st.expander("Lisäasetukset: painotukset", expanded=False):
-        price_weight = st.slider("Hintakäyrä", min_value=0.0, max_value=1.0, step=0.01, key="price_weight_widget")
-        rsi_weight = st.slider("RSI", min_value=0.0, max_value=1.0, step=0.01, key="rsi_weight_widget")
-        volume_weight = st.slider("Volyymi", min_value=0.0, max_value=1.0, step=0.01, key="volume_weight_widget")
-        volatility_weight = st.slider("Volatiliteetti", min_value=0.0, max_value=1.0, step=0.01, key="volatility_weight_widget")
-        trend_weight = st.slider("Trendi", min_value=0.0, max_value=1.0, step=0.01, key="trend_weight_widget")
+st.caption("Ticker-kohtaiset asetukset tallennetaan tämän session ajaksi.")
+st.caption("### Markkina")
+sector = st.selectbox("Sektori", options=list(SECTOR_SETTINGS.keys()), key="sector_widget", on_change=_mark_sector_manual)
+st.caption(f"Automaattisesti tunnistettu sektori: {st.session_state.get('auto_sector_name', 'yleinen')}")
+st.caption(f"Yahoo: {st.session_state.get('auto_sector_source') or 'Ei saatavilla'}")
+st.caption("### Pivot-asetukset")
+pivot_source = st.radio("Pivot source", options=["automatic", "manual"], horizontal=True, key="pivot_source_widget")
+pivot_detection_method_label = st.session_state.get("pivot_detection_method_ui_widget", "Tarkka pivot")
+pivot_detection_method = "reversal zone" if pivot_detection_method_label == "Käännealue" else "exact pivot"
+similarity_alert = _resolve_similarity_threshold(pivot_source=pivot_source, pivot_detection_method=pivot_detection_method)
+
+last_applied_preset = st.session_state.get("last_applied_preset_widget")
+if selected_preset in preset_options and selected_preset != last_applied_preset:
+    preset_weights = preset_options[selected_preset]
+    st.session_state["price_weight_widget"] = float(preset_weights["price"])
+    st.session_state["rsi_weight_widget"] = float(preset_weights["rsi"])
+    st.session_state["volume_weight_widget"] = float(preset_weights["volume"])
+    st.session_state["volatility_weight_widget"] = float(preset_weights["volatility"])
+    st.session_state["trend_weight_widget"] = float(preset_weights["trend"])
+    st.session_state["last_applied_preset_widget"] = selected_preset
+
+st.caption("Valitse haetko pohjaa vai huippua. Painotuksia voi säätää käsin.")
+
+with st.expander("Lisäasetukset", expanded=False):
+    pivot_detection_method_label = st.radio(
+        "Käänteen tunnistustapa",
+        options=["Tarkka pivot", "Käännealue"],
+        horizontal=True,
+        disabled=pivot_source != "automatic",
+        key="pivot_detection_method_ui_widget",
+    )
+    pivot_detection_method = "reversal zone" if pivot_detection_method_label == "Käännealue" else "exact pivot"
+    similarity_alert = _resolve_similarity_threshold(pivot_source=pivot_source, pivot_detection_method=pivot_detection_method)
+    pivot_window = st.select_slider(
+        "Osuman merkittävyys",
+        options=[5, 10, 15, 20, 30],
+        key="pivot_window_widget",
+        disabled=pivot_source != "automatic",
+    )
+    if pivot_source == "manual":
+        manual_pivot_type = st.radio("Manual pivot type", options=["bottom", "peak"], horizontal=True, key="manual_pivot_type_widget")
+        manual_pivot_dates_text = st.text_area(
+            "Manual pivot dates",
+            key="manual_pivot_dates_text_widget",
+            placeholder="2023-10-04\n2024-10-31\n2025-04-25",
+            help="Syötä päivämäärät riveittäin tai pilkulla eroteltuna (YYYY-MM-DD).",
+        )
+    else:
+        manual_pivot_type = st.session_state.get("manual_pivot_type_widget", "bottom")
+        manual_pivot_dates_text = st.session_state.get("manual_pivot_dates_text_widget", "")
+    price_weight = st.slider("Hintakäyrä", min_value=0.0, max_value=1.0, step=0.01, key="price_weight_widget")
+    rsi_weight = st.slider("RSI", min_value=0.0, max_value=1.0, step=0.01, key="rsi_weight_widget")
+    volume_weight = st.slider("Volyymi", min_value=0.0, max_value=1.0, step=0.01, key="volume_weight_widget")
+    volatility_weight = st.slider("Volatiliteetti", min_value=0.0, max_value=1.0, step=0.01, key="volatility_weight_widget")
+    trend_weight = st.slider("Trendi", min_value=0.0, max_value=1.0, step=0.01, key="trend_weight_widget")
     similarity_weights = normalize_similarity_weights(
         {
             "price": price_weight,
