@@ -451,9 +451,9 @@ def run_news_fetch(
     ticker: str,
     company_name: str | None = None,
     limit: int = 5,
-) -> tuple[list[dict[str, str | None]], list[dict[str, str | int]], str | None]:
-    latest_news = fetch_latest_news(ticker=ticker, company_name=company_name, limit=limit)
-    return latest_news, [], None
+) -> tuple[list[dict[str, str | None]], dict[str, list[object]]]:
+    latest_news, debug_info = fetch_latest_news(ticker=ticker, company_name=company_name, limit=limit)
+    return latest_news, debug_info
 
 
 
@@ -989,10 +989,15 @@ if run:
                 st.subheader("Viimeisimmät uutiset")
                 st.caption("Näytetään viimeisen 90 päivän uutiset")
                 news_source_note = None
-                news_debug_rows: list[dict[str, str | int]] = []
-                news_debug_message: str | None = None
+                news_debug_info: dict[str, list[object]] = {
+                    "queries": [],
+                    "rss_urls": [],
+                    "results_before_filter": [],
+                    "results_after_filter": [],
+                    "errors": [],
+                }
                 try:
-                    latest_news, news_debug_rows, news_debug_message = run_news_fetch(
+                    latest_news, news_debug_info = run_news_fetch(
                         ticker=ticker,
                         company_name=company_name,
                         limit=5,
@@ -1006,21 +1011,31 @@ if run:
                     st.caption(f"News source: {news_source_note}")
 
                 with st.expander("Uutishaun debug"):
-                    if not news_debug_rows:
+                    debug_queries = news_debug_info.get("queries", [])
+                    debug_urls = news_debug_info.get("rss_urls", [])
+                    before_counts = news_debug_info.get("results_before_filter", [])
+                    after_counts = news_debug_info.get("results_after_filter", [])
+                    debug_errors = news_debug_info.get("errors", [])
+
+                    if not debug_queries:
                         st.caption("Ei debug-dataa uutishausta.")
                     else:
-                        for index, debug_row in enumerate(news_debug_rows, start=1):
-                            query_text = debug_row.get("query", "")
-                            rss_url_text = debug_row.get("rss_url", "")
-                            entry_count = debug_row.get("entry_count", 0)
+                        for index, query_text in enumerate(debug_queries, start=1):
+                            rss_url_text = debug_urls[index - 1] if index - 1 < len(debug_urls) else ""
+                            before_count = before_counts[index - 1] if index - 1 < len(before_counts) else 0
+                            after_count = after_counts[index - 1] if index - 1 < len(after_counts) else 0
                             st.markdown(
                                 f"**Haku {index}**\n\n"
                                 f"- Käytetty hakulause: `{query_text}`\n"
                                 f"- Muodostettu RSS URL: `{rss_url_text}`\n"
-                                f"- RSS entryjä löytyi: **{entry_count}**"
+                                f"- Entryt ennen filtteriä: **{before_count}**\n"
+                                f"- Entryt filtterin jälkeen: **{after_count}**"
                             )
-                    if news_debug_message:
-                        st.warning(news_debug_message)
+                    if latest_news:
+                        st.caption(f"Ensimmäinen uutinen: {latest_news[0].get('title', '')}")
+                    if debug_errors:
+                        for err in debug_errors:
+                            st.warning(str(err))
 
                 if not latest_news:
                     st.info("Uutisia ei löytynyt tällä hetkellä.")
