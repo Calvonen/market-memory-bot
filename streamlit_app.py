@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -975,10 +974,7 @@ if run:
                     st.dataframe(quarterly_display, use_container_width=True, hide_index=True)
 
                 st.subheader("Viimeisimmät uutiset")
-                st.caption("Automaattinen uutishaku on väliaikaisesti pois käytöstä.")
-                news_query = f"{ticker} {company_name or ticker} stock news"
-                news_url = f"https://news.google.com/search?q={quote_plus(news_query)}"
-                st.link_button("Avaa Google News -haku", news_url)
+                st.info("Uutisosio on väliaikaisesti pois käytöstä.")
 
 else:
     st.info("Valitse asetukset vasemmalta ja suorita analyysi.")
