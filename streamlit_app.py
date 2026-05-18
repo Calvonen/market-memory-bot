@@ -242,6 +242,51 @@ def _resolve_similarity_threshold(pivot_source: str, pivot_detection_method: str
         return 0.90
     return 0.85
 
+
+def generate_momentum_summary(
+    current: pd.Series,
+    top_match: MatchResult,
+    market_state_rows: list[dict[str, str]],
+    similarity_alert: float,
+) -> tuple[str, str]:
+    trend_state = next((row["Tila"] for row in market_state_rows if row.get("Mittari") == "Trendi"), "⚪ Mixed")
+    vol_state = next((row["Tila"] for row in market_state_rows if row.get("Mittari") == "Volatiliteetti"), "⚪ Normal")
+    signal_type = "REBOUND WATCH" if top_match.pivot.pivot_type == "bottom" else "SHORT WATCH"
+    rsi = float(current.get("rsi", float("nan")))
+    macd_hist = float(current.get("macd_hist", float("nan")))
+    similarity = float(top_match.score)
+    rr_15d = float(top_match.historical_return_after_pivot)
+
+    bullish = "Bullish" in trend_state and macd_hist > 0 and signal_type == "REBOUND WATCH"
+    bearish = "Bearish" in trend_state and macd_hist < 0 and signal_type == "SHORT WATCH"
+
+    if bullish:
+        emoji = "🟢"
+        sentences = [
+            "Momentum pysyy vahvana ja trendi tukee nousun jatkumista.",
+            f"RSI on {rsi:.1f} ja MACD-histogrammi on plussalla ({macd_hist:.3f}), joten ostovoima kantaa edelleen.",
+            f"Similarity-osuma on {similarity:.3f} ({signal_type}), historiallinen +15d tuotto {rr_15d:+.1f}%, volatiliteetti {vol_state.lower()}.",
+        ]
+        if rsi > 70:
+            sentences.append("RSI on jo kuuma, joten liikkeet voivat kiihtyä nopeasti molempiin suuntiin.")
+    elif bearish:
+        emoji = "🔴"
+        sentences = [
+            "Myyntipaine pysyy hallitsevana ja trendi jatkaa alaspäin.",
+            f"RSI on {rsi:.1f} ja MACD-histogrammi painuu miinuksella ({macd_hist:.3f}), mikä pitää momentumin negatiivisena.",
+            f"Similarity-osuma on {similarity:.3f} ({signal_type}), historiallinen +15d tuotto {rr_15d:+.1f}% ja volatiliteetti {vol_state.lower()}.",
+        ]
+    else:
+        emoji = "🟡"
+        confirmation_text = "vahvistus puuttuu vielä" if similarity < similarity_alert else "vahvistus alkaa rakentua"
+        sentences = [
+            "Mahdollinen rebound-rakenne on muodostumassa, mutta markkina hakee vielä suuntaa.",
+            f"RSI on {rsi:.1f} ja MACD-histogrammi {macd_hist:.3f}, joten momentum kääntyy hitaasti mutta ei ole vielä täysin selkeä.",
+            f"Similarity-osuma on {similarity:.3f} ({signal_type}), {confirmation_text}, volatiliteetti {vol_state.lower()} ja risk/reward {rr_15d:+.1f}% (historiallinen +15d).",
+        ]
+
+    return emoji, " ".join(sentences[:5])
+
 @st.cache_data(show_spinner=False)
 def run_analysis(
     ticker: str,
@@ -838,8 +883,26 @@ if run:
                     else:
                         st.caption("Valitse metsästystapa, jotta alert-status näytetään.")
 
-                    st.subheader("Nykyinen markkinatila")
                     market_state_rows = get_current_market_state(enriched)
+                    current_row = enriched.iloc[-1]
+                    momentum_emoji, momentum_summary = generate_momentum_summary(
+                        current=current_row,
+                        top_match=top_match,
+                        market_state_rows=market_state_rows,
+                        similarity_alert=similarity_alert,
+                    )
+                    st.markdown(
+                        (
+                            "<div style='border-left: 8px solid #334155; padding: 0.75rem 1rem; "
+                            "border-radius: 0.25rem; background: rgba(148, 163, 184, 0.08); margin-bottom: 0.75rem;'>"
+                            "<strong>Momentum Trader</strong><br>"
+                            f"{momentum_emoji} {momentum_summary}"
+                            "</div>"
+                        ),
+                        unsafe_allow_html=True,
+                    )
+
+                    st.subheader("Nykyinen markkinatila")
                     market_state_df = pd.DataFrame(market_state_rows, columns=["Mittari", "Tila"])
                     st.table(market_state_df)
 
