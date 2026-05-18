@@ -277,6 +277,7 @@ def generate_momentum_summary(
     market_state_rows: list[dict[str, str]],
     similarity_alert: float,
     selected_preset: str,
+    pivot_mode: str,
 ) -> tuple[str, str]:
     trend_state = next((row["Tila"] for row in market_state_rows if row.get("Mittari") == "Trendi"), "⚪ Mixed")
     vol_state = next((row["Tila"] for row in market_state_rows if row.get("Mittari") == "Volatiliteetti"), "⚪ Normal")
@@ -286,34 +287,58 @@ def generate_momentum_summary(
     similarity = float(top_match.score)
     rr_15d = float(top_match.historical_return_after_pivot)
 
-    bullish_signal = signal_type in {"REBOUND WATCH", "MOMENTUM LONG"}
-    bearish_signal = signal_type in {"SHORT WATCH", "MOMENTUM SHORT"}
-    bullish = "Bullish" in trend_state and macd_hist > 0 and bullish_signal
-    bearish = "Bearish" in trend_state and macd_hist < 0 and bearish_signal
+    trend_status = "mixed"
+    if "Bullish" in trend_state:
+        trend_status = "bullish"
+    elif "Bearish" in trend_state:
+        trend_status = "bearish"
 
-    if bullish:
+    if signal_type == "SHORT WATCH":
+        emoji = "🔴"
+        mode_text = "peak-focus" if pivot_mode == "peak" else ("all-pivot" if pivot_mode == "all" else pivot_mode)
+        trend_tail = (
+            "Nousutrendi on edelleen voimassa, mutta korjausliikkeen riski kasvaa."
+            if trend_status == "bullish"
+            else "Trend fatigue näkyy selvästi ja pullback risk kasvaa."
+        )
+        sentences = [
+            "Momentum alkaa heikentyä ja exhausted rally -piirteet voimistuvat.",
+            f"RSI on {rsi:.1f} ja MACD-histogrammi {macd_hist:.3f}, mikä viittaa overheating-vaiheeseen ja weakening momentum -tilaan.",
+            f"Similarity-osuma on {similarity:.3f} (SHORT WATCH), historiallinen +15d tuotto {rr_15d:+.1f}%, volatiliteetti {vol_state.lower()} ({mode_text}).",
+            trend_tail,
+        ]
+    elif signal_type == "REBOUND WATCH":
+        emoji = "🟡"
+        confirmation_text = "vahvistus puuttuu vielä" if similarity < similarity_alert else "vahvistus alkaa rakentua"
+        sentences = [
+            "Mahdollinen rebound-rakenne on muodostumassa, ja oversold-tila tukee toipumista.",
+            f"RSI on {rsi:.1f} ja MACD-histogrammi {macd_hist:.3f}; recovery voi vahvistua, jos momentum jatkaa paranemista.",
+            f"Similarity-osuma on {similarity:.3f} (REBOUND WATCH), {confirmation_text}, volatiliteetti {vol_state.lower()} ja risk/reward {rr_15d:+.1f}% (historiallinen +15d).",
+            "Bullish reversal on mahdollinen, jos trendi kääntyy vahvistuvaan suuntaan.",
+        ]
+    elif signal_type == "MOMENTUM LONG":
         emoji = "🟢"
         sentences = [
             "Momentum pysyy vahvana ja trendi tukee nousun jatkumista.",
             f"RSI on {rsi:.1f} ja MACD-histogrammi on plussalla ({macd_hist:.3f}), joten ostovoima kantaa edelleen.",
-            f"Similarity-osuma on {similarity:.3f} ({signal_type}), historiallinen +15d tuotto {rr_15d:+.1f}%, volatiliteetti {vol_state.lower()}.",
+            f"Similarity-osuma on {similarity:.3f} (MOMENTUM LONG), historiallinen +15d tuotto {rr_15d:+.1f}%, volatiliteetti {vol_state.lower()}.",
+            "Trend continuation -rakenne tukee bullish momentum -skenaariota.",
         ]
         if rsi > 70:
             sentences.append("RSI on jo kuuma, joten liikkeet voivat kiihtyä nopeasti molempiin suuntiin.")
-    elif bearish:
+    elif signal_type == "MOMENTUM SHORT":
         emoji = "🔴"
         sentences = [
-            "Myyntipaine pysyy hallitsevana ja trendi jatkaa alaspäin.",
-            f"RSI on {rsi:.1f} ja MACD-histogrammi painuu miinuksella ({macd_hist:.3f}), mikä pitää momentumin negatiivisena.",
-            f"Similarity-osuma on {similarity:.3f} ({signal_type}), historiallinen +15d tuotto {rr_15d:+.1f}% ja volatiliteetti {vol_state.lower()}.",
+            "Myyntipaine pysyy hallitsevana ja trendi jatkaa alaspäin (bearish continuation).",
+            f"RSI on {rsi:.1f} ja MACD-histogrammi painuu miinuksella ({macd_hist:.3f}), mikä ylläpitää downside pressure -tilaa.",
+            f"Similarity-osuma on {similarity:.3f} (MOMENTUM SHORT), historiallinen +15d tuotto {rr_15d:+.1f}% ja volatiliteetti {vol_state.lower()}.",
         ]
     else:
         emoji = "🟡"
-        confirmation_text = "vahvistus puuttuu vielä" if similarity < similarity_alert else "vahvistus alkaa rakentua"
         sentences = [
-            "Mahdollinen rebound-rakenne on muodostumassa, mutta markkina hakee vielä suuntaa.",
-            f"RSI on {rsi:.1f} ja MACD-histogrammi {macd_hist:.3f}, joten momentum kääntyy hitaasti mutta ei ole vielä täysin selkeä.",
-            f"Similarity-osuma on {similarity:.3f} ({signal_type}), {confirmation_text}, volatiliteetti {vol_state.lower()} ja risk/reward {rr_15d:+.1f}% (historiallinen +15d).",
+            "Momentum-signaali on neutraali ja markkina hakee suuntaa.",
+            f"RSI on {rsi:.1f} ja MACD-histogrammi {macd_hist:.3f}; trend_status={trend_status}, pivot_mode={pivot_mode}.",
+            f"Similarity-osuma on {similarity:.3f} ({signal_type}), volatiliteetti {vol_state.lower()} ja historiallinen +15d {rr_15d:+.1f}%.",
         ]
 
     return emoji, " ".join(sentences[:5])
@@ -940,6 +965,7 @@ if run:
                         market_state_rows=market_state_rows,
                         similarity_alert=similarity_alert,
                         selected_preset=selected_preset_key,
+                        pivot_mode=pivot_mode,
                     )
                     st.markdown(
                         (
