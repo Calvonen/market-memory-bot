@@ -6,7 +6,7 @@ from urllib.parse import quote_plus
 
 import feedparser
 
-GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search?q={query}"
+GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
 
 
 def _format_published(raw_value: object) -> str | None:
@@ -148,18 +148,28 @@ def fetch_latest_news(
     normalized_limit = min(10, max(1, int(limit)))
     normalized_company = (company_name or "").strip()
 
+    search_limit = max(normalized_limit * 3, normalized_limit)
+
+    queries: list[str] = []
     if normalized_company:
-        primary_query = f"{ticker} stock OR {normalized_company}"
+        queries.append(f"{normalized_company} stock OR {ticker}")
     else:
-        primary_query = f"{ticker} stock"
+        queries.append(f"{ticker} stock")
 
-    rss_items = _fetch_from_google_news(query=primary_query, limit=max(normalized_limit * 3, normalized_limit))
-    fresh_rss_items = _apply_freshness_filter(rss_items, max_age_days=max_age_days, limit=normalized_limit)
-    if fresh_rss_items:
-        return fresh_rss_items
+    # Finnish listings often benefit from explicit Helsinki context.
+    if normalized_company and ticker.upper().endswith(".HE"):
+        queries.append(f"{normalized_company} Helsinki stock")
 
     if normalized_company:
-        fallback_items = _fetch_from_google_news(query=normalized_company, limit=max(normalized_limit * 3, normalized_limit))
-        return _apply_freshness_filter(fallback_items, max_age_days=max_age_days, limit=normalized_limit)
+        queries.append(normalized_company)
+
+    for query in queries:
+        try:
+            rss_items = _fetch_from_google_news(query=query, limit=search_limit)
+            fresh_rss_items = _apply_freshness_filter(rss_items, max_age_days=max_age_days, limit=normalized_limit)
+            if fresh_rss_items:
+                return fresh_rss_items
+        except Exception:
+            continue
 
     return []
