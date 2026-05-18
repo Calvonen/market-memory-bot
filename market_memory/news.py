@@ -141,13 +141,22 @@ def fetch_latest_news_with_debug(
     company_name: str | None = None,
     limit: int = 10,
     max_age_days: int = 90,
-) -> tuple[list[dict[str, str | None]], list[dict[str, str | int]], str | None]:
+) -> tuple[list[dict[str, str | None]], dict[str, list[object]]]:
     """Fetch latest news headlines from Google News RSS.
 
     Returns dictionaries with keys: title, publisher, link, published, source.
     """
+    debug_info: dict[str, list[object]] = {
+        "queries": [],
+        "rss_urls": [],
+        "results_before_filter": [],
+        "results_after_filter": [],
+        "errors": [],
+    }
+
     if not ticker:
-        return [], [], None
+        debug_info["errors"].append("No ticker provided.")
+        return [], debug_info
 
     normalized_limit = min(5, max(1, int(limit)))
     normalized_company = (company_name or "").strip()
@@ -163,21 +172,35 @@ def fetch_latest_news_with_debug(
     else:
         queries.append(f"{ticker} stock")
 
-    debug_rows: list[dict[str, str | int]] = []
+    total_found_before_filter = 0
+
     for query in queries:
         try:
             rss_items, debug = _fetch_from_google_news(query=query, limit=search_limit)
-            debug_rows.append(debug)
-            if not rss_items:
-                continue
-            fresh_rss_items = _apply_freshness_filter(rss_items, max_age_days=max_age_days, limit=normalized_limit)
-            if fresh_rss_items:
-                return fresh_rss_items, debug_rows, None
-            return [], debug_rows, "RSS löytyi, mutta kaikki suodattuivat pois päivämäärän takia."
-        except Exception:
-            continue
+            before_filter_count = int(debug.get("entry_count", 0))
+            after_filter_items = _apply_freshness_filter(rss_items, max_age_days=max_age_days, limit=normalized_limit)
+            after_filter_count = len(after_filter_items)
 
-    return [], debug_rows, None
+            debug_info["queries"].append(query)
+            debug_info["rss_urls"].append(str(debug.get("rss_url", "")))
+            debug_info["results_before_filter"].append(before_filter_count)
+            debug_info["results_after_filter"].append(after_filter_count)
+
+            total_found_before_filter += before_filter_count
+
+            if after_filter_items:
+                return after_filter_items, debug_info
+        except Exception as exc:
+            debug_info["queries"].append(query)
+            debug_info["rss_urls"].append(GOOGLE_NEWS_RSS_URL.format(query=quote_plus(query)))
+            debug_info["results_before_filter"].append(0)
+            debug_info["results_after_filter"].append(0)
+            debug_info["errors"].append(f"{query}: {exc}")
+
+    if total_found_before_filter == 0:
+        debug_info["errors"].append("No RSS entries found.")
+
+    return [], debug_info
 
 
 def fetch_latest_news(
@@ -185,11 +208,11 @@ def fetch_latest_news(
     company_name: str | None = None,
     limit: int = 10,
     max_age_days: int = 90,
-) -> list[dict[str, str | None]]:
-    news, _, _ = fetch_latest_news_with_debug(
+ ) -> tuple[list[dict[str, str | None]], dict[str, list[object]]]:
+    news, debug_info = fetch_latest_news_with_debug(
         ticker=ticker,
         company_name=company_name,
         limit=limit,
         max_age_days=max_age_days,
     )
-    return news
+    return news, debug_info
