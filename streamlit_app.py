@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -13,7 +14,6 @@ from market_memory.data import fetch_ohlcv
 from market_memory.fundamentals import fetch_quarterly_fundamentals
 from market_memory.indicators import add_indicators
 from market_memory.market_state import get_current_market_state
-from market_memory.news import fetch_latest_news
 from market_memory.pivots import Pivot, detect_pivots, detect_reversal_zones
 from market_memory.sector_resolver import resolve_sector
 from market_memory.similarity import MatchResult, find_best_matches, normalize_similarity_weights
@@ -445,18 +445,6 @@ def _get_company_name(ticker: str) -> str | None:
 @st.cache_data(show_spinner=False)
 def run_quarterly_fundamentals_fetch(ticker: str) -> pd.DataFrame:
     return fetch_quarterly_fundamentals(ticker)
-
-@st.cache_data(show_spinner=False, ttl=900)
-def run_news_fetch(
-    ticker: str,
-    company_name: str | None = None,
-    limit: int = 5,
-) -> tuple[list[dict[str, str | None]], dict[str, list[object]]]:
-    latest_news, debug_info = fetch_latest_news(ticker=ticker, company_name=company_name, limit=limit)
-    return latest_news, debug_info
-
-
-
 
 @st.cache_data(show_spinner=False)
 def _fetch_latest_price(ticker: str, refresh_key: str | None = None) -> float | None:
@@ -987,70 +975,11 @@ if run:
                     st.dataframe(quarterly_display, use_container_width=True, hide_index=True)
 
                 st.subheader("Viimeisimmät uutiset")
-                st.caption("Näytetään viimeisen 90 päivän uutiset")
-                news_source_note = None
-                news_debug_info: dict[str, list[object]] = {
-                    "queries": [],
-                    "rss_urls": [],
-                    "results_before_filter": [],
-                    "results_after_filter": [],
-                    "errors": [],
-                }
-                try:
-                    latest_news, news_debug_info = run_news_fetch(
-                        ticker=ticker,
-                        company_name=company_name,
-                        limit=5,
-                    )
-                    if latest_news:
-                        news_source_note = latest_news[0].get("source")
-                except Exception:
-                    latest_news = []
+                st.caption("Automaattinen uutishaku on väliaikaisesti pois käytöstä.")
+                news_query = f"{ticker} {company_name or ticker} stock news"
+                news_url = f"https://news.google.com/search?q={quote_plus(news_query)}"
+                st.link_button("Avaa Google News -haku", news_url)
 
-                if news_source_note:
-                    st.caption(f"News source: {news_source_note}")
-
-                with st.expander("Uutishaun debug"):
-                    debug_queries = news_debug_info.get("queries", [])
-                    debug_urls = news_debug_info.get("rss_urls", [])
-                    before_counts = news_debug_info.get("results_before_filter", [])
-                    after_counts = news_debug_info.get("results_after_filter", [])
-                    debug_errors = news_debug_info.get("errors", [])
-
-                    if not debug_queries:
-                        st.caption("Ei debug-dataa uutishausta.")
-                    else:
-                        for index, query_text in enumerate(debug_queries, start=1):
-                            rss_url_text = debug_urls[index - 1] if index - 1 < len(debug_urls) else ""
-                            before_count = before_counts[index - 1] if index - 1 < len(before_counts) else 0
-                            after_count = after_counts[index - 1] if index - 1 < len(after_counts) else 0
-                            st.markdown(
-                                f"**Haku {index}**\n\n"
-                                f"- Käytetty hakulause: `{query_text}`\n"
-                                f"- Muodostettu RSS URL: `{rss_url_text}`\n"
-                                f"- Entryt ennen filtteriä: **{before_count}**\n"
-                                f"- Entryt filtterin jälkeen: **{after_count}**"
-                            )
-                    if latest_news:
-                        st.caption(f"Ensimmäinen uutinen: {latest_news[0].get('title', '')}")
-                    if debug_errors:
-                        for err in debug_errors:
-                            st.warning(str(err))
-
-                if not latest_news:
-                    st.info("Uutisia ei löytynyt tällä hetkellä.")
-                else:
-                    for news in latest_news:
-                        meta_parts = []
-                        if news.get("publisher"):
-                            meta_parts.append(str(news["publisher"]))
-                        if news.get("published"):
-                            meta_parts.append(str(news["published"]))
-                        meta_text = " • ".join(meta_parts)
-
-                        st.markdown(f"- [{news['title']}]({news['link']})")
-                        if meta_text:
-                            st.caption(meta_text)
 else:
     st.info("Valitse asetukset vasemmalta ja suorita analyysi.")
 
