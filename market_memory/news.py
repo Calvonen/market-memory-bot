@@ -108,20 +108,24 @@ def _normalize_rss_entry(entry: Any) -> dict[str, str | datetime | None] | None:
     }
 
 
-def _fetch_from_google_news(query: str, limit: int) -> list[dict[str, str | datetime | None]]:
+def _fetch_from_google_news(query: str, limit: int) -> tuple[list[dict[str, str | datetime | None]], dict[str, str | int]]:
     items: list[dict[str, str | datetime | None]] = []
     encoded_query = quote_plus(query)
     rss_url = GOOGLE_NEWS_RSS_URL.format(query=encoded_query)
+    debug: dict[str, str | int] = {"query": query, "rss_url": rss_url, "entry_count": 0}
 
     try:
         feed = feedparser.parse(rss_url)
     except Exception:
-        return items
+        return items, debug
 
     if getattr(feed, "bozo", False):
-        return items
+        return items, debug
 
-    for entry in getattr(feed, "entries", []):
+    entries = list(getattr(feed, "entries", []))
+    debug["entry_count"] = len(entries)
+
+    for entry in entries:
         normalized = _normalize_rss_entry(entry)
         if normalized is None:
             continue
@@ -129,7 +133,51 @@ def _fetch_from_google_news(query: str, limit: int) -> list[dict[str, str | date
         if len(items) >= limit:
             break
 
-    return items
+    return items, debug
+
+
+def fetch_latest_news_with_debug(
+    ticker: str,
+    company_name: str | None = None,
+    limit: int = 10,
+    max_age_days: int = 90,
+) -> tuple[list[dict[str, str | None]], list[dict[str, str | int]], str | None]:
+    """Fetch latest news headlines from Google News RSS.
+
+    Returns dictionaries with keys: title, publisher, link, published, source.
+    """
+    if not ticker:
+        return [], [], None
+
+    normalized_limit = min(5, max(1, int(limit)))
+    normalized_company = (company_name or "").strip()
+
+    search_limit = max(normalized_limit * 3, normalized_limit)
+
+    queries: list[str] = []
+    if normalized_company:
+        queries.append(f"{ticker} {normalized_company} stock")
+        queries.append(f"{normalized_company} stock")
+        queries.append(f"{ticker} stock")
+        queries.append(f"{normalized_company} earnings")
+    else:
+        queries.append(f"{ticker} stock")
+
+    debug_rows: list[dict[str, str | int]] = []
+    for query in queries:
+        try:
+            rss_items, debug = _fetch_from_google_news(query=query, limit=search_limit)
+            debug_rows.append(debug)
+            if not rss_items:
+                continue
+            fresh_rss_items = _apply_freshness_filter(rss_items, max_age_days=max_age_days, limit=normalized_limit)
+            if fresh_rss_items:
+                return fresh_rss_items, debug_rows, None
+            return [], debug_rows, "RSS löytyi, mutta kaikki suodattuivat pois päivämäärän takia."
+        except Exception:
+            continue
+
+    return [], debug_rows, None
 
 
 def fetch_latest_news(
@@ -138,38 +186,10 @@ def fetch_latest_news(
     limit: int = 10,
     max_age_days: int = 90,
 ) -> list[dict[str, str | None]]:
-    """Fetch latest news headlines from Google News RSS.
-
-    Returns dictionaries with keys: title, publisher, link, published, source.
-    """
-    if not ticker:
-        return []
-
-    normalized_limit = min(10, max(1, int(limit)))
-    normalized_company = (company_name or "").strip()
-
-    search_limit = max(normalized_limit * 3, normalized_limit)
-
-    queries: list[str] = []
-    if normalized_company:
-        queries.append(f"{normalized_company} stock OR {ticker}")
-    else:
-        queries.append(f"{ticker} stock")
-
-    # Finnish listings often benefit from explicit Helsinki context.
-    if normalized_company and ticker.upper().endswith(".HE"):
-        queries.append(f"{normalized_company} Helsinki stock")
-
-    if normalized_company:
-        queries.append(normalized_company)
-
-    for query in queries:
-        try:
-            rss_items = _fetch_from_google_news(query=query, limit=search_limit)
-            fresh_rss_items = _apply_freshness_filter(rss_items, max_age_days=max_age_days, limit=normalized_limit)
-            if fresh_rss_items:
-                return fresh_rss_items
-        except Exception:
-            continue
-
-    return []
+    news, _, _ = fetch_latest_news_with_debug(
+        ticker=ticker,
+        company_name=company_name,
+        limit=limit,
+        max_age_days=max_age_days,
+    )
+    return news

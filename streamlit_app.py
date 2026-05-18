@@ -13,7 +13,7 @@ from market_memory.data import fetch_ohlcv
 from market_memory.fundamentals import fetch_quarterly_fundamentals
 from market_memory.indicators import add_indicators
 from market_memory.market_state import get_current_market_state
-from market_memory.news import fetch_latest_news
+from market_memory.news import fetch_latest_news_with_debug
 from market_memory.pivots import Pivot, detect_pivots, detect_reversal_zones
 from market_memory.sector_resolver import resolve_sector
 from market_memory.similarity import MatchResult, find_best_matches, normalize_similarity_weights
@@ -447,8 +447,12 @@ def run_quarterly_fundamentals_fetch(ticker: str) -> pd.DataFrame:
     return fetch_quarterly_fundamentals(ticker)
 
 @st.cache_data(show_spinner=False, ttl=900)
-def run_news_fetch(ticker: str, company_name: str | None = None, limit: int = 10) -> list[dict[str, str | None]]:
-    return fetch_latest_news(ticker=ticker, company_name=company_name, limit=limit)
+def run_news_fetch(
+    ticker: str,
+    company_name: str | None = None,
+    limit: int = 5,
+) -> tuple[list[dict[str, str | None]], list[dict[str, str | int]], str | None]:
+    return fetch_latest_news_with_debug(ticker=ticker, company_name=company_name, limit=limit)
 
 
 
@@ -984,8 +988,14 @@ if run:
                 st.subheader("Viimeisimmät uutiset")
                 st.caption("Näytetään viimeisen 90 päivän uutiset")
                 news_source_note = None
+                news_debug_rows: list[dict[str, str | int]] = []
+                news_debug_message: str | None = None
                 try:
-                    latest_news = run_news_fetch(ticker=ticker, company_name=company_name, limit=10)
+                    latest_news, news_debug_rows, news_debug_message = run_news_fetch(
+                        ticker=ticker,
+                        company_name=company_name,
+                        limit=5,
+                    )
                     if latest_news:
                         news_source_note = latest_news[0].get("source")
                 except Exception:
@@ -993,6 +1003,23 @@ if run:
 
                 if news_source_note:
                     st.caption(f"News source: {news_source_note}")
+
+                with st.expander("Uutishaun debug"):
+                    if not news_debug_rows:
+                        st.caption("Ei debug-dataa uutishausta.")
+                    else:
+                        for index, debug_row in enumerate(news_debug_rows, start=1):
+                            query_text = debug_row.get("query", "")
+                            rss_url_text = debug_row.get("rss_url", "")
+                            entry_count = debug_row.get("entry_count", 0)
+                            st.markdown(
+                                f"**Haku {index}**\n\n"
+                                f"- Käytetty hakulause: `{query_text}`\n"
+                                f"- Muodostettu RSS URL: `{rss_url_text}`\n"
+                                f"- RSS entryjä löytyi: **{entry_count}**"
+                            )
+                    if news_debug_message:
+                        st.warning(news_debug_message)
 
                 if not latest_news:
                     st.info("Uutisia ei löytynyt tällä hetkellä.")
