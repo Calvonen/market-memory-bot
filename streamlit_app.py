@@ -200,7 +200,7 @@ DEFAULT_TICKER_SETTINGS = {
     "pivot_mode": "all",
     "sector": "yleinen",
     "similarity_alert": 0.85,
-    "selected_preset": "Valitse metsästystapa",
+    "selected_preset": "Valitse setup-tyyli",
     "last_applied_preset": None,
     "similarity_weights": DEFAULT_SIMILARITY_WEIGHTS,
     "pivot_window": 5,
@@ -243,22 +243,43 @@ def _resolve_similarity_threshold(pivot_source: str, pivot_detection_method: str
     return 0.85
 
 
+def _legacy_setup_name(setup_style: str) -> str:
+    mapping = {
+        "Rebound setup": "pohjan metsästys",
+        "Short setup": "huipun metsästys",
+        "Momentum long": "nousun jatkumo",
+        "Momentum short": "laskun jatkumo",
+    }
+    return mapping.get(setup_style, setup_style)
+
+
+def _resolve_signal_type(pivot_type: str, setup_style: str) -> str:
+    if setup_style == "Momentum long":
+        return "MOMENTUM LONG"
+    if setup_style == "Momentum short":
+        return "MOMENTUM SHORT"
+    return "REBOUND WATCH" if pivot_type == "bottom" else "SHORT WATCH"
+
+
 def generate_momentum_summary(
     current: pd.Series,
     top_match: MatchResult,
     market_state_rows: list[dict[str, str]],
     similarity_alert: float,
+    selected_preset: str,
 ) -> tuple[str, str]:
     trend_state = next((row["Tila"] for row in market_state_rows if row.get("Mittari") == "Trendi"), "⚪ Mixed")
     vol_state = next((row["Tila"] for row in market_state_rows if row.get("Mittari") == "Volatiliteetti"), "⚪ Normal")
-    signal_type = "REBOUND WATCH" if top_match.pivot.pivot_type == "bottom" else "SHORT WATCH"
+    signal_type = _resolve_signal_type(top_match.pivot.pivot_type, selected_preset)
     rsi = float(current.get("rsi", float("nan")))
     macd_hist = float(current.get("macd_hist", float("nan")))
     similarity = float(top_match.score)
     rr_15d = float(top_match.historical_return_after_pivot)
 
-    bullish = "Bullish" in trend_state and macd_hist > 0 and signal_type == "REBOUND WATCH"
-    bearish = "Bearish" in trend_state and macd_hist < 0 and signal_type == "SHORT WATCH"
+    bullish_signal = signal_type in {"REBOUND WATCH", "MOMENTUM LONG"}
+    bearish_signal = signal_type in {"SHORT WATCH", "MOMENTUM SHORT"}
+    bullish = "Bullish" in trend_state and macd_hist > 0 and bullish_signal
+    bearish = "Bearish" in trend_state and macd_hist < 0 and bearish_signal
 
     if bullish:
         emoji = "🟢"
@@ -703,8 +724,16 @@ if previous_ticker != current_ticker:
         st.session_state["pending_pivot_mode"] = ticker_settings["pivot_mode"]
     st.session_state["manual_pivot_type_widget"] = ticker_settings["manual_pivot_type"]
     st.session_state["manual_pivot_dates_text_widget"] = ticker_settings["manual_pivot_dates_text"]
-    st.session_state["selected_preset_widget"] = ticker_settings["selected_preset"]
-    st.session_state["last_applied_preset_widget"] = ticker_settings.get("last_applied_preset", ticker_settings["selected_preset"])
+    preset_aliases = {
+        "pohjan metsästys": "Rebound setup",
+        "paniikkipohja": "Rebound setup",
+        "huipun metsästys": "Short setup",
+        "väsyvä huippu": "Momentum short",
+    }
+    selected_preset_value = preset_aliases.get(ticker_settings["selected_preset"], ticker_settings["selected_preset"])
+    last_applied_value = ticker_settings.get("last_applied_preset", ticker_settings["selected_preset"])
+    st.session_state["selected_preset_widget"] = selected_preset_value
+    st.session_state["last_applied_preset_widget"] = preset_aliases.get(last_applied_value, last_applied_value)
     st.session_state["price_weight_widget"] = float(ticker_settings["similarity_weights"]["price"])
     st.session_state["rsi_weight_widget"] = float(ticker_settings["similarity_weights"]["rsi"])
     st.session_state["volume_weight_widget"] = float(ticker_settings["similarity_weights"]["volume"])
@@ -732,17 +761,17 @@ with top_cols[2]:
         key="pivot_mode_widget",
     )
 with top_cols[3]:
-    preset_placeholder = "Valitse metsästystapa"
+    preset_placeholder = "Valitse setup-tyyli"
     preset_options = {
-        "pohjan metsästys": {"price": 0.10, "rsi": 0.35, "volume": 0.20, "volatility": 0.25, "trend": 0.10},
-        "paniikkipohja": {"price": 0.05, "rsi": 0.30, "volume": 0.25, "volatility": 0.30, "trend": 0.10},
-        "huipun metsästys": {"price": 0.30, "rsi": 0.30, "volume": 0.15, "volatility": 0.15, "trend": 0.10},
-        "väsyvä huippu": {"price": 0.25, "rsi": 0.20, "volume": 0.10, "volatility": 0.10, "trend": 0.35},
+        "Rebound setup": {"price": 0.10, "rsi": 0.35, "volume": 0.20, "volatility": 0.25, "trend": 0.10, "pivot_mode": "bottom"},
+        "Short setup": {"price": 0.30, "rsi": 0.30, "volume": 0.15, "volatility": 0.15, "trend": 0.10, "pivot_mode": "peak"},
+        "Momentum long": {"price": 0.25, "rsi": 0.15, "volume": 0.15, "volatility": 0.10, "trend": 0.35, "pivot_mode": "all"},
+        "Momentum short": {"price": 0.25, "rsi": 0.15, "volume": 0.15, "volatility": 0.10, "trend": 0.35, "pivot_mode": "all"},
     }
     preset_select_options = [preset_placeholder, *list(preset_options.keys())]
     if st.session_state.get("selected_preset_widget") not in preset_select_options:
         st.session_state["selected_preset_widget"] = preset_placeholder
-    selected_preset = st.selectbox("Metsästystapa", options=preset_select_options, key="selected_preset_widget")
+    selected_preset = st.selectbox("Setup-tyyli", options=preset_select_options, key="selected_preset_widget")
 
 st.caption("Ticker-kohtaiset asetukset tallennetaan tämän session ajaksi.")
 st.caption("### Markkina")
@@ -763,9 +792,10 @@ if selected_preset in preset_options and selected_preset != last_applied_preset:
     st.session_state["volume_weight_widget"] = float(preset_weights["volume"])
     st.session_state["volatility_weight_widget"] = float(preset_weights["volatility"])
     st.session_state["trend_weight_widget"] = float(preset_weights["trend"])
+    st.session_state["pivot_mode_widget"] = preset_weights["pivot_mode"]
     st.session_state["last_applied_preset_widget"] = selected_preset
 
-st.caption("Valitse haetko pohjaa vai huippua. Painotuksia voi säätää käsin.")
+st.caption("Valitse setup-tyyli. Painotuksia voi säätää käsin.")
 
 with st.expander("Lisäasetukset", expanded=False):
     pivot_detection_method_label = st.radio(
@@ -828,6 +858,7 @@ with st.expander("Lisäasetukset", expanded=False):
             "sector": sector,
             "similarity_alert": similarity_alert,
             "selected_preset": selected_preset,
+            "selected_preset_legacy": _legacy_setup_name(selected_preset),
             "last_applied_preset": st.session_state.get("last_applied_preset_widget", selected_preset),
             "similarity_weights": similarity_weights,
             "pivot_window": pivot_window,
@@ -876,12 +907,12 @@ if run:
                     show_alert_status = selected_preset in preset_options
                     is_alert = top_match.score >= similarity_alert
                     if show_alert_status and is_alert:
-                        kind = "REBOUND WATCH" if top_match.pivot.pivot_type == "bottom" else "SHORT WATCH"
+                        kind = _resolve_signal_type(top_match.pivot.pivot_type, selected_preset)
                         st.error(f"Alert status: ALERT — {kind} (top score {top_match.score:.3f})")
                     elif show_alert_status:
                         st.info(f"Alert status: INFO — no alert (top score {top_match.score:.3f})")
                     else:
-                        st.caption("Valitse metsästystapa, jotta alert-status näytetään.")
+                        st.caption("Valitse setup-tyyli, jotta alert-status näytetään.")
 
                     market_state_rows = get_current_market_state(enriched)
                     current_row = enriched.iloc[-1]
@@ -890,6 +921,7 @@ if run:
                         top_match=top_match,
                         market_state_rows=market_state_rows,
                         similarity_alert=similarity_alert,
+                        selected_preset=selected_preset,
                     )
                     st.markdown(
                         (
@@ -1049,6 +1081,7 @@ else:
 
 def _analyze_scanner_ticker(
     ticker: str,
+    selected_preset: str,
     similarity_alert: float,
     pivot_mode: str,
     pivot_source: str,
@@ -1078,7 +1111,7 @@ def _analyze_scanner_ticker(
     best = matches[0]
     market_state_rows = dict(get_current_market_state(enriched))
     current = enriched.iloc[-1]
-    signal_type = "REBOUND WATCH" if best.pivot.pivot_type == "bottom" else "SHORT WATCH"
+    signal_type = _resolve_signal_type(best.pivot.pivot_type, selected_preset)
     return {
         "ticker": ticker,
         "company_name": _get_company_name(ticker) or "",
@@ -1123,6 +1156,7 @@ if st.session_state["view"] == "Scanner":
                 try:
                     row = _analyze_scanner_ticker(
                         ticker=scanner_ticker,
+                        selected_preset=selected_preset,
                         similarity_alert=similarity_alert,
                         pivot_mode=pivot_mode,
                         pivot_source=pivot_source,
