@@ -13,7 +13,7 @@ from market_memory.data import fetch_ohlcv
 from market_memory.fundamentals import fetch_quarterly_fundamentals
 from market_memory.indicators import add_indicators
 from market_memory.market_state import get_current_market_state
-from market_memory.news import fetch_latest_news_with_debug
+from market_memory.news import fetch_latest_news
 from market_memory.pivots import Pivot, detect_pivots, detect_reversal_zones
 from market_memory.sector_resolver import resolve_sector
 from market_memory.similarity import MatchResult, find_best_matches, normalize_similarity_weights
@@ -452,7 +452,8 @@ def run_news_fetch(
     company_name: str | None = None,
     limit: int = 5,
 ) -> tuple[list[dict[str, str | None]], list[dict[str, str | int]], str | None]:
-    return fetch_latest_news_with_debug(ticker=ticker, company_name=company_name, limit=limit)
+    latest_news = fetch_latest_news(ticker=ticker, company_name=company_name, limit=limit)
+    return latest_news, [], None
 
 
 
