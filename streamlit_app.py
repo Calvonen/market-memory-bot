@@ -446,8 +446,8 @@ def _get_company_name(ticker: str) -> str | None:
 def run_quarterly_fundamentals_fetch(ticker: str) -> pd.DataFrame:
     return fetch_quarterly_fundamentals(ticker)
 
-@st.cache_data(show_spinner=False)
-def run_news_fetch(ticker: str, company_name: str | None = None, limit: int = 5) -> list[dict[str, str | None]]:
+@st.cache_data(show_spinner=False, ttl=900)
+def run_news_fetch(ticker: str, company_name: str | None = None, limit: int = 10) -> list[dict[str, str | None]]:
     return fetch_latest_news(ticker=ticker, company_name=company_name, limit=limit)
 
 
@@ -985,7 +985,7 @@ if run:
                 st.caption("Näytetään viimeisen 90 päivän uutiset")
                 news_source_note = None
                 try:
-                    latest_news = run_news_fetch(ticker=ticker, company_name=company_name, limit=5)
+                    latest_news = run_news_fetch(ticker=ticker, company_name=company_name, limit=10)
                     if latest_news:
                         news_source_note = latest_news[0].get("source")
                 except Exception:
@@ -996,7 +996,7 @@ if run:
                     st.caption(f"News source: {news_source_note}")
 
                 if not latest_news:
-                    st.info("Viimeisen 90 päivän uutisia ei löytynyt.")
+                    st.info("Uutisia ei löytynyt tällä hetkellä.")
                 else:
                     for news in latest_news:
                         meta_parts = []
