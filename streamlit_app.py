@@ -245,20 +245,30 @@ def _resolve_similarity_threshold(pivot_source: str, pivot_detection_method: str
 
 def _legacy_setup_name(setup_style: str) -> str:
     mapping = {
-        "Rebound setup": "pohjan metsästys",
-        "Short setup": "huipun metsästys",
-        "Momentum long": "nousun jatkumo",
-        "Momentum short": "laskun jatkumo",
+        "Rebound setup": "Pohjakäänne",
+        "Short setup": "Huippukäänne",
+        "Momentum long": "Nousun jatkumo",
+        "Momentum short": "Laskun jatkumo",
     }
     return mapping.get(setup_style, setup_style)
 
 
 def _resolve_signal_type(pivot_type: str, setup_style: str) -> str:
-    if setup_style == "Momentum long":
+    setup_key = SETUP_STYLE_TO_KEY.get(setup_style, setup_style)
+    if setup_key == "Momentum long":
         return "MOMENTUM LONG"
-    if setup_style == "Momentum short":
+    if setup_key == "Momentum short":
         return "MOMENTUM SHORT"
     return "REBOUND WATCH" if pivot_type == "bottom" else "SHORT WATCH"
+
+
+SETUP_KEY_TO_STYLE = {
+    "Rebound setup": "Pohjakäänne",
+    "Short setup": "Huippukäänne",
+    "Momentum long": "Nousun jatkumo",
+    "Momentum short": "Laskun jatkumo",
+}
+SETUP_STYLE_TO_KEY = {style: key for key, style in SETUP_KEY_TO_STYLE.items()}
 
 
 def generate_momentum_summary(
@@ -730,10 +740,11 @@ if previous_ticker != current_ticker:
         "huipun metsästys": "Short setup",
         "väsyvä huippu": "Momentum short",
     }
-    selected_preset_value = preset_aliases.get(ticker_settings["selected_preset"], ticker_settings["selected_preset"])
+    selected_preset_key = preset_aliases.get(ticker_settings["selected_preset"], ticker_settings["selected_preset"])
     last_applied_value = ticker_settings.get("last_applied_preset", ticker_settings["selected_preset"])
-    st.session_state["selected_preset_widget"] = selected_preset_value
-    st.session_state["last_applied_preset_widget"] = preset_aliases.get(last_applied_value, last_applied_value)
+    last_applied_key = preset_aliases.get(last_applied_value, last_applied_value)
+    st.session_state["selected_preset_widget"] = SETUP_KEY_TO_STYLE.get(selected_preset_key, selected_preset_key)
+    st.session_state["last_applied_preset_widget"] = SETUP_KEY_TO_STYLE.get(last_applied_key, last_applied_key)
     st.session_state["price_weight_widget"] = float(ticker_settings["similarity_weights"]["price"])
     st.session_state["rsi_weight_widget"] = float(ticker_settings["similarity_weights"]["rsi"])
     st.session_state["volume_weight_widget"] = float(ticker_settings["similarity_weights"]["volume"])
@@ -768,7 +779,7 @@ with top_cols[3]:
         "Momentum long": {"price": 0.25, "rsi": 0.15, "volume": 0.15, "volatility": 0.10, "trend": 0.35, "pivot_mode": "all"},
         "Momentum short": {"price": 0.25, "rsi": 0.15, "volume": 0.15, "volatility": 0.10, "trend": 0.35, "pivot_mode": "all"},
     }
-    preset_select_options = [preset_placeholder, *list(preset_options.keys())]
+    preset_select_options = [preset_placeholder, *[SETUP_KEY_TO_STYLE[key] for key in preset_options.keys()]]
     if st.session_state.get("selected_preset_widget") not in preset_select_options:
         st.session_state["selected_preset_widget"] = preset_placeholder
     selected_preset = st.selectbox("Setup-tyyli", options=preset_select_options, key="selected_preset_widget")
@@ -785,15 +796,18 @@ pivot_detection_method = "reversal zone" if pivot_detection_method_label == "Kä
 similarity_alert = _resolve_similarity_threshold(pivot_source=pivot_source, pivot_detection_method=pivot_detection_method)
 
 last_applied_preset = st.session_state.get("last_applied_preset_widget")
-if selected_preset in preset_options and selected_preset != last_applied_preset:
-    preset_weights = preset_options[selected_preset]
+selected_preset_key = SETUP_STYLE_TO_KEY.get(selected_preset, selected_preset)
+last_applied_preset_key = SETUP_STYLE_TO_KEY.get(last_applied_preset, last_applied_preset)
+if selected_preset_key in preset_options and selected_preset_key != last_applied_preset_key:
+    preset_weights = preset_options[selected_preset_key]
     st.session_state["price_weight_widget"] = float(preset_weights["price"])
     st.session_state["rsi_weight_widget"] = float(preset_weights["rsi"])
     st.session_state["volume_weight_widget"] = float(preset_weights["volume"])
     st.session_state["volatility_weight_widget"] = float(preset_weights["volatility"])
     st.session_state["trend_weight_widget"] = float(preset_weights["trend"])
-    st.session_state["pivot_mode_widget"] = preset_weights["pivot_mode"]
+    st.session_state["pending_pivot_mode"] = preset_weights["pivot_mode"]
     st.session_state["last_applied_preset_widget"] = selected_preset
+    st.rerun()
 
 st.caption("Valitse setup-tyyli. Painotuksia voi säätää käsin.")
 
@@ -857,9 +871,13 @@ with st.expander("Lisäasetukset", expanded=False):
             "pivot_mode": pivot_mode,
             "sector": sector,
             "similarity_alert": similarity_alert,
-            "selected_preset": selected_preset,
-            "selected_preset_legacy": _legacy_setup_name(selected_preset),
-            "last_applied_preset": st.session_state.get("last_applied_preset_widget", selected_preset),
+            "selected_preset": selected_preset_key,
+            "selected_preset_ui": selected_preset,
+            "selected_preset_legacy": _legacy_setup_name(selected_preset_key),
+            "last_applied_preset": SETUP_STYLE_TO_KEY.get(
+                st.session_state.get("last_applied_preset_widget", selected_preset),
+                st.session_state.get("last_applied_preset_widget", selected_preset),
+            ),
             "similarity_weights": similarity_weights,
             "pivot_window": pivot_window,
             "pivot_detection_method": pivot_detection_method,
@@ -904,10 +922,10 @@ if run:
                     st.warning("Ei historiallisia osumia valituilla ehdoilla.")
                 else:
                     top_match = matches[0]
-                    show_alert_status = selected_preset in preset_options
+                    show_alert_status = selected_preset_key in preset_options
                     is_alert = top_match.score >= similarity_alert
                     if show_alert_status and is_alert:
-                        kind = _resolve_signal_type(top_match.pivot.pivot_type, selected_preset)
+                        kind = _resolve_signal_type(top_match.pivot.pivot_type, selected_preset_key)
                         st.error(f"Alert status: ALERT — {kind} (top score {top_match.score:.3f})")
                     elif show_alert_status:
                         st.info(f"Alert status: INFO — no alert (top score {top_match.score:.3f})")
@@ -921,7 +939,7 @@ if run:
                         top_match=top_match,
                         market_state_rows=market_state_rows,
                         similarity_alert=similarity_alert,
-                        selected_preset=selected_preset,
+                        selected_preset=selected_preset_key,
                     )
                     st.markdown(
                         (
