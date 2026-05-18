@@ -990,7 +990,6 @@ if run:
                         news_source_note = latest_news[0].get("source")
                 except Exception:
                     latest_news = []
-                    st.caption("⚠️ Uutisten haussa tapahtui virhe.")
 
                 if news_source_note:
                     st.caption(f"News source: {news_source_note}")
