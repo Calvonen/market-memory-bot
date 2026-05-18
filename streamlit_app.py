@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from urllib.parse import quote_plus
 
-import feedparser
 import pandas as pd
 import streamlit as st
 import yfinance as yf
@@ -452,88 +449,6 @@ def run_quarterly_fundamentals_fetch(ticker: str) -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def run_news_fetch(ticker: str, company_name: str | None = None, limit: int = 5) -> list[dict[str, str | None]]:
     return fetch_latest_news(ticker=ticker, company_name=company_name, limit=limit)
-
-
-def _normalize_to_day(value: object) -> pd.Timestamp | None:
-    try:
-        ts = pd.Timestamp(value)
-    except Exception:
-        return None
-    if ts.tzinfo is not None:
-        ts = ts.tz_convert(None)
-    return ts.normalize()
-
-
-def _extract_future_date_candidates(text: str, today: pd.Timestamp) -> list[pd.Timestamp]:
-    patterns = [
-        r"\b(?:20\d{2}|19\d{2})[-/.](?:0?[1-9]|1[0-2])[-/.](?:0?[1-9]|[12]\d|3[01])\b",
-        r"\b(?:0?[1-9]|[12]\d|3[01])[-/.](?:0?[1-9]|1[0-2])[-/.](?:20\d{2}|19\d{2})\b",
-        r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2},?\s+(?:20\d{2}|19\d{2})\b",
-    ]
-
-    candidates: list[pd.Timestamp] = []
-    for pattern in patterns:
-        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
-            parsed = pd.to_datetime(match.group(0), errors="coerce")
-            if pd.isna(parsed):
-                continue
-            normalized = _normalize_to_day(parsed)
-            if normalized is not None and normalized >= today:
-                candidates.append(normalized)
-    return candidates
-
-
-@st.cache_data(show_spinner=False)
-def fetch_next_earnings_date(ticker: str, company_name: str | None = None) -> tuple[pd.Timestamp | None, str | None]:
-    symbol = yf.Ticker(ticker)
-    today = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
-
-    calendar = getattr(symbol, "calendar", None)
-    if isinstance(calendar, pd.DataFrame) and not calendar.empty:
-        for column in calendar.columns:
-            values = pd.to_datetime(calendar[column], errors="coerce").dropna()
-            for value in values:
-                normalized = _normalize_to_day(value)
-                if normalized is not None and normalized >= today:
-                    return normalized, None
-
-    try:
-        earnings_dates = symbol.get_earnings_dates(limit=8)
-    except Exception:
-        earnings_dates = None
-
-    if isinstance(earnings_dates, pd.DataFrame) and not earnings_dates.empty:
-        dates = pd.to_datetime(earnings_dates.index, errors="coerce").dropna()
-        future_dates = []
-        for dt in dates:
-            normalized = _normalize_to_day(dt)
-            if normalized is not None and normalized >= today:
-                future_dates.append(normalized)
-        if future_dates:
-            return min(future_dates), None
-
-    raw_queries = [
-        f"{company_name} financial calendar" if company_name else None,
-        f"{company_name} earnings date" if company_name else None,
-        f"{ticker} earnings date",
-    ]
-    queries = [query for query in raw_queries if query]
-
-    for query in queries:
-        rss_url = f"https://news.google.com/rss/search?q={quote_plus(query)}"
-        try:
-            feed = feedparser.parse(rss_url)
-        except Exception:
-            continue
-        entries = getattr(feed, "entries", []) or []
-        for entry in entries[:8]:
-            text_parts = [str(entry.get("title") or ""), str(entry.get("summary") or "")]
-            text = " ".join(text_parts)
-            candidates = _extract_future_date_candidates(text, today=today)
-            if candidates:
-                return min(candidates), None
-
-    return None, None
 
 
 
@@ -1048,32 +963,7 @@ if run:
                         f"{similarity_weights['trend']:.2f}×{top_match.trend_similarity:.3f}"
                     )
 
-                st.subheader("Seuraava tulosjulkistus")
-                company_name = _get_company_name(ticker)
-                next_earnings_date, _ = fetch_next_earnings_date(ticker, company_name=company_name)
-                if next_earnings_date is None:
-                    st.info("Seuraavaa tulosjulkistusta ei löytynyt automaattisesti.")
-                else:
-                    today = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
-                    days_left = int((next_earnings_date - today).days)
 
-                    if days_left < 7:
-                        status_color = "#dc2626"
-                    elif days_left < 30:
-                        status_color = "#f97316"
-                    else:
-                        status_color = "#16a34a"
-
-                    st.markdown(
-                        (
-                            f"<div style='border-left: 8px solid {status_color}; padding: 0.75rem 1rem; "
-                            "border-radius: 0.25rem; background: rgba(148, 163, 184, 0.08);'>"
-                            f"<strong>Päivämäärä:</strong> {next_earnings_date.date().isoformat()}<br>"
-                            f"<strong>Päiviä jäljellä:</strong> {days_left}"
-                            "</div>"
-                        ),
-                        unsafe_allow_html=True,
-                    )
 
                 st.subheader("Kvartaalitiedot")
                 try:
