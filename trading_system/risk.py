@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from trading_system.models import (
     Direction,
@@ -54,7 +54,7 @@ class RiskEngine:
         now: datetime | None,
     ) -> RiskDecision:
         reasons: list[str] = []
-        current_time = now or datetime.utcnow()
+        current_time = now or datetime.now(UTC)
 
         if self.config.kill_switch:
             reasons.append("kill_switch_active")
