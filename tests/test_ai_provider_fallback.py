@@ -1,0 +1,112 @@
+import json
+import unittest
+from datetime import date
+from unittest.mock import patch
+
+from trading_system.ai_event_analyzer import (
+    AIEventAnalysis,
+    EventAnalysisPayload,
+    FallbackEventAnalyzer,
+    GroqEventAnalyzer,
+)
+from trading_system.models import EventExpectation
+from trading_system.release_ingestion import ReleaseDocument
+
+
+PAYLOAD = {
+    "metrics": {"fy26_operating_profit_pre_exceptional_gbp_m": 45.0},
+    "guidance_summary": "FY27 outlook broadly in line.",
+    "management_summary": "Management remains cautious.",
+    "catalyst_direction": "NEUTRAL",
+    "catalyst_score_0_25": 8,
+    "fundamental_direction": "NEUTRAL",
+    "fundamental_score_0_35": 12,
+    "key_positive_surprises": [],
+    "key_negative_surprises": [],
+    "uncertainties": ["FY27 range not quantified"],
+    "invalidation_flags": [],
+    "evidence_quotes": ["outlook remains challenging"],
+}
+
+
+def expectation() -> EventExpectation:
+    return EventExpectation(
+        event_id="hays-fy2026-results",
+        instrument="HAS.L",
+        event_name="Hays plc FY2026 results",
+        scheduled_date=date(2026, 8, 20),
+        consensus={"fy27_operating_profit_pre_exceptional_gbp_m": 55.6},
+    )
+
+
+def document() -> ReleaseDocument:
+    return ReleaseDocument(
+        event_id="hays-fy2026-results",
+        source_type="official_results_centre",
+        source_url="https://example.test/hays-results",
+        source_title="Hays FY26 results",
+        raw_text="Official release text.",
+        content_sha256="abc123",
+    )
+
+
+class StubAnalyzer:
+    def __init__(self, *, result=None, error=None):
+        self.result = result
+        self.error = error
+        self.calls = 0
+
+    def analyze(self, expectation, document):
+        self.calls += 1
+        if self.error:
+            raise self.error
+        return self.result
+
+
+class AIProviderTests(unittest.TestCase):
+    def test_groq_uses_json_schema_and_returns_provider_metadata(self) -> None:
+        analyzer = GroqEventAnalyzer(api_key="test", model="openai/gpt-oss-120b")
+        response = {
+            "choices": [{"message": {"content": json.dumps(PAYLOAD)}}]
+        }
+
+        with patch("trading_system.ai_event_analyzer._post_json", return_value=response) as post:
+            result = analyzer.analyze(expectation(), document())
+
+        self.assertEqual(result.provider, "groq")
+        self.assertEqual(result.model, "openai/gpt-oss-120b")
+        self.assertEqual(result.payload.catalyst_score_0_25, 8)
+        body = post.call_args.args[1]
+        self.assertEqual(body["response_format"]["type"], "json_schema")
+        self.assertTrue(body["response_format"]["json_schema"]["strict"])
+
+    def test_fallback_uses_second_analyzer_after_first_failure(self) -> None:
+        first = StubAnalyzer(error=RuntimeError("rate limited"))
+        expected = AIEventAnalysis(
+            payload=EventAnalysisPayload.model_validate(PAYLOAD),
+            provider="ollama",
+            model="gpt-oss:20b",
+            raw_response=json.dumps(PAYLOAD),
+        )
+        second = StubAnalyzer(result=expected)
+
+        result = FallbackEventAnalyzer([first, second]).analyze(expectation(), document())
+
+        self.assertEqual(result.provider, "ollama")
+        self.assertEqual(first.calls, 1)
+        self.assertEqual(second.calls, 1)
+
+    def test_fallback_reports_all_provider_failures(self) -> None:
+        analyzer = FallbackEventAnalyzer(
+            [
+                StubAnalyzer(error=RuntimeError("groq down")),
+                StubAnalyzer(error=RuntimeError("ollama down")),
+            ]
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "All event analyzers failed"):
+            analyzer.analyze(expectation(), document())
+
+
+if __name__ == "__main__":
+    unittest.main()
