@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 import os
 import re
-import urllib.error
-import urllib.request
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
+import requests
 from pydantic import BaseModel, ConfigDict, Field
 
 from trading_system.models import EventExpectation
@@ -95,13 +94,7 @@ def _keyword_tokens(expectation: EventExpectation) -> set[str]:
 
 
 def _select_release_text(expectation: EventExpectation, raw_text: str) -> str:
-    """Keep the immutable source intact but send a bounded, relevant excerpt to AI.
-
-    The beginning of company result releases usually contains headline KPIs and
-    guidance. The remaining budget is filled with paragraphs matching event KPI,
-    outlook, cash, cost and regional terms. This keeps Groq Free-tier requests
-    comfortably below its token-per-minute ceiling without discarding the source.
-    """
+    """Keep the immutable source intact but send a bounded, relevant excerpt to AI."""
     budget = _release_char_budget()
     if len(raw_text) <= budget:
         return raw_text
@@ -169,20 +162,31 @@ OFFICIAL RELEASE EXCERPT:
 
 
 def _post_json(url: str, body: dict[str, Any], *, headers: dict[str, str], timeout: int) -> dict[str, Any]:
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json", **headers},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:2000]
-        raise RuntimeError(f"AI provider HTTP {exc.code}: {detail}") from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
+        response = requests.post(
+            url,
+            json=body,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "MarketAI/0.1",
+                **headers,
+            },
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
         raise RuntimeError(f"AI provider request failed: {exc}") from exc
+
+    if not response.ok:
+        detail = response.text[:2000]
+        raise RuntimeError(f"AI provider HTTP {response.status_code}: {detail}")
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise RuntimeError("AI provider returned invalid JSON") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("AI provider returned an unexpected response shape")
+    return data
 
 
 class GroqEventAnalyzer:
