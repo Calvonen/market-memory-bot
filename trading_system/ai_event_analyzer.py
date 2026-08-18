@@ -69,25 +69,40 @@ OFFICIAL RELEASE TEXT:
 """
 
 
-class OpenAICompatibleEventAnalyzer:
-    """Shared Responses API adapter for OpenAI-compatible providers such as Groq."""
+def _post_json(url: str, body: dict[str, Any], *, headers: dict[str, str], timeout: int) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", **headers},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:2000]
+        raise RuntimeError(f"AI provider HTTP {exc.code}: {detail}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError(f"AI provider request failed: {exc}") from exc
+
+
+class GroqEventAnalyzer:
+    """Default cloud analyzer using Groq JSON Schema structured output."""
 
     def __init__(
         self,
         *,
-        provider: str,
-        api_key: str,
-        model: str,
-        base_url: str | None = None,
-        client: Any | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        base_url: str = "https://api.groq.com/openai/v1",
+        timeout_seconds: int = 180,
     ) -> None:
-        if client is None:
-            from openai import OpenAI
-
-            client = OpenAI(api_key=api_key, base_url=base_url)
-        self.client = client
-        self.provider = provider
-        self.model = model
+        self.api_key = api_key or os.environ.get("GROQ_API_KEY") or ""
+        if not self.api_key:
+            raise RuntimeError("GROQ_API_KEY is required for the Groq analyzer")
+        self.model = model or os.environ.get("MARKETAI_GROQ_MODEL", "openai/gpt-oss-120b")
+        self.base_url = base_url.rstrip("/")
+        self.timeout_seconds = timeout_seconds
 
     def analyze(
         self,
@@ -95,56 +110,30 @@ class OpenAICompatibleEventAnalyzer:
         document: ReleaseDocument,
     ) -> AIEventAnalysis:
         schema = EventAnalysisPayload.model_json_schema()
-        response = self.client.responses.create(
-            model=self.model,
-            input=_build_prompt(expectation, document),
-            text={
-                "format": {
+        response = _post_json(
+            f"{self.base_url}/chat/completions",
+            {
+                "model": self.model,
+                "messages": [{"role": "user", "content": _build_prompt(expectation, document)}],
+                "temperature": 0,
+                "response_format": {
                     "type": "json_schema",
-                    "name": "event_analysis",
-                    "strict": True,
-                    "schema": schema,
-                }
+                    "json_schema": {
+                        "name": "event_analysis",
+                        "strict": True,
+                        "schema": schema,
+                    },
+                },
             },
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            timeout=self.timeout_seconds,
         )
-        raw = response.output_text
+        choices = response.get("choices") or []
+        raw = str(((choices[0].get("message") if choices else {}) or {}).get("content") or "")
+        if not raw:
+            raise RuntimeError("Groq returned an empty analysis")
         payload = EventAnalysisPayload.model_validate_json(raw)
-        return AIEventAnalysis(
-            payload=payload,
-            provider=self.provider,
-            model=self.model,
-            raw_response=raw,
-        )
-
-
-class GroqEventAnalyzer(OpenAICompatibleEventAnalyzer):
-    def __init__(self, client: Any | None = None, model: str | None = None) -> None:
-        api_key = os.environ.get("GROQ_API_KEY")
-        if not api_key and client is None:
-            raise RuntimeError("GROQ_API_KEY is required for the Groq analyzer")
-        super().__init__(
-            provider="groq",
-            api_key=api_key or "test-key",
-            base_url="https://api.groq.com/openai/v1",
-            model=model
-            or os.environ.get("MARKETAI_GROQ_MODEL", "openai/gpt-oss-120b"),
-            client=client,
-        )
-
-
-class OpenAIEventAnalyzer(OpenAICompatibleEventAnalyzer):
-    """Optional paid-provider adapter retained for portability, not the default."""
-
-    def __init__(self, client: Any | None = None, model: str | None = None) -> None:
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key and client is None:
-            raise RuntimeError("OPENAI_API_KEY is required for the OpenAI analyzer")
-        super().__init__(
-            provider="openai",
-            api_key=api_key or "test-key",
-            model=model or os.environ.get("MARKETAI_OPENAI_MODEL", "gpt-5.6"),
-            client=client,
-        )
+        return AIEventAnalysis(payload=payload, provider="groq", model=self.model, raw_response=raw)
 
 
 class OllamaEventAnalyzer:
@@ -168,35 +157,63 @@ class OllamaEventAnalyzer:
         expectation: EventExpectation,
         document: ReleaseDocument,
     ) -> AIEventAnalysis:
-        request_body = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": _build_prompt(expectation, document)}],
-            "stream": False,
-            "format": EventAnalysisPayload.model_json_schema(),
-            "options": {"temperature": 0},
-        }
-        request = urllib.request.Request(
+        response = _post_json(
             f"{self.base_url}/api/chat",
-            data=json.dumps(request_body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
+            {
+                "model": self.model,
+                "messages": [{"role": "user", "content": _build_prompt(expectation, document)}],
+                "stream": False,
+                "format": EventAnalysisPayload.model_json_schema(),
+                "options": {"temperature": 0},
+            },
+            headers={},
+            timeout=self.timeout_seconds,
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                response_data = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError) as exc:
-            raise RuntimeError(f"Ollama analysis failed: {exc}") from exc
-
-        raw = str((response_data.get("message") or {}).get("content") or "")
+        raw = str((response.get("message") or {}).get("content") or "")
         if not raw:
             raise RuntimeError("Ollama returned an empty analysis")
         payload = EventAnalysisPayload.model_validate_json(raw)
-        return AIEventAnalysis(
-            payload=payload,
-            provider="ollama",
+        return AIEventAnalysis(payload=payload, provider="ollama", model=self.model, raw_response=raw)
+
+
+class OpenAIEventAnalyzer:
+    """Optional paid-provider adapter. Imported only when explicitly enabled."""
+
+    def __init__(self, client: Any | None = None, model: str | None = None) -> None:
+        if client is None:
+            try:
+                from openai import OpenAI
+            except ImportError as exc:
+                raise RuntimeError(
+                    "OpenAI fallback requires the optional 'openai' Python package"
+                ) from exc
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if not api_key:
+                raise RuntimeError("OPENAI_API_KEY is required for the OpenAI analyzer")
+            client = OpenAI(api_key=api_key)
+        self.client = client
+        self.model = model or os.environ.get("MARKETAI_OPENAI_MODEL", "gpt-5.6")
+
+    def analyze(
+        self,
+        expectation: EventExpectation,
+        document: ReleaseDocument,
+    ) -> AIEventAnalysis:
+        response = self.client.responses.create(
             model=self.model,
-            raw_response=raw,
+            input=_build_prompt(expectation, document),
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "event_analysis",
+                    "strict": True,
+                    "schema": EventAnalysisPayload.model_json_schema(),
+                }
+            },
         )
+        raw = response.output_text
+        payload = EventAnalysisPayload.model_validate_json(raw)
+        return AIEventAnalysis(payload=payload, provider="openai", model=self.model, raw_response=raw)
 
 
 class FallbackEventAnalyzer:
