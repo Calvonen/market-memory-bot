@@ -44,6 +44,27 @@ class ScoreBreakdown:
 
 
 @dataclass(frozen=True)
+class ComponentAssessment:
+    name: str
+    direction: Direction
+    score: int
+    max_score: int
+    reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class StrategyInputs:
+    instrument: str
+    fundamental: ComponentAssessment
+    catalyst: ComponentAssessment
+    technical: ComponentAssessment
+    market_memory: ComponentAssessment
+    news_sentiment: ComponentAssessment
+    source_event_id: str | None = None
+    invalidation: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class StrategyDecision:
     instrument: str
     direction: Direction
@@ -52,6 +73,8 @@ class StrategyDecision:
     rationale: tuple[str, ...] = ()
     invalidation: tuple[str, ...] = ()
     source_event_id: str | None = None
+    long_evidence: int = 0
+    short_evidence: int = 0
     decision_id: str = field(default_factory=new_id)
     created_at: datetime = field(default_factory=utc_now)
 
@@ -118,3 +141,17 @@ class EventExpectation:
     bear_case: tuple[str, ...] = ()
     triggers: dict[str, float | str] = field(default_factory=dict)
     invalidation_conditions: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class EventActuals:
+    event_id: str
+    instrument: str
+    published_at: datetime
+    source_url: str
+    metrics: dict[str, float | str | None] = field(default_factory=dict)
+    guidance_summary: str | None = None
+    management_summary: str | None = None
+    price_reaction_pct: float | None = None
+    source_document_id: str | None = None
+    captured_at: datetime = field(default_factory=utc_now)
