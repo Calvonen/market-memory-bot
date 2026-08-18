@@ -12,6 +12,7 @@ from trading_system.ai_event_analyzer import (
     build_default_event_analyzer,
 )
 from trading_system.models import EventExpectation, PortfolioState
+from trading_system.paper_trade_repository import SupabasePaperTradeRepository
 from trading_system.post_release_paper import PostReleasePaperResult, run_post_release_paper
 from trading_system.release_ingestion import HaysResultsCentreProvider, OfficialReleaseProvider
 from trading_system.release_repository import SupabaseReleaseRepository
@@ -129,6 +130,9 @@ def run_paper_confirmation_loop(
     analysis: EventAnalysisPayload,
     interval_seconds: int,
     once: bool,
+    source_document_id: str | None = None,
+    analysis_id: str | None = None,
+    persistence: SupabasePaperTradeRepository | None = None,
     runner: Callable[..., PostReleasePaperResult] = run_post_release_paper,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> PostReleasePaperResult:
@@ -140,6 +144,16 @@ def run_paper_confirmation_loop(
             analysis=analysis,
             portfolio=portfolio,
         )
+        if persistence is not None:
+            if analysis_id is None:
+                raise RuntimeError("paper persistence requires analysis_id")
+            persistence.save_result(
+                event_id=event_id,
+                expectation_version=expectation.version,
+                source_document_id=source_document_id,
+                analysis_id=analysis_id,
+                result=result,
+            )
         print(f"{event_id}: {result.status} ({result.message})", flush=True)
         if once or result.status == "paper_executed":
             return result
@@ -158,6 +172,7 @@ def main() -> None:
     args = parser.parse_args()
 
     monitor = build_hays_monitor()
+    persistence = SupabasePaperTradeRepository.from_env()
     while True:
         result = monitor.run_once(args.event_id)
         detail = f" ({result.message})" if result.message else ""
@@ -166,12 +181,17 @@ def main() -> None:
         if result.status == "analyzed":
             if result.expectation is None or result.analysis is None:
                 raise RuntimeError("analyzed result is missing expectation or analysis payload")
+            if result.analysis_id is None:
+                raise RuntimeError("analyzed result is missing persisted analysis id")
             run_paper_confirmation_loop(
                 event_id=args.event_id,
                 expectation=result.expectation,
                 analysis=result.analysis,
                 interval_seconds=args.interval_seconds,
                 once=args.once,
+                source_document_id=result.source_document_id,
+                analysis_id=result.analysis_id,
+                persistence=persistence,
             )
             return
 
