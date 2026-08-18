@@ -140,6 +140,112 @@ class TradingSystemFoundationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             broker.execute(proposal)
 
+    def test_missing_spread_data_is_a_hard_rejection(self) -> None:
+        portfolio = PortfolioState(
+            equity=10_000.0,
+            cash=10_000.0,
+            open_positions=0,
+            spread_pct=None,
+            volatility_pct=3.0,
+        )
+        proposal = self.engine.evaluate(self.short_candidate, portfolio)
+
+        self.assertEqual(proposal.risk.status, RiskStatus.REJECT)
+        self.assertIn("missing_spread_data", proposal.risk.reasons)
+        self.assertNotIn("spread_too_wide", proposal.risk.reasons)
+
+    def test_missing_volatility_data_is_a_hard_rejection(self) -> None:
+        portfolio = PortfolioState(
+            equity=10_000.0,
+            cash=10_000.0,
+            open_positions=0,
+            spread_pct=0.2,
+            volatility_pct=None,
+        )
+        proposal = self.engine.evaluate(self.short_candidate, portfolio)
+
+        self.assertEqual(proposal.risk.status, RiskStatus.REJECT)
+        self.assertIn("missing_volatility_data", proposal.risk.reasons)
+        self.assertNotIn("volatility_too_high", proposal.risk.reasons)
+
+    def test_missing_spread_and_volatility_data_are_both_reported(self) -> None:
+        portfolio = PortfolioState(
+            equity=10_000.0,
+            cash=10_000.0,
+            open_positions=0,
+            spread_pct=None,
+            volatility_pct=None,
+        )
+        proposal = self.engine.evaluate(self.short_candidate, portfolio)
+
+        self.assertEqual(proposal.risk.status, RiskStatus.REJECT)
+        self.assertIn("missing_spread_data", proposal.risk.reasons)
+        self.assertIn("missing_volatility_data", proposal.risk.reasons)
+
+    def test_spread_just_under_the_limit_with_valid_volatility_still_passes(self) -> None:
+        portfolio = PortfolioState(
+            equity=10_000.0,
+            cash=10_000.0,
+            open_positions=0,
+            spread_pct=RiskConfig().max_spread_pct - 0.01,
+            volatility_pct=3.0,
+        )
+        proposal = self.engine.evaluate(self.short_candidate, portfolio)
+
+        self.assertEqual(proposal.risk.status, RiskStatus.PASS)
+        self.assertEqual(proposal.risk.reasons, ())
+
+    def test_volatility_just_under_the_limit_with_valid_spread_still_passes(self) -> None:
+        portfolio = PortfolioState(
+            equity=10_000.0,
+            cash=10_000.0,
+            open_positions=0,
+            spread_pct=0.2,
+            volatility_pct=RiskConfig().max_volatility_pct - 0.01,
+        )
+        proposal = self.engine.evaluate(self.short_candidate, portfolio)
+
+        self.assertEqual(proposal.risk.status, RiskStatus.PASS)
+        self.assertEqual(proposal.risk.reasons, ())
+
+    def test_spread_over_the_limit_is_still_rejected_as_spread_too_wide(self) -> None:
+        portfolio = PortfolioState(
+            equity=10_000.0,
+            cash=10_000.0,
+            open_positions=0,
+            spread_pct=RiskConfig().max_spread_pct + 0.5,
+            volatility_pct=3.0,
+        )
+        proposal = self.engine.evaluate(self.short_candidate, portfolio)
+
+        self.assertEqual(proposal.risk.status, RiskStatus.REJECT)
+        self.assertIn("spread_too_wide", proposal.risk.reasons)
+        self.assertNotIn("missing_spread_data", proposal.risk.reasons)
+
+    def test_volatility_over_the_limit_is_still_rejected_as_volatility_too_high(self) -> None:
+        portfolio = PortfolioState(
+            equity=10_000.0,
+            cash=10_000.0,
+            open_positions=0,
+            spread_pct=0.2,
+            volatility_pct=RiskConfig().max_volatility_pct + 1.0,
+        )
+        proposal = self.engine.evaluate(self.short_candidate, portfolio)
+
+        self.assertEqual(proposal.risk.status, RiskStatus.REJECT)
+        self.assertIn("volatility_too_high", proposal.risk.reasons)
+        self.assertNotIn("missing_volatility_data", proposal.risk.reasons)
+
+    def test_otherwise_valid_proposal_with_both_readings_present_is_unaffected(self) -> None:
+        """Same scenario as test_valid_paper_trade_passes_and_sizes_from_risk:
+        the fail-closed fix must not change outcomes when data is present."""
+        proposal = self.engine.evaluate(self.short_candidate, self.portfolio)
+
+        self.assertEqual(proposal.risk.status, RiskStatus.PASS)
+        self.assertEqual(proposal.risk.reasons, ())
+        self.assertEqual(proposal.risk.max_quantity, 10)
+        self.assertEqual(proposal.risk.reward_risk, 2.0)
+
 
 if __name__ == "__main__":
     unittest.main()

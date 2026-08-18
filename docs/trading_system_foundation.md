@@ -72,8 +72,8 @@ Provider/model metadata is persisted with every event analysis so historical dec
 - max open positions
 - instrument exposure cap
 - max daily loss
-- spread cap
-- volatility cap
+- spread cap (missing spread data is a hard rejection, not a skipped check)
+- volatility cap (missing volatility data is a hard rejection, not a skipped check)
 - cooldown after a loss
 - valid entry, stop and target
 - stop/target direction

@@ -104,10 +104,18 @@ class RiskEngine:
         if portfolio.daily_pnl <= -daily_loss_limit and daily_loss_limit > 0:
             reasons.append("max_daily_loss_reached")
 
-        if portfolio.spread_pct is not None and portfolio.spread_pct > self.config.max_spread_pct:
+        # A deterministic gate must fail closed on missing market-quality data,
+        # not silently skip the check: an absent spread/volatility reading is
+        # not evidence that the trade is safe, and callers must never be able
+        # to reach PASS by simply omitting these fields from PortfolioState.
+        if portfolio.spread_pct is None:
+            reasons.append("missing_spread_data")
+        elif portfolio.spread_pct > self.config.max_spread_pct:
             reasons.append("spread_too_wide")
 
-        if portfolio.volatility_pct is not None and portfolio.volatility_pct > self.config.max_volatility_pct:
+        if portfolio.volatility_pct is None:
+            reasons.append("missing_volatility_data")
+        elif portfolio.volatility_pct > self.config.max_volatility_pct:
             reasons.append("volatility_too_high")
 
         if portfolio.last_loss_at is not None:
