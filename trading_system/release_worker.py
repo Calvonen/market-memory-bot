@@ -5,7 +5,7 @@ import os
 import time
 from dataclasses import dataclass
 
-from trading_system.ai_event_analyzer import OpenAIEventAnalyzer
+from trading_system.ai_event_analyzer import EventAnalyzer, build_default_event_analyzer
 from trading_system.release_ingestion import HaysResultsCentreProvider, OfficialReleaseProvider
 from trading_system.release_repository import SupabaseReleaseRepository
 from trading_system.supabase_event_repository import SupabaseEventExpectationRepository
@@ -25,7 +25,7 @@ class EventReleaseMonitor:
         *,
         expectation_repository: SupabaseEventExpectationRepository,
         release_repository: SupabaseReleaseRepository,
-        analyzer: OpenAIEventAnalyzer,
+        analyzer: EventAnalyzer,
         provider: OfficialReleaseProvider,
     ) -> None:
         self.expectations = expectation_repository
@@ -70,6 +70,7 @@ class EventReleaseMonitor:
                 status="analyzed",
                 source_document_id=document_id,
                 analysis_id=str(saved_analysis.get("id")) if saved_analysis.get("id") else None,
+                message=f"AI provider={analysis.provider}, model={analysis.model}",
             )
         except Exception as exc:
             self.releases.record_run(
@@ -85,7 +86,7 @@ def build_hays_monitor() -> EventReleaseMonitor:
     return EventReleaseMonitor(
         expectation_repository=SupabaseEventExpectationRepository.from_env(),
         release_repository=SupabaseReleaseRepository.from_env(),
-        analyzer=OpenAIEventAnalyzer(),
+        analyzer=build_default_event_analyzer(),
         provider=HaysResultsCentreProvider(),
     )
 
@@ -104,7 +105,8 @@ def main() -> None:
     monitor = build_hays_monitor()
     while True:
         result = monitor.run_once(args.event_id)
-        print(f"{args.event_id}: {result.status}", flush=True)
+        detail = f" ({result.message})" if result.message else ""
+        print(f"{args.event_id}: {result.status}{detail}", flush=True)
         if args.once or result.status == "analyzed":
             return
         time.sleep(max(60, args.interval_seconds))
