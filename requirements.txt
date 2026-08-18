@@ -6,3 +6,6 @@ ta
 scikit-learn
 streamlit
 feedparser
+fastapi==0.139.2
+supabase==2.31.0
+uvicorn==0.51.0
