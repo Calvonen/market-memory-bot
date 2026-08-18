@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -57,13 +58,96 @@ class EventAnalyzer(Protocol):
     ) -> AIEventAnalysis: ...
 
 
+def _release_char_budget() -> int:
+    configured = int(os.environ.get("MARKETAI_AI_RELEASE_CHAR_BUDGET", "12000"))
+    return max(4_000, min(configured, 50_000))
+
+
+def _keyword_tokens(expectation: EventExpectation) -> set[str]:
+    tokens = {
+        "guidance",
+        "outlook",
+        "operating profit",
+        "net fees",
+        "earnings",
+        "eps",
+        "cash",
+        "debt",
+        "cost",
+        "saving",
+        "restructuring",
+        "exceptional",
+        "germany",
+        "uk",
+        "ireland",
+        "permanent",
+        "temp",
+        "contracting",
+        "margin",
+        "strategy",
+        "current trading",
+    }
+    for key in (*expectation.consensus.keys(), *expectation.important_kpis):
+        normalized = re.sub(r"[_\-]+", " ", str(key).lower())
+        words = [word for word in normalized.split() if len(word) >= 4]
+        tokens.update(words)
+    return tokens
+
+
+def _select_release_text(expectation: EventExpectation, raw_text: str) -> str:
+    """Keep the immutable source intact but send a bounded, relevant excerpt to AI.
+
+    The beginning of company result releases usually contains headline KPIs and
+    guidance. The remaining budget is filled with paragraphs matching event KPI,
+    outlook, cash, cost and regional terms. This keeps Groq Free-tier requests
+    comfortably below its token-per-minute ceiling without discarding the source.
+    """
+    budget = _release_char_budget()
+    if len(raw_text) <= budget:
+        return raw_text
+
+    normalized = raw_text.replace("\r\n", "\n")
+    paragraphs = [part.strip() for part in re.split(r"\n{1,}", normalized) if part.strip()]
+    if len(paragraphs) <= 1:
+        paragraphs = [part.strip() for part in re.split(r"(?<=[.!?])\s+", normalized) if part.strip()]
+
+    head_budget = min(4_000, budget // 3)
+    head = normalized[:head_budget].strip()
+    keywords = _keyword_tokens(expectation)
+
+    scored: list[tuple[int, int, str]] = []
+    for index, paragraph in enumerate(paragraphs):
+        lowered = paragraph.lower()
+        score = sum(2 if " " in keyword else 1 for keyword in keywords if keyword in lowered)
+        if any(marker in lowered for marker in ("chief executive", "ceo", "current trading", "outlook")):
+            score += 3
+        if score:
+            scored.append((score, -index, paragraph))
+
+    selected: list[str] = [head]
+    used = len(head)
+    seen = {head}
+    for _, _, paragraph in sorted(scored, reverse=True):
+        if paragraph in seen:
+            continue
+        remaining = budget - used - 2
+        if remaining <= 200:
+            break
+        chunk = paragraph[:remaining]
+        selected.append(chunk)
+        seen.add(paragraph)
+        used += len(chunk) + 2
+
+    return "\n\n".join(selected)[:budget]
+
+
 def _build_prompt(expectation: EventExpectation, document: ReleaseDocument) -> str:
     expectation_json = json.dumps(asdict(expectation), default=str, ensure_ascii=False)
-    release_text = document.raw_text[:100_000]
+    release_text = _select_release_text(expectation, document.raw_text)
     return f"""Analyze this official company results release for an event-trading system.
 
 Rules:
-- Extract only facts supported by the supplied official release.
+- Extract only facts supported by the supplied official release excerpt.
 - Return metrics as objects with name, value, and unit. Use null for an unknown value or unit.
 - Compare against the PRE-EVENT expectation snapshot; do not rewrite the expectation.
 - FY26 results already pre-guided should not be treated as a fresh catalyst by themselves.
@@ -72,13 +156,14 @@ Rules:
 - Do not propose position size, order execution, leverage, or bypass risk controls.
 - Evidence quotes must be short excerpts from the supplied release.
 - If evidence is incomplete or contradictory, use MIXED/NEUTRAL and list uncertainties.
+- The complete immutable source document is stored separately; this is a relevance-selected excerpt.
 
 PRE-EVENT EXPECTATION:
 {expectation_json}
 
 OFFICIAL RELEASE TITLE: {document.source_title}
 OFFICIAL RELEASE URL: {document.source_url}
-OFFICIAL RELEASE TEXT:
+OFFICIAL RELEASE EXCERPT:
 {release_text}
 """
 
