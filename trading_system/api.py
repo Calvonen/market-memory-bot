@@ -4,14 +4,19 @@ import os
 import secrets
 from dataclasses import asdict, replace
 from datetime import date
-from typing import Any
+from typing import Any, Protocol
 
 from fastapi import FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
 from trading_system.event_repository import EventExpectationRepository
 from trading_system.models import EventExpectation
+from trading_system.paper_trade_repository import SupabasePaperTradeRepository
 from trading_system.supabase_event_repository import SupabaseEventExpectationRepository
+
+
+class PaperStatusRepository(Protocol):
+    def get_latest_for_event(self, event_id: str) -> dict[str, Any] | None: ...
 
 
 class ExpectationVersionRequest(BaseModel):
@@ -35,6 +40,7 @@ def _expectation_payload(expectation: EventExpectation) -> dict[str, Any]:
 def create_app(
     repository: EventExpectationRepository | None = None,
     *,
+    paper_repository: PaperStatusRepository | None = None,
     admin_token: str | None = None,
 ) -> FastAPI:
     app = FastAPI(
@@ -43,6 +49,7 @@ def create_app(
         description="Backend API for versioned event research and paper trading.",
     )
     repo_cache: EventExpectationRepository | None = repository
+    paper_repo_cache: PaperStatusRepository | None = paper_repository
     configured_admin_token = admin_token or os.environ.get("MARKETAI_ADMIN_API_KEY")
 
     def get_repository() -> EventExpectationRepository:
@@ -50,6 +57,12 @@ def create_app(
         if repo_cache is None:
             repo_cache = SupabaseEventExpectationRepository.from_env()
         return repo_cache
+
+    def get_paper_repository() -> PaperStatusRepository:
+        nonlocal paper_repo_cache
+        if paper_repo_cache is None:
+            paper_repo_cache = SupabasePaperTradeRepository.from_env()
+        return paper_repo_cache
 
     def require_admin(x_admin_token: str | None) -> None:
         if not configured_admin_token:
@@ -88,6 +101,26 @@ def create_app(
         if expectation is None:
             raise HTTPException(status_code=404, detail="Event not found")
         return _expectation_payload(expectation)
+
+    @app.get("/api/v1/events/{event_id}/paper-status")
+    def get_paper_status(event_id: str) -> dict[str, Any]:
+        try:
+            expectation = get_repository().get(event_id)
+            if expectation is None:
+                raise HTTPException(status_code=404, detail="Event not found")
+            run = get_paper_repository().get_latest_for_event(event_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        return {
+            "event_id": event_id,
+            "instrument": expectation.instrument,
+            "event_name": expectation.event_name,
+            "scheduled_date": expectation.scheduled_date,
+            "expectation_version": expectation.version,
+            "paper_run": run,
+            "trading_mode": "PAPER",
+        }
 
     @app.post(
         "/api/v1/events/{event_id}/expectation-versions",
