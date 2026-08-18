@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from enum import Enum
 
 
@@ -21,6 +21,10 @@ class RiskStatus(str, Enum):
     REJECT = "REJECT"
 
 
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 @dataclass(frozen=True)
 class TradeCandidate:
     instrument: str
@@ -32,7 +36,7 @@ class TradeCandidate:
     target_2: float | None = None
     rationale: tuple[str, ...] = ()
     source_event_id: str | None = None
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=utc_now)
 
 
 @dataclass(frozen=True)
