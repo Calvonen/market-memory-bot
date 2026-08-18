@@ -38,7 +38,13 @@ class ReleaseIngestionTests(unittest.TestCase):
 
     def test_ai_scores_are_bounded_to_strategy_component_budgets(self) -> None:
         analysis = EventAnalysisPayload(
-            metrics={"fy27_operating_profit_pre_exceptional_gbp_m": 61.0},
+            metrics=[
+                {
+                    "name": "fy27_operating_profit_pre_exceptional_gbp_m",
+                    "value": 61.0,
+                    "unit": "GBP million",
+                }
+            ],
             guidance_summary="FY27 outlook above consensus",
             management_summary="Cost actions progressing",
             catalyst_direction="BULLISH",
