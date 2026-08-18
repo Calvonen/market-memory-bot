@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, ROUND_FLOOR
 
 from trading_system.models import (
     Direction,
@@ -27,6 +28,15 @@ class RiskConfig:
     cooldown_after_loss_minutes: int = 60
     kill_switch: bool = False
     live_trading_enabled: bool = False
+
+
+def _decimal(value: float) -> Decimal:
+    """Convert configured/market floats through their decimal string form.
+
+    Risk sizing must not lose a whole unit because binary floating-point represents
+    simple decimal prices such as 0.80 - 0.76 as 0.040000000000000036.
+    """
+    return Decimal(str(value))
 
 
 class RiskEngine:
@@ -104,33 +114,41 @@ class RiskEngine:
             reasons.append("invalid_target")
 
         reward_risk: float | None = None
-        risk_per_unit = 0.0
+        risk_per_unit_decimal = Decimal("0")
 
         if entry and stop and target and entry > 0 and stop > 0 and target > 0:
-            if candidate.direction is Direction.LONG:
-                risk_per_unit = entry - stop
-                reward_per_unit = target - entry
-            else:
-                risk_per_unit = stop - entry
-                reward_per_unit = entry - target
+            entry_decimal = _decimal(entry)
+            stop_decimal = _decimal(stop)
+            target_decimal = _decimal(target)
 
-            if risk_per_unit <= 0:
+            if candidate.direction is Direction.LONG:
+                risk_per_unit_decimal = entry_decimal - stop_decimal
+                reward_per_unit_decimal = target_decimal - entry_decimal
+            else:
+                risk_per_unit_decimal = stop_decimal - entry_decimal
+                reward_per_unit_decimal = entry_decimal - target_decimal
+
+            if risk_per_unit_decimal <= 0:
                 reasons.append("stop_on_wrong_side")
-            if reward_per_unit <= 0:
+            if reward_per_unit_decimal <= 0:
                 reasons.append("target_on_wrong_side")
 
-            if risk_per_unit > 0 and reward_per_unit > 0:
-                reward_risk = reward_per_unit / risk_per_unit
-                if reward_risk < self.config.min_reward_risk:
+            if risk_per_unit_decimal > 0 and reward_per_unit_decimal > 0:
+                reward_risk_decimal = reward_per_unit_decimal / risk_per_unit_decimal
+                reward_risk = float(reward_risk_decimal)
+                if reward_risk_decimal < _decimal(self.config.min_reward_risk):
                     reasons.append("reward_risk_below_minimum")
 
         max_risk_amount = max(portfolio.equity, 0.0) * (self.config.max_risk_per_trade_pct / 100.0)
         max_position_value = max(portfolio.equity, 0.0) * (self.config.max_position_pct / 100.0)
         max_quantity = 0
 
-        if entry and entry > 0 and risk_per_unit > 0:
-            by_risk = int(max_risk_amount // risk_per_unit)
-            by_position_value = int(max_position_value // entry)
+        if entry and entry > 0 and risk_per_unit_decimal > 0:
+            max_risk_decimal = _decimal(max_risk_amount)
+            max_position_decimal = _decimal(max_position_value)
+            entry_decimal = _decimal(entry)
+            by_risk = int((max_risk_decimal / risk_per_unit_decimal).to_integral_value(rounding=ROUND_FLOOR))
+            by_position_value = int((max_position_decimal / entry_decimal).to_integral_value(rounding=ROUND_FLOOR))
             max_quantity = max(0, min(by_risk, by_position_value))
             if max_quantity < 1:
                 reasons.append("position_size_below_one_unit")
