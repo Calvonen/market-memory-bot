@@ -8,7 +8,7 @@ from trading_system.post_release_paper import PostReleasePaperResult
 
 
 class SupabasePaperTradeRepository:
-    """Persist the latest paper confirmation state for one AI analysis.
+    """Persist and read the latest paper confirmation state for one AI analysis.
 
     One row per analysis is intentionally upserted as confirmation evolves from
     waiting to an executed paper order.  This keeps a durable strategy/risk/order
@@ -29,6 +29,18 @@ class SupabasePaperTradeRepository:
                 "MARKETAI_SUPABASE_URL and MARKETAI_SUPABASE_SECRET_KEY are required"
             )
         return cls(create_client(url, key))
+
+    def get_latest_for_event(self, event_id: str) -> dict[str, Any] | None:
+        response = (
+            self.client.table("event_paper_trade_runs")
+            .select("*")
+            .eq("event_id", event_id)
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        return rows[0] if rows else None
 
     def save_result(
         self,
