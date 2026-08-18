@@ -80,6 +80,14 @@ class StrategyDecision:
 
 
 @dataclass(frozen=True)
+class TradeLevels:
+    entry: float | None
+    stop: float | None
+    target_1: float | None
+    target_2: float | None = None
+
+
+@dataclass(frozen=True)
 class TradeCandidate:
     instrument: str
     direction: Direction
