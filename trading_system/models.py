@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 
 
@@ -69,7 +69,7 @@ class EventExpectation:
     event_id: str
     instrument: str
     event_name: str
-    scheduled_at: datetime
+    scheduled_date: date
     consensus: dict[str, float | str | None] = field(default_factory=dict)
     important_kpis: tuple[str, ...] = ()
     bull_case: tuple[str, ...] = ()
