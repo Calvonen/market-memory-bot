@@ -14,7 +14,13 @@ from trading_system.release_ingestion import ReleaseDocument
 
 
 PAYLOAD = {
-    "metrics": {"fy26_operating_profit_pre_exceptional_gbp_m": 45.0},
+    "metrics": [
+        {
+            "name": "fy26_operating_profit_pre_exceptional_gbp_m",
+            "value": 45.0,
+            "unit": "GBP million",
+        }
+    ],
     "guidance_summary": "FY27 outlook broadly in line.",
     "management_summary": "Management remains cautious.",
     "catalyst_direction": "NEUTRAL",
@@ -46,7 +52,6 @@ def document() -> ReleaseDocument:
         source_url="https://example.test/hays-results",
         source_title="Hays FY26 results",
         raw_text="Official release text.",
-        content_sha256="abc123",
     )
 
 
@@ -64,11 +69,9 @@ class StubAnalyzer:
 
 
 class AIProviderTests(unittest.TestCase):
-    def test_groq_uses_json_schema_and_returns_provider_metadata(self) -> None:
+    def test_groq_uses_strict_json_schema_and_returns_provider_metadata(self) -> None:
         analyzer = GroqEventAnalyzer(api_key="test", model="openai/gpt-oss-120b")
-        response = {
-            "choices": [{"message": {"content": json.dumps(PAYLOAD)}}]
-        }
+        response = {"choices": [{"message": {"content": json.dumps(PAYLOAD)}}]}
 
         with patch("trading_system.ai_event_analyzer._post_json", return_value=response) as post:
             result = analyzer.analyze(expectation(), document())
@@ -76,9 +79,15 @@ class AIProviderTests(unittest.TestCase):
         self.assertEqual(result.provider, "groq")
         self.assertEqual(result.model, "openai/gpt-oss-120b")
         self.assertEqual(result.payload.catalyst_score_0_25, 8)
+        self.assertEqual(
+            result.payload.metric_values()["fy26_operating_profit_pre_exceptional_gbp_m"],
+            45.0,
+        )
         body = post.call_args.args[1]
+        schema = body["response_format"]["json_schema"]["schema"]
         self.assertEqual(body["response_format"]["type"], "json_schema")
         self.assertTrue(body["response_format"]["json_schema"]["strict"])
+        self.assertFalse(schema["additionalProperties"])
 
     def test_fallback_uses_second_analyzer_after_first_failure(self) -> None:
         first = StubAnalyzer(error=RuntimeError("rate limited"))
