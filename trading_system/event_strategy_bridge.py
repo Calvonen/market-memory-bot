@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from trading_system.ai_event_analyzer import EventAnalysisPayload
-from trading_system.models import ComponentAssessment, Direction
+from trading_system.models import ComponentAssessment, Direction, StrategyInputs
 
 
 def _direction(value: str) -> Direction:
@@ -44,3 +44,25 @@ def event_analysis_components(
         ),
     )
     return fundamental, catalyst
+
+
+def build_event_strategy_inputs(
+    *,
+    instrument: str,
+    event_id: str,
+    analysis: EventAnalysisPayload,
+    technical: ComponentAssessment,
+    market_memory: ComponentAssessment,
+    news_sentiment: ComponentAssessment,
+) -> StrategyInputs:
+    fundamental, catalyst = event_analysis_components(analysis)
+    return StrategyInputs(
+        instrument=instrument,
+        fundamental=fundamental,
+        catalyst=catalyst,
+        technical=technical,
+        market_memory=market_memory,
+        news_sentiment=news_sentiment,
+        source_event_id=event_id,
+        invalidation=tuple(analysis.invalidation_flags),
+    )
