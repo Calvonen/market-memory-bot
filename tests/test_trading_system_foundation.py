@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from trading_system.brokers.paper import PaperBroker
 from trading_system.models import Direction, PortfolioState, RiskStatus, TradeCandidate, TradingMode
@@ -77,7 +77,7 @@ class TradingSystemFoundationTests(unittest.TestCase):
         self.assertIn("reward_risk_below_minimum", proposal.risk.reasons)
 
     def test_daily_loss_and_cooldown_are_hard_rejections(self) -> None:
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         portfolio = PortfolioState(
             equity=10_000.0,
             cash=9_700.0,
