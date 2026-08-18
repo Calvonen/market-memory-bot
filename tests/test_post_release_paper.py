@@ -1,5 +1,4 @@
 import unittest
-from datetime import date
 
 import pandas as pd
 
@@ -98,6 +97,45 @@ class PostReleasePaperTests(unittest.TestCase):
 
         self.assertEqual(result.status, "waiting_confirmation")
         self.assertEqual(result.message, "no event-day market bar yet")
+
+    def test_later_bar_does_not_replace_event_day_reaction(self) -> None:
+        df = pd.DataFrame(
+            {
+                "Close": [0.80, 0.84, 0.79],
+                "atr_pct": [4.0, 4.0, 4.0],
+            },
+            index=pd.to_datetime(["2026-08-19", "2026-08-20", "2026-08-21"]),
+        )
+        result = run_post_release_paper(
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            portfolio=self.portfolio,
+            market_df=df,
+            technical=self.technical,
+            market_memory=self.memory,
+        )
+
+        self.assertEqual(result.status, "paper_executed")
+
+    def test_missing_spread_assumption_stays_fail_closed(self) -> None:
+        portfolio = PortfolioState(
+            equity=10_000.0,
+            cash=10_000.0,
+            open_positions=0,
+            spread_pct=None,
+            volatility_pct=None,
+        )
+        result = run_post_release_paper(
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            portfolio=portfolio,
+            market_df=self.market_df(0.80, 0.84),
+            technical=self.technical,
+            market_memory=self.memory,
+        )
+
+        self.assertEqual(result.status, "waiting_confirmation")
+        self.assertEqual(result.message, "paper spread assumption unavailable")
 
 
 if __name__ == "__main__":
