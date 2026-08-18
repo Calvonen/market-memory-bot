@@ -163,3 +163,22 @@ class EventActuals:
     price_reaction_pct: float | None = None
     source_document_id: str | None = None
     captured_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(frozen=True)
+class EventMetricComparison:
+    metric: str
+    consensus: float | str | None
+    actual: float | str | None
+    absolute_delta: float | None = None
+    percent_delta: float | None = None
+
+
+@dataclass(frozen=True)
+class EventComparison:
+    event_id: str
+    instrument: str
+    metrics: tuple[EventMetricComparison, ...]
+    missing_important_kpis: tuple[str, ...] = ()
+    guidance_summary: str | None = None
+    price_reaction_pct: float | None = None
