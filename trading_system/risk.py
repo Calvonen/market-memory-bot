@@ -66,14 +66,27 @@ class RiskEngine:
         reasons: list[str] = []
         current_time = now or datetime.now(UTC)
 
+        max_risk_amount = max(portfolio.equity, 0.0) * (self.config.max_risk_per_trade_pct / 100.0)
+        max_position_value = max(portfolio.equity, 0.0) * (self.config.max_position_pct / 100.0)
+
+        # A StrategyEngine NO_TRADE is already a complete, deterministic rejection.
+        # Do not run entry/stop/target geometry for a direction that will never be
+        # sent to a broker; doing so only adds misleading secondary reasons.
+        if candidate.direction is Direction.NO_TRADE:
+            return RiskDecision(
+                status=RiskStatus.REJECT,
+                reasons=("strategy_returned_no_trade",),
+                max_risk_amount=max_risk_amount,
+                max_position_value=max_position_value,
+                max_quantity=0,
+                reward_risk=None,
+            )
+
         if self.config.kill_switch:
             reasons.append("kill_switch_active")
 
         if requested_mode is TradingMode.LIVE and not self.config.live_trading_enabled:
             reasons.append("live_trading_disabled")
-
-        if candidate.direction is Direction.NO_TRADE:
-            reasons.append("strategy_returned_no_trade")
 
         if candidate.direction not in {Direction.LONG, Direction.SHORT}:
             reasons.append("unsupported_direction")
@@ -139,8 +152,6 @@ class RiskEngine:
                 if reward_risk_decimal < _decimal(self.config.min_reward_risk):
                     reasons.append("reward_risk_below_minimum")
 
-        max_risk_amount = max(portfolio.equity, 0.0) * (self.config.max_risk_per_trade_pct / 100.0)
-        max_position_value = max(portfolio.equity, 0.0) * (self.config.max_position_pct / 100.0)
         max_quantity = 0
 
         if entry and entry > 0 and risk_per_unit_decimal > 0:
