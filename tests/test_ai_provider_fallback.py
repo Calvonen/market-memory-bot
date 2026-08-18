@@ -9,6 +9,7 @@ from trading_system.ai_event_analyzer import (
     EventAnalysisPayload,
     FallbackEventAnalyzer,
     GroqEventAnalyzer,
+    _parse_payload,
     _select_release_text,
 )
 from trading_system.models import EventExpectation
@@ -18,20 +19,20 @@ from trading_system.release_ingestion import ReleaseDocument
 PAYLOAD = {
     "metrics": [
         {
-            "name": "fy26_operating_profit_pre_exceptional_gbp_m",
-            "value": 45.0,
+            "name": "fy27_operating_profit_pre_exceptional_gbp_m",
+            "value": 61.0,
             "unit": "GBP million",
         }
     ],
-    "guidance_summary": "FY27 outlook broadly in line.",
+    "guidance_summary": "FY27 outlook above consensus.",
     "management_summary": "Management remains cautious.",
-    "catalyst_direction": "NEUTRAL",
-    "catalyst_score_0_25": 8,
-    "fundamental_direction": "NEUTRAL",
-    "fundamental_score_0_35": 12,
-    "key_positive_surprises": [],
+    "catalyst_direction": "BULLISH",
+    "catalyst_score_0_25": 20,
+    "fundamental_direction": "BULLISH",
+    "fundamental_score_0_35": 22,
+    "key_positive_surprises": ["FY27 outlook stronger"],
     "key_negative_surprises": [],
-    "uncertainties": ["FY27 range not quantified"],
+    "uncertainties": ["market recovery timing"],
     "invalidation_flags": [],
     "evidence_quotes": ["outlook remains challenging"],
 }
@@ -72,7 +73,7 @@ class StubAnalyzer:
 
 
 class AIProviderTests(unittest.TestCase):
-    def test_groq_uses_strict_json_schema_and_returns_provider_metadata(self) -> None:
+    def test_groq_schema_limits_metric_names_to_event_keys(self) -> None:
         analyzer = GroqEventAnalyzer(api_key="test", model="openai/gpt-oss-120b")
         response = {"choices": [{"message": {"content": json.dumps(PAYLOAD)}}]}
 
@@ -80,17 +81,25 @@ class AIProviderTests(unittest.TestCase):
             result = analyzer.analyze(expectation(), document())
 
         self.assertEqual(result.provider, "groq")
-        self.assertEqual(result.model, "openai/gpt-oss-120b")
-        self.assertEqual(result.payload.catalyst_score_0_25, 8)
         self.assertEqual(
-            result.payload.metric_values()["fy26_operating_profit_pre_exceptional_gbp_m"],
-            45.0,
+            result.payload.metric_values()["fy27_operating_profit_pre_exceptional_gbp_m"],
+            61.0,
         )
-        body = post.call_args.args[1]
-        schema = body["response_format"]["json_schema"]["schema"]
-        self.assertEqual(body["response_format"]["type"], "json_schema")
-        self.assertTrue(body["response_format"]["json_schema"]["strict"])
-        self.assertFalse(schema["additionalProperties"])
+        schema = post.call_args.args[1]["response_format"]["json_schema"]["schema"]
+        allowed = schema["$defs"]["ExtractedMetric"]["properties"]["name"]["enum"]
+        self.assertEqual(
+            allowed,
+            [
+                "fy27_operating_profit_pre_exceptional_gbp_m",
+                "guidance",
+                "germany_net_fee_trend",
+            ],
+        )
+
+    def test_non_canonical_metric_name_is_rejected_after_provider_response(self) -> None:
+        bad = {**PAYLOAD, "metrics": [{"name": "FY27 operating profit", "value": 61.0, "unit": "GBP million"}]}
+        with self.assertRaisesRegex(RuntimeError, "non-canonical metric names"):
+            _parse_payload(json.dumps(bad), expectation())
 
     def test_release_excerpt_respects_budget_and_keeps_late_guidance(self) -> None:
         filler = "General corporate information without a catalyst. " * 500
@@ -99,10 +108,8 @@ class AIProviderTests(unittest.TestCase):
             "with Germany net fees stabilising and structural cost savings continuing."
         )
         raw = filler + "\n\n" + late_guidance
-
         with patch.dict(os.environ, {"MARKETAI_AI_RELEASE_CHAR_BUDGET": "5000"}):
             excerpt = _select_release_text(expectation(), raw)
-
         self.assertLessEqual(len(excerpt), 5000)
         self.assertIn("FY27 guidance and outlook", excerpt)
 
@@ -115,9 +122,7 @@ class AIProviderTests(unittest.TestCase):
             raw_response=json.dumps(PAYLOAD),
         )
         second = StubAnalyzer(result=expected)
-
         result = FallbackEventAnalyzer([first, second]).analyze(expectation(), document())
-
         self.assertEqual(result.provider, "ollama")
         self.assertEqual(first.calls, 1)
         self.assertEqual(second.calls, 1)
@@ -129,7 +134,6 @@ class AIProviderTests(unittest.TestCase):
                 StubAnalyzer(error=RuntimeError("ollama down")),
             ]
         )
-
         with self.assertRaisesRegex(RuntimeError, "All event analyzers failed"):
             analyzer.analyze(expectation(), document())
 
