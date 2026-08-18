@@ -1,4 +1,5 @@
 import unittest
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import patch
 
@@ -6,9 +7,10 @@ from tests.fixtures.hays_fy2026 import HAYS_FY2026
 from trading_system.ai_event_analyzer import AIEventAnalysis, EventAnalysisPayload
 from trading_system.event_repository import InMemoryEventExpectationRepository
 from trading_system.post_release_paper import PostReleasePaperResult
-from trading_system.release_ingestion import ReleaseDocument
+from trading_system.release_ingestion import HaysResultsCentreProvider, ReleaseDocument
 from trading_system.release_worker import (
     EventReleaseMonitor,
+    build_hays_monitor,
     build_paper_portfolio_from_env,
     run_paper_confirmation_loop,
 )
@@ -199,7 +201,14 @@ class _FakeReleaseRepository:
         source_document_id: str | None = None,
         error_message: str | None = None,
     ) -> None:
-        self.runs.append({"event_id": event_id, "provider": provider, "status": status})
+        self.runs.append(
+            {
+                "event_id": event_id,
+                "provider": provider,
+                "status": status,
+                "error_message": error_message,
+            }
+        )
 
 
 class _FakeProvider:
@@ -210,6 +219,13 @@ class _FakeProvider:
 
     def discover(self, event_id: str) -> ReleaseDocument:
         return self.document
+
+
+class _NoReleaseProvider:
+    name = "hays_results_centre"
+
+    def discover(self, event_id: str) -> None:
+        return None
 
 
 class _CountingAnalyzer:
@@ -318,6 +334,169 @@ class EventReleaseMonitorRestartTests(unittest.TestCase):
         self.assertEqual(first.analysis_id, second.analysis_id)
         self.assertEqual(len(releases.analyses), 1)
         self.assertEqual(releases.analyses[0]["provider"], "groq")
+
+
+class EventReleaseMonitorOverdueTests(unittest.TestCase):
+    """scheduled_date=2026-08-20, default grace window=8h (see setUp)."""
+
+    def setUp(self) -> None:
+        self.expectations = InMemoryEventExpectationRepository({HAYS_FY2026.event_id: HAYS_FY2026})
+        self.releases = _FakeReleaseRepository()
+        self.analyzer = _CountingAnalyzer(
+            AIEventAnalysis(
+                payload=EventAnalysisPayload(
+                    metrics=[],
+                    guidance_summary="",
+                    management_summary="",
+                    catalyst_direction="NEUTRAL",
+                    catalyst_score_0_25=0,
+                    fundamental_direction="NEUTRAL",
+                    fundamental_score_0_35=0,
+                    key_positive_surprises=[],
+                    key_negative_surprises=[],
+                    uncertainties=[],
+                    invalidation_flags=[],
+                    evidence_quotes=[],
+                ),
+                provider="groq",
+                model="openai/gpt-oss-120b",
+                raw_response="{}",
+            )
+        )
+
+    def _monitor(self, now: datetime) -> EventReleaseMonitor:
+        return EventReleaseMonitor(
+            expectation_repository=self.expectations,
+            release_repository=self.releases,
+            analyzer=self.analyzer,
+            provider=_NoReleaseProvider(),
+            overdue_grace_hours=8.0,
+            clock=lambda: now,
+        )
+
+    def test_no_release_before_scheduled_date_is_not_overdue(self) -> None:
+        monitor = self._monitor(datetime(2026, 8, 19, 12, 0, tzinfo=UTC))
+        result = monitor.run_once(HAYS_FY2026.event_id)
+
+        self.assertEqual(result.status, "no_release")
+        self.assertFalse(result.overdue)
+        self.assertIsNone(result.message)
+        self.assertIsNone(self.releases.runs[-1]["error_message"])
+
+    def test_no_release_on_scheduled_date_within_grace_window_is_not_yet_overdue(self) -> None:
+        monitor = self._monitor(datetime(2026, 8, 20, 2, 0, tzinfo=UTC))
+        result = monitor.run_once(HAYS_FY2026.event_id)
+
+        self.assertEqual(result.status, "no_release")
+        self.assertFalse(result.overdue)
+
+    def test_no_release_past_grace_window_is_flagged_overdue_and_distinguishable_in_audit_log(self) -> None:
+        monitor = self._monitor(datetime(2026, 8, 20, 20, 0, tzinfo=UTC))
+        result = monitor.run_once(HAYS_FY2026.event_id)
+
+        self.assertEqual(result.status, "no_release")
+        self.assertTrue(result.overdue)
+        assert result.message is not None
+        self.assertIn("overdue", result.message.lower())
+
+        # status column stays a known, schema-safe value; the distinguishing
+        # signal rides in error_message instead of inventing a new status.
+        last_run = self.releases.runs[-1]
+        self.assertEqual(last_run["status"], "no_release")
+        assert last_run["error_message"] is not None
+        self.assertIn("overdue", last_run["error_message"].lower())
+
+    def test_overdue_never_invents_a_release_or_calls_the_analyzer(self) -> None:
+        monitor = self._monitor(datetime(2026, 8, 25, 0, 0, tzinfo=UTC))
+        result = monitor.run_once(HAYS_FY2026.event_id)
+
+        self.assertEqual(result.status, "no_release")
+        self.assertIsNone(result.analysis)
+        self.assertEqual(self.analyzer.calls, 0)
+        self.assertEqual(len(self.releases.documents), 0)
+        self.assertEqual(len(self.releases.analyses), 0)
+
+
+class BuildHaysMonitorTests(unittest.TestCase):
+    def test_release_url_override_is_threaded_into_the_provider(self) -> None:
+        override_url = "https://www.haysplc.com/results/manually-confirmed-release"
+        with (
+            patch(
+                "trading_system.release_worker.SupabaseEventExpectationRepository.from_env",
+                return_value=InMemoryEventExpectationRepository(),
+            ),
+            patch(
+                "trading_system.release_worker.SupabaseReleaseRepository.from_env",
+                return_value=_FakeReleaseRepository(),
+            ),
+            patch(
+                "trading_system.release_worker.build_default_event_analyzer",
+                return_value=_CountingAnalyzer(
+                    AIEventAnalysis(
+                        payload=EventAnalysisPayload(
+                            metrics=[],
+                            guidance_summary="",
+                            management_summary="",
+                            catalyst_direction="NEUTRAL",
+                            catalyst_score_0_25=0,
+                            fundamental_direction="NEUTRAL",
+                            fundamental_score_0_35=0,
+                            key_positive_surprises=[],
+                            key_negative_surprises=[],
+                            uncertainties=[],
+                            invalidation_flags=[],
+                            evidence_quotes=[],
+                        ),
+                        provider="groq",
+                        model="openai/gpt-oss-120b",
+                        raw_response="{}",
+                    )
+                ),
+            ),
+        ):
+            monitor = build_hays_monitor(release_url_override=override_url)
+
+        self.assertIsInstance(monitor.provider, HaysResultsCentreProvider)
+        self.assertEqual(monitor.provider.override_url, override_url)
+
+    def test_no_override_url_leaves_provider_in_auto_discovery_mode(self) -> None:
+        with (
+            patch(
+                "trading_system.release_worker.SupabaseEventExpectationRepository.from_env",
+                return_value=InMemoryEventExpectationRepository(),
+            ),
+            patch(
+                "trading_system.release_worker.SupabaseReleaseRepository.from_env",
+                return_value=_FakeReleaseRepository(),
+            ),
+            patch(
+                "trading_system.release_worker.build_default_event_analyzer",
+                return_value=_CountingAnalyzer(
+                    AIEventAnalysis(
+                        payload=EventAnalysisPayload(
+                            metrics=[],
+                            guidance_summary="",
+                            management_summary="",
+                            catalyst_direction="NEUTRAL",
+                            catalyst_score_0_25=0,
+                            fundamental_direction="NEUTRAL",
+                            fundamental_score_0_35=0,
+                            key_positive_surprises=[],
+                            key_negative_surprises=[],
+                            uncertainties=[],
+                            invalidation_flags=[],
+                            evidence_quotes=[],
+                        ),
+                        provider="groq",
+                        model="openai/gpt-oss-120b",
+                        raw_response="{}",
+                    )
+                ),
+            ),
+        ):
+            monitor = build_hays_monitor()
+
+        self.assertIsNone(monitor.provider.override_url)
 
 
 if __name__ == "__main__":

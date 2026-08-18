@@ -9,3 +9,4 @@ feedparser
 fastapi==0.139.2
 supabase==2.31.0
 uvicorn==0.51.0
+pypdf==6.16.1

@@ -4,6 +4,7 @@ import argparse
 import os
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Callable
 
 from trading_system.ai_event_analyzer import (
@@ -20,6 +21,8 @@ from trading_system.release_ingestion import HaysResultsCentreProvider, Official
 from trading_system.release_repository import SupabaseReleaseRepository
 from trading_system.supabase_event_repository import SupabaseEventExpectationRepository
 
+DEFAULT_OVERDUE_GRACE_HOURS = 8.0
+
 
 @dataclass(frozen=True)
 class IngestionResult:
@@ -29,6 +32,20 @@ class IngestionResult:
     message: str | None = None
     expectation: EventExpectation | None = None
     analysis: EventAnalysisPayload | None = None
+    overdue: bool = False
+
+
+def _is_release_overdue(expectation: EventExpectation, now: datetime, grace_hours: float) -> bool:
+    """A release is "overdue" once its scheduled date plus a grace window has passed.
+
+    This never invents or assumes a release exists - it only changes how a
+    continuing no_release state is logged/audited, so operators watching the
+    worker on the actual release day are not left staring at an
+    indistinguishable stream of "no_release" lines with no signal that
+    something may be wrong (wrong URL, site layout change, missed release).
+    """
+    scheduled_start = datetime.combine(expectation.scheduled_date, datetime.min.time(), tzinfo=UTC)
+    return now >= scheduled_start + timedelta(hours=grace_hours)
 
 
 class EventReleaseMonitor:
@@ -39,11 +56,15 @@ class EventReleaseMonitor:
         release_repository: SupabaseReleaseRepository,
         analyzer: EventAnalyzer,
         provider: OfficialReleaseProvider,
+        overdue_grace_hours: float = DEFAULT_OVERDUE_GRACE_HOURS,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.expectations = expectation_repository
         self.releases = release_repository
         self.analyzer = analyzer
         self.provider = provider
+        self.overdue_grace_hours = overdue_grace_hours
+        self.clock = clock
 
     def run_once(self, event_id: str) -> IngestionResult:
         expectation = self.expectations.get(event_id)
@@ -53,12 +74,22 @@ class EventReleaseMonitor:
         try:
             document = self.provider.discover(event_id)
             if document is None:
+                now = self.clock()
+                overdue = _is_release_overdue(expectation, now, self.overdue_grace_hours)
+                note = None
+                if overdue:
+                    note = (
+                        f"release overdue: scheduled_date={expectation.scheduled_date.isoformat()} "
+                        f"still no_release as of {now.isoformat()} (grace={self.overdue_grace_hours}h). "
+                        "Not inventing a release; verify the source manually or use the release-url override."
+                    )
                 self.releases.record_run(
                     event_id=event_id,
                     provider=self.provider.name,
                     status="no_release",
+                    error_message=note,
                 )
-                return IngestionResult(status="no_release")
+                return IngestionResult(status="no_release", overdue=overdue, message=note)
 
             existing = self.releases.find_document(event_id, document.content_sha256)
             stored = existing or self.releases.save_document(document)
@@ -113,12 +144,23 @@ class EventReleaseMonitor:
             raise
 
 
-def build_hays_monitor() -> EventReleaseMonitor:
+def build_hays_monitor(*, release_url_override: str | None = None) -> EventReleaseMonitor:
+    """Build the Hays FY2026 monitor.
+
+    `release_url_override` is a plain, explicit URL - never a secret - read
+    from `MARKETAI_HAYS_RELEASE_URL` or the `--release-url` CLI flag. When
+    set, discovery trusts that exact URL instead of scanning/matching the
+    results-centre listing page, for use if the site's title/link format
+    ever drifts away from what automatic matching expects.
+    """
     return EventReleaseMonitor(
         expectation_repository=SupabaseEventExpectationRepository.from_env(),
         release_repository=SupabaseReleaseRepository.from_env(),
         analyzer=build_default_event_analyzer(),
-        provider=HaysResultsCentreProvider(),
+        provider=HaysResultsCentreProvider(override_url=release_url_override),
+        overdue_grace_hours=float(
+            os.environ.get("MARKETAI_RELEASE_OVERDUE_GRACE_HOURS", str(DEFAULT_OVERDUE_GRACE_HOURS))
+        ),
     )
 
 
@@ -208,9 +250,17 @@ def main() -> None:
         type=int,
         default=int(os.environ.get("MARKETAI_RELEASE_POLL_SECONDS", "300")),
     )
+    parser.add_argument(
+        "--release-url",
+        default=os.environ.get("MARKETAI_HAYS_RELEASE_URL") or None,
+        help=(
+            "Explicit official Hays release URL (HTML or PDF) to use instead of "
+            "results-centre auto-discovery. Also settable via MARKETAI_HAYS_RELEASE_URL."
+        ),
+    )
     args = parser.parse_args()
 
-    monitor = build_hays_monitor()
+    monitor = build_hays_monitor(release_url_override=args.release_url)
     persistence = SupabasePaperTradeRepository.from_env()
 
     # Fail-closed on restart: if a paper order is already recorded for this
@@ -227,7 +277,8 @@ def main() -> None:
     while True:
         result = monitor.run_once(args.event_id)
         detail = f" ({result.message})" if result.message else ""
-        print(f"{args.event_id}: {result.status}{detail}", flush=True)
+        overdue_tag = " [RELEASE OVERDUE]" if result.overdue else ""
+        print(f"{args.event_id}: {result.status}{overdue_tag}{detail}", flush=True)
 
         if result.status == "analyzed":
             if result.expectation is None or result.analysis is None:
