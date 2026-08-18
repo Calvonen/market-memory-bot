@@ -49,6 +49,7 @@ class SupabaseEventExpectationRepository(EventExpectationRepository):
         response = (
             self.client.table("current_event_expectations")
             .select("*")
+            .eq("status", "scheduled")
             .gte("scheduled_date", today)
             .order("scheduled_date")
             .execute()
@@ -73,10 +74,9 @@ class SupabaseEventExpectationRepository(EventExpectationRepository):
             on_conflict="event_id",
         ).execute()
 
-        next_version = self._next_version(expectation.event_id)
         payload = {
             "event_id": expectation.event_id,
-            "version": next_version,
+            "version": self._next_version(expectation.event_id),
             "source_name": expectation.source_name or "manual",
             "source_url": expectation.source_url,
             "source_as_of": expectation.source_as_of.isoformat()
@@ -92,9 +92,9 @@ class SupabaseEventExpectationRepository(EventExpectationRepository):
             "change_note": change_note,
         }
 
-        # Concurrent writers can race on version allocation. Retry by re-reading
-        # the latest version if the unique (event_id, version) constraint wins
-        # elsewhere first.
+        # Concurrent writers can race on version allocation. Retry only the
+        # unique-constraint conflict; permission, validation and network errors
+        # must surface instead of being hidden by retries.
         for attempt in range(3):
             try:
                 response = (
@@ -110,8 +110,8 @@ class SupabaseEventExpectationRepository(EventExpectationRepository):
                     version=int(row.get("version", payload["version"])),
                     updated_at=created_at,
                 )
-            except Exception:
-                if attempt == 2:
+            except Exception as exc:
+                if not self._is_unique_violation(exc) or attempt == 2:
                     raise
                 payload["version"] = self._next_version(expectation.event_id)
 
@@ -164,3 +164,7 @@ class SupabaseEventExpectationRepository(EventExpectationRepository):
         if isinstance(value, datetime):
             return value if value.tzinfo else value.replace(tzinfo=UTC)
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    @staticmethod
+    def _is_unique_violation(exc: Exception) -> bool:
+        return getattr(exc, "code", None) == "23505" or "23505" in str(exc)
