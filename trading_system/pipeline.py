@@ -8,6 +8,7 @@ from trading_system.brokers.paper import PaperBroker
 from trading_system.models import (
     Direction,
     PortfolioState,
+    RiskStatus,
     StrategyDecision,
     StrategyInputs,
     TradeCandidate,
@@ -94,7 +95,7 @@ class PaperTradingPipeline:
         self.journal.record_proposal(proposal)
 
         order: BrokerOrder | None = None
-        if strategy.direction in {Direction.LONG, Direction.SHORT} and proposal.risk.status.value == "PASS":
+        if strategy.direction in {Direction.LONG, Direction.SHORT} and proposal.risk.status is RiskStatus.PASS:
             order = self.broker.execute(proposal)
             self.journal.record_order(order)
 
