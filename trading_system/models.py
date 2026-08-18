@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from enum import Enum
+from uuid import uuid4
 
 
 class Direction(str, Enum):
@@ -25,6 +26,36 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def new_id() -> str:
+    return uuid4().hex
+
+
+@dataclass(frozen=True)
+class ScoreBreakdown:
+    fundamental: int = 0
+    catalyst: int = 0
+    technical: int = 0
+    market_memory: int = 0
+    news_sentiment: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.fundamental + self.catalyst + self.technical + self.market_memory + self.news_sentiment
+
+
+@dataclass(frozen=True)
+class StrategyDecision:
+    instrument: str
+    direction: Direction
+    confidence: int
+    scores: ScoreBreakdown
+    rationale: tuple[str, ...] = ()
+    invalidation: tuple[str, ...] = ()
+    source_event_id: str | None = None
+    decision_id: str = field(default_factory=new_id)
+    created_at: datetime = field(default_factory=utc_now)
+
+
 @dataclass(frozen=True)
 class TradeCandidate:
     instrument: str
@@ -36,6 +67,8 @@ class TradeCandidate:
     target_2: float | None = None
     rationale: tuple[str, ...] = ()
     source_event_id: str | None = None
+    strategy_decision_id: str | None = None
+    candidate_id: str = field(default_factory=new_id)
     created_at: datetime = field(default_factory=utc_now)
 
 
@@ -59,6 +92,8 @@ class RiskDecision:
     max_position_value: float = 0.0
     max_quantity: int = 0
     reward_risk: float | None = None
+    decision_id: str = field(default_factory=new_id)
+    created_at: datetime = field(default_factory=utc_now)
 
 
 @dataclass(frozen=True)
@@ -66,6 +101,8 @@ class TradeProposal:
     candidate: TradeCandidate
     risk: RiskDecision
     mode: TradingMode = TradingMode.PAPER
+    proposal_id: str = field(default_factory=new_id)
+    created_at: datetime = field(default_factory=utc_now)
 
 
 @dataclass(frozen=True)
