@@ -4,8 +4,15 @@ import argparse
 import os
 import time
 from dataclasses import dataclass
+from typing import Callable
 
-from trading_system.ai_event_analyzer import EventAnalyzer, build_default_event_analyzer
+from trading_system.ai_event_analyzer import (
+    EventAnalysisPayload,
+    EventAnalyzer,
+    build_default_event_analyzer,
+)
+from trading_system.models import EventExpectation, PortfolioState
+from trading_system.post_release_paper import PostReleasePaperResult, run_post_release_paper
 from trading_system.release_ingestion import HaysResultsCentreProvider, OfficialReleaseProvider
 from trading_system.release_repository import SupabaseReleaseRepository
 from trading_system.supabase_event_repository import SupabaseEventExpectationRepository
@@ -17,6 +24,8 @@ class IngestionResult:
     source_document_id: str | None = None
     analysis_id: str | None = None
     message: str | None = None
+    expectation: EventExpectation | None = None
+    analysis: EventAnalysisPayload | None = None
 
 
 class EventReleaseMonitor:
@@ -71,6 +80,8 @@ class EventReleaseMonitor:
                 source_document_id=document_id,
                 analysis_id=str(saved_analysis.get("id")) if saved_analysis.get("id") else None,
                 message=f"AI provider={analysis.provider}, model={analysis.model}",
+                expectation=expectation,
+                analysis=analysis.payload,
             )
         except Exception as exc:
             self.releases.record_run(
@@ -91,6 +102,50 @@ def build_hays_monitor() -> EventReleaseMonitor:
     )
 
 
+def build_paper_portfolio_from_env() -> PortfolioState:
+    """Build the paper-only portfolio/risk context used after a release.
+
+    Spread is an explicit paper assumption because the current Yahoo daily feed
+    does not provide a live bid/ask spread.  Volatility is left unset here and is
+    filled from the latest ATR percentage by the post-release confirmation path.
+    """
+    equity = float(os.environ.get("MARKETAI_PAPER_EQUITY", "10000"))
+    cash = float(os.environ.get("MARKETAI_PAPER_CASH", str(equity)))
+    return PortfolioState(
+        equity=equity,
+        cash=cash,
+        open_positions=int(os.environ.get("MARKETAI_PAPER_OPEN_POSITIONS", "0")),
+        instrument_exposure_pct=float(os.environ.get("MARKETAI_PAPER_INSTRUMENT_EXPOSURE_PCT", "0")),
+        daily_pnl=float(os.environ.get("MARKETAI_PAPER_DAILY_PNL", "0")),
+        spread_pct=float(os.environ.get("MARKETAI_PAPER_SPREAD_PCT", "0.30")),
+        volatility_pct=None,
+    )
+
+
+def run_paper_confirmation_loop(
+    *,
+    event_id: str,
+    expectation: EventExpectation,
+    analysis: EventAnalysisPayload,
+    interval_seconds: int,
+    once: bool,
+    runner: Callable[..., PostReleasePaperResult] = run_post_release_paper,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> PostReleasePaperResult:
+    """Wait for market confirmation without re-running the LLM analysis."""
+    portfolio = build_paper_portfolio_from_env()
+    while True:
+        result = runner(
+            expectation=expectation,
+            analysis=analysis,
+            portfolio=portfolio,
+        )
+        print(f"{event_id}: {result.status} ({result.message})", flush=True)
+        if once or result.status == "paper_executed":
+            return result
+        sleeper(max(60, interval_seconds))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Monitor an official results release")
     parser.add_argument("--event-id", default="hays-fy2026-results")
@@ -107,7 +162,20 @@ def main() -> None:
         result = monitor.run_once(args.event_id)
         detail = f" ({result.message})" if result.message else ""
         print(f"{args.event_id}: {result.status}{detail}", flush=True)
-        if args.once or result.status == "analyzed":
+
+        if result.status == "analyzed":
+            if result.expectation is None or result.analysis is None:
+                raise RuntimeError("analyzed result is missing expectation or analysis payload")
+            run_paper_confirmation_loop(
+                event_id=args.event_id,
+                expectation=result.expectation,
+                analysis=result.analysis,
+                interval_seconds=args.interval_seconds,
+                once=args.once,
+            )
+            return
+
+        if args.once:
             return
         time.sleep(max(60, args.interval_seconds))
 
