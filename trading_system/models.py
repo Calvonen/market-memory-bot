@@ -149,6 +149,11 @@ class EventExpectation:
     bear_case: tuple[str, ...] = ()
     triggers: dict[str, float | str] = field(default_factory=dict)
     invalidation_conditions: tuple[str, ...] = ()
+    source_name: str | None = None
+    source_url: str | None = None
+    source_as_of: date | None = None
+    version: int = 1
+    updated_at: datetime = field(default_factory=utc_now)
 
 
 @dataclass(frozen=True)
