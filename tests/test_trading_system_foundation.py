@@ -38,6 +38,22 @@ class TradingSystemFoundationTests(unittest.TestCase):
         self.assertEqual(proposal.risk.max_quantity, 10)
         self.assertEqual(proposal.risk.reward_risk, 2.0)
 
+    def test_decimal_prices_do_not_undersize_by_one_unit(self) -> None:
+        candidate = TradeCandidate(
+            instrument="HAS.L",
+            direction=Direction.LONG,
+            confidence=63,
+            entry=0.80,
+            stop=0.76,
+            target_1=0.88,
+        )
+
+        proposal = self.engine.evaluate(candidate, self.portfolio)
+
+        self.assertEqual(proposal.risk.status, RiskStatus.PASS)
+        self.assertEqual(proposal.risk.max_quantity, 1250)
+        self.assertEqual(proposal.risk.reward_risk, 2.0)
+
     def test_live_trading_is_disabled_by_default(self) -> None:
         proposal = self.engine.evaluate(
             self.short_candidate,
