@@ -27,7 +27,13 @@ The Expo app can later expose an Events/Edit screen:
 5. backend inserts a new immutable Supabase expectation version
 6. workers read the active version through `EventExpectationRepository`
 
-The mobile client must never receive `MARKETAI_SUPABASE_SECRET_KEY`. FastAPI owns privileged Supabase access. The current MVP write endpoint additionally requires `X-Admin-Token`; this can later be replaced by Supabase Auth without changing the repository boundary.
+The mobile client must never receive `MARKETAI_SUPABASE_SECRET_KEY` or `MARKETAI_ADMIN_API_KEY`. FastAPI owns privileged Supabase access. The current MVP write endpoint requires `X-Admin-Token`; this can later be replaced by Supabase Auth without changing the repository boundary.
+
+## Read authentication (mobile app)
+
+`GET /api/v1/events`, `GET /api/v1/events/{event_id}` and `GET /api/v1/events/{event_id}/paper-status` return strategy-relevant data (consensus, bull/base/bear cases, trigger thresholds, risk/paper-trade state) and require a separate, lower-privilege `X-MarketAI-Key` header, checked against `MARKETAI_READ_API_KEY`. This key is intentionally **not** the admin token: it cannot create expectation versions. If `MARKETAI_READ_API_KEY` is not configured, these endpoints fail closed (503) rather than being open. `GET /health` stays unauthenticated and returns no strategy data.
+
+**This is an MVP-only credential, not real user authentication.** A `EXPO_PUBLIC_*` env var is compiled into the client bundle and is readable by anyone who has the app (APK/IPA) or inspects app traffic - it is not a secret once shipped, regardless of how it is obtained. Treat a shipped read key as effectively public: acceptable only while distribution is trusted/private (e.g. TestFlight/internal, or the API itself is unreachable from the public internet - see below). Before any public app-store release or public API exposure, replace this with per-user authentication (e.g. Supabase Auth / a real login), scoped API tokens issued per device, and server-side rate limiting - not a longer-lived shared secret shipped in the bundle.
 
 ## Backend environment
 
@@ -37,6 +43,7 @@ Required for Supabase-backed event reads/writes:
 MARKETAI_SUPABASE_URL=https://<project-ref>.supabase.co
 MARKETAI_SUPABASE_SECRET_KEY=<backend-only secret/service-role key>
 MARKETAI_ADMIN_API_KEY=<separate long random API admin token>
+MARKETAI_READ_API_KEY=<separate long random read-only token for GET endpoints>
 ```
 
 Run the first API locally with:
@@ -47,10 +54,11 @@ uvicorn trading_system.api:app --reload
 
 Current endpoints:
 
-- `GET /health`
-- `GET /api/v1/events`
-- `GET /api/v1/events/{event_id}`
-- `POST /api/v1/events/{event_id}/expectation-versions`
+- `GET /health` (no auth)
+- `GET /api/v1/events` (requires `X-MarketAI-Key`)
+- `GET /api/v1/events/{event_id}` (requires `X-MarketAI-Key`)
+- `GET /api/v1/events/{event_id}/paper-status` (requires `X-MarketAI-Key`)
+- `POST /api/v1/events/{event_id}/expectation-versions` (requires `X-Admin-Token`)
 
 The POST endpoint creates a new version; it never edits the previous version in place.
 

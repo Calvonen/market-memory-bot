@@ -42,6 +42,7 @@ def create_app(
     *,
     paper_repository: PaperStatusRepository | None = None,
     admin_token: str | None = None,
+    read_api_key: str | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="MarketAI API",
@@ -51,6 +52,7 @@ def create_app(
     repo_cache: EventExpectationRepository | None = repository
     paper_repo_cache: PaperStatusRepository | None = paper_repository
     configured_admin_token = admin_token or os.environ.get("MARKETAI_ADMIN_API_KEY")
+    configured_read_api_key = read_api_key or os.environ.get("MARKETAI_READ_API_KEY")
 
     def get_repository() -> EventExpectationRepository:
         nonlocal repo_cache
@@ -78,12 +80,32 @@ def create_app(
                 detail="Invalid admin token",
             )
 
+    def require_read(x_marketai_key: str | None) -> None:
+        # A separate, lower-privilege credential for read-only clients (the
+        # mobile app): it must never be the admin token, and its absence must
+        # fail closed (503) rather than silently leaving these endpoints open.
+        if not configured_read_api_key:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Read access is disabled until MARKETAI_READ_API_KEY is configured",
+            )
+        if not x_marketai_key or not secrets.compare_digest(
+            x_marketai_key, configured_read_api_key
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or missing read API key",
+            )
+
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "trading_mode": "PAPER"}
 
     @app.get("/api/v1/events")
-    def list_events() -> list[dict[str, Any]]:
+    def list_events(
+        x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
+    ) -> list[dict[str, Any]]:
+        require_read(x_marketai_key)
         try:
             return [
                 _expectation_payload(item)
@@ -93,7 +115,11 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.get("/api/v1/events/{event_id}")
-    def get_event(event_id: str) -> dict[str, Any]:
+    def get_event(
+        event_id: str,
+        x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
+    ) -> dict[str, Any]:
+        require_read(x_marketai_key)
         try:
             expectation = get_repository().get(event_id)
         except RuntimeError as exc:
@@ -103,7 +129,11 @@ def create_app(
         return _expectation_payload(expectation)
 
     @app.get("/api/v1/events/{event_id}/paper-status")
-    def get_paper_status(event_id: str) -> dict[str, Any]:
+    def get_paper_status(
+        event_id: str,
+        x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
+    ) -> dict[str, Any]:
+        require_read(x_marketai_key)
         try:
             expectation = get_repository().get(event_id)
             if expectation is None:
