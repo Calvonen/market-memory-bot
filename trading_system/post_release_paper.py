@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime
 
 import pandas as pd
 
@@ -60,21 +60,39 @@ def _event_hypothesis(
     return directional[0]
 
 
-def _price_reaction_pct(df: pd.DataFrame) -> float | None:
+def _index_date(value: object) -> date | None:
+    if hasattr(value, "date"):
+        return value.date()
+    return None
+
+
+def _event_price_reaction_pct(df: pd.DataFrame, event_date: date) -> float | None:
+    """Return the event-day close versus the immediately preceding market bar.
+
+    The event reaction is intentionally anchored to the scheduled event date.  If
+    confirmation is still pending on a later day, a later daily move must not be
+    mistaken for the original earnings reaction.
+    """
     if len(df) < 2:
         return None
-    previous = float(df["Close"].iloc[-2])
-    current = float(df["Close"].iloc[-1])
+
+    event_positions = [
+        position
+        for position, index_value in enumerate(df.index)
+        if _index_date(index_value) == event_date
+    ]
+    if not event_positions:
+        return None
+
+    event_position = event_positions[-1]
+    if event_position < 1:
+        return None
+
+    previous = float(df["Close"].iloc[event_position - 1])
+    event_close = float(df["Close"].iloc[event_position])
     if previous <= 0:
         return None
-    return ((current / previous) - 1.0) * 100.0
-
-
-def _latest_bar_date(df: pd.DataFrame):
-    if df.empty:
-        return None
-    value = df.index[-1]
-    return value.date() if hasattr(value, "date") else None
+    return ((event_close / previous) - 1.0) * 100.0
 
 
 def _levels_from_market(df: pd.DataFrame, direction: Direction) -> TradeLevels:
@@ -109,7 +127,8 @@ def run_post_release_paper(
 
     This is deliberately fail-closed.  It will not create a paper order until an
     event-day market bar exists, the initial price reaction agrees with the event
-    hypothesis, and both technical and market-memory confirmation are directional.
+    hypothesis, spread/volatility inputs are available to Risk Engine, and both
+    technical and market-memory confirmation are directional.
     """
     hypothesis = _event_hypothesis(expectation, analysis)
     if hypothesis is Direction.NO_TRADE:
@@ -120,18 +139,20 @@ def run_post_release_paper(
     if market_df.empty:
         return PostReleasePaperResult("waiting_confirmation", "no market data")
 
-    latest_date = _latest_bar_date(market_df)
-    if latest_date is None or latest_date < expectation.scheduled_date:
-        return PostReleasePaperResult("waiting_confirmation", "no event-day market bar yet")
-
-    reaction = _price_reaction_pct(market_df)
+    reaction = _event_price_reaction_pct(market_df, expectation.scheduled_date)
     if reaction is None:
-        return PostReleasePaperResult("waiting_confirmation", "price reaction unavailable")
+        return PostReleasePaperResult("waiting_confirmation", "no event-day market bar yet")
     if (hypothesis is Direction.LONG and reaction <= 0) or (hypothesis is Direction.SHORT and reaction >= 0):
         return PostReleasePaperResult(
             "waiting_confirmation",
             f"price reaction conflicts with {hypothesis.value}: {reaction:+.2f}%",
         )
+
+    if portfolio.spread_pct is None:
+        return PostReleasePaperResult("waiting_confirmation", "paper spread assumption unavailable")
+    if portfolio.volatility_pct is None:
+        latest_atr_pct = float(market_df["atr_pct"].iloc[-1])
+        portfolio = replace(portfolio, volatility_pct=latest_atr_pct)
 
     if technical is None:
         technical = build_technical_assessment(market_df, hypothesis)
