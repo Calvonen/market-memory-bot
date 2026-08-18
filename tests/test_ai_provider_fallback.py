@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 from datetime import date
 from unittest.mock import patch
@@ -8,6 +9,7 @@ from trading_system.ai_event_analyzer import (
     EventAnalysisPayload,
     FallbackEventAnalyzer,
     GroqEventAnalyzer,
+    _select_release_text,
 )
 from trading_system.models import EventExpectation
 from trading_system.release_ingestion import ReleaseDocument
@@ -42,6 +44,7 @@ def expectation() -> EventExpectation:
         event_name="Hays plc FY2026 results",
         scheduled_date=date(2026, 8, 20),
         consensus={"fy27_operating_profit_pre_exceptional_gbp_m": 55.6},
+        important_kpis=("guidance", "germany_net_fee_trend"),
     )
 
 
@@ -88,6 +91,20 @@ class AIProviderTests(unittest.TestCase):
         self.assertEqual(body["response_format"]["type"], "json_schema")
         self.assertTrue(body["response_format"]["json_schema"]["strict"])
         self.assertFalse(schema["additionalProperties"])
+
+    def test_release_excerpt_respects_budget_and_keeps_late_guidance(self) -> None:
+        filler = "General corporate information without a catalyst. " * 500
+        late_guidance = (
+            "FY27 guidance and outlook: operating profit expectations improve, "
+            "with Germany net fees stabilising and structural cost savings continuing."
+        )
+        raw = filler + "\n\n" + late_guidance
+
+        with patch.dict(os.environ, {"MARKETAI_AI_RELEASE_CHAR_BUDGET": "5000"}):
+            excerpt = _select_release_text(expectation(), raw)
+
+        self.assertLessEqual(len(excerpt), 5000)
+        self.assertIn("FY27 guidance and outlook", excerpt)
 
     def test_fallback_uses_second_analyzer_after_first_failure(self) -> None:
         first = StubAnalyzer(error=RuntimeError("rate limited"))
