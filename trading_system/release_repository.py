@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from dataclasses import asdict
 from typing import Any
 
 from trading_system.ai_event_analyzer import AIEventAnalysis
@@ -72,11 +71,12 @@ class SupabaseReleaseRepository:
                     "event_id": event_id,
                     "source_document_id": source_document_id,
                     "expectation_version": expectation_version,
+                    "provider": analysis.provider,
                     "model": analysis.model,
                     "analysis": analysis.payload.model_dump(),
                     "raw_response": analysis.raw_response,
                 },
-                on_conflict="source_document_id,expectation_version,model",
+                on_conflict="source_document_id,expectation_version,provider,model",
             )
             .select("*")
             .execute()
