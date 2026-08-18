@@ -76,7 +76,9 @@ class TradingSystemFoundationTests(unittest.TestCase):
         proposal = self.engine.evaluate(candidate, self.portfolio)
 
         self.assertEqual(proposal.risk.status, RiskStatus.REJECT)
-        self.assertIn("strategy_returned_no_trade", proposal.risk.reasons)
+        self.assertEqual(proposal.risk.reasons, ("strategy_returned_no_trade",))
+        self.assertEqual(proposal.risk.max_quantity, 0)
+        self.assertIsNone(proposal.risk.reward_risk)
 
     def test_reward_risk_below_minimum_is_rejected(self) -> None:
         candidate = TradeCandidate(
