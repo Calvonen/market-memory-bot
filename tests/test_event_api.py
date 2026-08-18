@@ -8,6 +8,14 @@ from trading_system.event_repository import InMemoryEventExpectationRepository
 from trading_system.models import EventExpectation
 
 
+class FakePaperRepository:
+    def __init__(self, run=None) -> None:
+        self.run = run
+
+    def get_latest_for_event(self, event_id: str):
+        return self.run
+
+
 class EventApiTests(unittest.TestCase):
     def setUp(self) -> None:
         event = EventExpectation(
@@ -22,7 +30,14 @@ class EventApiTests(unittest.TestCase):
             version=1,
         )
         self.repo = InMemoryEventExpectationRepository(events={event.event_id: event})
-        self.client = TestClient(create_app(self.repo, admin_token="test-admin-token"))
+        self.paper_repo = FakePaperRepository()
+        self.client = TestClient(
+            create_app(
+                self.repo,
+                paper_repository=self.paper_repo,
+                admin_token="test-admin-token",
+            )
+        )
 
     def test_get_event_returns_current_version(self) -> None:
         response = self.client.get("/api/v1/events/hays-fy2026-results")
@@ -35,6 +50,32 @@ class EventApiTests(unittest.TestCase):
             body["consensus"]["fy27_operating_profit_pre_exceptional_gbp_m"],
             55.6,
         )
+
+    def test_paper_status_returns_clean_pre_event_state(self) -> None:
+        response = self.client.get("/api/v1/events/hays-fy2026-results/paper-status")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["trading_mode"], "PAPER")
+        self.assertEqual(body["instrument"], "HAS.L")
+        self.assertIsNone(body["paper_run"])
+
+    def test_paper_status_exposes_latest_persisted_decision(self) -> None:
+        self.paper_repo.run = {
+            "status": "waiting_confirmation",
+            "message": "technical confirmation is not aligned",
+            "strategy": {"direction": "LONG", "confidence": 63},
+            "risk": None,
+            "paper_order": None,
+        }
+
+        response = self.client.get("/api/v1/events/hays-fy2026-results/paper-status")
+
+        self.assertEqual(response.status_code, 200)
+        run = response.json()["paper_run"]
+        self.assertEqual(run["status"], "waiting_confirmation")
+        self.assertEqual(run["strategy"]["direction"], "LONG")
+        self.assertIsNone(run["paper_order"])
 
     def test_write_requires_admin_token(self) -> None:
         response = self.client.post(
