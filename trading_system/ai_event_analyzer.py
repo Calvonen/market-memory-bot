@@ -49,6 +49,20 @@ class AIEventAnalysis:
     raw_response: str
 
 
+def analysis_from_record(record: dict[str, Any]) -> AIEventAnalysis:
+    """Rebuild a persisted `event_ai_analyses` row into the shape analyze() returns.
+
+    Used on worker restart to reuse an already-persisted analysis instead of
+    calling an AI provider again for the same document + expectation version.
+    """
+    return AIEventAnalysis(
+        payload=EventAnalysisPayload.model_validate(record["analysis"]),
+        provider=str(record["provider"]),
+        model=str(record["model"]),
+        raw_response=str(record.get("raw_response") or ""),
+    )
+
+
 class EventAnalyzer(Protocol):
     def analyze(
         self,

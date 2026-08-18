@@ -7,8 +7,10 @@ from dataclasses import dataclass
 from typing import Callable
 
 from trading_system.ai_event_analyzer import (
+    AIEventAnalysis,
     EventAnalysisPayload,
     EventAnalyzer,
+    analysis_from_record,
     build_default_event_analyzer,
 )
 from trading_system.models import EventExpectation, PortfolioState
@@ -62,13 +64,27 @@ class EventReleaseMonitor:
             stored = existing or self.releases.save_document(document)
             document_id = str(stored["id"])
 
-            analysis = self.analyzer.analyze(expectation, document)
-            saved_analysis = self.releases.save_analysis(
+            # A restart must never re-run the LLM for a document + expectation
+            # version that is already persisted, regardless of which provider
+            # (Groq vs. Ollama fallback) happened to succeed on a prior attempt.
+            existing_analysis = self.releases.find_analysis(
                 event_id=event_id,
                 source_document_id=document_id,
                 expectation_version=expectation.version,
-                analysis=analysis,
             )
+            reused_analysis = existing_analysis is not None
+            analysis: AIEventAnalysis
+            if existing_analysis is not None:
+                analysis = analysis_from_record(existing_analysis)
+                saved_analysis = existing_analysis
+            else:
+                analysis = self.analyzer.analyze(expectation, document)
+                saved_analysis = self.releases.save_analysis(
+                    event_id=event_id,
+                    source_document_id=document_id,
+                    expectation_version=expectation.version,
+                    analysis=analysis,
+                )
             self.releases.record_run(
                 event_id=event_id,
                 provider=self.provider.name,
@@ -76,11 +92,14 @@ class EventReleaseMonitor:
                 source_url=document.source_url,
                 source_document_id=document_id,
             )
+            message = f"AI provider={analysis.provider}, model={analysis.model}"
+            if reused_analysis:
+                message += " (reused persisted analysis, no AI call)"
             return IngestionResult(
                 status="analyzed",
                 source_document_id=document_id,
                 analysis_id=str(saved_analysis.get("id")) if saved_analysis.get("id") else None,
-                message=f"AI provider={analysis.provider}, model={analysis.model}",
+                message=message,
                 expectation=expectation,
                 analysis=analysis.payload,
             )
@@ -123,6 +142,15 @@ def build_paper_portfolio_from_env() -> PortfolioState:
     )
 
 
+def _already_paper_executed(
+    persistence: SupabasePaperTradeRepository | None, event_id: str
+) -> bool:
+    if persistence is None:
+        return False
+    latest = persistence.get_latest_for_event(event_id)
+    return latest is not None and latest.get("status") == "paper_executed"
+
+
 def run_paper_confirmation_loop(
     *,
     event_id: str,
@@ -136,7 +164,18 @@ def run_paper_confirmation_loop(
     runner: Callable[..., PostReleasePaperResult] = run_post_release_paper,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> PostReleasePaperResult:
-    """Wait for market confirmation without re-running the LLM analysis."""
+    """Wait for market confirmation without re-running the LLM analysis.
+
+    Fail-closed also covers restarts: if a paper order was already recorded
+    for this event, the loop exits immediately without calling the runner
+    (Strategy -> Risk -> PaperBroker) again, so a crash/restart can never
+    create a second simulated order for the same event.
+    """
+    if _already_paper_executed(persistence, event_id):
+        message = f"paper trade already executed for {event_id}; skipping re-run after restart"
+        print(f"{event_id}: paper_executed ({message})", flush=True)
+        return PostReleasePaperResult("paper_executed", message)
+
     portfolio = build_paper_portfolio_from_env()
     while True:
         result = runner(
@@ -173,6 +212,18 @@ def main() -> None:
 
     monitor = build_hays_monitor()
     persistence = SupabasePaperTradeRepository.from_env()
+
+    # Fail-closed on restart: if a paper order is already recorded for this
+    # event, stop before touching the release provider, the AI analyzer, or
+    # the Strategy/Risk/PaperBroker pipeline at all.
+    if _already_paper_executed(persistence, args.event_id):
+        print(
+            f"{args.event_id}: paper_executed already recorded; "
+            "exiting without re-running the pipeline.",
+            flush=True,
+        )
+        return
+
     while True:
         result = monitor.run_once(args.event_id)
         detail = f" ({result.message})" if result.message else ""

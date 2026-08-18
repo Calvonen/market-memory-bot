@@ -56,6 +56,32 @@ class SupabaseReleaseRepository:
         )
         return (response.data or [{}])[0]
 
+    def find_analysis(
+        self,
+        *,
+        event_id: str,
+        source_document_id: str,
+        expectation_version: int,
+    ) -> dict[str, Any] | None:
+        """Return an already-persisted analysis for this document+version, if any.
+
+        Looked up without filtering on provider/model so a worker restart reuses
+        whichever provider happened to succeed on a prior attempt instead of
+        starting a second, parallel analysis chain for the same release.
+        """
+        response = (
+            self.client.table("event_ai_analyses")
+            .select("*")
+            .eq("event_id", event_id)
+            .eq("source_document_id", source_document_id)
+            .eq("expectation_version", expectation_version)
+            .order("created_at")
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        return rows[0] if rows else None
+
     def save_analysis(
         self,
         *,

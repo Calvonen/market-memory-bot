@@ -1,10 +1,17 @@
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 from tests.fixtures.hays_fy2026 import HAYS_FY2026
-from trading_system.ai_event_analyzer import EventAnalysisPayload
+from trading_system.ai_event_analyzer import AIEventAnalysis, EventAnalysisPayload
+from trading_system.event_repository import InMemoryEventExpectationRepository
 from trading_system.post_release_paper import PostReleasePaperResult
-from trading_system.release_worker import build_paper_portfolio_from_env, run_paper_confirmation_loop
+from trading_system.release_ingestion import ReleaseDocument
+from trading_system.release_worker import (
+    EventReleaseMonitor,
+    build_paper_portfolio_from_env,
+    run_paper_confirmation_loop,
+)
 
 
 class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
@@ -95,6 +102,222 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
         self.assertEqual(portfolio.cash, 11000.0)
         self.assertEqual(portfolio.spread_pct, 0.45)
         self.assertIsNone(portfolio.volatility_pct)
+
+    def test_restart_after_paper_executed_skips_runner_and_broker(self) -> None:
+        class AlreadyExecutedPersistence:
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {"status": "paper_executed", "analysis_id": "analysis-1"}
+
+            def save_result(self, **kwargs: Any) -> None:
+                raise AssertionError("must not persist a new result on restart short-circuit")
+
+        def runner(**kwargs: Any) -> PostReleasePaperResult:
+            raise AssertionError("runner (Strategy/Risk/PaperBroker) must not run after paper_executed")
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            analysis_id="analysis-1",
+            persistence=AlreadyExecutedPersistence(),
+            runner=runner,
+            sleeper=lambda _: self.fail("must not sleep when already paper_executed"),
+        )
+
+        self.assertEqual(result.status, "paper_executed")
+
+
+class _FakeReleaseRepository:
+    """In-memory stand-in for SupabaseReleaseRepository's dedupe/upsert semantics."""
+
+    def __init__(self) -> None:
+        self.documents: list[dict[str, Any]] = []
+        self.analyses: list[dict[str, Any]] = []
+        self.runs: list[dict[str, Any]] = []
+
+    def find_document(self, event_id: str, content_sha256: str) -> dict[str, Any] | None:
+        for row in self.documents:
+            if row["event_id"] == event_id and row["content_sha256"] == content_sha256:
+                return row
+        return None
+
+    def save_document(self, document: ReleaseDocument) -> dict[str, Any]:
+        existing = self.find_document(document.event_id, document.content_sha256)
+        if existing:
+            return existing
+        row = {
+            "id": f"doc-{len(self.documents) + 1}",
+            "event_id": document.event_id,
+            "content_sha256": document.content_sha256,
+            "source_url": document.source_url,
+        }
+        self.documents.append(row)
+        return row
+
+    def find_analysis(
+        self, *, event_id: str, source_document_id: str, expectation_version: int
+    ) -> dict[str, Any] | None:
+        for row in self.analyses:
+            if (
+                row["event_id"] == event_id
+                and row["source_document_id"] == source_document_id
+                and row["expectation_version"] == expectation_version
+            ):
+                return row
+        return None
+
+    def save_analysis(
+        self,
+        *,
+        event_id: str,
+        source_document_id: str,
+        expectation_version: int,
+        analysis: AIEventAnalysis,
+    ) -> dict[str, Any]:
+        row = {
+            "id": f"analysis-{len(self.analyses) + 1}",
+            "event_id": event_id,
+            "source_document_id": source_document_id,
+            "expectation_version": expectation_version,
+            "provider": analysis.provider,
+            "model": analysis.model,
+            "analysis": analysis.payload.model_dump(),
+            "raw_response": analysis.raw_response,
+        }
+        self.analyses.append(row)
+        return row
+
+    def record_run(
+        self,
+        *,
+        event_id: str,
+        provider: str,
+        status: str,
+        source_url: str | None = None,
+        source_document_id: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        self.runs.append({"event_id": event_id, "provider": provider, "status": status})
+
+
+class _FakeProvider:
+    name = "hays_results_centre"
+
+    def __init__(self, document: ReleaseDocument) -> None:
+        self.document = document
+
+    def discover(self, event_id: str) -> ReleaseDocument:
+        return self.document
+
+
+class _CountingAnalyzer:
+    def __init__(self, analysis: AIEventAnalysis) -> None:
+        self.analysis = analysis
+        self.calls = 0
+
+    def analyze(self, expectation: Any, document: ReleaseDocument) -> AIEventAnalysis:
+        self.calls += 1
+        return self.analysis
+
+
+class EventReleaseMonitorRestartTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.expectations = InMemoryEventExpectationRepository({HAYS_FY2026.event_id: HAYS_FY2026})
+        self.document = ReleaseDocument(
+            event_id=HAYS_FY2026.event_id,
+            source_type="company_results",
+            source_url="https://www.haysplc.com/results/fy26",
+            source_title="Full-year results for the year ended 30 June 2026",
+            raw_text="Official FY26 results text " * 40,
+        )
+        self.analysis = AIEventAnalysis(
+            payload=EventAnalysisPayload(
+                metrics=[],
+                guidance_summary="FY27 outlook above consensus",
+                management_summary="management summary",
+                catalyst_direction="BULLISH",
+                catalyst_score_0_25=18,
+                fundamental_direction="BULLISH",
+                fundamental_score_0_35=24,
+                key_positive_surprises=[],
+                key_negative_surprises=[],
+                uncertainties=[],
+                invalidation_flags=[],
+                evidence_quotes=[],
+            ),
+            provider="groq",
+            model="openai/gpt-oss-120b",
+            raw_response="{}",
+        )
+
+    def _build_monitor(self, analyzer: _CountingAnalyzer, releases: _FakeReleaseRepository) -> EventReleaseMonitor:
+        return EventReleaseMonitor(
+            expectation_repository=self.expectations,
+            release_repository=releases,
+            analyzer=analyzer,
+            provider=_FakeProvider(self.document),
+        )
+
+    def test_restart_after_already_analyzed_document_does_not_call_analyzer_again(self) -> None:
+        releases = _FakeReleaseRepository()
+        analyzer = _CountingAnalyzer(self.analysis)
+        monitor = self._build_monitor(analyzer, releases)
+
+        first = monitor.run_once(HAYS_FY2026.event_id)
+        second = monitor.run_once(HAYS_FY2026.event_id)  # simulates a process restart
+
+        self.assertEqual(first.status, "analyzed")
+        self.assertEqual(second.status, "analyzed")
+        self.assertEqual(analyzer.calls, 1, "analyzer must not be called again on restart")
+
+    def test_restart_continues_with_the_same_analysis_id_and_source_document_id(self) -> None:
+        releases = _FakeReleaseRepository()
+        analyzer = _CountingAnalyzer(self.analysis)
+        monitor = self._build_monitor(analyzer, releases)
+
+        first = monitor.run_once(HAYS_FY2026.event_id)
+        second = monitor.run_once(HAYS_FY2026.event_id)
+
+        self.assertEqual(first.analysis_id, second.analysis_id)
+        self.assertEqual(first.source_document_id, second.source_document_id)
+        self.assertEqual(second.analysis, first.analysis)
+
+    def test_same_document_and_expectation_version_never_produces_a_second_analysis_row(self) -> None:
+        releases = _FakeReleaseRepository()
+        analyzer = _CountingAnalyzer(self.analysis)
+        monitor = self._build_monitor(analyzer, releases)
+
+        monitor.run_once(HAYS_FY2026.event_id)
+        monitor.run_once(HAYS_FY2026.event_id)
+        monitor.run_once(HAYS_FY2026.event_id)
+
+        self.assertEqual(len(releases.analyses), 1)
+
+    def test_provider_fallback_variance_across_restarts_does_not_fork_the_analysis_chain(self) -> None:
+        releases = _FakeReleaseRepository()
+        groq_analysis = self.analysis
+        ollama_analysis = AIEventAnalysis(
+            payload=self.analysis.payload,
+            provider="ollama",
+            model="gpt-oss:20b",
+            raw_response="{}",
+        )
+        analyzer = _CountingAnalyzer(groq_analysis)
+        monitor = self._build_monitor(analyzer, releases)
+        first = monitor.run_once(HAYS_FY2026.event_id)
+
+        # Simulate a restart where Groq is unavailable and Ollama would be used
+        # if the analyzer were called again; it must not be, because a
+        # persisted analysis already exists for this document + version.
+        analyzer.analysis = ollama_analysis
+        second = monitor.run_once(HAYS_FY2026.event_id)
+
+        self.assertEqual(analyzer.calls, 1)
+        self.assertEqual(first.analysis_id, second.analysis_id)
+        self.assertEqual(len(releases.analyses), 1)
+        self.assertEqual(releases.analyses[0]["provider"], "groq")
 
 
 if __name__ == "__main__":
