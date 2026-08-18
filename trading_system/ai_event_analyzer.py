@@ -7,14 +7,24 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from trading_system.models import EventExpectation
 from trading_system.release_ingestion import ReleaseDocument
 
 
+class ExtractedMetric(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    value: float | str | None
+    unit: str | None
+
+
 class EventAnalysisPayload(BaseModel):
-    metrics: dict[str, float | str | None]
+    model_config = ConfigDict(extra="forbid")
+
+    metrics: list[ExtractedMetric]
     guidance_summary: str
     management_summary: str
     catalyst_direction: str = Field(pattern="^(BULLISH|BEARISH|MIXED|NEUTRAL)$")
@@ -26,6 +36,9 @@ class EventAnalysisPayload(BaseModel):
     uncertainties: list[str]
     invalidation_flags: list[str]
     evidence_quotes: list[str] = Field(max_length=8)
+
+    def metric_values(self) -> dict[str, float | str | None]:
+        return {metric.name: metric.value for metric in self.metrics}
 
 
 @dataclass(frozen=True)
@@ -51,6 +64,7 @@ def _build_prompt(expectation: EventExpectation, document: ReleaseDocument) -> s
 
 Rules:
 - Extract only facts supported by the supplied official release.
+- Return metrics as objects with name, value, and unit. Use null for an unknown value or unit.
 - Compare against the PRE-EVENT expectation snapshot; do not rewrite the expectation.
 - FY26 results already pre-guided should not be treated as a fresh catalyst by themselves.
 - Give separate fundamental and catalyst assessments.
