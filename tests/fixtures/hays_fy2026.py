@@ -78,4 +78,8 @@ HAYS_FY2026 = EventExpectation(
         "Require FY27 outlook/strategy, price reaction, technical state and market-memory context before proposal creation.",
         "If guidance direction and price reaction materially conflict, prefer NO_TRADE until the conflict resolves.",
     ),
+    source_name="Hays plc Analysts' Consensus",
+    source_url="https://www.haysplc.com/investors/analysts-consensus",
+    source_as_of=date(2026, 7, 1),
+    version=1,
 )
