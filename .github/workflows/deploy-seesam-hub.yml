@@ -7,6 +7,7 @@ on:
       - feature/trading-system-foundation
     paths:
       - .github/workflows/deploy-seesam-hub.yml
+      - mobile/src/types/css.d.ts
 
 permissions:
   contents: read
