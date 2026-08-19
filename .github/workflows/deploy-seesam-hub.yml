@@ -1,0 +1,75 @@
+name: Deploy MarketAI to seesam-hub
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/trading-system-foundation
+    paths:
+      - .github/workflows/deploy-seesam-hub.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: marketai-seesam-hub-deploy
+  cancel-in-progress: false
+
+jobs:
+  test-and-deploy:
+    name: Test and deploy
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+
+      - name: Compile Python
+        run: |
+          /home/marko/marketai-repo/.venv/bin/python -m py_compile trading_system/*.py trading_system/brokers/*.py tests/*.py
+
+      - name: Run Python tests
+        run: |
+          /home/marko/marketai-repo/.venv/bin/python -m unittest discover -s tests -v
+
+      - name: Type-check mobile app
+        working-directory: mobile
+        run: |
+          npm ci
+          npx tsc --noEmit
+
+      - name: Install backend dependencies
+        run: |
+          /home/marko/marketai-repo/.venv/bin/pip install -r requirements.txt
+
+      - name: Fast-forward production checkout to tested commit
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          cd /home/marko/marketai-repo
+          test "$(git branch --show-current)" = "feature/trading-system-foundation"
+          test -z "$(git status --porcelain --untracked-files=no)"
+          git fetch origin feature/trading-system-foundation
+          git merge --ff-only "$DEPLOY_SHA"
+
+      - name: Restart MarketAI services
+        run: |
+          sudo /usr/bin/systemctl restart marketai-api.service
+          sudo /usr/bin/systemctl restart marketai-hays-release.service
+
+      - name: Verify services
+        run: |
+          for attempt in $(seq 1 15); do
+            if curl --fail --silent http://127.0.0.1:8001/health >/tmp/marketai-health.json; then
+              break
+            fi
+            if [ "$attempt" -eq 15 ]; then
+              echo "MarketAI API health check failed"
+              sudo /usr/bin/systemctl status marketai-api.service --no-pager -l || true
+              exit 1
+            fi
+            sleep 1
+          done
+          cat /tmp/marketai-health.json
+          /usr/bin/systemctl is-active --quiet marketai-hays-release.service
