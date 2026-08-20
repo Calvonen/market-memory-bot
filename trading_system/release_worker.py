@@ -336,13 +336,36 @@ def run_paper_confirmation_loop(
         if persistence is not None:
             if analysis_id is None:
                 raise RuntimeError("paper persistence requires analysis_id")
-            persistence.save_result(
+            persisted = persistence.save_result(
                 event_id=event_id,
                 expectation_version=expectation.version,
                 source_document_id=source_document_id,
                 analysis_id=analysis_id,
                 result=result,
             )
+            if persisted.get("status") == "expired_no_trade":
+                result = PostReleasePaperResult(
+                    "expired_no_trade",
+                    str(
+                        persisted.get("message")
+                        or "confirmation window expired without a trade"
+                    ),
+                    completed_components=result.completed_components,
+                    confirmation_deadline_at=deadline,
+                    expired_at=(
+                        datetime.fromisoformat(
+                            str(persisted["expired_at"]).replace("Z", "+00:00")
+                        )
+                        if persisted.get("expired_at")
+                        else clock().astimezone(UTC)
+                    ),
+                )
+            elif persisted.get("status") == "paper_executed" and result.status != "paper_executed":
+                result = PostReleasePaperResult(
+                    "paper_executed",
+                    str(persisted.get("message") or "paper trade already executed"),
+                    confirmation_deadline_at=deadline,
+                )
         print(f"{event_id}: {result.status} ({result.message})", flush=True)
         if once or result.status in {"paper_executed", "expired_no_trade"}:
             return result

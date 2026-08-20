@@ -130,13 +130,18 @@ class SupabasePaperTradeRepository:
                     "created_at": order.created_at.isoformat(),
                 }
 
-        response = (
-            self.client.table("event_paper_trade_runs")
-            .upsert(payload, on_conflict="analysis_id")
-            .select("*")
-            .execute()
-        )
-        return (response.data or [{}])[0]
+        response = self.client.rpc(
+            "save_event_paper_trade_result",
+            {"input_payload": payload},
+        ).execute()
+        rows = response.data or []
+        # An empty result means the database atomically rejected this write
+        # because a terminal row won the race. Reading afterwards is only to
+        # return the winner; correctness does not depend on a read-then-write.
+        if not rows:
+            latest = self.get_latest_for_event(event_id)
+            return latest or {}
+        return rows[0]
 
     def expire_waiting(
         self,
@@ -148,48 +153,16 @@ class SupabasePaperTradeRepository:
         confirmation_deadline_at: datetime,
         expired_at: datetime,
     ) -> dict[str, Any] | None:
-        response = (
-            self.client.table("event_paper_trade_runs")
-            .update(
-                {
-                    "status": "expired_no_trade",
-                    "message": "confirmation window expired without a trade",
-                    "expired_at": expired_at.isoformat(),
-                    "updated_at": expired_at.isoformat(),
-                }
-            )
-            .eq("event_id", event_id)
-            .eq("analysis_id", analysis_id)
-            .eq("status", "waiting_confirmation")
-            .select("*")
-            .execute()
-        )
-        rows = response.data or []
-        if rows:
-            return rows[0]
-
-        # There may be no waiting row when a worker first starts after the
-        # deadline. ON CONFLICT DO NOTHING prevents this terminal insert from
-        # overwriting a concurrently completed paper trade.
-        response = (
-            self.client.table("event_paper_trade_runs")
-            .upsert(
-                {
-                    "event_id": event_id,
-                    "expectation_version": expectation_version,
-                    "source_document_id": source_document_id,
-                    "analysis_id": analysis_id,
-                    "status": "expired_no_trade",
-                    "message": "confirmation window expired without a trade",
-                    "confirmation_deadline_at": confirmation_deadline_at.isoformat(),
-                    "expired_at": expired_at.isoformat(),
-                    "updated_at": expired_at.isoformat(),
-                },
-                on_conflict="analysis_id",
-                ignore_duplicates=True,
-            )
-            .select("*")
-            .execute()
-        )
+        response = self.client.rpc(
+            "expire_event_paper_trade_run",
+            {
+                "input_event_id": event_id,
+                "input_expectation_version": expectation_version,
+                "input_source_document_id": source_document_id,
+                "input_analysis_id": analysis_id,
+                "input_confirmation_deadline_at": confirmation_deadline_at.isoformat(),
+                "input_expired_at": expired_at.isoformat(),
+            },
+        ).execute()
         rows = response.data or []
         return rows[0] if rows else self.get_latest_for_event(event_id)

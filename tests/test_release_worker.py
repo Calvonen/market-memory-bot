@@ -199,6 +199,39 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "expired_no_trade")
 
+    def test_stale_runner_result_yields_to_atomic_expiry_winner(self) -> None:
+        class ExpiryWinsPersistence:
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def save_result(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "status": "expired_no_trade",
+                    "message": "confirmation window expired without a trade",
+                    "expired_at": "2026-08-20T15:45:01+00:00",
+                }
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            source_document_id="document-1",
+            analysis_id="analysis-1",
+            persistence=ExpiryWinsPersistence(),
+            runner=lambda **_: PostReleasePaperResult(
+                "paper_executed", "stale paper result"
+            ),
+            sleeper=lambda _: self.fail("terminal database winner must stop the loop"),
+            clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
+        )
+        self.assertEqual(result.status, "expired_no_trade")
+        self.assertIsNone(result.pipeline)
+
 
 class _FakeReleaseRepository:
     """In-memory stand-in for SupabaseReleaseRepository's dedupe/upsert semantics."""
