@@ -2,7 +2,8 @@
 -- rejection a database operation rather than a Python read-then-write check.
 alter table public.event_paper_trade_runs
   add column if not exists superseded_at timestamptz null,
-  add column if not exists superseded_by_analysis_id uuid null;
+  add column if not exists superseded_by_analysis_id uuid null,
+  add column if not exists terminal_transition_at timestamptz null;
 
 alter table public.event_paper_trade_runs
   drop constraint if exists event_paper_trade_runs_status_check;
@@ -10,25 +11,44 @@ alter table public.event_paper_trade_runs
   add constraint event_paper_trade_runs_status_check
   check (status in ('waiting_confirmation', 'paper_executed', 'expired_no_trade', 'superseded'));
 
+-- Backfill the best available historical terminal transition timestamp. New
+-- transitions below always use database time; historical paper orders prefer
+-- their execution timestamp, while expiries prefer the authoritative expired_at.
+update public.event_paper_trade_runs
+set terminal_transition_at = coalesce(
+  terminal_transition_at,
+  case
+    when status = 'expired_no_trade' then expired_at
+    when status = 'paper_executed'
+      and paper_order->>'created_at' is not null
+      and paper_order->>'created_at'
+        ~* '^\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}([.]\d+)?(z|[+-]\d{2}:?\d{2})$'
+      then (paper_order->>'created_at')::timestamptz
+    else null
+  end,
+  updated_at,
+  first_seen_at
+)
+where status in ('expired_no_trade', 'paper_executed')
+  and terminal_transition_at is null;
+
 -- Reconcile historical duplicates without deleting their audit payload. The
--- earliest paper execution wins; absent one, the earliest expiry wins. Losing
--- rows retain their strategy/risk/order JSON and point at the winning analysis.
+-- first terminal transition wins regardless of status. Losing rows retain
+-- their strategy/risk/order JSON and point at the winning analysis.
 with ranked_terminal as (
   select
     id,
     row_number() over (
       partition by event_id
       order by
-        case status when 'paper_executed' then 0 else 1 end,
-        updated_at asc,
+        terminal_transition_at asc,
         first_seen_at asc,
         id asc
     ) as terminal_rank,
     first_value(analysis_id) over (
       partition by event_id
       order by
-        case status when 'paper_executed' then 0 else 1 end,
-        updated_at asc,
+        terminal_transition_at asc,
         first_seen_at asc,
         id asc
     ) as winner_analysis_id
@@ -86,11 +106,13 @@ declare
   effective_expired_at timestamptz := nullif(input_payload->>'expired_at', '')::timestamptz;
   terminal_owner public.event_paper_trade_runs%rowtype;
   claim_owner_analysis_id uuid;
+  transition_time timestamptz;
 begin
   -- All analyses for one event share a transaction-scoped lock. The partial
   -- unique index is the invariant backstop; this lock also lets the losing RPC
   -- return the existing event-level owner instead of raising a unique error.
   perform pg_advisory_xact_lock(hashtextextended(effective_event_id, 0));
+  transition_time := clock_timestamp();
   select * into terminal_owner
   from public.event_paper_trade_runs
   where event_id = effective_event_id
@@ -117,16 +139,16 @@ begin
   -- atomically at persistence time and cannot publish a paper order.
   if effective_status in ('waiting_confirmation', 'paper_executed')
      and effective_deadline is not null
-     and clock_timestamp() >= effective_deadline then
+     and transition_time >= effective_deadline then
     effective_status := 'expired_no_trade';
-    effective_expired_at := coalesce(effective_expired_at, clock_timestamp());
+    effective_expired_at := transition_time;
   end if;
 
   return query
   insert into public.event_paper_trade_runs (
     event_id, expectation_version, source_document_id, analysis_id,
     status, message, strategy, risk, paper_order, completed_components,
-    confirmation_deadline_at, expired_at, updated_at
+    confirmation_deadline_at, expired_at, updated_at, terminal_transition_at
   ) values (
     effective_event_id,
     (input_payload->>'expectation_version')::integer,
@@ -144,33 +166,39 @@ begin
       else nullif(input_payload->'paper_order', 'null'::jsonb) end,
     nullif(input_payload->'completed_components', 'null'::jsonb),
     effective_deadline,
-    effective_expired_at,
-    coalesce(nullif(input_payload->>'updated_at', '')::timestamptz, clock_timestamp())
+    case when effective_status = 'expired_no_trade' then transition_time
+      else effective_expired_at end,
+    case when effective_status in ('expired_no_trade', 'paper_executed')
+      then transition_time
+      else coalesce(nullif(input_payload->>'updated_at', '')::timestamptz, transition_time)
+    end,
+    case when effective_status in ('expired_no_trade', 'paper_executed')
+      then transition_time else null end
   )
   on conflict (analysis_id) do update set
     status = case
       when coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at) is not null
-       and clock_timestamp() >= coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at)
+       and transition_time >= coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at)
       then 'expired_no_trade'
       else excluded.status
     end,
     message = case
       when coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at) is not null
-       and clock_timestamp() >= coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at)
+       and transition_time >= coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at)
       then 'confirmation window expired without a trade'
       else excluded.message
     end,
     strategy = case
       when coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at) is not null
-       and clock_timestamp() >= coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at)
+       and transition_time >= coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at)
       then null else excluded.strategy end,
     risk = case
       when coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at) is not null
-       and clock_timestamp() >= coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at)
+       and transition_time >= coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at)
       then null else excluded.risk end,
     paper_order = case
       when coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at) is not null
-       and clock_timestamp() >= coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at)
+       and transition_time >= coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at)
       then null else excluded.paper_order end,
     completed_components = excluded.completed_components,
     confirmation_deadline_at = coalesce(
@@ -179,11 +207,24 @@ begin
     ),
     expired_at = case
       when coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at) is not null
-       and clock_timestamp() >= coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at)
-      then coalesce(excluded.expired_at, clock_timestamp())
+       and transition_time >= coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at)
+      then transition_time
       else excluded.expired_at
     end,
-    updated_at = excluded.updated_at
+    updated_at = case
+      when excluded.status in ('expired_no_trade', 'paper_executed')
+        or (
+          coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at) is not null
+          and transition_time >= coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at)
+        )
+      then transition_time else excluded.updated_at end,
+    terminal_transition_at = case
+      when excluded.status in ('expired_no_trade', 'paper_executed')
+        or (
+          coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at) is not null
+          and transition_time >= coalesce(event_paper_trade_runs.confirmation_deadline_at, excluded.confirmation_deadline_at)
+        )
+      then transition_time else event_paper_trade_runs.terminal_transition_at end
   where event_paper_trade_runs.status not in ('expired_no_trade', 'paper_executed')
   returning event_paper_trade_runs.*;
 end;
@@ -266,8 +307,10 @@ declare
   claim_owner_analysis_id uuid;
   claim_lease_expires_at timestamptz;
   expired_run public.event_paper_trade_runs%rowtype;
+  transition_time timestamptz;
 begin
   perform pg_advisory_xact_lock(hashtextextended(input_event_id, 0));
+  transition_time := clock_timestamp();
   select * into terminal_owner
   from public.event_paper_trade_runs
   where event_id = input_event_id
@@ -282,7 +325,7 @@ begin
   -- authoritative, and this check deliberately shares the event lock and
   -- transaction with the terminal transition below.
   if input_confirmation_deadline_at is null
-     or clock_timestamp() < input_confirmation_deadline_at then
+     or transition_time < input_confirmation_deadline_at then
     -- An empty result is intentional: the repository asks the database clock
     -- RPC below whether this was a still-open deadline or a lease conflict.
     return;
@@ -295,7 +338,7 @@ begin
   if claim_owner_analysis_id is not null
      and claim_owner_analysis_id <> input_analysis_id then
     if claim_lease_expires_at is null
-       or claim_lease_expires_at > clock_timestamp() then
+       or claim_lease_expires_at > transition_time then
       return query
       select * from public.event_paper_trade_runs
       where analysis_id = input_analysis_id
@@ -308,21 +351,23 @@ begin
     update public.event_paper_trade_event_claims
     set
       analysis_id = input_analysis_id,
-      claimed_at = clock_timestamp(),
-      lease_expires_at = input_expired_at,
-      updated_at = clock_timestamp()
+      claimed_at = transition_time,
+      lease_expires_at = transition_time,
+      updated_at = transition_time
     where event_id = input_event_id
       and analysis_id = claim_owner_analysis_id
-      and lease_expires_at <= clock_timestamp();
+      and lease_expires_at <= transition_time;
   end if;
 
   insert into public.event_paper_trade_runs (
     event_id, expectation_version, source_document_id, analysis_id,
-    status, message, confirmation_deadline_at, expired_at, updated_at
+    status, message, confirmation_deadline_at, expired_at, updated_at,
+    terminal_transition_at
   ) values (
     input_event_id, input_expectation_version, input_source_document_id, input_analysis_id,
     'expired_no_trade', 'confirmation window expired without a trade',
-    input_confirmation_deadline_at, input_expired_at, input_expired_at
+    input_confirmation_deadline_at, transition_time, transition_time,
+    transition_time
   )
   on conflict (analysis_id) do update set
     status = 'expired_no_trade',
@@ -331,8 +376,9 @@ begin
       event_paper_trade_runs.confirmation_deadline_at,
       excluded.confirmation_deadline_at
     ),
-    expired_at = excluded.expired_at,
-    updated_at = excluded.updated_at
+    expired_at = transition_time,
+    updated_at = transition_time,
+    terminal_transition_at = transition_time
   where event_paper_trade_runs.status = 'waiting_confirmation'
   returning event_paper_trade_runs.* into expired_run;
 
@@ -341,7 +387,7 @@ begin
     set
       analysis_id = input_analysis_id,
       lease_expires_at = null,
-      updated_at = clock_timestamp()
+      updated_at = transition_time
     where event_id = input_event_id;
     return next expired_run;
   end if;

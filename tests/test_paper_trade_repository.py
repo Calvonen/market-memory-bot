@@ -199,6 +199,9 @@ class _EventRpcQuery:
                 "event_id": event_id,
                 "analysis_id": analysis_id,
                 "status": "expired_no_trade",
+                "expired_at": self.client.now.isoformat(),
+                "updated_at": self.client.now.isoformat(),
+                "terminal_transition_at": self.client.now.isoformat(),
             }
 
         owner = next(
@@ -711,6 +714,26 @@ class PaperTradeRepositoryTests(unittest.TestCase):
         expired = self.expire_analysis(client, "analysis-a")
         assert expired is not None
         self.assertEqual(expired["status"], "expired_no_trade")
+        self.assertEqual(expired["expired_at"], self.deadline.isoformat())
+        self.assertEqual(expired["updated_at"], expired["expired_at"])
+        self.assertGreaterEqual(
+            datetime.fromisoformat(expired["expired_at"]), self.deadline
+        )
+
+    def test_worker_clock_behind_does_not_set_expiry_timestamp(self) -> None:
+        client = _EventAtomicClient()
+        client.now = self.deadline + timedelta(minutes=1)
+        expired = SupabasePaperTradeRepository(client).expire_waiting(
+            event_id="hays-fy2026-results",
+            expectation_version=1,
+            source_document_id=None,
+            analysis_id="analysis-a",
+            confirmation_deadline_at=self.deadline,
+            expired_at=self.deadline - timedelta(hours=1),
+        )
+        assert expired is not None
+        self.assertEqual(expired["expired_at"], client.now.isoformat())
+        self.assertEqual(expired["updated_at"], client.now.isoformat())
 
     def test_premature_expiry_does_not_block_later_paper_execution(self) -> None:
         client = _EventAtomicClient()

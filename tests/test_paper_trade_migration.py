@@ -1,10 +1,23 @@
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 
 
 MIGRATION = Path(
     "supabase/migrations/20260820100000_atomic_paper_run_transitions.sql"
 )
+
+
+def _first_terminal(rows: list[dict[str, str]]) -> dict[str, str]:
+    """Model the migration's timestamp/ID ordering for regression fixtures."""
+    return min(
+        rows,
+        key=lambda row: (
+            datetime.fromisoformat(row["terminal_transition_at"]).astimezone(UTC),
+            row["first_seen_at"],
+            row["id"],
+        ),
+    )
 
 
 class PaperTradeMigrationTests(unittest.TestCase):
@@ -43,8 +56,8 @@ class PaperTradeMigrationTests(unittest.TestCase):
         self.assertIn("or event_paper_trade_event_claims.lease_expires_at <=", self.sql)
 
     def test_expiry_can_transfer_only_an_expired_lease_under_event_lock(self) -> None:
-        self.assertIn("claim_lease_expires_at > clock_timestamp()", self.sql)
-        self.assertIn("and lease_expires_at <= clock_timestamp()", self.sql)
+        self.assertIn("claim_lease_expires_at > transition_time", self.sql)
+        self.assertIn("and lease_expires_at <= transition_time", self.sql)
         self.assertIn("returning event_paper_trade_runs.* into expired_run", self.sql)
 
     def test_expiry_uses_database_time_after_event_lock_before_mutation(self) -> None:
@@ -52,9 +65,7 @@ class PaperTradeMigrationTests(unittest.TestCase):
             "create or replace function public.expire_event_paper_trade_run", 1
         )[1]
         lock_at = function_sql.index("pg_advisory_xact_lock")
-        deadline_at = function_sql.index(
-            "clock_timestamp() < input_confirmation_deadline_at"
-        )
+        deadline_at = function_sql.index("transition_time < input_confirmation_deadline_at")
         mutation_at = function_sql.index("insert into public.event_paper_trade_runs")
         self.assertLess(lock_at, deadline_at)
         self.assertLess(deadline_at, mutation_at)
@@ -66,6 +77,82 @@ class PaperTradeMigrationTests(unittest.TestCase):
         self.assertIn(
             "clock_timestamp() >= input_confirmation_deadline_at", self.sql
         )
+        self.assertIn("transition_time := clock_timestamp()", function_sql)
+        self.assertIn("expired_at = transition_time", function_sql)
+        self.assertIn("updated_at = transition_time", function_sql)
+        self.assertIn("terminal_transition_at = transition_time", function_sql)
+        self.assertNotIn("expired_at = input_expired_at", function_sql)
+
+    def test_reconciliation_ranks_first_terminal_transition_without_status_priority(self) -> None:
+        reconciliation = self.sql.split("with ranked_terminal as", 1)[1].split(
+            "create unique index", 1
+        )[0]
+        self.assertIn("terminal_transition_at asc", reconciliation)
+        self.assertNotIn("case status when 'paper_executed'", reconciliation)
+        self.assertIn("first_seen_at asc", reconciliation)
+        self.assertIn("id asc", reconciliation)
+
+    def test_reconciliation_backfill_prefers_status_specific_terminal_time(self) -> None:
+        backfill = self.sql.split("set terminal_transition_at = coalesce", 1)[1].split(
+            "with ranked_terminal as", 1
+        )[0]
+        self.assertIn("when status = 'expired_no_trade' then expired_at", backfill)
+        self.assertIn("paper_order->>'created_at'", backfill)
+        self.assertIn("updated_at", backfill)
+        self.assertIn("first_seen_at", backfill)
+
+    def test_expiry_before_stale_execution_remains_terminal_winner(self) -> None:
+        rows = [
+            {
+                "id": "b",
+                "status": "paper_executed",
+                "terminal_transition_at": "2026-08-20T15:46:00+00:00",
+                "first_seen_at": "2026-08-20T15:40:00+00:00",
+            },
+            {
+                "id": "a",
+                "status": "expired_no_trade",
+                "terminal_transition_at": "2026-08-20T15:45:00+00:00",
+                "first_seen_at": "2026-08-20T15:41:00+00:00",
+            },
+        ]
+        self.assertEqual(_first_terminal(rows)["status"], "expired_no_trade")
+
+    def test_execution_before_stale_expiry_remains_terminal_winner(self) -> None:
+        rows = [
+            {
+                "id": "a",
+                "status": "paper_executed",
+                "terminal_transition_at": "2026-08-20T15:44:00+00:00",
+                "first_seen_at": "2026-08-20T15:40:00+00:00",
+            },
+            {
+                "id": "b",
+                "status": "expired_no_trade",
+                "terminal_transition_at": "2026-08-20T15:45:00+00:00",
+                "first_seen_at": "2026-08-20T15:41:00+00:00",
+            },
+        ]
+        self.assertEqual(_first_terminal(rows)["status"], "paper_executed")
+
+    def test_same_status_uses_earliest_transition_and_is_idempotent(self) -> None:
+        rows = [
+            {
+                "id": "later",
+                "status": "paper_executed",
+                "terminal_transition_at": "2026-08-20T15:44:01+00:00",
+                "first_seen_at": "2026-08-20T15:40:00+00:00",
+            },
+            {
+                "id": "first",
+                "status": "paper_executed",
+                "terminal_transition_at": "2026-08-20T15:44:00+00:00",
+                "first_seen_at": "2026-08-20T15:41:00+00:00",
+            },
+        ]
+        winner = _first_terminal(rows)
+        self.assertEqual(winner["id"], "first")
+        self.assertEqual(_first_terminal([winner])["id"], "first")
 
     def test_event_state_read_prioritizes_terminal_and_excludes_superseded(self) -> None:
         self.assertIn("create or replace function public.get_event_paper_trade_state", self.sql)
