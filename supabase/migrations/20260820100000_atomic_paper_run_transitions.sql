@@ -278,6 +278,18 @@ begin
     return;
   end if;
 
+  -- The application clock is only a polling hint. Supabase time is
+  -- authoritative, and this check deliberately shares the event lock and
+  -- transaction with the terminal transition below.
+  if input_confirmation_deadline_at is null
+     or clock_timestamp() < input_confirmation_deadline_at then
+    return query
+    select * from public.event_paper_trade_runs
+    where analysis_id = input_analysis_id
+    limit 1;
+    return;
+  end if;
+
   select analysis_id, lease_expires_at
   into claim_owner_analysis_id, claim_lease_expires_at
   from public.event_paper_trade_event_claims

@@ -109,6 +109,8 @@ export default function HomeScreen() {
   const completed = run?.completed_components ?? null;
   const fundamentalScore = completed?.fundamental?.score ?? scores?.fundamental;
   const catalystScore = completed?.catalyst?.score ?? scores?.catalyst;
+  const confirmationReason =
+    run?.status === 'waiting_confirmation' ? run.message : null;
 
   const statusText =
     error
@@ -191,6 +193,9 @@ export default function HomeScreen() {
         <View style={styles.waitingBox}>
           <Text style={styles.waitingLabel}>NYKYTILA</Text>
           <Text style={styles.waitingText}>{statusText}</Text>
+          {confirmationReason ? (
+            <Text style={styles.confirmationReason}>{confirmationReason}</Text>
+          ) : null}
           {error ? (
             <Text style={styles.errorText}>{error}</Text>
           ) : null}
@@ -448,6 +453,12 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     marginTop: 5,
+  },
+  confirmationReason: {
+    color: '#8994a6',
+    fontSize: 13,
+    lineHeight: 19,
+    marginTop: 7,
   },
   sectionTitle: {
     color: '#687386',

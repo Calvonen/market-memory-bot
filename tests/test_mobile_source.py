@@ -16,6 +16,13 @@ class MobileSourceTests(unittest.TestCase):
         self.assertIn("Enimmäismäärä ${risk.max_quantity", self.source)
         self.assertIn("Tuotto/riski ${risk.reward_risk", self.source)
 
+    def test_waiting_confirmation_preserves_the_persisted_reason(self) -> None:
+        self.assertIn(
+            "run?.status === 'waiting_confirmation' ? run.message : null",
+            self.source,
+        )
+        self.assertIn("{confirmationReason}", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()

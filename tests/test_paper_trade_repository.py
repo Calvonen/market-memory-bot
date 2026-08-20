@@ -205,6 +205,21 @@ class _EventRpcQuery:
         if owner is not None:
             return SimpleNamespace(data=[owner.copy()])
 
+        if self.name == "expire_event_paper_trade_run":
+            deadline = datetime.fromisoformat(
+                self.params["input_confirmation_deadline_at"]
+            )
+            if self.client.now < deadline:
+                existing = next(
+                    (
+                        row
+                        for row in self.client.rows
+                        if row["analysis_id"] == analysis_id
+                    ),
+                    None,
+                )
+                return SimpleNamespace(data=[existing.copy()] if existing else [])
+
         claim = self.client.claims.get(event_id)
         if claim is not None and claim["analysis_id"] != analysis_id:
             if (
@@ -632,6 +647,7 @@ class PaperTradeRepositoryTests(unittest.TestCase):
 
     def test_active_claim_rejects_other_analysis_expiry(self) -> None:
         client = _EventAtomicClient()
+        client.now = self.deadline
         SupabasePaperTradeRepository(client).claim_event(
             event_id="hays-fy2026-results", analysis_id="analysis-a", lease_seconds=60
         )
@@ -645,7 +661,7 @@ class PaperTradeRepositoryTests(unittest.TestCase):
         SupabasePaperTradeRepository(client).claim_event(
             event_id="hays-fy2026-results", analysis_id="analysis-a", lease_seconds=60
         )
-        client.now += timedelta(seconds=61)
+        client.now = self.deadline
         expired = self.expire_analysis(client, "analysis-b")
         assert expired is not None
         self.assertEqual(expired["analysis_id"], "analysis-b")
@@ -665,12 +681,35 @@ class PaperTradeRepositoryTests(unittest.TestCase):
         SupabasePaperTradeRepository(client).claim_event(
             event_id="hays-fy2026-results", analysis_id="analysis-a", lease_seconds=60
         )
-        client.now += timedelta(seconds=61)
+        client.now = self.deadline
         winner_b = self.expire_analysis(client, "analysis-b")
         winner_c = self.expire_analysis(client, "analysis-c")
         assert winner_b is not None and winner_c is not None
         self.assertEqual(winner_b["analysis_id"], "analysis-b")
         self.assertEqual(winner_c["analysis_id"], "analysis-b")
+        self.assertEqual(len([row for row in client.rows if row["status"] in TERMINAL]), 1)
+
+    def test_host_deadline_does_not_expire_before_database_deadline(self) -> None:
+        client = _EventAtomicClient()
+        rejected = self.expire_analysis(client, "analysis-a")
+        assert rejected is not None
+        self.assertEqual(rejected["status"], "waiting_confirmation")
+        self.assertFalse(any(row["status"] in TERMINAL for row in client.rows))
+
+    def test_database_time_at_deadline_allows_expiry(self) -> None:
+        client = _EventAtomicClient()
+        client.now = self.deadline
+        expired = self.expire_analysis(client, "analysis-a")
+        assert expired is not None
+        self.assertEqual(expired["status"], "expired_no_trade")
+
+    def test_premature_expiry_does_not_block_later_paper_execution(self) -> None:
+        client = _EventAtomicClient()
+        rejected = self.expire_analysis(client, "analysis-a")
+        assert rejected is not None
+        self.assertEqual(rejected["status"], "waiting_confirmation")
+        executed = self.save_analysis(client, "analysis-a", "paper_executed")
+        self.assertEqual(executed["status"], "paper_executed")
         self.assertEqual(len([row for row in client.rows if row["status"] in TERMINAL]), 1)
 
 

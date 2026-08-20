@@ -200,6 +200,6 @@ class SupabasePaperTradeRepository:
                 "event_id": event_id,
                 "analysis_id": analysis_id,
                 "status": "waiting_confirmation",
-                "message": "paper expiry was rejected by an active event lease",
+                "message": "paper expiry was rejected by the database deadline or an active event lease",
             }
         return winner

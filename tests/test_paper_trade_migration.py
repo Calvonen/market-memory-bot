@@ -47,6 +47,19 @@ class PaperTradeMigrationTests(unittest.TestCase):
         self.assertIn("and lease_expires_at <= clock_timestamp()", self.sql)
         self.assertIn("returning event_paper_trade_runs.* into expired_run", self.sql)
 
+    def test_expiry_uses_database_time_after_event_lock_before_mutation(self) -> None:
+        function_sql = self.sql.split(
+            "create or replace function public.expire_event_paper_trade_run", 1
+        )[1]
+        lock_at = function_sql.index("pg_advisory_xact_lock")
+        deadline_at = function_sql.index(
+            "clock_timestamp() < input_confirmation_deadline_at"
+        )
+        mutation_at = function_sql.index("insert into public.event_paper_trade_runs")
+        self.assertLess(lock_at, deadline_at)
+        self.assertLess(deadline_at, mutation_at)
+        self.assertIn("input_confirmation_deadline_at is null", function_sql)
+
     def test_event_state_read_prioritizes_terminal_and_excludes_superseded(self) -> None:
         self.assertIn("create or replace function public.get_event_paper_trade_state", self.sql)
         self.assertIn("status <> 'superseded'", self.sql)
