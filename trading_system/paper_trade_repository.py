@@ -31,15 +31,10 @@ class SupabasePaperTradeRepository:
         return cls(create_client(url, key))
 
     def get_latest_for_event(self, event_id: str) -> dict[str, Any] | None:
-        response = (
-            self.client.table("event_paper_trade_runs")
-            .select("*")
-            .eq("event_id", event_id)
-            .neq("status", "superseded")
-            .order("updated_at", desc=True)
-            .limit(1)
-            .execute()
-        )
+        response = self.client.rpc(
+            "get_event_paper_trade_state",
+            {"input_event_id": event_id},
+        ).execute()
         rows = response.data or []
         return rows[0] if rows else None
 
@@ -201,7 +196,10 @@ class SupabasePaperTradeRepository:
             return rows[0]
         winner = self.get_for_analysis(analysis_id)
         if winner is None:
-            raise RuntimeError(
-                f"paper expiry was rejected but analysis {analysis_id} has no persisted row"
-            )
+            return {
+                "event_id": event_id,
+                "analysis_id": analysis_id,
+                "status": "waiting_confirmation",
+                "message": "paper expiry was rejected by an active event lease",
+            }
         return winner

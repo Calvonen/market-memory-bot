@@ -339,9 +339,28 @@ begin
 end;
 $$;
 
+create or replace function public.get_event_paper_trade_state(input_event_id text)
+returns setof public.event_paper_trade_runs
+language sql
+security invoker
+set search_path = public
+as $$
+  select *
+  from public.event_paper_trade_runs
+  where event_id = input_event_id
+    and status <> 'superseded'
+  order by
+    case when status in ('expired_no_trade', 'paper_executed') then 0 else 1 end,
+    updated_at desc,
+    id desc
+  limit 1;
+$$;
+
 revoke all on function public.save_event_paper_trade_result(jsonb) from public;
 revoke all on function public.expire_event_paper_trade_run(text, integer, uuid, uuid, timestamptz, timestamptz) from public;
 revoke all on function public.claim_event_paper_run(text, uuid, integer) from public;
+revoke all on function public.get_event_paper_trade_state(text) from public;
 grant execute on function public.save_event_paper_trade_result(jsonb) to service_role;
 grant execute on function public.expire_event_paper_trade_run(text, integer, uuid, uuid, timestamptz, timestamptz) to service_role;
 grant execute on function public.claim_event_paper_run(text, uuid, integer) to service_role;
+grant execute on function public.get_event_paper_trade_state(text) to service_role;

@@ -303,15 +303,116 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
             expectation=HAYS_FY2026,
             analysis=self.analysis,
             interval_seconds=300,
-            once=False,
+            once=True,
             analysis_id="analysis-b",
             persistence=ClaimedPersistence(),
             runner=lambda **_: self.fail("losing event claim must not reach PaperBroker"),
+            sleeper=lambda _: self.fail("once mode must not poll a lost lease"),
             clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
         )
         self.assertEqual(result.status, "waiting_confirmation")
         self.assertIn("analysis-a", result.message)
         self.assertIsNone(result.pipeline)
+
+    def test_continuous_worker_polls_then_reclaims_expired_lease(self) -> None:
+        class LeaseChangesPersistence:
+            def __init__(self) -> None:
+                self.claims = 0
+
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def claim_event(self, **kwargs: Any) -> dict[str, Any]:
+                self.claims += 1
+                owner = "analysis-a" if self.claims == 1 else kwargs["analysis_id"]
+                return {"event_id": kwargs["event_id"], "analysis_id": owner}
+
+            def save_result(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": kwargs["result"].status,
+                    "message": kwargs["result"].message,
+                }
+
+        persistence = LeaseChangesPersistence()
+        runner_calls: list[str] = []
+        sleeps: list[float] = []
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            analysis_id="analysis-b",
+            persistence=persistence,
+            runner=lambda **_: (
+                runner_calls.append("ran")
+                or PostReleasePaperResult("paper_executed", "owner paper order")
+            ),
+            sleeper=sleeps.append,
+            clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
+        )
+        self.assertEqual(result.status, "paper_executed")
+        self.assertEqual(persistence.claims, 2)
+        self.assertEqual(runner_calls, ["ran"])
+        self.assertEqual(sleeps, [300])
+
+    def test_losing_worker_can_expire_event_when_deadline_arrives(self) -> None:
+        now = [datetime(2026, 8, 20, 15, 44, tzinfo=UTC)]
+
+        class LeaseHeldPersistence:
+            def __init__(self) -> None:
+                self.expiry_attempts = 0
+
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def claim_event(self, **kwargs: Any) -> dict[str, Any]:
+                return {"event_id": kwargs["event_id"], "analysis_id": "analysis-a"}
+
+            def expire_waiting(self, **kwargs: Any) -> dict[str, Any]:
+                self.expiry_attempts += 1
+                if self.expiry_attempts == 1:
+                    return {
+                        "analysis_id": kwargs["analysis_id"],
+                        "status": "waiting_confirmation",
+                        "message": "active event lease",
+                    }
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": "expired_no_trade",
+                }
+
+        persistence = LeaseHeldPersistence()
+        sleeps = 0
+
+        def advance_after_sleep(seconds: float) -> None:
+            nonlocal sleeps
+            self.assertEqual(seconds, 300)
+            sleeps += 1
+            now[0] = datetime(2026, 8, 20, 15, 45 + sleeps - 1, tzinfo=UTC)
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            analysis_id="analysis-b",
+            persistence=persistence,
+            runner=lambda **_: self.fail("lease loser must not run before deadline"),
+            sleeper=advance_after_sleep,
+            clock=lambda: now[0],
+        )
+        self.assertEqual(result.status, "expired_no_trade")
+        self.assertEqual(persistence.expiry_attempts, 2)
+        self.assertEqual(sleeps, 2)
 
     def test_reclaimed_event_suppresses_old_runner_terminal_result(self) -> None:
         class ReclaimedPersistence:

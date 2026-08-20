@@ -321,10 +321,14 @@ def run_paper_confirmation_loop(
                     expired_at=now,
                 )
                 if updated is not None and updated.get("status") != "expired_no_trade":
-                    return PostReleasePaperResult(
+                    rejected_expiry = PostReleasePaperResult(
                         str(updated.get("status") or "waiting_confirmation"),
                         str(updated.get("message") or "paper expiry was rejected"),
                     )
+                    if rejected_expiry.status == "paper_executed" or once:
+                        return rejected_expiry
+                    sleeper(max(60, interval_seconds))
+                    continue
             print(f"{event_id}: {expired.status} ({expired.message})", flush=True)
             return expired
 
@@ -349,11 +353,15 @@ def run_paper_confirmation_loop(
             if str(owner.get("analysis_id")) != analysis_id:
                 message = f"paper event is owned by analysis {owner.get('analysis_id')}"
                 print(f"{event_id}: waiting_confirmation ({message})", flush=True)
-                return PostReleasePaperResult(
+                waiting = PostReleasePaperResult(
                     "waiting_confirmation",
                     message,
                     confirmation_deadline_at=deadline,
                 )
+                if once:
+                    return waiting
+                sleeper(max(60, interval_seconds))
+                continue
 
         result = runner(
             expectation=expectation,

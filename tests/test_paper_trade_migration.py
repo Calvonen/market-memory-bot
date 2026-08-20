@@ -47,6 +47,14 @@ class PaperTradeMigrationTests(unittest.TestCase):
         self.assertIn("and lease_expires_at <= clock_timestamp()", self.sql)
         self.assertIn("returning event_paper_trade_runs.* into expired_run", self.sql)
 
+    def test_event_state_read_prioritizes_terminal_and_excludes_superseded(self) -> None:
+        self.assertIn("create or replace function public.get_event_paper_trade_state", self.sql)
+        self.assertIn("status <> 'superseded'", self.sql)
+        self.assertIn(
+            "case when status in ('expired_no_trade', 'paper_executed') then 0 else 1 end",
+            self.sql,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
