@@ -230,6 +230,7 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
             clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
         )
         self.assertEqual(result.status, "expired_no_trade")
+        self.assertNotEqual(result.message, "stale paper result")
         self.assertIsNone(result.pipeline)
 
 

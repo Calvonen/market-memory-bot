@@ -42,6 +42,17 @@ class SupabasePaperTradeRepository:
         rows = response.data or []
         return rows[0] if rows else None
 
+    def get_for_analysis(self, analysis_id: str) -> dict[str, Any] | None:
+        response = (
+            self.client.table("event_paper_trade_runs")
+            .select("*")
+            .eq("analysis_id", analysis_id)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        return rows[0] if rows else None
+
     def save_result(
         self,
         *,
@@ -139,8 +150,12 @@ class SupabasePaperTradeRepository:
         # because a terminal row won the race. Reading afterwards is only to
         # return the winner; correctness does not depend on a read-then-write.
         if not rows:
-            latest = self.get_latest_for_event(event_id)
-            return latest or {}
+            winner = self.get_for_analysis(analysis_id)
+            if winner is None:
+                raise RuntimeError(
+                    f"paper result write was rejected but analysis {analysis_id} has no persisted row"
+                )
+            return winner
         return rows[0]
 
     def expire_waiting(
@@ -165,4 +180,4 @@ class SupabasePaperTradeRepository:
             },
         ).execute()
         rows = response.data or []
-        return rows[0] if rows else self.get_latest_for_event(event_id)
+        return rows[0] if rows else self.get_for_analysis(analysis_id)

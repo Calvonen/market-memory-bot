@@ -79,6 +79,45 @@ class _AtomicClient:
         return _RpcQuery(self, name, params)
 
 
+class _RejectedRpcQuery:
+    def execute(self) -> SimpleNamespace:
+        return SimpleNamespace(data=[])
+
+
+class _AnalysisQuery:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+
+    def select(self, *_args: Any) -> "_AnalysisQuery":
+        return self
+
+    def eq(self, column: str, value: str) -> "_AnalysisQuery":
+        self.rows = [row for row in self.rows if row.get(column) == value]
+        return self
+
+    def order(self, column: str, *, desc: bool = False) -> "_AnalysisQuery":
+        self.rows.sort(key=lambda row: row.get(column, ""), reverse=desc)
+        return self
+
+    def limit(self, count: int) -> "_AnalysisQuery":
+        self.rows = self.rows[:count]
+        return self
+
+    def execute(self) -> SimpleNamespace:
+        return SimpleNamespace(data=self.rows)
+
+
+class _RejectedSaveClient:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+
+    def rpc(self, _name: str, _params: dict[str, Any]) -> _RejectedRpcQuery:
+        return _RejectedRpcQuery()
+
+    def table(self, _table: str) -> _AnalysisQuery:
+        return _AnalysisQuery(self.rows.copy())
+
+
 class PaperTradeRepositoryTests(unittest.TestCase):
     deadline = datetime(2026, 8, 20, 15, 45, tzinfo=UTC)
     expired_at = datetime(2026, 8, 20, 15, 46, tzinfo=UTC)
@@ -161,6 +200,53 @@ class PaperTradeRepositoryTests(unittest.TestCase):
         expired = self.expire(client)
         assert expired is not None
         self.assertEqual(expired["confirmation_deadline_at"], self.deadline.isoformat())
+
+    def test_rejected_save_returns_terminal_row_for_same_analysis(self) -> None:
+        analysis_id = "00000000-0000-0000-0000-000000000002"
+        client = _RejectedSaveClient(
+            [{"analysis_id": analysis_id, "status": "expired_no_trade"}]
+        )
+        winner = self.save(client, "paper_executed")
+        self.assertEqual(winner["analysis_id"], analysis_id)
+        self.assertEqual(winner["status"], "expired_no_trade")
+
+    def test_rejected_save_without_authoritative_row_fails_closed(self) -> None:
+        with self.assertRaises(RuntimeError):
+            self.save(_RejectedSaveClient([]), "paper_executed")
+
+    def test_rejected_save_for_old_analysis_never_reads_newer_analysis(self) -> None:
+        analysis_a = "00000000-0000-0000-0000-000000000002"
+        analysis_b = "00000000-0000-0000-0000-000000000003"
+        client = _RejectedSaveClient(
+            [
+                {
+                    "analysis_id": analysis_a,
+                    "status": "expired_no_trade",
+                    "updated_at": "2026-08-20T15:45:00+00:00",
+                },
+                {
+                    "analysis_id": analysis_b,
+                    "status": "paper_executed",
+                    "updated_at": "2026-08-20T15:50:00+00:00",
+                },
+            ]
+        )
+        winner = self.save(client, "paper_executed")
+        self.assertEqual(winner["analysis_id"], analysis_a)
+        self.assertEqual(winner["status"], "expired_no_trade")
+
+    def test_expired_analysis_wins_even_when_newer_analysis_is_waiting(self) -> None:
+        analysis_a = "00000000-0000-0000-0000-000000000002"
+        analysis_b = "00000000-0000-0000-0000-000000000003"
+        client = _RejectedSaveClient(
+            [
+                {"analysis_id": analysis_a, "status": "expired_no_trade"},
+                {"analysis_id": analysis_b, "status": "waiting_confirmation"},
+            ]
+        )
+        winner = self.save(client, "paper_executed")
+        self.assertEqual(winner["analysis_id"], analysis_a)
+        self.assertEqual(winner["status"], "expired_no_trade")
 
 
 if __name__ == "__main__":
