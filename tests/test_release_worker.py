@@ -293,6 +293,39 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
         self.assertIn("analysis-a", result.message)
         self.assertIsNone(result.pipeline)
 
+    def test_reclaimed_event_suppresses_old_runner_terminal_result(self) -> None:
+        class ReclaimedPersistence:
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def save_result(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": "waiting_confirmation",
+                    "message": "event lease was reclaimed",
+                }
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=True,
+            analysis_id="analysis-old",
+            persistence=ReclaimedPersistence(),
+            runner=lambda **_: PostReleasePaperResult(
+                "paper_executed", "stale simulated order"
+            ),
+            sleeper=lambda _: self.fail("once mode must not poll after a rejected stale result"),
+            clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
+        )
+        self.assertEqual(result.status, "waiting_confirmation")
+        self.assertEqual(result.message, "event lease was reclaimed")
+        self.assertIsNone(result.pipeline)
+
 
 class _FakeReleaseRepository:
     """In-memory stand-in for SupabaseReleaseRepository's dedupe/upsert semantics."""

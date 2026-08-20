@@ -1,5 +1,5 @@
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -128,10 +128,30 @@ class _EventRpcQuery:
         if self.name == "claim_event_paper_run":
             event_id = self.params["input_event_id"]
             analysis_id = self.params["input_analysis_id"]
-            owner = self.client.claims.setdefault(event_id, analysis_id)
-            return SimpleNamespace(
-                data=[{"event_id": event_id, "analysis_id": owner}]
+            terminal = next(
+                (
+                    row
+                    for row in self.client.rows
+                    if row["event_id"] == event_id and row["status"] in TERMINAL
+                ),
+                None,
             )
+            claim = self.client.claims.get(event_id)
+            if terminal is not None:
+                claim = {"event_id": event_id, "analysis_id": terminal["analysis_id"], "lease_expires_at": None}
+            elif (
+                claim is None
+                or claim["analysis_id"] == analysis_id
+                or claim["lease_expires_at"] <= self.client.now
+            ):
+                claim = {
+                    "event_id": event_id,
+                    "analysis_id": analysis_id,
+                    "lease_expires_at": self.client.now
+                    + timedelta(seconds=self.params["input_lease_seconds"]),
+                }
+            self.client.claims[event_id] = claim
+            return SimpleNamespace(data=[claim.copy()])
         if self.name == "save_event_paper_trade_result":
             incoming = self.params["input_payload"].copy()
             event_id = incoming["event_id"]
@@ -156,6 +176,18 @@ class _EventRpcQuery:
         if owner is not None:
             return SimpleNamespace(data=[owner.copy()])
 
+        claim = self.client.claims.get(event_id)
+        if claim is not None and claim["analysis_id"] != analysis_id:
+            stale_row = next(
+                (
+                    row
+                    for row in self.client.rows
+                    if row["analysis_id"] == analysis_id
+                ),
+                None,
+            )
+            return SimpleNamespace(data=[stale_row.copy()] if stale_row else [])
+
         existing = next(
             (row for row in self.client.rows if row["analysis_id"] == analysis_id),
             None,
@@ -174,7 +206,8 @@ class _EventAtomicClient:
 
     def __init__(self) -> None:
         self.rows: list[dict[str, Any]] = []
-        self.claims: dict[str, str] = {}
+        self.claims: dict[str, dict[str, Any]] = {}
+        self.now = datetime(2026, 8, 20, 12, tzinfo=UTC)
 
     def rpc(self, name: str, params: dict[str, Any]) -> _EventRpcQuery:
         return _EventRpcQuery(self, name, params)
@@ -366,13 +399,83 @@ class PaperTradeRepositoryTests(unittest.TestCase):
         client = _EventAtomicClient()
         repository = SupabasePaperTradeRepository(client)
         owner_a = repository.claim_event(
-            event_id="hays-fy2026-results", analysis_id="analysis-a"
+            event_id="hays-fy2026-results", analysis_id="analysis-a", lease_seconds=60
         )
         owner_b = repository.claim_event(
-            event_id="hays-fy2026-results", analysis_id="analysis-b"
+            event_id="hays-fy2026-results", analysis_id="analysis-b", lease_seconds=60
         )
         self.assertEqual(owner_a["analysis_id"], "analysis-a")
         self.assertEqual(owner_b["analysis_id"], "analysis-a")
+
+    def test_stale_claim_can_be_reclaimed_by_new_analysis(self) -> None:
+        client = _EventAtomicClient()
+        repository = SupabasePaperTradeRepository(client)
+        repository.claim_event(
+            event_id="hays-fy2026-results", analysis_id="analysis-a", lease_seconds=60
+        )
+        client.now += timedelta(seconds=61)
+        owner = repository.claim_event(
+            event_id="hays-fy2026-results", analysis_id="analysis-b", lease_seconds=60
+        )
+        self.assertEqual(owner["analysis_id"], "analysis-b")
+
+    def test_terminal_owner_cannot_be_reclaimed_after_lease_expiry(self) -> None:
+        client = _EventAtomicClient()
+        repository = SupabasePaperTradeRepository(client)
+        repository.claim_event(
+            event_id="hays-fy2026-results", analysis_id="analysis-a", lease_seconds=60
+        )
+        self.save_analysis(client, "analysis-a", "paper_executed")
+        client.now += timedelta(seconds=61)
+        owner = repository.claim_event(
+            event_id="hays-fy2026-results", analysis_id="analysis-b", lease_seconds=60
+        )
+        self.assertEqual(owner["analysis_id"], "analysis-a")
+
+    def test_only_one_analysis_wins_concurrent_stale_claim_recovery(self) -> None:
+        client = _EventAtomicClient()
+        repository = SupabasePaperTradeRepository(client)
+        repository.claim_event(
+            event_id="hays-fy2026-results", analysis_id="analysis-a", lease_seconds=60
+        )
+        client.now += timedelta(seconds=61)
+        owner_b = repository.claim_event(
+            event_id="hays-fy2026-results", analysis_id="analysis-b", lease_seconds=60
+        )
+        owner_c = repository.claim_event(
+            event_id="hays-fy2026-results", analysis_id="analysis-c", lease_seconds=60
+        )
+        self.assertEqual(owner_b["analysis_id"], "analysis-b")
+        self.assertEqual(owner_c["analysis_id"], "analysis-b")
+
+    def test_new_official_analysis_progresses_after_old_claim_is_stale(self) -> None:
+        client = _EventAtomicClient()
+        repository = SupabasePaperTradeRepository(client)
+        repository.claim_event(
+            event_id="hays-fy2026-results", analysis_id="analysis-old", lease_seconds=60
+        )
+        client.now += timedelta(seconds=61)
+        owner = repository.claim_event(
+            event_id="hays-fy2026-results", analysis_id="analysis-new", lease_seconds=60
+        )
+        executed = self.save_analysis(client, "analysis-new", "paper_executed")
+        self.assertEqual(owner["analysis_id"], "analysis-new")
+        self.assertEqual(executed["status"], "paper_executed")
+
+    def test_reclaimed_event_rejects_old_analysis_stale_terminal_save(self) -> None:
+        client = _EventAtomicClient()
+        repository = SupabasePaperTradeRepository(client)
+        repository.claim_event(
+            event_id="hays-fy2026-results", analysis_id="analysis-old", lease_seconds=60
+        )
+        self.save_analysis(client, "analysis-old", "waiting_confirmation")
+        client.now += timedelta(seconds=61)
+        repository.claim_event(
+            event_id="hays-fy2026-results", analysis_id="analysis-new", lease_seconds=60
+        )
+        stale = self.save_analysis(client, "analysis-old", "paper_executed")
+        self.assertEqual(stale["status"], "waiting_confirmation")
+        self.assertFalse(any(row["status"] in TERMINAL for row in client.rows))
 
 
 if __name__ == "__main__":

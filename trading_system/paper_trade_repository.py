@@ -53,10 +53,16 @@ class SupabasePaperTradeRepository:
         rows = response.data or []
         return rows[0] if rows else None
 
-    def claim_event(self, *, event_id: str, analysis_id: str) -> dict[str, Any]:
+    def claim_event(
+        self, *, event_id: str, analysis_id: str, lease_seconds: int
+    ) -> dict[str, Any]:
         response = self.client.rpc(
             "claim_event_paper_run",
-            {"input_event_id": event_id, "input_analysis_id": analysis_id},
+            {
+                "input_event_id": event_id,
+                "input_analysis_id": analysis_id,
+                "input_lease_seconds": max(1, lease_seconds),
+            },
         ).execute()
         rows = response.data or []
         if not rows:
@@ -190,4 +196,11 @@ class SupabasePaperTradeRepository:
             },
         ).execute()
         rows = response.data or []
-        return rows[0] if rows else self.get_for_analysis(analysis_id)
+        if rows:
+            return rows[0]
+        winner = self.get_for_analysis(analysis_id)
+        if winner is None:
+            raise RuntimeError(
+                f"paper expiry was rejected but analysis {analysis_id} has no persisted row"
+            )
+        return winner

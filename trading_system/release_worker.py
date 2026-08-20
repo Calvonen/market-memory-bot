@@ -30,6 +30,7 @@ from trading_system.supabase_event_repository import SupabaseEventExpectationRep
 
 DEFAULT_OVERDUE_GRACE_HOURS = 8.0
 DEFAULT_CONFIRMATION_GRACE_MINUTES = 15
+DEFAULT_EVENT_CLAIM_LEASE_SECONDS = 1800
 HAYS_LSE_CLOSE_TIME = (16, 30)
 
 
@@ -298,23 +299,6 @@ def run_paper_confirmation_loop(
         expectation, grace_minutes=grace
     )
 
-    # Claim the event before invoking a runner that may reach PaperBroker. The
-    # database claim is event-scoped, so analyses for different documents cannot
-    # both create simulated orders. Re-entry by the owning analysis is allowed.
-    claim_event = getattr(persistence, "claim_event", None)
-    if persistence is not None and callable(claim_event):
-        if analysis_id is None:
-            raise RuntimeError("paper persistence requires analysis_id")
-        owner = claim_event(event_id=event_id, analysis_id=analysis_id)
-        if str(owner.get("analysis_id")) != analysis_id:
-            message = f"paper event is owned by analysis {owner.get('analysis_id')}"
-            print(f"{event_id}: waiting_confirmation ({message})", flush=True)
-            return PostReleasePaperResult(
-                "waiting_confirmation",
-                message,
-                confirmation_deadline_at=deadline,
-            )
-
     portfolio = build_paper_portfolio_from_env()
     while True:
         now = clock().astimezone(UTC)
@@ -336,13 +320,40 @@ def run_paper_confirmation_loop(
                     confirmation_deadline_at=deadline,
                     expired_at=now,
                 )
-                if updated is not None and updated.get("status") == "paper_executed":
+                if updated is not None and updated.get("status") != "expired_no_trade":
                     return PostReleasePaperResult(
-                        "paper_executed",
-                        str(updated.get("message") or "paper trade executed"),
+                        str(updated.get("status") or "waiting_confirmation"),
+                        str(updated.get("message") or "paper expiry was rejected"),
                     )
             print(f"{event_id}: {expired.status} ({expired.message})", flush=True)
             return expired
+
+        # Acquire or renew the event lease immediately before invoking a runner
+        # that may reach PaperBroker. A different analysis may reclaim only an
+        # expired lease; terminal ownership can never be reclaimed.
+        claim_event = getattr(persistence, "claim_event", None)
+        if persistence is not None and callable(claim_event):
+            if analysis_id is None:
+                raise RuntimeError("paper persistence requires analysis_id")
+            lease_seconds = int(
+                os.environ.get(
+                    "MARKETAI_EVENT_CLAIM_LEASE_SECONDS",
+                    str(DEFAULT_EVENT_CLAIM_LEASE_SECONDS),
+                )
+            )
+            owner = claim_event(
+                event_id=event_id,
+                analysis_id=analysis_id,
+                lease_seconds=lease_seconds,
+            )
+            if str(owner.get("analysis_id")) != analysis_id:
+                message = f"paper event is owned by analysis {owner.get('analysis_id')}"
+                print(f"{event_id}: waiting_confirmation ({message})", flush=True)
+                return PostReleasePaperResult(
+                    "waiting_confirmation",
+                    message,
+                    confirmation_deadline_at=deadline,
+                )
 
         result = runner(
             expectation=expectation,
@@ -394,6 +405,12 @@ def run_paper_confirmation_loop(
                 result = PostReleasePaperResult(
                     "paper_executed",
                     str(persisted.get("message") or "paper trade already executed"),
+                    confirmation_deadline_at=deadline,
+                )
+            elif persisted.get("status") != result.status:
+                result = PostReleasePaperResult(
+                    str(persisted.get("status") or "waiting_confirmation"),
+                    str(persisted.get("message") or "paper result write was rejected"),
                     confirmation_deadline_at=deadline,
                 )
         print(f"{event_id}: {result.status} ({result.message})", flush=True)

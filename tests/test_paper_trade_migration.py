@@ -17,6 +17,14 @@ class PaperTradeMigrationTests(unittest.TestCase):
         self.assertIn("on public.event_paper_trade_runs(event_id)", self.sql)
         self.assertIn("where status in ('expired_no_trade', 'paper_executed')", self.sql)
 
+    def test_existing_terminal_duplicates_are_reconciled_before_unique_index(self) -> None:
+        reconcile_at = self.sql.index("with ranked_terminal as")
+        index_at = self.sql.index("create unique index")
+        self.assertLess(reconcile_at, index_at)
+        self.assertIn("row_number() over", self.sql)
+        self.assertIn("status = 'superseded'", self.sql)
+        self.assertIn("superseded_by_analysis_id", self.sql)
+
     def test_both_transition_functions_take_event_scoped_transaction_lock(self) -> None:
         self.assertEqual(self.sql.count("pg_advisory_xact_lock"), 3)
         self.assertIn("hashtextextended(effective_event_id, 0)", self.sql)
@@ -30,7 +38,9 @@ class PaperTradeMigrationTests(unittest.TestCase):
     def test_runner_claim_is_unique_per_event(self) -> None:
         self.assertIn("event_id text primary key", self.sql)
         self.assertIn("create or replace function public.claim_event_paper_run", self.sql)
-        self.assertIn("on conflict (event_id) do nothing", self.sql)
+        self.assertIn("lease_expires_at", self.sql)
+        self.assertIn("event_paper_trade_event_claims.lease_expires_at <= clock_timestamp()", self.sql)
+        self.assertIn("or event_paper_trade_event_claims.lease_expires_at <=", self.sql)
 
 
 if __name__ == "__main__":
