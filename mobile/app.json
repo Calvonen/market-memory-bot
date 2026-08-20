@@ -3,6 +3,8 @@
     "name": "mobile",
     "slug": "mobile",
     "version": "1.0.0",
+    "runtimeVersion": { "policy": "appVersion" },
+    "updates": { "url": "https://u.expo.dev/dceb94e2-ff6e-45dd-9555-004b9c103f05" },
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "mobile",

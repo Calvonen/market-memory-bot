@@ -6,6 +6,7 @@ from dataclasses import asdict, replace
 from datetime import date
 from typing import Any, Protocol
 
+
 from fastapi import FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
@@ -33,6 +34,16 @@ class ExpectationVersionRequest(BaseModel):
     source_as_of: date | None = None
 
 
+def _analyze_market_ticker(ticker: str) -> dict[str, Any]:
+    from market_memory.analysis import analyze_ticker
+    return analyze_ticker(ticker)
+
+
+def _scan_market(market: str, limit: int) -> dict[str, Any]:
+    from market_memory.analysis import scan_market
+    return scan_market(market, limit)
+
+
 def _expectation_payload(expectation: EventExpectation) -> dict[str, Any]:
     return asdict(expectation)
 
@@ -43,6 +54,8 @@ def create_app(
     paper_repository: PaperStatusRepository | None = None,
     admin_token: str | None = None,
     read_api_key: str | None = None,
+    market_analyzer=_analyze_market_ticker,
+    market_scanner=_scan_market,
 ) -> FastAPI:
     app = FastAPI(
         title="MarketAI API",
@@ -113,6 +126,29 @@ def create_app(
             ]
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.get("/api/v1/market-memory/{ticker}")
+    def market_memory_analysis(
+        ticker: str,
+        x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
+    ) -> dict[str, Any]:
+        require_read(x_marketai_key)
+        try:
+            return market_analyzer(ticker)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/v1/scanner")
+    def scanner(
+        market: str = "Finland Top",
+        limit: int = 10,
+        x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
+    ) -> dict[str, Any]:
+        require_read(x_marketai_key)
+        try:
+            return market_scanner(market, limit)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/api/v1/events/{event_id}")
     def get_event(

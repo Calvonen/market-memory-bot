@@ -1,0 +1,2 @@
+import { Text, View } from 'react-native'; import { ScreenShell, shared } from '@/components/screen-shell';
+export default function SettingsScreen(){return <ScreenShell title="Asetukset" subtitle="MarketAI-sovellus"><View style={shared.card}><Text style={shared.heading}>API-yhteys</Text><Text style={shared.text}>Osoite ja read-only-avain annetaan EXPO_PUBLIC_-ympäristömuuttujilla. Tuotantosekrettejä ei tallenneta sovellukseen.</Text></View></ScreenShell>}
