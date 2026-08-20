@@ -61,8 +61,26 @@ class SupabasePaperTradeRepository:
             "strategy": None,
             "risk": None,
             "paper_order": None,
+            "completed_components": None,
+            "confirmation_deadline_at": (
+                result.confirmation_deadline_at.isoformat()
+                if result.confirmation_deadline_at
+                else None
+            ),
+            "expired_at": result.expired_at.isoformat() if result.expired_at else None,
             "updated_at": datetime.now(UTC).isoformat(),
         }
+
+        if result.completed_components is not None:
+            payload["completed_components"] = {
+                component.name: {
+                    "direction": component.direction.value,
+                    "score": component.score,
+                    "max_score": component.max_score,
+                    "reasons": list(component.reasons),
+                }
+                for component in result.completed_components
+            }
 
         if result.pipeline is not None:
             strategy = result.pipeline.strategy
@@ -119,3 +137,59 @@ class SupabasePaperTradeRepository:
             .execute()
         )
         return (response.data or [{}])[0]
+
+    def expire_waiting(
+        self,
+        *,
+        event_id: str,
+        expectation_version: int,
+        source_document_id: str | None,
+        analysis_id: str,
+        confirmation_deadline_at: datetime,
+        expired_at: datetime,
+    ) -> dict[str, Any] | None:
+        response = (
+            self.client.table("event_paper_trade_runs")
+            .update(
+                {
+                    "status": "expired_no_trade",
+                    "message": "confirmation window expired without a trade",
+                    "expired_at": expired_at.isoformat(),
+                    "updated_at": expired_at.isoformat(),
+                }
+            )
+            .eq("event_id", event_id)
+            .eq("analysis_id", analysis_id)
+            .eq("status", "waiting_confirmation")
+            .select("*")
+            .execute()
+        )
+        rows = response.data or []
+        if rows:
+            return rows[0]
+
+        # There may be no waiting row when a worker first starts after the
+        # deadline. ON CONFLICT DO NOTHING prevents this terminal insert from
+        # overwriting a concurrently completed paper trade.
+        response = (
+            self.client.table("event_paper_trade_runs")
+            .upsert(
+                {
+                    "event_id": event_id,
+                    "expectation_version": expectation_version,
+                    "source_document_id": source_document_id,
+                    "analysis_id": analysis_id,
+                    "status": "expired_no_trade",
+                    "message": "confirmation window expired without a trade",
+                    "confirmation_deadline_at": confirmation_deadline_at.isoformat(),
+                    "expired_at": expired_at.isoformat(),
+                    "updated_at": expired_at.isoformat(),
+                },
+                on_conflict="analysis_id",
+                ignore_duplicates=True,
+            )
+            .select("*")
+            .execute()
+        )
+        rows = response.data or []
+        return rows[0] if rows else self.get_latest_for_event(event_id)

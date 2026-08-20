@@ -40,8 +40,11 @@ class _LinkTextParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag.lower() == "a":
-            self._href = dict(attrs).get("href")
-            self._text = []
+            values = dict(attrs)
+            self._href = values.get("href")
+            self._text = [values.get("aria-label") or "", values.get("title") or ""]
+        elif tag.lower() == "img" and self._href is not None:
+            self._text.append(dict(attrs).get("alt") or "")
 
     def handle_data(self, data: str) -> None:
         if self._href is not None:
@@ -97,10 +100,11 @@ class HaysResultsCentreProvider:
     _TARGET_YEAR = "2026"
     _TARGET_FY_SHORT = "26"
 
-    # "full year", "full-year", "preliminary", "annual" + "results"/"result",
-    # allowing a short gap (e.g. a company name or "Hays plc") in between.
-    _RESULT_KEYWORD_RE = re.compile(r"\b(full[\s-]?year|preliminary|annual)\b[^.]{0,40}\bresults?\b")
-    _YEAR_END_RE = re.compile(r"year\s+ended\s+(\d{1,2})(?:st|nd|rd|th)?\s+june\s+(\d{4})")
+    _RESULT_TYPE_RE = re.compile(r"\b(full[\s-]?year|preliminary|annual)\b")
+    _RESULT_WORD_RE = re.compile(r"\bresults?\b")
+    _YEAR_END_RE = re.compile(
+        r"year\s+ended\s+(\d{1,2})(?:st|nd|rd|th)?\s+june\s+(\d{4})"
+    )
     _FY_TOKEN_RE = re.compile(r"\bfy[\s-]?(\d{2}|\d{4})\b")
 
     def __init__(
@@ -118,15 +122,20 @@ class HaysResultsCentreProvider:
 
     def discover(self, event_id: str) -> ReleaseDocument | None:
         if self.override_url:
-            return self._build_document(event_id, self.override_url, source_title="manual-override")
+            return self._build_document(
+                event_id, self.override_url, source_title="manual-override"
+            )
 
         listing_html = self._fetch(self.RESULTS_URL)
         parser = _LinkTextParser()
         parser.feed(listing_html)
 
-        for href, title in parser.links:
-            if not self._matches_target_release(title, href):
-                continue
+        candidates = [
+            (self._match_priority(title, href), href, title)
+            for href, title in parser.links
+            if self._matches_target_release(title, href)
+        ]
+        for _priority, href, title in sorted(candidates, reverse=True):
             source_url = urljoin(self.RESULTS_URL, href)
             try:
                 document = self._build_document(event_id, source_url, title)
@@ -145,24 +154,47 @@ class HaysResultsCentreProvider:
     @classmethod
     def _matches_target_release(cls, title: str, href: str) -> bool:
         haystack = cls._normalize(f"{title} {href}")
-        if not cls._RESULT_KEYWORD_RE.search(haystack):
+        if not cls._RESULT_TYPE_RE.search(haystack) or not cls._RESULT_WORD_RE.search(
+            haystack
+        ):
             return False
 
         year_end_matches = cls._YEAR_END_RE.findall(haystack)
         if year_end_matches:
-            if any(not (day == "30" and year == cls._TARGET_YEAR) for day, year in year_end_matches):
+            if any(
+                not (day == "30" and year == cls._TARGET_YEAR)
+                for day, year in year_end_matches
+            ):
                 return False
             return True
 
         fy_matches = cls._FY_TOKEN_RE.findall(haystack)
         if fy_matches:
-            if any(token not in {cls._TARGET_FY_SHORT, cls._TARGET_YEAR} for token in fy_matches):
+            if any(
+                token not in {cls._TARGET_FY_SHORT, cls._TARGET_YEAR}
+                for token in fy_matches
+            ):
                 return False
             return True
 
         return cls._TARGET_YEAR in haystack
 
-    def _build_document(self, event_id: str, source_url: str, source_title: str) -> ReleaseDocument | None:
+    @classmethod
+    def _match_priority(cls, title: str, href: str) -> int:
+        """Prefer the strongest explicit FY2026 signal, independent of link order."""
+        haystack = cls._normalize(f"{title} {href}")
+        if ("30", cls._TARGET_YEAR) in cls._YEAR_END_RE.findall(haystack):
+            return 3
+        if any(
+            token in {cls._TARGET_FY_SHORT, cls._TARGET_YEAR}
+            for token in cls._FY_TOKEN_RE.findall(haystack)
+        ):
+            return 2
+        return 1
+
+    def _build_document(
+        self, event_id: str, source_url: str, source_title: str
+    ) -> ReleaseDocument | None:
         data, content_type, charset = self._fetch_bytes(source_url)
 
         if self._looks_like_pdf(source_url, content_type):

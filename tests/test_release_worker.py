@@ -12,6 +12,7 @@ from trading_system.release_worker import (
     EventReleaseMonitor,
     build_hays_monitor,
     build_paper_portfolio_from_env,
+    hays_confirmation_deadline,
     run_paper_confirmation_loop,
 )
 
@@ -39,11 +40,17 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
             evidence_quotes=[],
         )
 
-    def test_confirmation_loop_waits_without_reanalyzing_then_stops_after_paper_execution(self) -> None:
+    def test_confirmation_loop_waits_without_reanalyzing_then_stops_after_paper_execution(
+        self,
+    ) -> None:
         results = iter(
             [
-                PostReleasePaperResult("waiting_confirmation", "no event-day market bar yet"),
-                PostReleasePaperResult("paper_executed", "LONG 100 HAS.L FILLED_SIMULATED"),
+                PostReleasePaperResult(
+                    "waiting_confirmation", "no event-day market bar yet"
+                ),
+                PostReleasePaperResult(
+                    "paper_executed", "LONG 100 HAS.L FILLED_SIMULATED"
+                ),
             ]
         )
         runner_calls = []
@@ -61,6 +68,7 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
             once=False,
             runner=runner,
             sleeper=sleeps.append,
+            clock=lambda: datetime(2026, 8, 20, 12, tzinfo=UTC),
         )
 
         self.assertEqual(result.status, "paper_executed")
@@ -73,7 +81,9 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
 
         def runner(**kwargs):
             calls.append(kwargs)
-            return PostReleasePaperResult("waiting_confirmation", "technical confirmation is not aligned")
+            return PostReleasePaperResult(
+                "waiting_confirmation", "technical confirmation is not aligned"
+            )
 
         result = run_paper_confirmation_loop(
             event_id="hays-fy2026-results",
@@ -83,12 +93,15 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
             once=True,
             runner=runner,
             sleeper=lambda _: self.fail("once mode must not sleep"),
+            clock=lambda: datetime(2026, 8, 20, 12, tzinfo=UTC),
         )
 
         self.assertEqual(result.status, "waiting_confirmation")
         self.assertEqual(len(calls), 1)
 
-    def test_paper_portfolio_has_explicit_spread_assumption_and_live_mode_is_not_involved(self) -> None:
+    def test_paper_portfolio_has_explicit_spread_assumption_and_live_mode_is_not_involved(
+        self,
+    ) -> None:
         with patch.dict(
             "os.environ",
             {
@@ -111,10 +124,14 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
                 return {"status": "paper_executed", "analysis_id": "analysis-1"}
 
             def save_result(self, **kwargs: Any) -> None:
-                raise AssertionError("must not persist a new result on restart short-circuit")
+                raise AssertionError(
+                    "must not persist a new result on restart short-circuit"
+                )
 
         def runner(**kwargs: Any) -> PostReleasePaperResult:
-            raise AssertionError("runner (Strategy/Risk/PaperBroker) must not run after paper_executed")
+            raise AssertionError(
+                "runner (Strategy/Risk/PaperBroker) must not run after paper_executed"
+            )
 
         result = run_paper_confirmation_loop(
             event_id="hays-fy2026-results",
@@ -130,6 +147,58 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
 
         self.assertEqual(result.status, "paper_executed")
 
+    def test_hays_deadline_is_lse_close_plus_grace_in_utc(self) -> None:
+        deadline = hays_confirmation_deadline(HAYS_FY2026, grace_minutes=15)
+        self.assertEqual(deadline, datetime(2026, 8, 20, 15, 45, tzinfo=UTC))
+
+    def test_expired_confirmation_never_calls_runner(self) -> None:
+        class WaitingPersistence:
+            def __init__(self) -> None:
+                self.expired = False
+
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def expire_waiting(self, **kwargs: Any) -> dict[str, Any]:
+                self.expired = True
+                return {"status": "expired_no_trade"}
+
+        persistence = WaitingPersistence()
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            analysis_id="analysis-1",
+            persistence=persistence,
+            runner=lambda **_: self.fail(
+                "expired confirmation must not enter the pipeline"
+            ),
+            clock=lambda: datetime(2026, 8, 20, 15, 45, tzinfo=UTC),
+        )
+        self.assertEqual(result.status, "expired_no_trade")
+        self.assertTrue(persistence.expired)
+
+    def test_restart_after_expiry_skips_runner(self) -> None:
+        class ExpiredPersistence:
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {"status": "expired_no_trade"}
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            persistence=ExpiredPersistence(),
+            runner=lambda **_: self.fail("terminal expiry must skip the pipeline"),
+        )
+        self.assertEqual(result.status, "expired_no_trade")
+
 
 class _FakeReleaseRepository:
     """In-memory stand-in for SupabaseReleaseRepository's dedupe/upsert semantics."""
@@ -139,7 +208,9 @@ class _FakeReleaseRepository:
         self.analyses: list[dict[str, Any]] = []
         self.runs: list[dict[str, Any]] = []
 
-    def find_document(self, event_id: str, content_sha256: str) -> dict[str, Any] | None:
+    def find_document(
+        self, event_id: str, content_sha256: str
+    ) -> dict[str, Any] | None:
         for row in self.documents:
             if row["event_id"] == event_id and row["content_sha256"] == content_sha256:
                 return row
@@ -240,7 +311,9 @@ class _CountingAnalyzer:
 
 class EventReleaseMonitorRestartTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.expectations = InMemoryEventExpectationRepository({HAYS_FY2026.event_id: HAYS_FY2026})
+        self.expectations = InMemoryEventExpectationRepository(
+            {HAYS_FY2026.event_id: HAYS_FY2026}
+        )
         self.document = ReleaseDocument(
             event_id=HAYS_FY2026.event_id,
             source_type="company_results",
@@ -268,7 +341,9 @@ class EventReleaseMonitorRestartTests(unittest.TestCase):
             raw_response="{}",
         )
 
-    def _build_monitor(self, analyzer: _CountingAnalyzer, releases: _FakeReleaseRepository) -> EventReleaseMonitor:
+    def _build_monitor(
+        self, analyzer: _CountingAnalyzer, releases: _FakeReleaseRepository
+    ) -> EventReleaseMonitor:
         return EventReleaseMonitor(
             expectation_repository=self.expectations,
             release_repository=releases,
@@ -276,7 +351,9 @@ class EventReleaseMonitorRestartTests(unittest.TestCase):
             provider=_FakeProvider(self.document),
         )
 
-    def test_restart_after_already_analyzed_document_does_not_call_analyzer_again(self) -> None:
+    def test_restart_after_already_analyzed_document_does_not_call_analyzer_again(
+        self,
+    ) -> None:
         releases = _FakeReleaseRepository()
         analyzer = _CountingAnalyzer(self.analysis)
         monitor = self._build_monitor(analyzer, releases)
@@ -286,9 +363,13 @@ class EventReleaseMonitorRestartTests(unittest.TestCase):
 
         self.assertEqual(first.status, "analyzed")
         self.assertEqual(second.status, "analyzed")
-        self.assertEqual(analyzer.calls, 1, "analyzer must not be called again on restart")
+        self.assertEqual(
+            analyzer.calls, 1, "analyzer must not be called again on restart"
+        )
 
-    def test_restart_continues_with_the_same_analysis_id_and_source_document_id(self) -> None:
+    def test_restart_continues_with_the_same_analysis_id_and_source_document_id(
+        self,
+    ) -> None:
         releases = _FakeReleaseRepository()
         analyzer = _CountingAnalyzer(self.analysis)
         monitor = self._build_monitor(analyzer, releases)
@@ -300,7 +381,9 @@ class EventReleaseMonitorRestartTests(unittest.TestCase):
         self.assertEqual(first.source_document_id, second.source_document_id)
         self.assertEqual(second.analysis, first.analysis)
 
-    def test_same_document_and_expectation_version_never_produces_a_second_analysis_row(self) -> None:
+    def test_same_document_and_expectation_version_never_produces_a_second_analysis_row(
+        self,
+    ) -> None:
         releases = _FakeReleaseRepository()
         analyzer = _CountingAnalyzer(self.analysis)
         monitor = self._build_monitor(analyzer, releases)
@@ -311,7 +394,9 @@ class EventReleaseMonitorRestartTests(unittest.TestCase):
 
         self.assertEqual(len(releases.analyses), 1)
 
-    def test_provider_fallback_variance_across_restarts_does_not_fork_the_analysis_chain(self) -> None:
+    def test_provider_fallback_variance_across_restarts_does_not_fork_the_analysis_chain(
+        self,
+    ) -> None:
         releases = _FakeReleaseRepository()
         groq_analysis = self.analysis
         ollama_analysis = AIEventAnalysis(
@@ -340,7 +425,9 @@ class EventReleaseMonitorOverdueTests(unittest.TestCase):
     """scheduled_date=2026-08-20, default grace window=8h (see setUp)."""
 
     def setUp(self) -> None:
-        self.expectations = InMemoryEventExpectationRepository({HAYS_FY2026.event_id: HAYS_FY2026})
+        self.expectations = InMemoryEventExpectationRepository(
+            {HAYS_FY2026.event_id: HAYS_FY2026}
+        )
         self.releases = _FakeReleaseRepository()
         self.analyzer = _CountingAnalyzer(
             AIEventAnalysis(
@@ -383,14 +470,18 @@ class EventReleaseMonitorOverdueTests(unittest.TestCase):
         self.assertIsNone(result.message)
         self.assertIsNone(self.releases.runs[-1]["error_message"])
 
-    def test_no_release_on_scheduled_date_within_grace_window_is_not_yet_overdue(self) -> None:
+    def test_no_release_on_scheduled_date_within_grace_window_is_not_yet_overdue(
+        self,
+    ) -> None:
         monitor = self._monitor(datetime(2026, 8, 20, 2, 0, tzinfo=UTC))
         result = monitor.run_once(HAYS_FY2026.event_id)
 
         self.assertEqual(result.status, "no_release")
         self.assertFalse(result.overdue)
 
-    def test_no_release_past_grace_window_is_flagged_overdue_and_distinguishable_in_audit_log(self) -> None:
+    def test_no_release_past_grace_window_is_flagged_overdue_and_distinguishable_in_audit_log(
+        self,
+    ) -> None:
         monitor = self._monitor(datetime(2026, 8, 20, 20, 0, tzinfo=UTC))
         result = monitor.run_once(HAYS_FY2026.event_id)
 

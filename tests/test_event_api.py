@@ -121,6 +121,11 @@ class EventApiTests(unittest.TestCase):
         self.paper_repo.run = {
             "status": "waiting_confirmation",
             "message": "technical confirmation is not aligned",
+            "completed_components": {
+                "fundamental": {"direction": "LONG", "score": 24, "max_score": 35},
+                "catalyst": {"direction": "LONG", "score": 20, "max_score": 25},
+            },
+            "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
             "strategy": {"direction": "LONG", "confidence": 63},
             "risk": None,
             "paper_order": None,
@@ -135,6 +140,8 @@ class EventApiTests(unittest.TestCase):
         run = response.json()["paper_run"]
         self.assertEqual(run["status"], "waiting_confirmation")
         self.assertEqual(run["strategy"]["direction"], "LONG")
+        self.assertEqual(run["completed_components"]["fundamental"]["score"], 24)
+        self.assertEqual(run["confirmation_deadline_at"], "2026-08-20T15:45:00+00:00")
         self.assertIsNone(run["paper_order"])
 
     def test_paper_status_without_read_key_is_denied(self) -> None:
