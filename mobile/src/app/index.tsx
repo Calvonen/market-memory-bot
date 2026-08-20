@@ -141,6 +141,10 @@ export default function HomeScreen() {
       : risk?.status === 'REJECT'
         ? 'HYLÄTTY'
         : 'ODOTTAA';
+  const riskReasonText =
+    risk?.status === 'REJECT' && risk.reasons?.length
+      ? `${risk.reasons.join(' • ')} • `
+      : '';
 
   return (
     <ScrollView
@@ -249,7 +253,7 @@ export default function HomeScreen() {
 
         <Text style={styles.riskMessage}>
           {risk
-            ? `Riskiarvio ${risk.status === 'PASS' ? 'hyväksytty' : 'hylätty'} • Enimmäismäärä ${risk.max_quantity ?? '--'} • Tuotto/riski ${risk.reward_risk ?? '--'}`
+            ? `${riskReasonText}Riskiarvio ${risk.status === 'PASS' ? 'hyväksytty' : 'hylätty'} • Enimmäismäärä ${risk.max_quantity ?? '--'} • Tuotto/riski ${risk.reward_risk ?? '--'}`
             : 'Riskiarvio alkaa hyväksyttävän strategiapäätöksen jälkeen.'}
         </Text>
         {order ? (

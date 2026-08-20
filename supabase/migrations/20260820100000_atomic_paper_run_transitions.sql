@@ -264,6 +264,8 @@ as $$
 declare
   terminal_owner public.event_paper_trade_runs%rowtype;
   claim_owner_analysis_id uuid;
+  claim_lease_expires_at timestamptz;
+  expired_run public.event_paper_trade_runs%rowtype;
 begin
   perform pg_advisory_xact_lock(hashtextextended(input_event_id, 0));
   select * into terminal_owner
@@ -276,19 +278,34 @@ begin
     return;
   end if;
 
-  select analysis_id into claim_owner_analysis_id
+  select analysis_id, lease_expires_at
+  into claim_owner_analysis_id, claim_lease_expires_at
   from public.event_paper_trade_event_claims
   where event_id = input_event_id;
   if claim_owner_analysis_id is not null
      and claim_owner_analysis_id <> input_analysis_id then
-    return query
-    select * from public.event_paper_trade_runs
-    where analysis_id = input_analysis_id
-    limit 1;
-    return;
+    if claim_lease_expires_at is null
+       or claim_lease_expires_at > clock_timestamp() then
+      return query
+      select * from public.event_paper_trade_runs
+      where analysis_id = input_analysis_id
+      limit 1;
+      return;
+    end if;
+
+    -- The lease is stale. Transfer it under the same event advisory lock used
+    -- by the expiry transition; no active owner can be displaced.
+    update public.event_paper_trade_event_claims
+    set
+      analysis_id = input_analysis_id,
+      claimed_at = clock_timestamp(),
+      lease_expires_at = input_expired_at,
+      updated_at = clock_timestamp()
+    where event_id = input_event_id
+      and analysis_id = claim_owner_analysis_id
+      and lease_expires_at <= clock_timestamp();
   end if;
 
-  return query
   insert into public.event_paper_trade_runs (
     event_id, expectation_version, source_document_id, analysis_id,
     status, message, confirmation_deadline_at, expired_at, updated_at
@@ -307,7 +324,18 @@ begin
     expired_at = excluded.expired_at,
     updated_at = excluded.updated_at
   where event_paper_trade_runs.status = 'waiting_confirmation'
-  returning event_paper_trade_runs.*;
+  returning event_paper_trade_runs.* into expired_run;
+
+  if found then
+    update public.event_paper_trade_event_claims
+    set
+      analysis_id = input_analysis_id,
+      lease_expires_at = null,
+      updated_at = clock_timestamp()
+    where event_id = input_event_id;
+    return next expired_run;
+  end if;
+  return;
 end;
 $$;
 

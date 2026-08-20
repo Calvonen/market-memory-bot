@@ -42,6 +42,11 @@ class PaperTradeMigrationTests(unittest.TestCase):
         self.assertIn("event_paper_trade_event_claims.lease_expires_at <= clock_timestamp()", self.sql)
         self.assertIn("or event_paper_trade_event_claims.lease_expires_at <=", self.sql)
 
+    def test_expiry_can_transfer_only_an_expired_lease_under_event_lock(self) -> None:
+        self.assertIn("claim_lease_expires_at > clock_timestamp()", self.sql)
+        self.assertIn("and lease_expires_at <= clock_timestamp()", self.sql)
+        self.assertIn("returning event_paper_trade_runs.* into expired_run", self.sql)
+
 
 if __name__ == "__main__":
     unittest.main()

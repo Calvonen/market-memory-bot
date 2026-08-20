@@ -199,6 +199,26 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "expired_no_trade")
 
+    def test_restart_uses_terminal_owner_instead_of_newer_superseded_history(self) -> None:
+        class SupersededAwarePersistence:
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "analysis_id": "analysis-winner",
+                    "status": "paper_executed",
+                    "updated_at": "2026-08-20T15:45:00+00:00",
+                }
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            persistence=SupersededAwarePersistence(),
+            runner=lambda **_: self.fail("terminal event restart must not run again"),
+        )
+        self.assertEqual(result.status, "paper_executed")
+
     def test_stale_runner_result_yields_to_atomic_expiry_winner(self) -> None:
         class ExpiryWinsPersistence:
             def get_latest_for_event(self, event_id: str) -> dict[str, Any]:

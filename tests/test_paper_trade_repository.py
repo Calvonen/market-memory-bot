@@ -21,6 +21,9 @@ class _TableQuery:
     def eq(self, *_args: Any) -> "_TableQuery":
         return self
 
+    def neq(self, *_args: Any) -> "_TableQuery":
+        return self
+
     def order(self, *_args: Any, **_kwargs: Any) -> "_TableQuery":
         return self
 
@@ -93,6 +96,10 @@ class _AnalysisQuery:
 
     def eq(self, column: str, value: str) -> "_AnalysisQuery":
         self.rows = [row for row in self.rows if row.get(column) == value]
+        return self
+
+    def neq(self, column: str, value: str) -> "_AnalysisQuery":
+        self.rows = [row for row in self.rows if row.get(column) != value]
         return self
 
     def order(self, column: str, *, desc: bool = False) -> "_AnalysisQuery":
@@ -178,15 +185,27 @@ class _EventRpcQuery:
 
         claim = self.client.claims.get(event_id)
         if claim is not None and claim["analysis_id"] != analysis_id:
-            stale_row = next(
-                (
-                    row
-                    for row in self.client.rows
-                    if row["analysis_id"] == analysis_id
-                ),
-                None,
-            )
-            return SimpleNamespace(data=[stale_row.copy()] if stale_row else [])
+            if (
+                self.name == "expire_event_paper_trade_run"
+                and claim["lease_expires_at"] is not None
+                and claim["lease_expires_at"] <= self.client.now
+            ):
+                claim = {
+                    "event_id": event_id,
+                    "analysis_id": analysis_id,
+                    "lease_expires_at": self.client.now,
+                }
+                self.client.claims[event_id] = claim
+            else:
+                stale_row = next(
+                    (
+                        row
+                        for row in self.client.rows
+                        if row["analysis_id"] == analysis_id
+                    ),
+                    None,
+                )
+                return SimpleNamespace(data=[stale_row.copy()] if stale_row else [])
 
         existing = next(
             (row for row in self.client.rows if row["analysis_id"] == analysis_id),
@@ -198,6 +217,12 @@ class _EventRpcQuery:
         else:
             existing.update(incoming)
             saved = existing
+        if saved["status"] in TERMINAL and event_id in self.client.claims:
+            self.client.claims[event_id] = {
+                "event_id": event_id,
+                "analysis_id": analysis_id,
+                "lease_expires_at": None,
+            }
         return SimpleNamespace(data=[saved.copy()])
 
 
@@ -332,6 +357,52 @@ class PaperTradeRepositoryTests(unittest.TestCase):
         winner = self.save(client, "paper_executed")
         self.assertEqual(winner["analysis_id"], analysis_a)
         self.assertEqual(winner["status"], "expired_no_trade")
+
+    def test_latest_event_read_prefers_terminal_over_newer_superseded_row(self) -> None:
+        client = _RejectedSaveClient(
+            [
+                {
+                    "analysis_id": "analysis-winner",
+                    "event_id": "hays-fy2026-results",
+                    "status": "paper_executed",
+                    "updated_at": "2026-08-20T15:45:00+00:00",
+                },
+                {
+                    "analysis_id": "analysis-loser",
+                    "event_id": "hays-fy2026-results",
+                    "status": "superseded",
+                    "updated_at": "2026-08-20T15:50:00+00:00",
+                },
+            ]
+        )
+        latest = SupabasePaperTradeRepository(client).get_latest_for_event(
+            "hays-fy2026-results"
+        )
+        assert latest is not None
+        self.assertEqual(latest["analysis_id"], "analysis-winner")
+
+    def test_latest_event_read_ignores_superseded_nonterminal_history(self) -> None:
+        client = _RejectedSaveClient(
+            [
+                {
+                    "analysis_id": "analysis-loser",
+                    "event_id": "hays-fy2026-results",
+                    "status": "superseded",
+                    "updated_at": "2026-08-20T15:50:00+00:00",
+                },
+                {
+                    "analysis_id": "analysis-active",
+                    "event_id": "hays-fy2026-results",
+                    "status": "waiting_confirmation",
+                    "updated_at": "2026-08-20T15:40:00+00:00",
+                },
+            ]
+        )
+        latest = SupabasePaperTradeRepository(client).get_latest_for_event(
+            "hays-fy2026-results"
+        )
+        assert latest is not None
+        self.assertEqual(latest["analysis_id"], "analysis-active")
 
     def test_expired_analysis_wins_even_when_newer_analysis_is_waiting(self) -> None:
         analysis_a = "00000000-0000-0000-0000-000000000002"
@@ -476,6 +547,60 @@ class PaperTradeRepositoryTests(unittest.TestCase):
         stale = self.save_analysis(client, "analysis-old", "paper_executed")
         self.assertEqual(stale["status"], "waiting_confirmation")
         self.assertFalse(any(row["status"] in TERMINAL for row in client.rows))
+
+    def expire_analysis(
+        self, client: _EventAtomicClient, analysis_id: str
+    ) -> dict[str, Any] | None:
+        return SupabasePaperTradeRepository(client).expire_waiting(
+            event_id="hays-fy2026-results",
+            expectation_version=1,
+            source_document_id=None,
+            analysis_id=analysis_id,
+            confirmation_deadline_at=self.deadline,
+            expired_at=self.expired_at,
+        )
+
+    def test_active_claim_rejects_other_analysis_expiry(self) -> None:
+        client = _EventAtomicClient()
+        SupabasePaperTradeRepository(client).claim_event(
+            event_id="hays-fy2026-results", analysis_id="analysis-a", lease_seconds=60
+        )
+        with self.assertRaises(RuntimeError):
+            self.expire_analysis(client, "analysis-b")
+        self.assertFalse(any(row["status"] in TERMINAL for row in client.rows))
+
+    def test_expired_claim_is_atomically_reclaimed_by_event_expiry(self) -> None:
+        client = _EventAtomicClient()
+        SupabasePaperTradeRepository(client).claim_event(
+            event_id="hays-fy2026-results", analysis_id="analysis-a", lease_seconds=60
+        )
+        client.now += timedelta(seconds=61)
+        expired = self.expire_analysis(client, "analysis-b")
+        assert expired is not None
+        self.assertEqual(expired["analysis_id"], "analysis-b")
+        self.assertEqual(expired["status"], "expired_no_trade")
+        self.assertEqual(client.claims["hays-fy2026-results"]["analysis_id"], "analysis-b")
+
+    def test_terminal_owner_rejects_other_analysis_expiry_reclaim(self) -> None:
+        client = _EventAtomicClient()
+        self.save_analysis(client, "analysis-a", "paper_executed")
+        expired = self.expire_analysis(client, "analysis-b")
+        assert expired is not None
+        self.assertEqual(expired["analysis_id"], "analysis-a")
+        self.assertEqual(expired["status"], "paper_executed")
+
+    def test_concurrent_post_deadline_expiry_reclaim_has_one_winner(self) -> None:
+        client = _EventAtomicClient()
+        SupabasePaperTradeRepository(client).claim_event(
+            event_id="hays-fy2026-results", analysis_id="analysis-a", lease_seconds=60
+        )
+        client.now += timedelta(seconds=61)
+        winner_b = self.expire_analysis(client, "analysis-b")
+        winner_c = self.expire_analysis(client, "analysis-c")
+        assert winner_b is not None and winner_c is not None
+        self.assertEqual(winner_b["analysis_id"], "analysis-b")
+        self.assertEqual(winner_c["analysis_id"], "analysis-b")
+        self.assertEqual(len([row for row in client.rows if row["status"] in TERMINAL]), 1)
 
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@ class SupabasePaperTradeRepository:
             self.client.table("event_paper_trade_runs")
             .select("*")
             .eq("event_id", event_id)
+            .neq("status", "superseded")
             .order("updated_at", desc=True)
             .limit(1)
             .execute()
