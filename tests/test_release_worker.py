@@ -499,6 +499,63 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
         self.assertEqual(runner_calls, ["ran"])
         self.assertEqual(sleeps, [300])
 
+    def test_first_attempt_stale_runner_keeps_polling_and_reclaims_lease(self) -> None:
+        class LeaseReclaimedDuringRunner:
+            def __init__(self) -> None:
+                self.claims = 0
+                self.saves = 0
+
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def claim_event(self, **kwargs: Any) -> dict[str, Any]:
+                self.claims += 1
+                if self.claims == 2:
+                    return {"analysis_id": "analysis-b"}
+                return {"analysis_id": kwargs["analysis_id"]}
+
+            def save_result(self, **kwargs: Any) -> dict[str, Any]:
+                self.saves += 1
+                if self.saves == 1:
+                    return {
+                        "analysis_id": kwargs["analysis_id"],
+                        "status": "waiting_confirmation",
+                        "message": "paper result was rejected after the event lease was lost",
+                        "write_rejection": "lease_lost",
+                    }
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": kwargs["result"].status,
+                    "message": kwargs["result"].message,
+                }
+
+        persistence = LeaseReclaimedDuringRunner()
+        runner_calls: list[str] = []
+        sleeps: list[float] = []
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            analysis_id="analysis-a",
+            persistence=persistence,
+            runner=lambda **_: (
+                runner_calls.append("ran")
+                or PostReleasePaperResult("paper_executed", "simulated order")
+            ),
+            sleeper=sleeps.append,
+            clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
+        )
+        self.assertEqual(result.status, "paper_executed")
+        self.assertEqual(runner_calls, ["ran", "ran"])
+        self.assertEqual(persistence.saves, 2)
+        self.assertEqual(persistence.claims, 3)
+        self.assertEqual(sleeps, [300, 300])
+
     def test_losing_worker_can_expire_event_when_deadline_arrives(self) -> None:
         now = [datetime(2026, 8, 20, 15, 44, tzinfo=UTC)]
 

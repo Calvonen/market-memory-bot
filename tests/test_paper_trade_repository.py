@@ -382,9 +382,19 @@ class PaperTradeRepositoryTests(unittest.TestCase):
         self.assertEqual(winner["analysis_id"], analysis_id)
         self.assertEqual(winner["status"], "expired_no_trade")
 
-    def test_rejected_save_without_authoritative_row_fails_closed(self) -> None:
-        with self.assertRaises(RuntimeError):
-            self.save(_RejectedSaveClient([]), "paper_executed")
+    def test_first_attempt_lease_loser_without_row_returns_waiting(self) -> None:
+        rejected = self.save(_RejectedSaveClient([]), "paper_executed")
+        self.assertEqual(rejected["status"], "waiting_confirmation")
+        self.assertEqual(rejected["write_rejection"], "lease_lost")
+        self.assertNotEqual(rejected["status"], "paper_executed")
+
+    def test_technical_rpc_failure_still_propagates(self) -> None:
+        class FailingClient:
+            def rpc(self, _name: str, _params: dict[str, Any]) -> Any:
+                raise ConnectionError("database transport failed")
+
+        with self.assertRaisesRegex(ConnectionError, "database transport failed"):
+            self.save(FailingClient(), "paper_executed")
 
     def test_rejected_save_for_old_analysis_never_reads_newer_analysis(self) -> None:
         analysis_a = "00000000-0000-0000-0000-000000000002"

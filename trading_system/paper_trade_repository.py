@@ -158,15 +158,20 @@ class SupabasePaperTradeRepository:
             {"input_payload": payload},
         ).execute()
         rows = response.data or []
-        # An empty result means the database atomically rejected this write
-        # because a terminal row won the race. Reading afterwards is only to
-        # return the winner; correctness does not depend on a read-then-write.
+        # An empty result means the database atomically rejected this write.
+        # Prefer the analysis-specific winner when one exists. A first-attempt
+        # runner may have no row yet if its event lease was reclaimed while it
+        # was running; that is a normal stale-writer loss, not a transport error.
         if not rows:
             winner = self.get_for_analysis(analysis_id)
             if winner is None:
-                raise RuntimeError(
-                    f"paper result write was rejected but analysis {analysis_id} has no persisted row"
-                )
+                return {
+                    "event_id": event_id,
+                    "analysis_id": analysis_id,
+                    "status": "waiting_confirmation",
+                    "message": "paper result was rejected after the event lease was lost",
+                    "write_rejection": "lease_lost",
+                }
             return winner
         return rows[0]
 
