@@ -1,5 +1,19 @@
 -- Terminal paper-run states are immutable. These functions make stale-writer
 -- rejection a database operation rather than a Python read-then-write check.
+create unique index if not exists event_paper_trade_runs_one_terminal_per_event_idx
+  on public.event_paper_trade_runs(event_id)
+  where status in ('expired_no_trade', 'paper_executed');
+
+create table if not exists public.event_paper_trade_event_claims (
+  event_id text primary key,
+  analysis_id uuid not null,
+  claimed_at timestamptz not null default now()
+);
+
+alter table public.event_paper_trade_event_claims enable row level security;
+revoke all on table public.event_paper_trade_event_claims from anon, authenticated;
+grant select, insert on table public.event_paper_trade_event_claims to service_role;
+
 create or replace function public.save_event_paper_trade_result(input_payload jsonb)
 returns setof public.event_paper_trade_runs
 language plpgsql
@@ -7,10 +21,26 @@ security invoker
 set search_path = public
 as $$
 declare
+  effective_event_id text := input_payload->>'event_id';
   effective_status text := input_payload->>'status';
   effective_deadline timestamptz := nullif(input_payload->>'confirmation_deadline_at', '')::timestamptz;
   effective_expired_at timestamptz := nullif(input_payload->>'expired_at', '')::timestamptz;
+  terminal_owner public.event_paper_trade_runs%rowtype;
 begin
+  -- All analyses for one event share a transaction-scoped lock. The partial
+  -- unique index is the invariant backstop; this lock also lets the losing RPC
+  -- return the existing event-level owner instead of raising a unique error.
+  perform pg_advisory_xact_lock(hashtextextended(effective_event_id, 0));
+  select * into terminal_owner
+  from public.event_paper_trade_runs
+  where event_id = effective_event_id
+    and status in ('expired_no_trade', 'paper_executed')
+  limit 1;
+  if found then
+    return next terminal_owner;
+    return;
+  end if;
+
   -- A runner that started before the deadline but finishes afterwards loses
   -- atomically at persistence time and cannot publish a paper order.
   if effective_status in ('waiting_confirmation', 'paper_executed')
@@ -26,7 +56,7 @@ begin
     status, message, strategy, risk, paper_order, completed_components,
     confirmation_deadline_at, expired_at, updated_at
   ) values (
-    input_payload->>'event_id',
+    effective_event_id,
     (input_payload->>'expectation_version')::integer,
     nullif(input_payload->>'source_document_id', '')::uuid,
     (input_payload->>'analysis_id')::uuid,
@@ -87,6 +117,27 @@ begin
 end;
 $$;
 
+create or replace function public.claim_event_paper_run(
+  input_event_id text,
+  input_analysis_id uuid
+)
+returns setof public.event_paper_trade_event_claims
+language plpgsql
+security invoker
+set search_path = public
+as $$
+begin
+  perform pg_advisory_xact_lock(hashtextextended(input_event_id, 0));
+  insert into public.event_paper_trade_event_claims(event_id, analysis_id)
+  values (input_event_id, input_analysis_id)
+  on conflict (event_id) do nothing;
+
+  return query
+  select * from public.event_paper_trade_event_claims
+  where event_id = input_event_id;
+end;
+$$;
+
 create or replace function public.expire_event_paper_trade_run(
   input_event_id text,
   input_expectation_version integer,
@@ -96,10 +147,25 @@ create or replace function public.expire_event_paper_trade_run(
   input_expired_at timestamptz
 )
 returns setof public.event_paper_trade_runs
-language sql
+language plpgsql
 security invoker
 set search_path = public
 as $$
+declare
+  terminal_owner public.event_paper_trade_runs%rowtype;
+begin
+  perform pg_advisory_xact_lock(hashtextextended(input_event_id, 0));
+  select * into terminal_owner
+  from public.event_paper_trade_runs
+  where event_id = input_event_id
+    and status in ('expired_no_trade', 'paper_executed')
+  limit 1;
+  if found then
+    return next terminal_owner;
+    return;
+  end if;
+
+  return query
   insert into public.event_paper_trade_runs (
     event_id, expectation_version, source_document_id, analysis_id,
     status, message, confirmation_deadline_at, expired_at, updated_at
@@ -119,9 +185,12 @@ as $$
     updated_at = excluded.updated_at
   where event_paper_trade_runs.status = 'waiting_confirmation'
   returning event_paper_trade_runs.*;
+end;
 $$;
 
 revoke all on function public.save_event_paper_trade_result(jsonb) from public;
 revoke all on function public.expire_event_paper_trade_run(text, integer, uuid, uuid, timestamptz, timestamptz) from public;
+revoke all on function public.claim_event_paper_run(text, uuid) from public;
 grant execute on function public.save_event_paper_trade_result(jsonb) to service_role;
 grant execute on function public.expire_event_paper_trade_run(text, integer, uuid, uuid, timestamptz, timestamptz) to service_role;
+grant execute on function public.claim_event_paper_run(text, uuid) to service_role;

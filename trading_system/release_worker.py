@@ -298,6 +298,23 @@ def run_paper_confirmation_loop(
         expectation, grace_minutes=grace
     )
 
+    # Claim the event before invoking a runner that may reach PaperBroker. The
+    # database claim is event-scoped, so analyses for different documents cannot
+    # both create simulated orders. Re-entry by the owning analysis is allowed.
+    claim_event = getattr(persistence, "claim_event", None)
+    if persistence is not None and callable(claim_event):
+        if analysis_id is None:
+            raise RuntimeError("paper persistence requires analysis_id")
+        owner = claim_event(event_id=event_id, analysis_id=analysis_id)
+        if str(owner.get("analysis_id")) != analysis_id:
+            message = f"paper event is owned by analysis {owner.get('analysis_id')}"
+            print(f"{event_id}: waiting_confirmation ({message})", flush=True)
+            return PostReleasePaperResult(
+                "waiting_confirmation",
+                message,
+                confirmation_deadline_at=deadline,
+            )
+
     portfolio = build_paper_portfolio_from_env()
     while True:
         now = clock().astimezone(UTC)
@@ -343,7 +360,20 @@ def run_paper_confirmation_loop(
                 analysis_id=analysis_id,
                 result=result,
             )
-            if persisted.get("status") == "expired_no_trade":
+            event_owner_is_other_analysis = (
+                persisted.get("analysis_id") is not None
+                and str(persisted["analysis_id"]) != analysis_id
+            )
+            if event_owner_is_other_analysis:
+                result = PostReleasePaperResult(
+                    str(persisted.get("status") or "expired_no_trade"),
+                    str(
+                        persisted.get("message")
+                        or "another analysis owns the terminal event state"
+                    ),
+                    confirmation_deadline_at=deadline,
+                )
+            elif persisted.get("status") == "expired_no_trade":
                 result = PostReleasePaperResult(
                     "expired_no_trade",
                     str(

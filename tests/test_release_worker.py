@@ -233,6 +233,66 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
         self.assertNotEqual(result.message, "stale paper result")
         self.assertIsNone(result.pipeline)
 
+    def test_other_analysis_terminal_owner_suppresses_second_worker_result(self) -> None:
+        owner_analysis = "analysis-a"
+
+        class OtherAnalysisWinsPersistence:
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def save_result(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "analysis_id": owner_analysis,
+                    "status": "paper_executed",
+                    "message": "owner paper order",
+                }
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            analysis_id="analysis-b",
+            persistence=OtherAnalysisWinsPersistence(),
+            runner=lambda **_: PostReleasePaperResult(
+                "paper_executed", "second simulated order"
+            ),
+            clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
+        )
+        self.assertEqual(result.status, "paper_executed")
+        self.assertEqual(result.message, "owner paper order")
+        self.assertIsNone(result.pipeline)
+
+    def test_other_analysis_claim_prevents_second_runner_and_simulated_order(self) -> None:
+        class ClaimedPersistence:
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def claim_event(self, **kwargs: Any) -> dict[str, Any]:
+                return {"event_id": kwargs["event_id"], "analysis_id": "analysis-a"}
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            analysis_id="analysis-b",
+            persistence=ClaimedPersistence(),
+            runner=lambda **_: self.fail("losing event claim must not reach PaperBroker"),
+            clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
+        )
+        self.assertEqual(result.status, "waiting_confirmation")
+        self.assertIn("analysis-a", result.message)
+        self.assertIsNone(result.pipeline)
+
 
 class _FakeReleaseRepository:
     """In-memory stand-in for SupabaseReleaseRepository's dedupe/upsert semantics."""

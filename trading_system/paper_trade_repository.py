@@ -53,6 +53,16 @@ class SupabasePaperTradeRepository:
         rows = response.data or []
         return rows[0] if rows else None
 
+    def claim_event(self, *, event_id: str, analysis_id: str) -> dict[str, Any]:
+        response = self.client.rpc(
+            "claim_event_paper_run",
+            {"input_event_id": event_id, "input_analysis_id": analysis_id},
+        ).execute()
+        rows = response.data or []
+        if not rows:
+            raise RuntimeError(f"paper event claim returned no owner for {event_id}")
+        return rows[0]
+
     def save_result(
         self,
         *,

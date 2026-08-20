@@ -118,6 +118,71 @@ class _RejectedSaveClient:
         return _AnalysisQuery(self.rows.copy())
 
 
+class _EventRpcQuery:
+    def __init__(self, client: "_EventAtomicClient", name: str, params: dict[str, Any]) -> None:
+        self.client = client
+        self.name = name
+        self.params = params
+
+    def execute(self) -> SimpleNamespace:
+        if self.name == "claim_event_paper_run":
+            event_id = self.params["input_event_id"]
+            analysis_id = self.params["input_analysis_id"]
+            owner = self.client.claims.setdefault(event_id, analysis_id)
+            return SimpleNamespace(
+                data=[{"event_id": event_id, "analysis_id": owner}]
+            )
+        if self.name == "save_event_paper_trade_result":
+            incoming = self.params["input_payload"].copy()
+            event_id = incoming["event_id"]
+            analysis_id = incoming["analysis_id"]
+        else:
+            event_id = self.params["input_event_id"]
+            analysis_id = self.params["input_analysis_id"]
+            incoming = {
+                "event_id": event_id,
+                "analysis_id": analysis_id,
+                "status": "expired_no_trade",
+            }
+
+        owner = next(
+            (
+                row
+                for row in self.client.rows
+                if row["event_id"] == event_id and row["status"] in TERMINAL
+            ),
+            None,
+        )
+        if owner is not None:
+            return SimpleNamespace(data=[owner.copy()])
+
+        existing = next(
+            (row for row in self.client.rows if row["analysis_id"] == analysis_id),
+            None,
+        )
+        if existing is None:
+            self.client.rows.append(incoming)
+            saved = incoming
+        else:
+            existing.update(incoming)
+            saved = existing
+        return SimpleNamespace(data=[saved.copy()])
+
+
+class _EventAtomicClient:
+    """Models the migration's event advisory lock and terminal-owner check."""
+
+    def __init__(self) -> None:
+        self.rows: list[dict[str, Any]] = []
+        self.claims: dict[str, str] = {}
+
+    def rpc(self, name: str, params: dict[str, Any]) -> _EventRpcQuery:
+        return _EventRpcQuery(self, name, params)
+
+    def table(self, _table: str) -> _AnalysisQuery:
+        return _AnalysisQuery(self.rows.copy())
+
+
 class PaperTradeRepositoryTests(unittest.TestCase):
     deadline = datetime(2026, 8, 20, 15, 45, tzinfo=UTC)
     expired_at = datetime(2026, 8, 20, 15, 46, tzinfo=UTC)
@@ -247,6 +312,67 @@ class PaperTradeRepositoryTests(unittest.TestCase):
         winner = self.save(client, "paper_executed")
         self.assertEqual(winner["analysis_id"], analysis_a)
         self.assertEqual(winner["status"], "expired_no_trade")
+
+    def save_analysis(
+        self, client: _EventAtomicClient, analysis_id: str, status: str
+    ) -> dict[str, Any]:
+        return SupabasePaperTradeRepository(client).save_result(
+            event_id="hays-fy2026-results",
+            expectation_version=1,
+            source_document_id=None,
+            analysis_id=analysis_id,
+            result=PostReleasePaperResult(status, "result"),
+        )
+
+    def test_different_analyses_competing_for_terminal_event_have_one_winner(self) -> None:
+        client = _EventAtomicClient()
+        analysis_a = "00000000-0000-0000-0000-000000000002"
+        analysis_b = "00000000-0000-0000-0000-000000000003"
+        winner_a = self.save_analysis(client, analysis_a, "paper_executed")
+        winner_b = self.save_analysis(client, analysis_b, "paper_executed")
+        self.assertEqual(winner_a["analysis_id"], analysis_a)
+        self.assertEqual(winner_b["analysis_id"], analysis_a)
+        self.assertEqual(len([row for row in client.rows if row["status"] in TERMINAL]), 1)
+
+    def test_existing_paper_execution_owns_event_against_new_analysis(self) -> None:
+        client = _EventAtomicClient()
+        analysis_a = "00000000-0000-0000-0000-000000000002"
+        analysis_b = "00000000-0000-0000-0000-000000000003"
+        self.save_analysis(client, analysis_a, "paper_executed")
+        winner = self.save_analysis(client, analysis_b, "paper_executed")
+        self.assertEqual(winner["analysis_id"], analysis_a)
+        self.assertFalse(any(row["analysis_id"] == analysis_b for row in client.rows))
+
+    def test_existing_expiry_owns_event_against_new_analysis(self) -> None:
+        client = _EventAtomicClient()
+        analysis_a = "00000000-0000-0000-0000-000000000002"
+        analysis_b = "00000000-0000-0000-0000-000000000003"
+        self.save_analysis(client, analysis_a, "expired_no_trade")
+        winner = self.save_analysis(client, analysis_b, "paper_executed")
+        self.assertEqual(winner["analysis_id"], analysis_a)
+        self.assertEqual(winner["status"], "expired_no_trade")
+        self.assertEqual(len([row for row in client.rows if row["status"] in TERMINAL]), 1)
+
+    def test_single_analysis_waiting_to_paper_execution_still_works(self) -> None:
+        client = _EventAtomicClient()
+        analysis_id = "00000000-0000-0000-0000-000000000002"
+        waiting = self.save_analysis(client, analysis_id, "waiting_confirmation")
+        executed = self.save_analysis(client, analysis_id, "paper_executed")
+        self.assertEqual(waiting["status"], "waiting_confirmation")
+        self.assertEqual(executed["status"], "paper_executed")
+        self.assertEqual(len(client.rows), 1)
+
+    def test_event_claim_allows_only_one_analysis_owner(self) -> None:
+        client = _EventAtomicClient()
+        repository = SupabasePaperTradeRepository(client)
+        owner_a = repository.claim_event(
+            event_id="hays-fy2026-results", analysis_id="analysis-a"
+        )
+        owner_b = repository.claim_event(
+            event_id="hays-fy2026-results", analysis_id="analysis-b"
+        )
+        self.assertEqual(owner_a["analysis_id"], "analysis-a")
+        self.assertEqual(owner_b["analysis_id"], "analysis-a")
 
 
 if __name__ == "__main__":
