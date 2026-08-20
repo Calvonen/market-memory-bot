@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 from trading_system.post_release_paper import PostReleasePaperResult
 
@@ -17,6 +18,7 @@ class SupabasePaperTradeRepository:
 
     def __init__(self, client: Any) -> None:
         self.client = client
+        self.claim_token = str(uuid4())
 
     @classmethod
     def from_env(cls) -> "SupabasePaperTradeRepository":
@@ -50,13 +52,19 @@ class SupabasePaperTradeRepository:
         return rows[0] if rows else None
 
     def claim_event(
-        self, *, event_id: str, analysis_id: str, lease_seconds: int
+        self,
+        *,
+        event_id: str,
+        analysis_id: str,
+        lease_seconds: int,
+        claim_token: str | None = None,
     ) -> dict[str, Any]:
         response = self.client.rpc(
             "claim_event_paper_run",
             {
                 "input_event_id": event_id,
                 "input_analysis_id": analysis_id,
+                "input_claim_token": claim_token or self.claim_token,
                 "input_lease_seconds": max(1, lease_seconds),
             },
         ).execute()
@@ -73,12 +81,14 @@ class SupabasePaperTradeRepository:
         source_document_id: str | None,
         analysis_id: str,
         result: PostReleasePaperResult,
+        claim_token: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "event_id": event_id,
             "expectation_version": expectation_version,
             "source_document_id": source_document_id,
             "analysis_id": analysis_id,
+            "claim_token": claim_token or self.claim_token,
             "status": result.status,
             "message": result.message,
             "strategy": None,
@@ -184,6 +194,7 @@ class SupabasePaperTradeRepository:
         analysis_id: str,
         confirmation_deadline_at: datetime,
         expired_at: datetime,
+        claim_token: str | None = None,
     ) -> dict[str, Any] | None:
         response = self.client.rpc(
             "expire_event_paper_trade_run",
@@ -192,6 +203,7 @@ class SupabasePaperTradeRepository:
                 "input_expectation_version": expectation_version,
                 "input_source_document_id": source_document_id,
                 "input_analysis_id": analysis_id,
+                "input_claim_token": claim_token or self.claim_token,
                 "input_confirmation_deadline_at": confirmation_deadline_at.isoformat(),
                 "input_expired_at": expired_at.isoformat(),
             },

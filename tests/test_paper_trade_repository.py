@@ -231,7 +231,16 @@ class _EventRpcQuery:
                 return SimpleNamespace(data=[existing.copy()] if existing else [])
 
         claim = self.client.claims.get(event_id)
-        if claim is not None and claim["analysis_id"] != analysis_id:
+        if claim is not None and (
+            claim["analysis_id"] != analysis_id
+            or (
+                self.name == "save_event_paper_trade_result"
+                and (
+                    claim["lease_expires_at"] is None
+                    or claim["lease_expires_at"] < self.client.now
+                )
+            )
+        ):
             if (
                 self.name == "expire_event_paper_trade_run"
                 and claim["lease_expires_at"] is not None
@@ -290,6 +299,58 @@ class _EventAtomicClient:
         return _AnalysisQuery(self.rows.copy())
 
 
+class _TokenLeaseQuery:
+    def __init__(
+        self, client: "_TokenLeaseClient", name: str, params: dict[str, Any]
+    ) -> None:
+        self.client = client
+        self.name = name
+        self.params = params
+
+    def execute(self) -> SimpleNamespace:
+        if self.name == "claim_event_paper_run":
+            token = self.params["input_claim_token"]
+            if (
+                self.client.claim is None
+                or self.client.claim["claim_token"] == token
+                or self.client.claim["lease_expires_at"] <= self.client.now
+            ):
+                self.client.claim = {
+                    "event_id": self.params["input_event_id"],
+                    "analysis_id": self.params["input_analysis_id"],
+                    "claim_token": token,
+                    "lease_expires_at": self.client.now
+                    + timedelta(seconds=self.params["input_lease_seconds"]),
+                }
+            return SimpleNamespace(data=[self.client.claim.copy()])
+        if self.name == "save_event_paper_trade_result":
+            payload = self.params["input_payload"]
+            valid = (
+                self.client.claim is not None
+                and self.client.claim["analysis_id"] == payload["analysis_id"]
+                and self.client.claim["claim_token"] == payload["claim_token"]
+                and self.client.claim["lease_expires_at"] >= self.client.now
+            )
+            if valid:
+                self.client.rows.append(payload.copy())
+                return SimpleNamespace(data=[payload.copy()])
+            return SimpleNamespace(data=[])
+        raise AssertionError(f"unexpected RPC {self.name}")
+
+
+class _TokenLeaseClient:
+    def __init__(self) -> None:
+        self.now = datetime(2026, 8, 20, 12, tzinfo=UTC)
+        self.claim: dict[str, Any] | None = None
+        self.rows: list[dict[str, Any]] = []
+
+    def rpc(self, name: str, params: dict[str, Any]) -> _TokenLeaseQuery:
+        return _TokenLeaseQuery(self, name, params)
+
+    def table(self, _table: str) -> _AnalysisQuery:
+        return _AnalysisQuery(self.rows.copy())
+
+
 class PaperTradeRepositoryTests(unittest.TestCase):
     deadline = datetime(2026, 8, 20, 15, 45, tzinfo=UTC)
     expired_at = datetime(2026, 8, 20, 15, 46, tzinfo=UTC)
@@ -328,7 +389,8 @@ class PaperTradeRepositoryTests(unittest.TestCase):
             ),
             confirmation_deadline_at=self.deadline,
         )
-        SupabasePaperTradeRepository(client).save_result(
+        repository = SupabasePaperTradeRepository(client)
+        repository.save_result(
             event_id="hays-fy2026-results",
             expectation_version=1,
             source_document_id="00000000-0000-0000-0000-000000000001",
@@ -336,6 +398,7 @@ class PaperTradeRepositoryTests(unittest.TestCase):
             result=result,
         )
         payload = client.save_calls[0]
+        self.assertEqual(payload["claim_token"], repository.claim_token)
         self.assertEqual(payload["confirmation_deadline_at"], self.deadline.isoformat())
         self.assertEqual(payload["completed_components"]["fundamental"]["score"], 24)
         self.assertEqual(payload["completed_components"]["catalyst"]["score"], 20)
@@ -583,6 +646,81 @@ class PaperTradeRepositoryTests(unittest.TestCase):
         self.assertEqual(owner_a["analysis_id"], "analysis-a")
         self.assertEqual(owner_b["analysis_id"], "analysis-a")
 
+    def test_same_analysis_workers_are_serialized_by_claim_token(self) -> None:
+        client = _TokenLeaseClient()
+        repository = SupabasePaperTradeRepository(client)
+        owner_a = repository.claim_event(
+            event_id="hays-fy2026-results",
+            analysis_id="analysis-shared",
+            lease_seconds=60,
+            claim_token="00000000-0000-0000-0000-00000000000a",
+        )
+        owner_b = repository.claim_event(
+            event_id="hays-fy2026-results",
+            analysis_id="analysis-shared",
+            lease_seconds=60,
+            claim_token="00000000-0000-0000-0000-00000000000b",
+        )
+        self.assertEqual(owner_b["claim_token"], owner_a["claim_token"])
+
+        renewed = repository.claim_event(
+            event_id="hays-fy2026-results",
+            analysis_id="analysis-shared",
+            lease_seconds=120,
+            claim_token=owner_a["claim_token"],
+        )
+        self.assertEqual(renewed["claim_token"], owner_a["claim_token"])
+
+        rejected = repository.save_result(
+            event_id="hays-fy2026-results",
+            expectation_version=1,
+            source_document_id=None,
+            analysis_id="analysis-shared",
+            result=PostReleasePaperResult("paper_executed", "loser order"),
+            claim_token="00000000-0000-0000-0000-00000000000b",
+        )
+        self.assertEqual(rejected["status"], "waiting_confirmation")
+        self.assertFalse(client.rows)
+
+    def test_expired_token_can_be_reclaimed_and_only_new_holder_saves(self) -> None:
+        client = _TokenLeaseClient()
+        repository = SupabasePaperTradeRepository(client)
+        token_a = "00000000-0000-0000-0000-00000000000a"
+        token_b = "00000000-0000-0000-0000-00000000000b"
+        repository.claim_event(
+            event_id="hays-fy2026-results",
+            analysis_id="analysis-shared",
+            lease_seconds=60,
+            claim_token=token_a,
+        )
+        client.now += timedelta(seconds=61)
+        owner_b = repository.claim_event(
+            event_id="hays-fy2026-results",
+            analysis_id="analysis-shared",
+            lease_seconds=60,
+            claim_token=token_b,
+        )
+        self.assertEqual(owner_b["claim_token"], token_b)
+        stale = repository.save_result(
+            event_id="hays-fy2026-results",
+            expectation_version=1,
+            source_document_id=None,
+            analysis_id="analysis-shared",
+            result=PostReleasePaperResult("paper_executed", "stale order"),
+            claim_token=token_a,
+        )
+        self.assertEqual(stale["status"], "waiting_confirmation")
+        winner = repository.save_result(
+            event_id="hays-fy2026-results",
+            expectation_version=1,
+            source_document_id=None,
+            analysis_id="analysis-shared",
+            result=PostReleasePaperResult("paper_executed", "winning order"),
+            claim_token=token_b,
+        )
+        self.assertEqual(winner["status"], "paper_executed")
+        self.assertEqual(len(client.rows), 1)
+
     def test_stale_claim_can_be_reclaimed_by_new_analysis(self) -> None:
         client = _EventAtomicClient()
         repository = SupabasePaperTradeRepository(client)
@@ -594,6 +732,26 @@ class PaperTradeRepositoryTests(unittest.TestCase):
             event_id="hays-fy2026-results", analysis_id="analysis-b", lease_seconds=60
         )
         self.assertEqual(owner["analysis_id"], "analysis-b")
+
+    def test_save_before_matching_claim_expiry_is_accepted(self) -> None:
+        client = _EventAtomicClient()
+        repository = SupabasePaperTradeRepository(client)
+        repository.claim_event(
+            event_id="hays-fy2026-results", analysis_id="analysis-a", lease_seconds=60
+        )
+        saved = self.save_analysis(client, "analysis-a", "paper_executed")
+        self.assertEqual(saved["status"], "paper_executed")
+
+    def test_save_after_matching_claim_expiry_is_rejected(self) -> None:
+        client = _EventAtomicClient()
+        repository = SupabasePaperTradeRepository(client)
+        repository.claim_event(
+            event_id="hays-fy2026-results", analysis_id="analysis-a", lease_seconds=60
+        )
+        client.now += timedelta(seconds=61)
+        rejected = self.save_analysis(client, "analysis-a", "paper_executed")
+        self.assertEqual(rejected["status"], "waiting_confirmation")
+        self.assertFalse(any(row["status"] in TERMINAL for row in client.rows))
 
     def test_terminal_owner_cannot_be_reclaimed_after_lease_expiry(self) -> None:
         client = _EventAtomicClient()

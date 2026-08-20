@@ -55,6 +55,17 @@ class PaperTradeMigrationTests(unittest.TestCase):
         self.assertIn("event_paper_trade_event_claims.lease_expires_at <= clock_timestamp()", self.sql)
         self.assertIn("or event_paper_trade_event_claims.lease_expires_at <=", self.sql)
 
+    def test_claims_are_scoped_to_worker_token_and_valid_lease(self) -> None:
+        self.assertIn("claim_token uuid not null", self.sql)
+        self.assertIn("input_claim_token uuid", self.sql)
+        self.assertIn("claim_owner_token <> effective_claim_token", self.sql)
+        self.assertIn("claim_lease_expires_at < transition_time", self.sql)
+        self.assertIn(
+            "event_paper_trade_event_claims.claim_token = excluded.claim_token",
+            self.sql,
+        )
+        self.assertIn("claim_token = claim_owner_token", self.sql)
+
     def test_expiry_can_transfer_only_an_expired_lease_under_event_lock(self) -> None:
         self.assertIn("claim_lease_expires_at > transition_time", self.sql)
         self.assertIn("and lease_expires_at <= transition_time", self.sql)

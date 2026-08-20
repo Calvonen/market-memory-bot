@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Callable
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from trading_system.ai_event_analyzer import (
@@ -300,6 +301,7 @@ def run_paper_confirmation_loop(
     )
 
     portfolio = build_paper_portfolio_from_env()
+    claim_token = str(uuid4())
     while True:
         now = clock().astimezone(UTC)
         if now >= deadline:
@@ -319,6 +321,7 @@ def run_paper_confirmation_loop(
                     analysis_id=analysis_id,
                     confirmation_deadline_at=deadline,
                     expired_at=now,
+                    claim_token=claim_token,
                 )
                 if updated is not None and updated.get("status") != "expired_no_trade":
                     deadline_is_open = (
@@ -363,8 +366,12 @@ def run_paper_confirmation_loop(
                 event_id=event_id,
                 analysis_id=analysis_id,
                 lease_seconds=lease_seconds,
+                claim_token=claim_token,
             )
-            if str(owner.get("analysis_id")) != analysis_id:
+            owner_token = owner.get("claim_token")
+            if str(owner.get("analysis_id")) != analysis_id or str(
+                owner_token
+            ) != claim_token:
                 message = f"paper event is owned by analysis {owner.get('analysis_id')}"
                 print(f"{event_id}: waiting_confirmation ({message})", flush=True)
                 waiting = PostReleasePaperResult(
@@ -392,6 +399,7 @@ def run_paper_confirmation_loop(
                 source_document_id=source_document_id,
                 analysis_id=analysis_id,
                 result=result,
+                claim_token=claim_token,
             )
             event_owner_is_other_analysis = (
                 persisted.get("analysis_id") is not None

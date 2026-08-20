@@ -70,12 +70,14 @@ create unique index if not exists event_paper_trade_runs_one_terminal_per_event_
 create table if not exists public.event_paper_trade_event_claims (
   event_id text primary key,
   analysis_id uuid not null,
+  claim_token uuid not null default gen_random_uuid(),
   claimed_at timestamptz not null default now(),
   lease_expires_at timestamptz null,
   updated_at timestamptz not null default now()
 );
 
 alter table public.event_paper_trade_event_claims
+  add column if not exists claim_token uuid not null default gen_random_uuid(),
   add column if not exists lease_expires_at timestamptz null,
   add column if not exists updated_at timestamptz not null default now();
 
@@ -98,11 +100,14 @@ as $$
 declare
   effective_event_id text := input_payload->>'event_id';
   effective_analysis_id uuid := (input_payload->>'analysis_id')::uuid;
+  effective_claim_token uuid := (input_payload->>'claim_token')::uuid;
   effective_status text := input_payload->>'status';
   effective_deadline timestamptz := nullif(input_payload->>'confirmation_deadline_at', '')::timestamptz;
   effective_expired_at timestamptz := nullif(input_payload->>'expired_at', '')::timestamptz;
   terminal_owner public.event_paper_trade_runs%rowtype;
   claim_owner_analysis_id uuid;
+  claim_owner_token uuid;
+  claim_lease_expires_at timestamptz;
   transition_time timestamptz;
 begin
   -- All analyses for one event share a transaction-scoped lock. The partial
@@ -120,11 +125,16 @@ begin
     return;
   end if;
 
-  select analysis_id into claim_owner_analysis_id
+  select analysis_id, claim_token, lease_expires_at
+  into claim_owner_analysis_id, claim_owner_token, claim_lease_expires_at
   from public.event_paper_trade_event_claims
   where event_id = effective_event_id;
-  if claim_owner_analysis_id is not null
-     and claim_owner_analysis_id <> effective_analysis_id then
+  if claim_owner_analysis_id is null
+     or effective_claim_token is null
+     or claim_owner_analysis_id <> effective_analysis_id
+     or claim_owner_token <> effective_claim_token
+     or claim_lease_expires_at is null
+     or claim_lease_expires_at < transition_time then
     return query
     select * from public.event_paper_trade_runs
     where analysis_id = effective_analysis_id
@@ -228,9 +238,11 @@ end;
 $$;
 
 drop function if exists public.claim_event_paper_run(text, uuid);
+drop function if exists public.claim_event_paper_run(text, uuid, integer);
 create or replace function public.claim_event_paper_run(
   input_event_id text,
   input_analysis_id uuid,
+  input_claim_token uuid,
   input_lease_seconds integer
 )
 returns setof public.event_paper_trade_event_claims
@@ -251,32 +263,39 @@ begin
 
   if terminal_analysis_id is not null then
     insert into public.event_paper_trade_event_claims(
-      event_id, analysis_id, lease_expires_at, updated_at
-    ) values (input_event_id, terminal_analysis_id, null, clock_timestamp())
+      event_id, analysis_id, claim_token, lease_expires_at, updated_at
+    ) values (input_event_id, terminal_analysis_id, input_claim_token, null, clock_timestamp())
     on conflict (event_id) do update set
       analysis_id = excluded.analysis_id,
+      claim_token = excluded.claim_token,
       lease_expires_at = null,
       updated_at = excluded.updated_at;
   else
     insert into public.event_paper_trade_event_claims(
-      event_id, analysis_id, claimed_at, lease_expires_at, updated_at
+      event_id, analysis_id, claim_token, claimed_at, lease_expires_at, updated_at
     ) values (
       input_event_id,
       input_analysis_id,
+      input_claim_token,
       clock_timestamp(),
       clock_timestamp() + make_interval(secs => greatest(input_lease_seconds, 1)),
       clock_timestamp()
     )
     on conflict (event_id) do update set
       analysis_id = excluded.analysis_id,
+      claim_token = excluded.claim_token,
       claimed_at = case
         when event_paper_trade_event_claims.analysis_id = excluded.analysis_id
+         and event_paper_trade_event_claims.claim_token = excluded.claim_token
           then event_paper_trade_event_claims.claimed_at
         else excluded.claimed_at
       end,
       lease_expires_at = excluded.lease_expires_at,
       updated_at = excluded.updated_at
-    where event_paper_trade_event_claims.analysis_id = excluded.analysis_id
+    where (
+         event_paper_trade_event_claims.analysis_id = excluded.analysis_id
+         and event_paper_trade_event_claims.claim_token = excluded.claim_token
+       )
        or event_paper_trade_event_claims.lease_expires_at <= clock_timestamp();
   end if;
 
@@ -286,11 +305,13 @@ begin
 end;
 $$;
 
+drop function if exists public.expire_event_paper_trade_run(text, integer, uuid, uuid, timestamptz, timestamptz);
 create or replace function public.expire_event_paper_trade_run(
   input_event_id text,
   input_expectation_version integer,
   input_source_document_id uuid,
   input_analysis_id uuid,
+  input_claim_token uuid,
   input_confirmation_deadline_at timestamptz,
   input_expired_at timestamptz
 )
@@ -302,6 +323,7 @@ as $$
 declare
   terminal_owner public.event_paper_trade_runs%rowtype;
   claim_owner_analysis_id uuid;
+  claim_owner_token uuid;
   claim_lease_expires_at timestamptz;
   expired_run public.event_paper_trade_runs%rowtype;
   transition_time timestamptz;
@@ -328,12 +350,18 @@ begin
     return;
   end if;
 
-  select analysis_id, lease_expires_at
-  into claim_owner_analysis_id, claim_lease_expires_at
+  select analysis_id, claim_token, lease_expires_at
+  into claim_owner_analysis_id, claim_owner_token, claim_lease_expires_at
   from public.event_paper_trade_event_claims
   where event_id = input_event_id;
   if claim_owner_analysis_id is not null
-     and claim_owner_analysis_id <> input_analysis_id then
+     and (
+       input_claim_token is null
+       or
+       claim_owner_analysis_id <> input_analysis_id
+       or claim_owner_token <> input_claim_token
+       or claim_lease_expires_at < transition_time
+     ) then
     if claim_lease_expires_at is null
        or claim_lease_expires_at > transition_time then
       return query
@@ -348,11 +376,13 @@ begin
     update public.event_paper_trade_event_claims
     set
       analysis_id = input_analysis_id,
+      claim_token = input_claim_token,
       claimed_at = transition_time,
       lease_expires_at = transition_time,
       updated_at = transition_time
     where event_id = input_event_id
       and analysis_id = claim_owner_analysis_id
+      and claim_token = claim_owner_token
       and lease_expires_at <= transition_time;
   end if;
 
@@ -383,6 +413,7 @@ begin
     update public.event_paper_trade_event_claims
     set
       analysis_id = input_analysis_id,
+      claim_token = input_claim_token,
       lease_expires_at = null,
       updated_at = transition_time
     where event_id = input_event_id;
@@ -422,12 +453,12 @@ as $$
 $$;
 
 revoke all on function public.save_event_paper_trade_result(jsonb) from public;
-revoke all on function public.expire_event_paper_trade_run(text, integer, uuid, uuid, timestamptz, timestamptz) from public;
-revoke all on function public.claim_event_paper_run(text, uuid, integer) from public;
+revoke all on function public.expire_event_paper_trade_run(text, integer, uuid, uuid, uuid, timestamptz, timestamptz) from public;
+revoke all on function public.claim_event_paper_run(text, uuid, uuid, integer) from public;
 revoke all on function public.is_event_confirmation_deadline_reached(timestamptz) from public;
 revoke all on function public.get_event_paper_trade_state(text) from public;
 grant execute on function public.save_event_paper_trade_result(jsonb) to service_role;
-grant execute on function public.expire_event_paper_trade_run(text, integer, uuid, uuid, timestamptz, timestamptz) to service_role;
-grant execute on function public.claim_event_paper_run(text, uuid, integer) to service_role;
+grant execute on function public.expire_event_paper_trade_run(text, integer, uuid, uuid, uuid, timestamptz, timestamptz) to service_role;
+grant execute on function public.claim_event_paper_run(text, uuid, uuid, integer) to service_role;
 grant execute on function public.is_event_confirmation_deadline_reached(timestamptz) to service_role;
 grant execute on function public.get_event_paper_trade_state(text) to service_role;

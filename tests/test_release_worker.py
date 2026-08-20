@@ -203,7 +203,10 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
                 }
 
             def claim_event(self, **kwargs: Any) -> dict[str, Any]:
-                return {"analysis_id": kwargs["analysis_id"]}
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "claim_token": kwargs["claim_token"],
+                }
 
             def save_result(self, **kwargs: Any) -> dict[str, Any]:
                 self.runner_saved = True
@@ -252,7 +255,10 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
                 }
 
             def claim_event(self, **kwargs: Any) -> dict[str, Any]:
-                return {"analysis_id": kwargs["analysis_id"]}
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "claim_token": kwargs["claim_token"],
+                }
 
             def save_result(self, **kwargs: Any) -> dict[str, Any]:
                 self.saves += 1
@@ -435,7 +441,11 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
                 }
 
             def claim_event(self, **kwargs: Any) -> dict[str, Any]:
-                return {"event_id": kwargs["event_id"], "analysis_id": "analysis-a"}
+                return {
+                    "event_id": kwargs["event_id"],
+                    "analysis_id": "analysis-a",
+                    "claim_token": "owner-token",
+                }
 
         result = run_paper_confirmation_loop(
             event_id="hays-fy2026-results",
@@ -467,7 +477,11 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
             def claim_event(self, **kwargs: Any) -> dict[str, Any]:
                 self.claims += 1
                 owner = "analysis-a" if self.claims == 1 else kwargs["analysis_id"]
-                return {"event_id": kwargs["event_id"], "analysis_id": owner}
+                return {
+                    "event_id": kwargs["event_id"],
+                    "analysis_id": owner,
+                    "claim_token": kwargs["claim_token"],
+                }
 
             def save_result(self, **kwargs: Any) -> dict[str, Any]:
                 return {
@@ -514,8 +528,11 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
             def claim_event(self, **kwargs: Any) -> dict[str, Any]:
                 self.claims += 1
                 if self.claims == 2:
-                    return {"analysis_id": "analysis-b"}
-                return {"analysis_id": kwargs["analysis_id"]}
+                    return {"analysis_id": "analysis-b", "claim_token": "b-token"}
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "claim_token": kwargs["claim_token"],
+                }
 
             def save_result(self, **kwargs: Any) -> dict[str, Any]:
                 self.saves += 1
@@ -556,6 +573,71 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
         self.assertEqual(persistence.claims, 3)
         self.assertEqual(sleeps, [300, 300])
 
+    def test_same_analysis_workers_require_the_current_claim_token(self) -> None:
+        class TokenPersistence:
+            def __init__(self) -> None:
+                self.owner_token: str | None = None
+                self.runner_saves = 0
+
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def claim_event(self, **kwargs: Any) -> dict[str, Any]:
+                if self.owner_token is None:
+                    self.owner_token = kwargs["claim_token"]
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "claim_token": self.owner_token,
+                }
+
+            def save_result(self, **kwargs: Any) -> dict[str, Any]:
+                self.runner_saves += 1
+                self.assert_current_token(kwargs["claim_token"])
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": kwargs["result"].status,
+                    "message": kwargs["result"].message,
+                }
+
+            def assert_current_token(self, token: str) -> None:
+                if token != self.owner_token:
+                    raise AssertionError("wrong worker token reached save")
+
+        persistence = TokenPersistence()
+        runner_calls: list[str] = []
+        first = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=True,
+            analysis_id="analysis-shared",
+            persistence=persistence,
+            runner=lambda **_: (
+                runner_calls.append("owner")
+                or PostReleasePaperResult("waiting_confirmation", "owner polled")
+            ),
+            clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
+        )
+        second = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=True,
+            analysis_id="analysis-shared",
+            persistence=persistence,
+            runner=lambda **_: self.fail("same-analysis token loser must not run"),
+            clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
+        )
+        self.assertEqual(first.status, "waiting_confirmation")
+        self.assertEqual(second.status, "waiting_confirmation")
+        self.assertEqual(runner_calls, ["owner"])
+        self.assertEqual(persistence.runner_saves, 1)
+
     def test_losing_worker_can_expire_event_when_deadline_arrives(self) -> None:
         now = [datetime(2026, 8, 20, 15, 44, tzinfo=UTC)]
 
@@ -570,7 +652,11 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
                 }
 
             def claim_event(self, **kwargs: Any) -> dict[str, Any]:
-                return {"event_id": kwargs["event_id"], "analysis_id": "analysis-a"}
+                return {
+                    "event_id": kwargs["event_id"],
+                    "analysis_id": "analysis-a",
+                    "claim_token": "owner-token",
+                }
 
             def expire_waiting(self, **kwargs: Any) -> dict[str, Any]:
                 self.expiry_attempts += 1
