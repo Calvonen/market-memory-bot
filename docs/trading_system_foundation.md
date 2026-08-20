@@ -89,6 +89,17 @@ The system records every official-release check. When the FY26 release becomes a
 
 A single consensus miss or beat is never sufficient to create a trade proposal. Guidance, price reaction, technical state, market memory and the complete event analysis are required.
 
+### Temporary Hays confirmation-session policy
+
+PR1 intentionally does not introduce a general exchange-calendar subsystem. For
+the Hays/LSE event, the confirmation window ends at 16:30 Europe/London on the
+scheduled release date plus `MARKETAI_CONFIRMATION_GRACE_MINUTES` (15 minutes by
+default). The resulting deadline is converted to UTC and persisted with the paper
+run, so polling and restarts cannot move it. Once reached, the run becomes the
+terminal, fail-closed `expired_no_trade` state before Strategy, Risk or PaperBroker
+can run again. Exchange holidays and non-Hays instruments require a future,
+calendar-aware policy rather than extending this temporary event-specific rule.
+
 ## Runtime AI configuration
 
 ```text

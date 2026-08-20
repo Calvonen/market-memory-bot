@@ -10,6 +10,12 @@ import {
 type PaperRun = {
   status?: string;
   message?: string;
+  completed_components?: {
+    fundamental?: CompletedComponent;
+    catalyst?: CompletedComponent;
+  } | null;
+  confirmation_deadline_at?: string | null;
+  expired_at?: string | null;
   strategy?: {
     direction?: string;
     confidence?: number;
@@ -38,6 +44,12 @@ type PaperRun = {
     reference_price?: number;
     status?: string;
   } | null;
+};
+
+type CompletedComponent = {
+  direction?: string;
+  score?: number;
+  max_score?: number;
 };
 
 type PaperStatus = {
@@ -75,7 +87,7 @@ export default function HomeScreen() {
       }
       setData(await response.json());
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
+      setError(err instanceof Error ? err.message : 'Tuntematon virhe');
     }
   }, []);
 
@@ -94,27 +106,47 @@ export default function HomeScreen() {
   const risk = run?.risk ?? null;
   const order = run?.paper_order ?? null;
   const scores = strategy?.scores ?? null;
+  const completed = run?.completed_components ?? null;
+  const fundamentalScore = completed?.fundamental?.score ?? scores?.fundamental;
+  const catalystScore = completed?.catalyst?.score ?? scores?.catalyst;
+  const confirmationReason =
+    run?.status === 'waiting_confirmation' ? run.message : null;
 
   const statusText =
     error
-      ? 'Backend unavailable'
+      ? 'Palvelimeen ei saada yhteyttä'
       : !data
-        ? 'Loading status...'
+        ? 'Ladataan tilaa...'
         : !run
-          ? 'Waiting for official release'
-          : run.message || run.status || 'Processing';
+          ? 'Odottaa virallista tulosjulkistusta'
+          : run.status === 'waiting_confirmation'
+            ? 'Odottaa vahvistusta'
+            : run.status === 'expired_no_trade'
+              ? 'Vanhentui – ei kauppaa'
+              : run.status === 'paper_executed'
+                ? 'Paperikauppa toteutettu'
+                : 'Käsitellään';
 
   const scheduled = data?.scheduled_date
     ? new Date(`${data.scheduled_date}T12:00:00`)
     : null;
   const day = scheduled ? String(scheduled.getDate()).padStart(2, '0') : '--';
   const month = scheduled
-    ? scheduled.toLocaleString('en', { month: 'short' }).toUpperCase()
+    ? scheduled.toLocaleString('fi-FI', { month: 'short' }).toUpperCase()
     : '---';
 
-  const strategyDirection = strategy?.direction ?? 'NO TRADE';
+  const strategyDirection = localizeDirection(strategy?.direction);
   const confidence = strategy?.confidence;
-  const riskStatus = risk?.status ?? 'PENDING';
+  const riskStatus =
+    risk?.status === 'PASS'
+      ? 'HYVÄKSYTTY'
+      : risk?.status === 'REJECT'
+        ? 'HYLÄTTY'
+        : 'ODOTTAA';
+  const riskReasonText =
+    risk?.status === 'REJECT' && risk.reasons?.length
+      ? `${risk.reasons.join(' • ')} • `
+      : '';
 
   return (
     <ScrollView
@@ -132,7 +164,7 @@ export default function HomeScreen() {
       <View style={styles.header}>
         <View>
           <Text style={styles.brand}>MarketAI</Text>
-          <Text style={styles.subtitle}>Trading dashboard</Text>
+          <Text style={styles.subtitle}>Kaupankäynnin tilannekuva</Text>
         </View>
 
         <View style={styles.paperBadge}>
@@ -144,7 +176,9 @@ export default function HomeScreen() {
       <View style={styles.eventCard}>
         <View style={styles.rowBetween}>
           <View>
-            <Text style={styles.company}>{data?.event_name?.replace(' FY2026 results', '') ?? 'Hays plc'}</Text>
+            <Text style={styles.company}>
+              {data?.event_name?.replace(' FY2026 results', '') ?? 'Hays plc'}
+            </Text>
             <Text style={styles.symbol}>{data?.instrument ?? 'HAS.L'}</Text>
           </View>
 
@@ -154,103 +188,111 @@ export default function HomeScreen() {
           </View>
         </View>
 
-        <Text style={styles.eventTitle}>FY2026 Results</Text>
+        <Text style={styles.eventTitle}>FY2026-tulokset</Text>
 
         <View style={styles.waitingBox}>
-          <Text style={styles.waitingLabel}>CURRENT STATUS</Text>
+          <Text style={styles.waitingLabel}>NYKYTILA</Text>
           <Text style={styles.waitingText}>{statusText}</Text>
+          {confirmationReason ? (
+            <Text style={styles.confirmationReason}>{confirmationReason}</Text>
+          ) : null}
           {error ? (
             <Text style={styles.errorText}>{error}</Text>
           ) : null}
         </View>
       </View>
 
-      <Text style={styles.sectionTitle}>ANALYSIS</Text>
+      <Text style={styles.sectionTitle}>ANALYYSI</Text>
 
       <View style={styles.grid}>
         <MetricCard
-          title="Fundamental"
-          value={`${scores?.fundamental ?? '--'} / 35`}
-          state={scores ? 'Scored' : 'Waiting'}
+          title="Perustekijät"
+          value={`${fundamentalScore ?? '--'} / 35`}
+          state={fundamentalScore !== undefined ? 'Valmis' : 'Odottaa'}
         />
         <MetricCard
-          title="Catalyst"
-          value={`${scores?.catalyst ?? '--'} / 25`}
-          state={scores ? 'Scored' : 'Waiting'}
+          title="Kurssiajuri"
+          value={`${catalystScore ?? '--'} / 25`}
+          state={catalystScore !== undefined ? 'Valmis' : 'Odottaa'}
         />
         <MetricCard
-          title="Technical"
+          title="Tekninen"
           value={`${scores?.technical ?? '--'} / 20`}
-          state={scores ? 'Scored' : 'Waiting'}
+          state={scores ? 'Valmis' : 'Odottaa'}
         />
         <MetricCard
-          title="Market Memory"
+          title="Markkinamuisti"
           value={`${scores?.market_memory ?? '--'} / 10`}
-          state={scores ? 'Scored' : 'Waiting'}
+          state={scores ? 'Valmis' : 'Odottaa'}
         />
       </View>
 
       <View style={styles.card}>
         <View style={styles.rowBetween}>
-          <Text style={styles.cardTitle}>STRATEGY</Text>
+          <Text style={styles.cardTitle}>STRATEGIA</Text>
           <Text style={styles.neutralBadge}>{strategyDirection}</Text>
         </View>
 
         <Text style={styles.bigValue}>{confidence ?? '--'}</Text>
-        <Text style={styles.muted}>Confidence</Text>
+        <Text style={styles.muted}>Luottamus</Text>
 
         <View style={styles.progressTrack}>
           <View style={styles.progressEmpty} />
         </View>
 
         <View style={styles.scoreRow}>
-          <Text style={styles.muted}>LONG evidence</Text>
+          <Text style={styles.muted}>OSTO-näyttö</Text>
           <Text style={styles.score}>{strategy?.long_evidence ?? '--'}</Text>
         </View>
         <View style={styles.scoreRow}>
-          <Text style={styles.muted}>SHORT evidence</Text>
+          <Text style={styles.muted}>MYYNTI-näyttö</Text>
           <Text style={styles.score}>{strategy?.short_evidence ?? '--'}</Text>
         </View>
       </View>
 
       <View style={styles.card}>
         <View style={styles.rowBetween}>
-          <Text style={styles.cardTitle}>RISK ENGINE</Text>
+          <Text style={styles.cardTitle}>RISKINHALLINTA</Text>
           <Text style={styles.pendingBadge}>{riskStatus}</Text>
         </View>
 
         <Text style={styles.riskMessage}>
           {risk
-            ? risk.reasons?.length
-              ? risk.reasons.join(' • ')
-              : `Max quantity ${risk.max_quantity ?? '--'} • R/R ${risk.reward_risk ?? '--'}`
-            : 'Risk evaluation starts after a valid strategy decision.'}
+            ? `${riskReasonText}Riskiarvio ${risk.status === 'PASS' ? 'hyväksytty' : 'hylätty'} • Enimmäismäärä ${risk.max_quantity ?? '--'} • Tuotto/riski ${risk.reward_risk ?? '--'}`
+            : 'Riskiarvio alkaa hyväksyttävän strategiapäätöksen jälkeen.'}
         </Text>
         {order ? (
           <Text style={styles.orderText}>
-            Paper order: {order.direction} {order.quantity} @ {order.reference_price} • {order.status}
+            Paperitoimeksianto: {localizeDirection(order.direction)} {order.quantity} @{' '}
+            {order.reference_price} • {order.status === 'FILLED_SIMULATED' ? 'SIMULOITU TÄYTTÖ' : 'KÄSITELLÄÄN'}
           </Text>
         ) : null}
       </View>
 
-      <Text style={styles.sectionTitle}>EVENT PROGRESS</Text>
+      <Text style={styles.sectionTitle}>TAPAHTUMAN ETENEMINEN</Text>
 
       <View style={styles.timelineCard}>
-        <TimelineItem done label="Expectation locked" />
-        <TimelineItem done={Boolean(run)} label="Official release" />
-        <TimelineItem done={Boolean(run)} label="AI analysis" />
-        <TimelineItem done={Boolean(strategy)} label="Market reaction" />
-        <TimelineItem done={Boolean(strategy)} label="Technical confirmation" />
-        <TimelineItem done={Boolean(strategy)} label="Market memory" />
-        <TimelineItem done={risk?.status === 'PASS'} label="Risk approval" />
-        <TimelineItem done={Boolean(order)} label="Paper order" last />
+        <TimelineItem done label="Odotukset lukittu" />
+        <TimelineItem done={Boolean(run)} label="Virallinen tulosjulkistus" />
+        <TimelineItem done={Boolean(run)} label="Tekoälyanalyysi" />
+        <TimelineItem done={Boolean(strategy)} label="Markkinareaktio" />
+        <TimelineItem done={Boolean(strategy)} label="Tekninen vahvistus" />
+        <TimelineItem done={Boolean(strategy)} label="Markkinamuisti" />
+        <TimelineItem done={risk?.status === 'PASS'} label="Riskihyväksyntä" />
+        <TimelineItem done={Boolean(order)} label="Paperitoimeksianto" last />
       </View>
 
       <Text style={styles.footer}>
-        MarketAI • PAPER trading only
+        MarketAI • vain PAPER-kaupankäynti
       </Text>
     </ScrollView>
   );
+}
+
+function localizeDirection(direction?: string) {
+  if (direction === 'LONG') return 'OSTO';
+  if (direction === 'SHORT') return 'MYYNTI';
+  return 'EI KAUPPAA';
 }
 
 function MetricCard({
@@ -411,6 +453,12 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     marginTop: 5,
+  },
+  confirmationReason: {
+    color: '#8994a6',
+    fontSize: 13,
+    lineHeight: 19,
+    marginTop: 7,
   },
   sectionTitle: {
     color: '#687386',

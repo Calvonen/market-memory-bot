@@ -12,6 +12,7 @@ from trading_system.release_worker import (
     EventReleaseMonitor,
     build_hays_monitor,
     build_paper_portfolio_from_env,
+    hays_confirmation_deadline,
     run_paper_confirmation_loop,
 )
 
@@ -39,11 +40,17 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
             evidence_quotes=[],
         )
 
-    def test_confirmation_loop_waits_without_reanalyzing_then_stops_after_paper_execution(self) -> None:
+    def test_confirmation_loop_waits_without_reanalyzing_then_stops_after_paper_execution(
+        self,
+    ) -> None:
         results = iter(
             [
-                PostReleasePaperResult("waiting_confirmation", "no event-day market bar yet"),
-                PostReleasePaperResult("paper_executed", "LONG 100 HAS.L FILLED_SIMULATED"),
+                PostReleasePaperResult(
+                    "waiting_confirmation", "no event-day market bar yet"
+                ),
+                PostReleasePaperResult(
+                    "paper_executed", "LONG 100 HAS.L FILLED_SIMULATED"
+                ),
             ]
         )
         runner_calls = []
@@ -61,6 +68,7 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
             once=False,
             runner=runner,
             sleeper=sleeps.append,
+            clock=lambda: datetime(2026, 8, 20, 12, tzinfo=UTC),
         )
 
         self.assertEqual(result.status, "paper_executed")
@@ -73,7 +81,9 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
 
         def runner(**kwargs):
             calls.append(kwargs)
-            return PostReleasePaperResult("waiting_confirmation", "technical confirmation is not aligned")
+            return PostReleasePaperResult(
+                "waiting_confirmation", "technical confirmation is not aligned"
+            )
 
         result = run_paper_confirmation_loop(
             event_id="hays-fy2026-results",
@@ -83,12 +93,15 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
             once=True,
             runner=runner,
             sleeper=lambda _: self.fail("once mode must not sleep"),
+            clock=lambda: datetime(2026, 8, 20, 12, tzinfo=UTC),
         )
 
         self.assertEqual(result.status, "waiting_confirmation")
         self.assertEqual(len(calls), 1)
 
-    def test_paper_portfolio_has_explicit_spread_assumption_and_live_mode_is_not_involved(self) -> None:
+    def test_paper_portfolio_has_explicit_spread_assumption_and_live_mode_is_not_involved(
+        self,
+    ) -> None:
         with patch.dict(
             "os.environ",
             {
@@ -111,10 +124,14 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
                 return {"status": "paper_executed", "analysis_id": "analysis-1"}
 
             def save_result(self, **kwargs: Any) -> None:
-                raise AssertionError("must not persist a new result on restart short-circuit")
+                raise AssertionError(
+                    "must not persist a new result on restart short-circuit"
+                )
 
         def runner(**kwargs: Any) -> PostReleasePaperResult:
-            raise AssertionError("runner (Strategy/Risk/PaperBroker) must not run after paper_executed")
+            raise AssertionError(
+                "runner (Strategy/Risk/PaperBroker) must not run after paper_executed"
+            )
 
         result = run_paper_confirmation_loop(
             event_id="hays-fy2026-results",
@@ -130,6 +147,618 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
 
         self.assertEqual(result.status, "paper_executed")
 
+    def test_hays_deadline_is_lse_close_plus_grace_in_utc(self) -> None:
+        deadline = hays_confirmation_deadline(HAYS_FY2026, grace_minutes=15)
+        self.assertEqual(deadline, datetime(2026, 8, 20, 15, 45, tzinfo=UTC))
+
+    def test_expired_confirmation_never_calls_runner(self) -> None:
+        class WaitingPersistence:
+            def __init__(self) -> None:
+                self.expired = False
+
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def expire_waiting(self, **kwargs: Any) -> dict[str, Any]:
+                self.expired = True
+                return {"status": "expired_no_trade"}
+
+        persistence = WaitingPersistence()
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            analysis_id="analysis-1",
+            persistence=persistence,
+            runner=lambda **_: self.fail(
+                "expired confirmation must not enter the pipeline"
+            ),
+            clock=lambda: datetime(2026, 8, 20, 15, 45, tzinfo=UTC),
+        )
+        self.assertEqual(result.status, "expired_no_trade")
+        self.assertTrue(persistence.expired)
+
+    def test_clock_skew_deadline_rejection_runs_confirmation_in_once_mode(self) -> None:
+        class DeadlineOpenPersistence:
+            def __init__(self) -> None:
+                self.runner_saved = False
+
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def expire_waiting(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": "waiting_confirmation",
+                    "message": "database confirmation window is still open",
+                    "expiry_rejection": "deadline_open",
+                }
+
+            def claim_event(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "claim_token": kwargs["claim_token"],
+                }
+
+            def save_result(self, **kwargs: Any) -> dict[str, Any]:
+                self.runner_saved = True
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": kwargs["result"].status,
+                    "message": kwargs["result"].message,
+                }
+
+        persistence = DeadlineOpenPersistence()
+        runner_calls: list[str] = []
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=True,
+            analysis_id="analysis-1",
+            persistence=persistence,
+            runner=lambda **_: (
+                runner_calls.append("ran")
+                or PostReleasePaperResult("paper_executed", "valid confirmation")
+            ),
+            clock=lambda: datetime(2026, 8, 20, 15, 46, tzinfo=UTC),
+        )
+        self.assertEqual(runner_calls, ["ran"])
+        self.assertTrue(persistence.runner_saved)
+        self.assertEqual(result.status, "paper_executed")
+
+    def test_clock_skew_deadline_rejection_keeps_continuous_polling(self) -> None:
+        class DeadlineOpenPersistence:
+            def __init__(self) -> None:
+                self.saves = 0
+
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def expire_waiting(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": "waiting_confirmation",
+                    "expiry_rejection": "deadline_open",
+                }
+
+            def claim_event(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "claim_token": kwargs["claim_token"],
+                }
+
+            def save_result(self, **kwargs: Any) -> dict[str, Any]:
+                self.saves += 1
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": kwargs["result"].status,
+                    "message": kwargs["result"].message,
+                }
+
+        persistence = DeadlineOpenPersistence()
+        runner_calls = 0
+
+        def runner(**_: Any) -> PostReleasePaperResult:
+            nonlocal runner_calls
+            runner_calls += 1
+            if runner_calls == 1:
+                return PostReleasePaperResult(
+                    "waiting_confirmation", "matching price reaction is pending"
+                )
+            return PostReleasePaperResult("paper_executed", "valid confirmation")
+
+        sleeps: list[float] = []
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            analysis_id="analysis-1",
+            persistence=persistence,
+            runner=runner,
+            sleeper=sleeps.append,
+            clock=lambda: datetime(2026, 8, 20, 15, 46, tzinfo=UTC),
+        )
+        self.assertEqual(runner_calls, 2)
+        self.assertEqual(persistence.saves, 2)
+        self.assertEqual(sleeps, [300])
+        self.assertEqual(result.status, "paper_executed")
+
+    def test_clock_skew_does_not_bypass_active_event_lease(self) -> None:
+        class LeaseConflictPersistence:
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def expire_waiting(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": "waiting_confirmation",
+                    "message": "active event lease",
+                    "expiry_rejection": "lease_conflict",
+                }
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=True,
+            analysis_id="analysis-b",
+            persistence=LeaseConflictPersistence(),
+            runner=lambda **_: self.fail("lease conflict must not invoke runner"),
+            clock=lambda: datetime(2026, 8, 20, 15, 46, tzinfo=UTC),
+        )
+        self.assertEqual(result.status, "waiting_confirmation")
+        self.assertEqual(result.message, "active event lease")
+
+    def test_restart_after_expiry_skips_runner(self) -> None:
+        class ExpiredPersistence:
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {"status": "expired_no_trade"}
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            persistence=ExpiredPersistence(),
+            runner=lambda **_: self.fail("terminal expiry must skip the pipeline"),
+        )
+        self.assertEqual(result.status, "expired_no_trade")
+
+    def test_restart_uses_terminal_owner_instead_of_newer_superseded_history(self) -> None:
+        class SupersededAwarePersistence:
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "analysis_id": "analysis-winner",
+                    "status": "paper_executed",
+                    "updated_at": "2026-08-20T15:45:00+00:00",
+                }
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            persistence=SupersededAwarePersistence(),
+            runner=lambda **_: self.fail("terminal event restart must not run again"),
+        )
+        self.assertEqual(result.status, "paper_executed")
+
+    def test_stale_runner_result_yields_to_atomic_expiry_winner(self) -> None:
+        class ExpiryWinsPersistence:
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def save_result(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "status": "expired_no_trade",
+                    "message": "confirmation window expired without a trade",
+                    "expired_at": "2026-08-20T15:45:01+00:00",
+                }
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            source_document_id="document-1",
+            analysis_id="analysis-1",
+            persistence=ExpiryWinsPersistence(),
+            runner=lambda **_: PostReleasePaperResult(
+                "paper_executed", "stale paper result"
+            ),
+            sleeper=lambda _: self.fail("terminal database winner must stop the loop"),
+            clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
+        )
+        self.assertEqual(result.status, "expired_no_trade")
+        self.assertNotEqual(result.message, "stale paper result")
+        self.assertIsNone(result.pipeline)
+
+    def test_other_analysis_terminal_owner_suppresses_second_worker_result(self) -> None:
+        owner_analysis = "analysis-a"
+
+        class OtherAnalysisWinsPersistence:
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def save_result(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "analysis_id": owner_analysis,
+                    "status": "paper_executed",
+                    "message": "owner paper order",
+                }
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            analysis_id="analysis-b",
+            persistence=OtherAnalysisWinsPersistence(),
+            runner=lambda **_: PostReleasePaperResult(
+                "paper_executed", "second simulated order"
+            ),
+            clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
+        )
+        self.assertEqual(result.status, "paper_executed")
+        self.assertEqual(result.message, "owner paper order")
+        self.assertIsNone(result.pipeline)
+
+    def test_other_analysis_claim_prevents_second_runner_and_simulated_order(self) -> None:
+        class ClaimedPersistence:
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def claim_event(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "event_id": kwargs["event_id"],
+                    "analysis_id": "analysis-a",
+                    "claim_token": "owner-token",
+                }
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=True,
+            analysis_id="analysis-b",
+            persistence=ClaimedPersistence(),
+            runner=lambda **_: self.fail("losing event claim must not reach PaperBroker"),
+            sleeper=lambda _: self.fail("once mode must not poll a lost lease"),
+            clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
+        )
+        self.assertEqual(result.status, "waiting_confirmation")
+        self.assertIn("analysis-a", result.message)
+        self.assertIsNone(result.pipeline)
+
+    def test_continuous_worker_polls_then_reclaims_expired_lease(self) -> None:
+        class LeaseChangesPersistence:
+            def __init__(self) -> None:
+                self.claims = 0
+
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def claim_event(self, **kwargs: Any) -> dict[str, Any]:
+                self.claims += 1
+                owner = "analysis-a" if self.claims == 1 else kwargs["analysis_id"]
+                return {
+                    "event_id": kwargs["event_id"],
+                    "analysis_id": owner,
+                    "claim_token": kwargs["claim_token"],
+                }
+
+            def save_result(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": kwargs["result"].status,
+                    "message": kwargs["result"].message,
+                }
+
+        persistence = LeaseChangesPersistence()
+        runner_calls: list[str] = []
+        sleeps: list[float] = []
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            analysis_id="analysis-b",
+            persistence=persistence,
+            runner=lambda **_: (
+                runner_calls.append("ran")
+                or PostReleasePaperResult("paper_executed", "owner paper order")
+            ),
+            sleeper=sleeps.append,
+            clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
+        )
+        self.assertEqual(result.status, "paper_executed")
+        self.assertEqual(persistence.claims, 2)
+        self.assertEqual(runner_calls, ["ran"])
+        self.assertEqual(sleeps, [300])
+
+    def test_first_attempt_stale_runner_keeps_polling_and_reclaims_lease(self) -> None:
+        class LeaseReclaimedDuringRunner:
+            def __init__(self) -> None:
+                self.claims = 0
+                self.saves = 0
+
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def claim_event(self, **kwargs: Any) -> dict[str, Any]:
+                self.claims += 1
+                if self.claims == 2:
+                    return {"analysis_id": "analysis-b", "claim_token": "b-token"}
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "claim_token": kwargs["claim_token"],
+                }
+
+            def save_result(self, **kwargs: Any) -> dict[str, Any]:
+                self.saves += 1
+                if self.saves == 1:
+                    return {
+                        "analysis_id": kwargs["analysis_id"],
+                        "status": "waiting_confirmation",
+                        "message": "paper result was rejected after the event lease was lost",
+                        "write_rejection": "lease_lost",
+                    }
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": kwargs["result"].status,
+                    "message": kwargs["result"].message,
+                }
+
+        persistence = LeaseReclaimedDuringRunner()
+        runner_calls: list[str] = []
+        sleeps: list[float] = []
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            analysis_id="analysis-a",
+            persistence=persistence,
+            runner=lambda **_: (
+                runner_calls.append("ran")
+                or PostReleasePaperResult("paper_executed", "simulated order")
+            ),
+            sleeper=sleeps.append,
+            clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
+        )
+        self.assertEqual(result.status, "paper_executed")
+        self.assertEqual(runner_calls, ["ran", "ran"])
+        self.assertEqual(persistence.saves, 2)
+        self.assertEqual(persistence.claims, 3)
+        self.assertEqual(sleeps, [300, 300])
+
+    def test_same_analysis_workers_require_the_current_claim_token(self) -> None:
+        class TokenPersistence:
+            def __init__(self) -> None:
+                self.owner_token: str | None = None
+                self.runner_saves = 0
+
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def claim_event(self, **kwargs: Any) -> dict[str, Any]:
+                if self.owner_token is None:
+                    self.owner_token = kwargs["claim_token"]
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "claim_token": self.owner_token,
+                }
+
+            def save_result(self, **kwargs: Any) -> dict[str, Any]:
+                self.runner_saves += 1
+                self.assert_current_token(kwargs["claim_token"])
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": kwargs["result"].status,
+                    "message": kwargs["result"].message,
+                }
+
+            def assert_current_token(self, token: str) -> None:
+                if token != self.owner_token:
+                    raise AssertionError("wrong worker token reached save")
+
+        persistence = TokenPersistence()
+        runner_calls: list[str] = []
+        first = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=True,
+            analysis_id="analysis-shared",
+            persistence=persistence,
+            runner=lambda **_: (
+                runner_calls.append("owner")
+                or PostReleasePaperResult("waiting_confirmation", "owner polled")
+            ),
+            clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
+        )
+        second = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=True,
+            analysis_id="analysis-shared",
+            persistence=persistence,
+            runner=lambda **_: self.fail("same-analysis token loser must not run"),
+            clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
+        )
+        self.assertEqual(first.status, "waiting_confirmation")
+        self.assertEqual(second.status, "waiting_confirmation")
+        self.assertEqual(runner_calls, ["owner"])
+        self.assertEqual(persistence.runner_saves, 1)
+
+    def test_terminal_claim_response_skips_same_analysis_new_token_runner(self) -> None:
+        class TerminalAfterInitialRead:
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def claim_event(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "claim_token": "original-owner-token",
+                    "lease_expires_at": None,
+                    "terminal_status": "paper_executed",
+                }
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            analysis_id="analysis-shared",
+            persistence=TerminalAfterInitialRead(),
+            runner=lambda **_: self.fail("terminal claim must skip the runner"),
+            sleeper=lambda _: self.fail("terminal claim must not poll"),
+            clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
+        )
+        self.assertEqual(result.status, "paper_executed")
+
+    def test_losing_worker_can_expire_event_when_deadline_arrives(self) -> None:
+        now = [datetime(2026, 8, 20, 15, 44, tzinfo=UTC)]
+
+        class LeaseHeldPersistence:
+            def __init__(self) -> None:
+                self.expiry_attempts = 0
+
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def claim_event(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "event_id": kwargs["event_id"],
+                    "analysis_id": "analysis-a",
+                    "claim_token": "owner-token",
+                }
+
+            def expire_waiting(self, **kwargs: Any) -> dict[str, Any]:
+                self.expiry_attempts += 1
+                if self.expiry_attempts == 1:
+                    return {
+                        "analysis_id": kwargs["analysis_id"],
+                        "status": "waiting_confirmation",
+                        "message": "active event lease",
+                    }
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": "expired_no_trade",
+                }
+
+        persistence = LeaseHeldPersistence()
+        sleeps = 0
+
+        def advance_after_sleep(seconds: float) -> None:
+            nonlocal sleeps
+            self.assertEqual(seconds, 300)
+            sleeps += 1
+            now[0] = datetime(2026, 8, 20, 15, 45 + sleeps - 1, tzinfo=UTC)
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            analysis_id="analysis-b",
+            persistence=persistence,
+            runner=lambda **_: self.fail("lease loser must not run before deadline"),
+            sleeper=advance_after_sleep,
+            clock=lambda: now[0],
+        )
+        self.assertEqual(result.status, "expired_no_trade")
+        self.assertEqual(persistence.expiry_attempts, 2)
+        self.assertEqual(sleeps, 2)
+
+    def test_reclaimed_event_suppresses_old_runner_terminal_result(self) -> None:
+        class ReclaimedPersistence:
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def save_result(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": "waiting_confirmation",
+                    "message": "event lease was reclaimed",
+                }
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=True,
+            analysis_id="analysis-old",
+            persistence=ReclaimedPersistence(),
+            runner=lambda **_: PostReleasePaperResult(
+                "paper_executed", "stale simulated order"
+            ),
+            sleeper=lambda _: self.fail("once mode must not poll after a rejected stale result"),
+            clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
+        )
+        self.assertEqual(result.status, "waiting_confirmation")
+        self.assertEqual(result.message, "event lease was reclaimed")
+        self.assertIsNone(result.pipeline)
+
 
 class _FakeReleaseRepository:
     """In-memory stand-in for SupabaseReleaseRepository's dedupe/upsert semantics."""
@@ -139,7 +768,9 @@ class _FakeReleaseRepository:
         self.analyses: list[dict[str, Any]] = []
         self.runs: list[dict[str, Any]] = []
 
-    def find_document(self, event_id: str, content_sha256: str) -> dict[str, Any] | None:
+    def find_document(
+        self, event_id: str, content_sha256: str
+    ) -> dict[str, Any] | None:
         for row in self.documents:
             if row["event_id"] == event_id and row["content_sha256"] == content_sha256:
                 return row
@@ -240,7 +871,9 @@ class _CountingAnalyzer:
 
 class EventReleaseMonitorRestartTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.expectations = InMemoryEventExpectationRepository({HAYS_FY2026.event_id: HAYS_FY2026})
+        self.expectations = InMemoryEventExpectationRepository(
+            {HAYS_FY2026.event_id: HAYS_FY2026}
+        )
         self.document = ReleaseDocument(
             event_id=HAYS_FY2026.event_id,
             source_type="company_results",
@@ -268,7 +901,9 @@ class EventReleaseMonitorRestartTests(unittest.TestCase):
             raw_response="{}",
         )
 
-    def _build_monitor(self, analyzer: _CountingAnalyzer, releases: _FakeReleaseRepository) -> EventReleaseMonitor:
+    def _build_monitor(
+        self, analyzer: _CountingAnalyzer, releases: _FakeReleaseRepository
+    ) -> EventReleaseMonitor:
         return EventReleaseMonitor(
             expectation_repository=self.expectations,
             release_repository=releases,
@@ -276,7 +911,9 @@ class EventReleaseMonitorRestartTests(unittest.TestCase):
             provider=_FakeProvider(self.document),
         )
 
-    def test_restart_after_already_analyzed_document_does_not_call_analyzer_again(self) -> None:
+    def test_restart_after_already_analyzed_document_does_not_call_analyzer_again(
+        self,
+    ) -> None:
         releases = _FakeReleaseRepository()
         analyzer = _CountingAnalyzer(self.analysis)
         monitor = self._build_monitor(analyzer, releases)
@@ -286,9 +923,13 @@ class EventReleaseMonitorRestartTests(unittest.TestCase):
 
         self.assertEqual(first.status, "analyzed")
         self.assertEqual(second.status, "analyzed")
-        self.assertEqual(analyzer.calls, 1, "analyzer must not be called again on restart")
+        self.assertEqual(
+            analyzer.calls, 1, "analyzer must not be called again on restart"
+        )
 
-    def test_restart_continues_with_the_same_analysis_id_and_source_document_id(self) -> None:
+    def test_restart_continues_with_the_same_analysis_id_and_source_document_id(
+        self,
+    ) -> None:
         releases = _FakeReleaseRepository()
         analyzer = _CountingAnalyzer(self.analysis)
         monitor = self._build_monitor(analyzer, releases)
@@ -300,7 +941,9 @@ class EventReleaseMonitorRestartTests(unittest.TestCase):
         self.assertEqual(first.source_document_id, second.source_document_id)
         self.assertEqual(second.analysis, first.analysis)
 
-    def test_same_document_and_expectation_version_never_produces_a_second_analysis_row(self) -> None:
+    def test_same_document_and_expectation_version_never_produces_a_second_analysis_row(
+        self,
+    ) -> None:
         releases = _FakeReleaseRepository()
         analyzer = _CountingAnalyzer(self.analysis)
         monitor = self._build_monitor(analyzer, releases)
@@ -311,7 +954,9 @@ class EventReleaseMonitorRestartTests(unittest.TestCase):
 
         self.assertEqual(len(releases.analyses), 1)
 
-    def test_provider_fallback_variance_across_restarts_does_not_fork_the_analysis_chain(self) -> None:
+    def test_provider_fallback_variance_across_restarts_does_not_fork_the_analysis_chain(
+        self,
+    ) -> None:
         releases = _FakeReleaseRepository()
         groq_analysis = self.analysis
         ollama_analysis = AIEventAnalysis(
@@ -340,7 +985,9 @@ class EventReleaseMonitorOverdueTests(unittest.TestCase):
     """scheduled_date=2026-08-20, default grace window=8h (see setUp)."""
 
     def setUp(self) -> None:
-        self.expectations = InMemoryEventExpectationRepository({HAYS_FY2026.event_id: HAYS_FY2026})
+        self.expectations = InMemoryEventExpectationRepository(
+            {HAYS_FY2026.event_id: HAYS_FY2026}
+        )
         self.releases = _FakeReleaseRepository()
         self.analyzer = _CountingAnalyzer(
             AIEventAnalysis(
@@ -383,14 +1030,18 @@ class EventReleaseMonitorOverdueTests(unittest.TestCase):
         self.assertIsNone(result.message)
         self.assertIsNone(self.releases.runs[-1]["error_message"])
 
-    def test_no_release_on_scheduled_date_within_grace_window_is_not_yet_overdue(self) -> None:
+    def test_no_release_on_scheduled_date_within_grace_window_is_not_yet_overdue(
+        self,
+    ) -> None:
         monitor = self._monitor(datetime(2026, 8, 20, 2, 0, tzinfo=UTC))
         result = monitor.run_once(HAYS_FY2026.event_id)
 
         self.assertEqual(result.status, "no_release")
         self.assertFalse(result.overdue)
 
-    def test_no_release_past_grace_window_is_flagged_overdue_and_distinguishable_in_audit_log(self) -> None:
+    def test_no_release_past_grace_window_is_flagged_overdue_and_distinguishable_in_audit_log(
+        self,
+    ) -> None:
         monitor = self._monitor(datetime(2026, 8, 20, 20, 0, tzinfo=UTC))
         result = monitor.run_once(HAYS_FY2026.event_id)
 

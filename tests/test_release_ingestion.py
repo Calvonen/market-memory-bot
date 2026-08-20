@@ -25,7 +25,9 @@ def _minimal_pdf_bytes(text: str) -> bytes:
         b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
         b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> "
         b"/MediaBox [0 0 612 792] /Contents 4 0 R >>\nendobj\n",
-        (b"4 0 obj\n<< /Length %d >>\nstream\n" % len(content_stream)) + content_stream + b"\nendstream\nendobj\n",
+        (b"4 0 obj\n<< /Length %d >>\nstream\n" % len(content_stream))
+        + content_stream
+        + b"\nendstream\nendobj\n",
         b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
     ]
 
@@ -38,7 +40,9 @@ def _minimal_pdf_bytes(text: str) -> bytes:
     xref = f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode("ascii")
     for offset in offsets:
         xref += f"{offset:010d} 00000 n \n".encode("ascii")
-    trailer = f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF".encode("ascii")
+    trailer = f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF".encode(
+        "ascii"
+    )
     return body + xref + trailer
 
 
@@ -67,9 +71,17 @@ def provider_url() -> str:
 
 
 class ReleaseIngestionTests(unittest.TestCase):
+    def assert_release_title_matches(self, title: str, href: str = "/results/fy26") -> None:
+        self.assertTrue(HaysResultsCentreProvider._matches_target_release(title, href))
+
+    def assert_release_title_rejected(self, title: str, href: str = "/reports/fy26") -> None:
+        self.assertFalse(HaysResultsCentreProvider._matches_target_release(title, href))
+
     def test_no_release_yet_returns_none(self) -> None:
         provider = FakeHaysProvider(
-            {provider_url(): '<html><a href="/q4">Quarterly update for the three months ended 30 June 2026</a></html>'}
+            {
+                provider_url(): '<html><a href="/q4">Quarterly update for the three months ended 30 June 2026</a></html>'
+            }
         )
         self.assertIsNone(provider.discover("hays-fy2026-results"))
 
@@ -89,6 +101,38 @@ class ReleaseIngestionTests(unittest.TestCase):
         self.assertEqual(document.source_url, release_url)
         self.assertEqual(document.source_type, "company_results")
         self.assertEqual(len(document.content_sha256), 64)
+
+    def test_nested_image_alt_and_reversed_result_wording_are_discovered(self) -> None:
+        release_url = "https://www.haysplc.com/results/fy26"
+        body = " ".join(["Official FY26 results text"] * 80)
+        provider = FakeHaysProvider(
+            {
+                provider_url(): '<a href="/results/fy26"><span><img alt="Results: full year FY2026"></span></a>',
+                release_url: f"<html><body>{body}</body></html>",
+            }
+        )
+        document = provider.discover("hays-fy2026-results")
+        self.assertIsNotNone(document)
+        assert document is not None
+        self.assertEqual(document.source_url, release_url)
+
+    def test_strong_year_end_candidate_is_preferred_over_bare_year(self) -> None:
+        weak_url = "https://www.haysplc.com/results/full-year-2026"
+        strong_url = "https://www.haysplc.com/results/fy26"
+        body = " ".join(["Official results text"] * 80)
+        provider = FakeHaysProvider(
+            {
+                provider_url(): (
+                    '<a href="/results/full-year-2026">Full year results 2026</a>'
+                    '<a href="/results/fy26">Full year results for the year ended 30 June 2026</a>'
+                ),
+                weak_url: f"<html><body>{body}</body></html>",
+                strong_url: f"<html><body>{body}</body></html>",
+            }
+        )
+        document = provider.discover("hays-fy2026-results")
+        assert document is not None
+        self.assertEqual(document.source_url, strong_url)
 
     def test_full_year_without_hyphen_and_bare_year_is_discovered(self) -> None:
         """"full year" (no hyphen) with a bare 2026, no "year ended" phrase."""
@@ -122,9 +166,26 @@ class ReleaseIngestionTests(unittest.TestCase):
         assert document is not None
         self.assertEqual(document.source_url, release_url)
 
+    def test_annual_report_fy2026_is_rejected(self) -> None:
+        self.assert_release_title_rejected("Annual Report FY2026")
+
+    def test_results_centre_annual_report_fy2026_is_rejected(self) -> None:
+        self.assert_release_title_rejected("Results Centre – Annual Report FY2026")
+
+    def test_fy2026_annual_results_is_accepted(self) -> None:
+        self.assert_release_title_matches("FY2026 Annual Results")
+
+    def test_results_full_year_fy2026_is_accepted(self) -> None:
+        self.assert_release_title_matches("Results – Full Year FY2026")
+
+    def test_fy2025_annual_results_is_rejected(self) -> None:
+        self.assert_release_title_rejected("FY2025 Annual Results", "/results/fy25")
+
     def test_direct_fy2026_pdf_link_is_downloaded_and_parsed(self) -> None:
         pdf_url = "https://www.haysplc.com/investors/results-centre/documents/hays-fy26-full-year-results.pdf"
-        pdf_text = "Hays plc\nFull year results for the year ended 30 June 2026\n" + ("Results body text. " * 60)
+        pdf_text = "Hays plc\nFull year results for the year ended 30 June 2026\n" + (
+            "Results body text. " * 60
+        )
         provider = FakeHaysProvider(
             pages={
                 provider_url(): f'<a href="{pdf_url}">Results announcement (PDF)</a>',
@@ -180,7 +241,9 @@ class ReleaseIngestionTests(unittest.TestCase):
         class ExplodingListingProvider(FakeHaysProvider):
             def _fetch_bytes(self, url: str) -> tuple[bytes, str, str]:
                 if url == provider_url():
-                    raise AssertionError("listing page must not be fetched when override_url is set")
+                    raise AssertionError(
+                        "listing page must not be fetched when override_url is set"
+                    )
                 return super()._fetch_bytes(url)
 
         provider = ExplodingListingProvider(

@@ -10,9 +10,15 @@ from market_memory.indicators import add_indicators
 from market_memory.pivots import detect_pivots
 from market_memory.similarity import find_best_matches
 from trading_system.ai_event_analyzer import EventAnalysisPayload
-from trading_system.event_strategy_bridge import build_event_strategy_inputs, event_analysis_components
+from trading_system.event_strategy_bridge import (
+    build_event_strategy_inputs,
+    event_analysis_components,
+)
 from trading_system.events import compare_event
-from trading_system.market_memory_bridge import build_market_memory_assessment, build_technical_assessment
+from trading_system.market_memory_bridge import (
+    build_market_memory_assessment,
+    build_technical_assessment,
+)
 from trading_system.models import (
     ComponentAssessment,
     Direction,
@@ -29,6 +35,9 @@ class PostReleasePaperResult:
     status: str
     message: str
     pipeline: PipelineResult | None = None
+    completed_components: tuple[ComponentAssessment, ComponentAssessment] | None = None
+    confirmation_deadline_at: datetime | None = None
+    expired_at: datetime | None = None
 
 
 def _event_hypothesis(
@@ -50,14 +59,39 @@ def _event_hypothesis(
         expectation=expectation,
         comparison=comparison,
     )
+    return _hypothesis_from_components((fundamental, catalyst))
+
+
+def _hypothesis_from_components(
+    components: tuple[ComponentAssessment, ComponentAssessment],
+) -> Direction:
     directional = [
         component.direction
-        for component in (fundamental, catalyst)
+        for component in components
         if component.direction in {Direction.LONG, Direction.SHORT}
     ]
     if not directional or len(set(directional)) != 1:
         return Direction.NO_TRADE
     return directional[0]
+
+
+def _completed_event_components(
+    expectation: EventExpectation, analysis: EventAnalysisPayload
+) -> tuple[ComponentAssessment, ComponentAssessment]:
+    actuals = EventActuals(
+        event_id=expectation.event_id,
+        instrument=expectation.instrument,
+        published_at=datetime.now(UTC),
+        source_url=expectation.source_url or "official-release",
+        metrics=analysis.metric_values(),
+        guidance_summary=analysis.guidance_summary,
+        management_summary=analysis.management_summary,
+    )
+    return event_analysis_components(
+        analysis,
+        expectation=expectation,
+        comparison=compare_event(expectation, actuals),
+    )
 
 
 def _index_date(value: object) -> date | None:
@@ -130,26 +164,46 @@ def run_post_release_paper(
     hypothesis, spread/volatility inputs are available to Risk Engine, and both
     technical and market-memory confirmation are directional.
     """
-    hypothesis = _event_hypothesis(expectation, analysis)
+    completed = _completed_event_components(expectation, analysis)
+    hypothesis = _hypothesis_from_components(completed)
     if hypothesis is Direction.NO_TRADE:
-        return PostReleasePaperResult("waiting_confirmation", "event direction is mixed or neutral")
+        return PostReleasePaperResult(
+            "waiting_confirmation",
+            "event direction is mixed or neutral",
+            completed_components=completed,
+        )
 
     if market_df is None:
-        market_df = add_indicators(fetch_ohlcv(expectation.instrument, period="5y", interval="1d"))
+        market_df = add_indicators(
+            fetch_ohlcv(expectation.instrument, period="5y", interval="1d")
+        )
     if market_df.empty:
-        return PostReleasePaperResult("waiting_confirmation", "no market data")
+        return PostReleasePaperResult(
+            "waiting_confirmation", "no market data", completed_components=completed
+        )
 
     reaction = _event_price_reaction_pct(market_df, expectation.scheduled_date)
     if reaction is None:
-        return PostReleasePaperResult("waiting_confirmation", "no event-day market bar yet")
-    if (hypothesis is Direction.LONG and reaction <= 0) or (hypothesis is Direction.SHORT and reaction >= 0):
+        return PostReleasePaperResult(
+            "waiting_confirmation",
+            "no event-day market bar yet",
+            completed_components=completed,
+        )
+    if (hypothesis is Direction.LONG and reaction <= 0) or (
+        hypothesis is Direction.SHORT and reaction >= 0
+    ):
         return PostReleasePaperResult(
             "waiting_confirmation",
             f"price reaction conflicts with {hypothesis.value}: {reaction:+.2f}%",
+            completed_components=completed,
         )
 
     if portfolio.spread_pct is None:
-        return PostReleasePaperResult("waiting_confirmation", "paper spread assumption unavailable")
+        return PostReleasePaperResult(
+            "waiting_confirmation",
+            "paper spread assumption unavailable",
+            completed_components=completed,
+        )
     if portfolio.volatility_pct is None:
         latest_atr_pct = float(market_df["atr_pct"].iloc[-1])
         portfolio = replace(portfolio, volatility_pct=latest_atr_pct)
@@ -162,9 +216,17 @@ def run_post_release_paper(
         market_memory = build_market_memory_assessment(matches, hypothesis)
 
     if technical.direction is not hypothesis:
-        return PostReleasePaperResult("waiting_confirmation", "technical confirmation is not aligned")
+        return PostReleasePaperResult(
+            "waiting_confirmation",
+            "technical confirmation is not aligned",
+            completed_components=completed,
+        )
     if market_memory.direction is not hypothesis:
-        return PostReleasePaperResult("waiting_confirmation", "market-memory confirmation is not aligned")
+        return PostReleasePaperResult(
+            "waiting_confirmation",
+            "market-memory confirmation is not aligned",
+            completed_components=completed,
+        )
 
     actuals = EventActuals(
         event_id=expectation.event_id,
@@ -201,9 +263,11 @@ def run_post_release_paper(
             "waiting_confirmation",
             f"strategy/risk did not approve: {result.strategy.direction.value}/{result.proposal.risk.status.value}",
             result,
+            completed,
         )
     return PostReleasePaperResult(
         "paper_executed",
         f"{result.order.direction.value} {result.order.quantity} {result.order.instrument} {result.order.status}",
         result,
+        completed,
     )

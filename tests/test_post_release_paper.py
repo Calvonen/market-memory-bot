@@ -97,6 +97,11 @@ class PostReleasePaperTests(unittest.TestCase):
 
         self.assertEqual(result.status, "waiting_confirmation")
         self.assertEqual(result.message, "no event-day market bar yet")
+        assert result.completed_components is not None
+        fundamental, catalyst = result.completed_components
+        self.assertEqual((fundamental.score, catalyst.score), (24, 20))
+        self.assertEqual(fundamental.direction, Direction.LONG)
+        self.assertEqual(catalyst.direction, Direction.LONG)
 
     def test_later_bar_does_not_replace_event_day_reaction(self) -> None:
         df = pd.DataFrame(

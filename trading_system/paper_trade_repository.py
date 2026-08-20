@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 from trading_system.post_release_paper import PostReleasePaperResult
 
@@ -17,6 +18,7 @@ class SupabasePaperTradeRepository:
 
     def __init__(self, client: Any) -> None:
         self.client = client
+        self.claim_token = str(uuid4())
 
     @classmethod
     def from_env(cls) -> "SupabasePaperTradeRepository":
@@ -31,16 +33,45 @@ class SupabasePaperTradeRepository:
         return cls(create_client(url, key))
 
     def get_latest_for_event(self, event_id: str) -> dict[str, Any] | None:
+        response = self.client.rpc(
+            "get_event_paper_trade_state",
+            {"input_event_id": event_id},
+        ).execute()
+        rows = response.data or []
+        return rows[0] if rows else None
+
+    def get_for_analysis(self, analysis_id: str) -> dict[str, Any] | None:
         response = (
             self.client.table("event_paper_trade_runs")
             .select("*")
-            .eq("event_id", event_id)
-            .order("updated_at", desc=True)
+            .eq("analysis_id", analysis_id)
             .limit(1)
             .execute()
         )
         rows = response.data or []
         return rows[0] if rows else None
+
+    def claim_event(
+        self,
+        *,
+        event_id: str,
+        analysis_id: str,
+        lease_seconds: int,
+        claim_token: str | None = None,
+    ) -> dict[str, Any]:
+        response = self.client.rpc(
+            "claim_event_paper_run",
+            {
+                "input_event_id": event_id,
+                "input_analysis_id": analysis_id,
+                "input_claim_token": claim_token or self.claim_token,
+                "input_lease_seconds": max(1, lease_seconds),
+            },
+        ).execute()
+        rows = response.data or []
+        if not rows:
+            raise RuntimeError(f"paper event claim returned no owner for {event_id}")
+        return rows[0]
 
     def save_result(
         self,
@@ -50,19 +81,39 @@ class SupabasePaperTradeRepository:
         source_document_id: str | None,
         analysis_id: str,
         result: PostReleasePaperResult,
+        claim_token: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "event_id": event_id,
             "expectation_version": expectation_version,
             "source_document_id": source_document_id,
             "analysis_id": analysis_id,
+            "claim_token": claim_token or self.claim_token,
             "status": result.status,
             "message": result.message,
             "strategy": None,
             "risk": None,
             "paper_order": None,
+            "completed_components": None,
+            "confirmation_deadline_at": (
+                result.confirmation_deadline_at.isoformat()
+                if result.confirmation_deadline_at
+                else None
+            ),
+            "expired_at": result.expired_at.isoformat() if result.expired_at else None,
             "updated_at": datetime.now(UTC).isoformat(),
         }
+
+        if result.completed_components is not None:
+            payload["completed_components"] = {
+                component.name: {
+                    "direction": component.direction.value,
+                    "score": component.score,
+                    "max_score": component.max_score,
+                    "reasons": list(component.reasons),
+                }
+                for component in result.completed_components
+            }
 
         if result.pipeline is not None:
             strategy = result.pipeline.strategy
@@ -112,10 +163,74 @@ class SupabasePaperTradeRepository:
                     "created_at": order.created_at.isoformat(),
                 }
 
-        response = (
-            self.client.table("event_paper_trade_runs")
-            .upsert(payload, on_conflict="analysis_id")
-            .select("*")
-            .execute()
-        )
-        return (response.data or [{}])[0]
+        response = self.client.rpc(
+            "save_event_paper_trade_result",
+            {"input_payload": payload},
+        ).execute()
+        rows = response.data or []
+        # An empty result means the database atomically rejected this write.
+        # Prefer the analysis-specific winner when one exists. A first-attempt
+        # runner may have no row yet if its event lease was reclaimed while it
+        # was running; that is a normal stale-writer loss, not a transport error.
+        if not rows:
+            winner = self.get_for_analysis(analysis_id)
+            if winner is None:
+                return {
+                    "event_id": event_id,
+                    "analysis_id": analysis_id,
+                    "status": "waiting_confirmation",
+                    "message": "paper result was rejected after the event lease was lost",
+                    "write_rejection": "lease_lost",
+                }
+            return winner
+        return rows[0]
+
+    def expire_waiting(
+        self,
+        *,
+        event_id: str,
+        expectation_version: int,
+        source_document_id: str | None,
+        analysis_id: str,
+        confirmation_deadline_at: datetime,
+        expired_at: datetime,
+        claim_token: str | None = None,
+    ) -> dict[str, Any] | None:
+        response = self.client.rpc(
+            "expire_event_paper_trade_run",
+            {
+                "input_event_id": event_id,
+                "input_expectation_version": expectation_version,
+                "input_source_document_id": source_document_id,
+                "input_analysis_id": analysis_id,
+                "input_claim_token": claim_token or self.claim_token,
+                "input_confirmation_deadline_at": confirmation_deadline_at.isoformat(),
+                "input_expired_at": expired_at.isoformat(),
+            },
+        ).execute()
+        rows = response.data or []
+        if rows:
+            result = rows[0]
+            if result.get("status") == "waiting_confirmation":
+                return {**result, "expiry_rejection": "lease_conflict"}
+            return result
+        deadline_response = self.client.rpc(
+            "is_event_confirmation_deadline_reached",
+            {
+                "input_confirmation_deadline_at": confirmation_deadline_at.isoformat(),
+            },
+        ).execute()
+        deadline_reached = deadline_response.data is True
+        winner = self.get_for_analysis(analysis_id)
+        result = winner or {
+            "event_id": event_id,
+            "analysis_id": analysis_id,
+            "status": "waiting_confirmation",
+            "message": "paper expiry was rejected",
+        }
+        return {
+            **result,
+            "expiry_rejection": (
+                "lease_conflict" if deadline_reached else "deadline_open"
+            ),
+        }
