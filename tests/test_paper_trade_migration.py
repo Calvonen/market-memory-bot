@@ -97,7 +97,8 @@ class PaperTradeMigrationTests(unittest.TestCase):
             "with ranked_terminal as", 1
         )[0]
         self.assertIn("when status = 'expired_no_trade' then expired_at", backfill)
-        self.assertIn("paper_order->>'created_at'", backfill)
+        self.assertIn("when status = 'paper_executed' then updated_at", backfill)
+        self.assertNotIn("paper_order->>'created_at'", backfill)
         self.assertIn("updated_at", backfill)
         self.assertIn("first_seen_at", backfill)
 
@@ -106,6 +107,7 @@ class PaperTradeMigrationTests(unittest.TestCase):
             {
                 "id": "b",
                 "status": "paper_executed",
+                "paper_order_created_at": "2026-08-20T15:44:00+00:00",
                 "terminal_transition_at": "2026-08-20T15:46:00+00:00",
                 "first_seen_at": "2026-08-20T15:40:00+00:00",
             },
@@ -117,6 +119,25 @@ class PaperTradeMigrationTests(unittest.TestCase):
             },
         ]
         self.assertEqual(_first_terminal(rows)["status"], "expired_no_trade")
+
+    def test_order_creation_time_cannot_outrank_later_execution_persistence(self) -> None:
+        rows = [
+            {
+                "id": "stale-execution",
+                "status": "paper_executed",
+                "paper_order_created_at": "2026-08-20T15:40:00+00:00",
+                "terminal_transition_at": "2026-08-20T15:46:00+00:00",
+                "first_seen_at": "2026-08-20T15:39:00+00:00",
+            },
+            {
+                "id": "expiry",
+                "status": "expired_no_trade",
+                "paper_order_created_at": "",
+                "terminal_transition_at": "2026-08-20T15:45:00+00:00",
+                "first_seen_at": "2026-08-20T15:41:00+00:00",
+            },
+        ]
+        self.assertEqual(_first_terminal(rows)["id"], "expiry")
 
     def test_execution_before_stale_expiry_remains_terminal_winner(self) -> None:
         rows = [

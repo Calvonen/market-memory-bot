@@ -12,18 +12,15 @@ alter table public.event_paper_trade_runs
   check (status in ('waiting_confirmation', 'paper_executed', 'expired_no_trade', 'superseded'));
 
 -- Backfill the best available historical terminal transition timestamp. New
--- transitions below always use database time; historical paper orders prefer
--- their execution timestamp, while expiries prefer the authoritative expired_at.
+-- transitions below always use database time. Historical executions use the
+-- row persistence timestamp, never the simulated order's earlier created_at;
+-- historical expiries prefer their authoritative expired_at.
 update public.event_paper_trade_runs
 set terminal_transition_at = coalesce(
   terminal_transition_at,
   case
     when status = 'expired_no_trade' then expired_at
-    when status = 'paper_executed'
-      and paper_order->>'created_at' is not null
-      and paper_order->>'created_at'
-        ~* '^\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}([.]\d+)?(z|[+-]\d{2}:?\d{2})$'
-      then (paper_order->>'created_at')::timestamptz
+    when status = 'paper_executed' then updated_at
     else null
   end,
   updated_at,
