@@ -111,6 +111,9 @@ def scan_market(market: str, limit: int = 10) -> dict[str, Any]:
         if ticker in results_by_ticker
     ]
 
+    if not rows:
+        raise RuntimeError("All scanner analyses failed")
+
     return {
         "market": market,
         "markets": list(MARKET_TICKERS),

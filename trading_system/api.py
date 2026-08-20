@@ -149,6 +149,8 @@ def create_app(
             return market_scanner(market, limit)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.get("/api/v1/events/{event_id}")
     def get_event(

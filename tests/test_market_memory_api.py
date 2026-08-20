@@ -30,3 +30,24 @@ class MarketMemoryApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_scanner_returns_503_when_all_analyses_fail():
+    def failing_scanner(_market: str, _limit: int):
+        raise RuntimeError("All scanner analyses failed")
+
+    app = create_app(
+        repository=None,
+        paper_repository=None,
+        read_api_key="read-key",
+        market_scanner=failing_scanner,
+    )
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/v1/scanner",
+        headers={"X-MarketAI-Key": "read-key"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "All scanner analyses failed"
