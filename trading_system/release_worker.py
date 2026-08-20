@@ -368,6 +368,13 @@ def run_paper_confirmation_loop(
                 lease_seconds=lease_seconds,
                 claim_token=claim_token,
             )
+            terminal_claim_status = owner.get("terminal_status")
+            if terminal_claim_status in {"paper_executed", "expired_no_trade"}:
+                message = f"terminal paper state already recorded for {event_id}"
+                print(
+                    f"{event_id}: {terminal_claim_status} ({message})", flush=True
+                )
+                return PostReleasePaperResult(str(terminal_claim_status), message)
             owner_token = owner.get("claim_token")
             if str(owner.get("analysis_id")) != analysis_id or str(
                 owner_token

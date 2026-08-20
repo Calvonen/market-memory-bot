@@ -66,6 +66,17 @@ class PaperTradeMigrationTests(unittest.TestCase):
         )
         self.assertIn("claim_token = claim_owner_token", self.sql)
 
+    def test_terminal_claim_does_not_adopt_the_callers_token(self) -> None:
+        claim_function = self.sql.split(
+            "create or replace function public.claim_event_paper_run", 1
+        )[1].split("drop function if exists public.expire_event_paper_trade_run", 1)[0]
+        terminal_branch = claim_function.split(
+            "if terminal_analysis_id is not null then", 1
+        )[1].split("\n  else\n", 1)[0]
+        self.assertIn("terminal_status", terminal_branch)
+        self.assertNotIn("input_claim_token", terminal_branch)
+        self.assertNotIn("claim_token = excluded.claim_token", terminal_branch)
+
     def test_expiry_can_transfer_only_an_expired_lease_under_event_lock(self) -> None:
         self.assertIn("claim_lease_expires_at > transition_time", self.sql)
         self.assertIn("and lease_expires_at <= transition_time", self.sql)

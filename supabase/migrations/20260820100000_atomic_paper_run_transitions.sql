@@ -71,6 +71,7 @@ create table if not exists public.event_paper_trade_event_claims (
   event_id text primary key,
   analysis_id uuid not null,
   claim_token uuid not null default gen_random_uuid(),
+  terminal_status text null,
   claimed_at timestamptz not null default now(),
   lease_expires_at timestamptz null,
   updated_at timestamptz not null default now()
@@ -78,6 +79,7 @@ create table if not exists public.event_paper_trade_event_claims (
 
 alter table public.event_paper_trade_event_claims
   add column if not exists claim_token uuid not null default gen_random_uuid(),
+  add column if not exists terminal_status text null,
   add column if not exists lease_expires_at timestamptz null,
   add column if not exists updated_at timestamptz not null default now();
 
@@ -252,10 +254,11 @@ set search_path = public
 as $$
 declare
   terminal_analysis_id uuid;
+  terminal_status text;
 begin
   perform pg_advisory_xact_lock(hashtextextended(input_event_id, 0));
 
-  select analysis_id into terminal_analysis_id
+  select analysis_id, status into terminal_analysis_id, terminal_status
   from public.event_paper_trade_runs
   where event_id = input_event_id
     and status in ('expired_no_trade', 'paper_executed')
@@ -263,22 +266,26 @@ begin
 
   if terminal_analysis_id is not null then
     insert into public.event_paper_trade_event_claims(
-      event_id, analysis_id, claim_token, lease_expires_at, updated_at
-    ) values (input_event_id, terminal_analysis_id, input_claim_token, null, clock_timestamp())
+      event_id, analysis_id, lease_expires_at, terminal_status, updated_at
+    ) values (
+      input_event_id, terminal_analysis_id, null, terminal_status, clock_timestamp()
+    )
     on conflict (event_id) do update set
       analysis_id = excluded.analysis_id,
-      claim_token = excluded.claim_token,
       lease_expires_at = null,
+      terminal_status = excluded.terminal_status,
       updated_at = excluded.updated_at;
   else
     insert into public.event_paper_trade_event_claims(
-      event_id, analysis_id, claim_token, claimed_at, lease_expires_at, updated_at
+      event_id, analysis_id, claim_token, claimed_at, lease_expires_at,
+      terminal_status, updated_at
     ) values (
       input_event_id,
       input_analysis_id,
       input_claim_token,
       clock_timestamp(),
       clock_timestamp() + make_interval(secs => greatest(input_lease_seconds, 1)),
+      null,
       clock_timestamp()
     )
     on conflict (event_id) do update set
@@ -291,6 +298,7 @@ begin
         else excluded.claimed_at
       end,
       lease_expires_at = excluded.lease_expires_at,
+      terminal_status = null,
       updated_at = excluded.updated_at
     where (
          event_paper_trade_event_claims.analysis_id = excluded.analysis_id

@@ -638,6 +638,36 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
         self.assertEqual(runner_calls, ["owner"])
         self.assertEqual(persistence.runner_saves, 1)
 
+    def test_terminal_claim_response_skips_same_analysis_new_token_runner(self) -> None:
+        class TerminalAfterInitialRead:
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def claim_event(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "claim_token": "original-owner-token",
+                    "lease_expires_at": None,
+                    "terminal_status": "paper_executed",
+                }
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            analysis_id="analysis-shared",
+            persistence=TerminalAfterInitialRead(),
+            runner=lambda **_: self.fail("terminal claim must skip the runner"),
+            sleeper=lambda _: self.fail("terminal claim must not poll"),
+            clock=lambda: datetime(2026, 8, 20, 15, 44, tzinfo=UTC),
+        )
+        self.assertEqual(result.status, "paper_executed")
+
     def test_losing_worker_can_expire_event_when_deadline_arrives(self) -> None:
         now = [datetime(2026, 8, 20, 15, 44, tzinfo=UTC)]
 

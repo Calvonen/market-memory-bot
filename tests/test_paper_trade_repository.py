@@ -310,6 +310,17 @@ class _TokenLeaseQuery:
     def execute(self) -> SimpleNamespace:
         if self.name == "claim_event_paper_run":
             token = self.params["input_claim_token"]
+            if self.client.terminal_status is not None:
+                assert self.client.claim is not None
+                return SimpleNamespace(
+                    data=[
+                        {
+                            **self.client.claim,
+                            "lease_expires_at": None,
+                            "terminal_status": self.client.terminal_status,
+                        }
+                    ]
+                )
             if (
                 self.client.claim is None
                 or self.client.claim["claim_token"] == token
@@ -343,6 +354,7 @@ class _TokenLeaseClient:
         self.now = datetime(2026, 8, 20, 12, tzinfo=UTC)
         self.claim: dict[str, Any] | None = None
         self.rows: list[dict[str, Any]] = []
+        self.terminal_status: str | None = None
 
     def rpc(self, name: str, params: dict[str, Any]) -> _TokenLeaseQuery:
         return _TokenLeaseQuery(self, name, params)
@@ -720,6 +732,28 @@ class PaperTradeRepositoryTests(unittest.TestCase):
         )
         self.assertEqual(winner["status"], "paper_executed")
         self.assertEqual(len(client.rows), 1)
+
+    def test_terminal_claim_preserves_original_token_for_same_analysis(self) -> None:
+        client = _TokenLeaseClient()
+        repository = SupabasePaperTradeRepository(client)
+        token_a = "00000000-0000-0000-0000-00000000000a"
+        token_b = "00000000-0000-0000-0000-00000000000b"
+        repository.claim_event(
+            event_id="hays-fy2026-results",
+            analysis_id="analysis-shared",
+            lease_seconds=60,
+            claim_token=token_a,
+        )
+        client.terminal_status = "paper_executed"
+        terminal = repository.claim_event(
+            event_id="hays-fy2026-results",
+            analysis_id="analysis-shared",
+            lease_seconds=60,
+            claim_token=token_b,
+        )
+        self.assertEqual(terminal["terminal_status"], "paper_executed")
+        self.assertEqual(terminal["claim_token"], token_a)
+        self.assertNotEqual(terminal["claim_token"], token_b)
 
     def test_stale_claim_can_be_reclaimed_by_new_analysis(self) -> None:
         client = _EventAtomicClient()
