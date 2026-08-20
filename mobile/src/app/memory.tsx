@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, Text, TextInput, View } from 'react-native';
 
 import { ScreenShell, shared } from '@/components/screen-shell';
@@ -9,21 +9,36 @@ export default function MemoryScreen() {
   const [data, setData] = useState<MarketMemoryResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const latestRequestId = useRef(0);
 
   async function analyze() {
+    const requestId = ++latestRequestId.current;
+    const requestedTicker = ticker.trim();
+
     setData(null);
     setLoading(true);
     setError(null);
+
     try {
-      setData(
-        await apiGet(`/api/v1/market-memory/${encodeURIComponent(ticker.trim())}`),
+      const result = await apiGet<MarketMemoryResult>(
+        `/api/v1/market-memory/${encodeURIComponent(requestedTicker)}`,
       );
+
+      if (requestId === latestRequestId.current) {
+        setData(result);
+      }
     } catch (requestError) {
-      setError(
-        requestError instanceof Error ? requestError.message : 'Analyysi epäonnistui',
-      );
+      if (requestId === latestRequestId.current) {
+        setError(
+          requestError instanceof Error
+            ? requestError.message
+            : 'Analyysi epäonnistui',
+        );
+      }
     } finally {
-      setLoading(false);
+      if (requestId === latestRequestId.current) {
+        setLoading(false);
+      }
     }
   }
 

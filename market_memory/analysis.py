@@ -1,6 +1,7 @@
 """Serializable, read-only application service for Market Memory clients."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import pandas as pd
@@ -71,12 +72,41 @@ def scan_market(market: str, limit: int = 10) -> dict[str, Any]:
     """Small first scanner table; full Streamlit parity is intentionally deferred."""
     if market not in MARKET_TICKERS:
         raise ValueError("Unknown market")
-    rows = []
-    for ticker in MARKET_TICKERS[market][: max(1, min(limit, 25))]:
-        try:
-            result = analyze_ticker(ticker)
+    tickers = MARKET_TICKERS[market][: max(1, min(limit, 25))]
+    results_by_ticker: dict[str, dict[str, Any]] = {}
+
+    max_workers = min(4, len(tickers))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_ticker = {
+            executor.submit(analyze_ticker, ticker): ticker
+            for ticker in tickers
+        }
+
+        for future in as_completed(future_to_ticker):
+            ticker = future_to_ticker[future]
+            try:
+                result = future.result()
+            except Exception:
+                continue
+
             best = result["analog_matches"][0] if result["analog_matches"] else None
-            rows.append({"ticker": ticker, "price": result["price"], "direction": result["result"]["direction"], "best_similarity": best["score"] if best else None, "trend": result["trend"]})
-        except (ValueError, KeyError, IndexError):
-            continue
-    return {"market": market, "markets": list(MARKET_TICKERS), "results": rows, "partial": True}
+            results_by_ticker[ticker] = {
+                "ticker": ticker,
+                "price": result["price"],
+                "direction": result["result"]["direction"],
+                "best_similarity": best["score"] if best else None,
+                "trend": result["trend"],
+            }
+
+    rows = [
+        results_by_ticker[ticker]
+        for ticker in tickers
+        if ticker in results_by_ticker
+    ]
+
+    return {
+        "market": market,
+        "markets": list(MARKET_TICKERS),
+        "results": rows,
+        "partial": True,
+    }
