@@ -37,7 +37,14 @@ def analyze_ticker(ticker: str) -> dict[str, Any]:
     trend = next((row["Tila"] for row in state if row["Mittari"] == "Trendi"), "-")
     momentum = next((row["Tila"] for row in state if row["Mittari"] == "Momentum"), "-")
     avg_return = pd.Series([m.return_plus_15d for m in matches], dtype="float64").dropna().mean()
-    direction = "NEUTRAL" if pd.isna(avg_return) else ("LONG" if avg_return > 0 else "SHORT")
+    if pd.isna(avg_return):
+        direction = "NEUTRAL"
+    elif avg_return > 0:
+        direction = "LONG"
+    elif avg_return < 0:
+        direction = "SHORT"
+    else:
+        direction = "NEUTRAL"
 
     return {
         "ticker": symbol,
