@@ -183,6 +183,145 @@ class ReleaseWorkerPaperConfirmationTests(unittest.TestCase):
         self.assertEqual(result.status, "expired_no_trade")
         self.assertTrue(persistence.expired)
 
+    def test_clock_skew_deadline_rejection_runs_confirmation_in_once_mode(self) -> None:
+        class DeadlineOpenPersistence:
+            def __init__(self) -> None:
+                self.runner_saved = False
+
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def expire_waiting(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": "waiting_confirmation",
+                    "message": "database confirmation window is still open",
+                    "expiry_rejection": "deadline_open",
+                }
+
+            def claim_event(self, **kwargs: Any) -> dict[str, Any]:
+                return {"analysis_id": kwargs["analysis_id"]}
+
+            def save_result(self, **kwargs: Any) -> dict[str, Any]:
+                self.runner_saved = True
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": kwargs["result"].status,
+                    "message": kwargs["result"].message,
+                }
+
+        persistence = DeadlineOpenPersistence()
+        runner_calls: list[str] = []
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=True,
+            analysis_id="analysis-1",
+            persistence=persistence,
+            runner=lambda **_: (
+                runner_calls.append("ran")
+                or PostReleasePaperResult("paper_executed", "valid confirmation")
+            ),
+            clock=lambda: datetime(2026, 8, 20, 15, 46, tzinfo=UTC),
+        )
+        self.assertEqual(runner_calls, ["ran"])
+        self.assertTrue(persistence.runner_saved)
+        self.assertEqual(result.status, "paper_executed")
+
+    def test_clock_skew_deadline_rejection_keeps_continuous_polling(self) -> None:
+        class DeadlineOpenPersistence:
+            def __init__(self) -> None:
+                self.saves = 0
+
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def expire_waiting(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": "waiting_confirmation",
+                    "expiry_rejection": "deadline_open",
+                }
+
+            def claim_event(self, **kwargs: Any) -> dict[str, Any]:
+                return {"analysis_id": kwargs["analysis_id"]}
+
+            def save_result(self, **kwargs: Any) -> dict[str, Any]:
+                self.saves += 1
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": kwargs["result"].status,
+                    "message": kwargs["result"].message,
+                }
+
+        persistence = DeadlineOpenPersistence()
+        runner_calls = 0
+
+        def runner(**_: Any) -> PostReleasePaperResult:
+            nonlocal runner_calls
+            runner_calls += 1
+            if runner_calls == 1:
+                return PostReleasePaperResult(
+                    "waiting_confirmation", "matching price reaction is pending"
+                )
+            return PostReleasePaperResult("paper_executed", "valid confirmation")
+
+        sleeps: list[float] = []
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=False,
+            analysis_id="analysis-1",
+            persistence=persistence,
+            runner=runner,
+            sleeper=sleeps.append,
+            clock=lambda: datetime(2026, 8, 20, 15, 46, tzinfo=UTC),
+        )
+        self.assertEqual(runner_calls, 2)
+        self.assertEqual(persistence.saves, 2)
+        self.assertEqual(sleeps, [300])
+        self.assertEqual(result.status, "paper_executed")
+
+    def test_clock_skew_does_not_bypass_active_event_lease(self) -> None:
+        class LeaseConflictPersistence:
+            def get_latest_for_event(self, event_id: str) -> dict[str, Any]:
+                return {
+                    "status": "waiting_confirmation",
+                    "confirmation_deadline_at": "2026-08-20T15:45:00+00:00",
+                }
+
+            def expire_waiting(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "analysis_id": kwargs["analysis_id"],
+                    "status": "waiting_confirmation",
+                    "message": "active event lease",
+                    "expiry_rejection": "lease_conflict",
+                }
+
+        result = run_paper_confirmation_loop(
+            event_id="hays-fy2026-results",
+            expectation=HAYS_FY2026,
+            analysis=self.analysis,
+            interval_seconds=300,
+            once=True,
+            analysis_id="analysis-b",
+            persistence=LeaseConflictPersistence(),
+            runner=lambda **_: self.fail("lease conflict must not invoke runner"),
+            clock=lambda: datetime(2026, 8, 20, 15, 46, tzinfo=UTC),
+        )
+        self.assertEqual(result.status, "waiting_confirmation")
+        self.assertEqual(result.message, "active event lease")
+
     def test_restart_after_expiry_skips_runner(self) -> None:
         class ExpiredPersistence:
             def get_latest_for_event(self, event_id: str) -> dict[str, Any]:

@@ -193,13 +193,27 @@ class SupabasePaperTradeRepository:
         ).execute()
         rows = response.data or []
         if rows:
-            return rows[0]
+            result = rows[0]
+            if result.get("status") == "waiting_confirmation":
+                return {**result, "expiry_rejection": "lease_conflict"}
+            return result
+        deadline_response = self.client.rpc(
+            "is_event_confirmation_deadline_reached",
+            {
+                "input_confirmation_deadline_at": confirmation_deadline_at.isoformat(),
+            },
+        ).execute()
+        deadline_reached = deadline_response.data is True
         winner = self.get_for_analysis(analysis_id)
-        if winner is None:
-            return {
-                "event_id": event_id,
-                "analysis_id": analysis_id,
-                "status": "waiting_confirmation",
-                "message": "paper expiry was rejected by the database deadline or an active event lease",
-            }
-        return winner
+        result = winner or {
+            "event_id": event_id,
+            "analysis_id": analysis_id,
+            "status": "waiting_confirmation",
+            "message": "paper expiry was rejected",
+        }
+        return {
+            **result,
+            "expiry_rejection": (
+                "lease_conflict" if deadline_reached else "deadline_open"
+            ),
+        }

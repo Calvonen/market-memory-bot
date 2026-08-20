@@ -321,16 +321,30 @@ def run_paper_confirmation_loop(
                     expired_at=now,
                 )
                 if updated is not None and updated.get("status") != "expired_no_trade":
+                    deadline_is_open = (
+                        updated.get("expiry_rejection") == "deadline_open"
+                    )
                     rejected_expiry = PostReleasePaperResult(
                         str(updated.get("status") or "waiting_confirmation"),
                         str(updated.get("message") or "paper expiry was rejected"),
                     )
-                    if rejected_expiry.status == "paper_executed" or once:
+                    if rejected_expiry.status == "paper_executed":
                         return rejected_expiry
-                    sleeper(max(60, interval_seconds))
-                    continue
-            print(f"{event_id}: {expired.status} ({expired.message})", flush=True)
-            return expired
+                    if not deadline_is_open:
+                        if once:
+                            return rejected_expiry
+                        sleeper(max(60, interval_seconds))
+                        continue
+                    # The database clock is authoritative. If it says the
+                    # window is still open, ignore local clock skew for this
+                    # iteration and proceed through the normal lease/runner
+                    # path. The save RPC rechecks the deadline atomically.
+                else:
+                    print(f"{event_id}: {expired.status} ({expired.message})", flush=True)
+                    return expired
+            else:
+                print(f"{event_id}: {expired.status} ({expired.message})", flush=True)
+                return expired
 
         # Acquire or renew the event lease immediately before invoking a runner
         # that may reach PaperBroker. A different analysis may reclaim only an

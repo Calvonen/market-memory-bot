@@ -42,6 +42,8 @@ class _RpcQuery:
 
     def execute(self) -> SimpleNamespace:
         current = self.client.row
+        if self.name == "is_event_confirmation_deadline_reached":
+            return SimpleNamespace(data=True)
         if self.name == "save_event_paper_trade_result":
             incoming = self.params["input_payload"].copy()
             self.client.save_calls.append(incoming)
@@ -154,6 +156,11 @@ class _EventRpcQuery:
         self.params = params
 
     def execute(self) -> SimpleNamespace:
+        if self.name == "is_event_confirmation_deadline_reached":
+            deadline = datetime.fromisoformat(
+                self.params["input_confirmation_deadline_at"]
+            )
+            return SimpleNamespace(data=self.client.now >= deadline)
         if self.name == "claim_event_paper_run":
             event_id = self.params["input_event_id"]
             analysis_id = self.params["input_analysis_id"]
@@ -654,6 +661,7 @@ class PaperTradeRepositoryTests(unittest.TestCase):
         rejected = self.expire_analysis(client, "analysis-b")
         assert rejected is not None
         self.assertEqual(rejected["status"], "waiting_confirmation")
+        self.assertEqual(rejected["expiry_rejection"], "lease_conflict")
         self.assertFalse(any(row["status"] in TERMINAL for row in client.rows))
 
     def test_expired_claim_is_atomically_reclaimed_by_event_expiry(self) -> None:
@@ -694,6 +702,7 @@ class PaperTradeRepositoryTests(unittest.TestCase):
         rejected = self.expire_analysis(client, "analysis-a")
         assert rejected is not None
         self.assertEqual(rejected["status"], "waiting_confirmation")
+        self.assertEqual(rejected["expiry_rejection"], "deadline_open")
         self.assertFalse(any(row["status"] in TERMINAL for row in client.rows))
 
     def test_database_time_at_deadline_allows_expiry(self) -> None:

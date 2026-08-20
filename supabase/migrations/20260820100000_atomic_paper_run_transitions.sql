@@ -283,10 +283,8 @@ begin
   -- transaction with the terminal transition below.
   if input_confirmation_deadline_at is null
      or clock_timestamp() < input_confirmation_deadline_at then
-    return query
-    select * from public.event_paper_trade_runs
-    where analysis_id = input_analysis_id
-    limit 1;
+    -- An empty result is intentional: the repository asks the database clock
+    -- RPC below whether this was a still-open deadline or a lease conflict.
     return;
   end if;
 
@@ -351,6 +349,18 @@ begin
 end;
 $$;
 
+create or replace function public.is_event_confirmation_deadline_reached(
+  input_confirmation_deadline_at timestamptz
+)
+returns boolean
+language sql
+security invoker
+set search_path = public
+as $$
+  select input_confirmation_deadline_at is not null
+    and clock_timestamp() >= input_confirmation_deadline_at;
+$$;
+
 create or replace function public.get_event_paper_trade_state(input_event_id text)
 returns setof public.event_paper_trade_runs
 language sql
@@ -371,8 +381,10 @@ $$;
 revoke all on function public.save_event_paper_trade_result(jsonb) from public;
 revoke all on function public.expire_event_paper_trade_run(text, integer, uuid, uuid, timestamptz, timestamptz) from public;
 revoke all on function public.claim_event_paper_run(text, uuid, integer) from public;
+revoke all on function public.is_event_confirmation_deadline_reached(timestamptz) from public;
 revoke all on function public.get_event_paper_trade_state(text) from public;
 grant execute on function public.save_event_paper_trade_result(jsonb) to service_role;
 grant execute on function public.expire_event_paper_trade_run(text, integer, uuid, uuid, timestamptz, timestamptz) to service_role;
 grant execute on function public.claim_event_paper_run(text, uuid, integer) to service_role;
+grant execute on function public.is_event_confirmation_deadline_reached(timestamptz) to service_role;
 grant execute on function public.get_event_paper_trade_state(text) to service_role;

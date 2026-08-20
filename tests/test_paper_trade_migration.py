@@ -59,6 +59,13 @@ class PaperTradeMigrationTests(unittest.TestCase):
         self.assertLess(lock_at, deadline_at)
         self.assertLess(deadline_at, mutation_at)
         self.assertIn("input_confirmation_deadline_at is null", function_sql)
+        self.assertIn(
+            "create or replace function public.is_event_confirmation_deadline_reached",
+            self.sql,
+        )
+        self.assertIn(
+            "clock_timestamp() >= input_confirmation_deadline_at", self.sql
+        )
 
     def test_event_state_read_prioritizes_terminal_and_excludes_superseded(self) -> None:
         self.assertIn("create or replace function public.get_event_paper_trade_state", self.sql)
