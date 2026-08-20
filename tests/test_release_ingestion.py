@@ -71,6 +71,12 @@ def provider_url() -> str:
 
 
 class ReleaseIngestionTests(unittest.TestCase):
+    def assert_release_title_matches(self, title: str, href: str = "/results/fy26") -> None:
+        self.assertTrue(HaysResultsCentreProvider._matches_target_release(title, href))
+
+    def assert_release_title_rejected(self, title: str, href: str = "/reports/fy26") -> None:
+        self.assertFalse(HaysResultsCentreProvider._matches_target_release(title, href))
+
     def test_no_release_yet_returns_none(self) -> None:
         provider = FakeHaysProvider(
             {
@@ -159,6 +165,21 @@ class ReleaseIngestionTests(unittest.TestCase):
         self.assertIsNotNone(document)
         assert document is not None
         self.assertEqual(document.source_url, release_url)
+
+    def test_annual_report_fy2026_is_rejected(self) -> None:
+        self.assert_release_title_rejected("Annual Report FY2026")
+
+    def test_results_centre_annual_report_fy2026_is_rejected(self) -> None:
+        self.assert_release_title_rejected("Results Centre – Annual Report FY2026")
+
+    def test_fy2026_annual_results_is_accepted(self) -> None:
+        self.assert_release_title_matches("FY2026 Annual Results")
+
+    def test_results_full_year_fy2026_is_accepted(self) -> None:
+        self.assert_release_title_matches("Results – Full Year FY2026")
+
+    def test_fy2025_annual_results_is_rejected(self) -> None:
+        self.assert_release_title_rejected("FY2025 Annual Results", "/results/fy25")
 
     def test_direct_fy2026_pdf_link_is_downloaded_and_parsed(self) -> None:
         pdf_url = "https://www.haysplc.com/investors/results-centre/documents/hays-fy26-full-year-results.pdf"

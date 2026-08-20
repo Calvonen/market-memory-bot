@@ -100,8 +100,14 @@ class HaysResultsCentreProvider:
     _TARGET_YEAR = "2026"
     _TARGET_FY_SHORT = "26"
 
-    _RESULT_TYPE_RE = re.compile(r"\b(full[\s-]?year|preliminary|annual)\b")
-    _RESULT_WORD_RE = re.compile(r"\bresults?\b")
+    # Keep release type and "results" adjacent. Searching them independently
+    # would incorrectly treat e.g. "Results Centre - Annual Report FY2026" as
+    # an annual-results announcement.
+    _RESULT_PHRASE_RE = re.compile(
+        r"(?:\b(?:full[\s-]?year|preliminary|annual)[\s-]+results?\b"
+        r"|\bresults?\s*(?:[-:]\s*)?(?:full[\s-]?year|preliminary)\b)"
+    )
+    _ANNUAL_REPORT_RE = re.compile(r"\bannual[\s-]+reports?\b")
     _YEAR_END_RE = re.compile(
         r"year\s+ended\s+(\d{1,2})(?:st|nd|rd|th)?\s+june\s+(\d{4})"
     )
@@ -154,9 +160,9 @@ class HaysResultsCentreProvider:
     @classmethod
     def _matches_target_release(cls, title: str, href: str) -> bool:
         haystack = cls._normalize(f"{title} {href}")
-        if not cls._RESULT_TYPE_RE.search(haystack) or not cls._RESULT_WORD_RE.search(
-            haystack
-        ):
+        if cls._ANNUAL_REPORT_RE.search(haystack):
+            return False
+        if not cls._RESULT_PHRASE_RE.search(haystack):
             return False
 
         year_end_matches = cls._YEAR_END_RE.findall(haystack)
