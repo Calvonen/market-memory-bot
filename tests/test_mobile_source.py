@@ -35,6 +35,20 @@ class MobileSourceTests(unittest.TestCase):
         for text in ("Ticker", "Analysoi", "ActivityIndicator", "Tärkeimmät analogiat"):
             self.assertIn(text, source)
 
+    def test_new_market_memory_request_hides_previous_result(self) -> None:
+        source = Path("mobile/src/app/memory.tsx").read_text(encoding="utf-8")
+        request_start = source.index("async function analyze()")
+        clear_data = source.index("setData(null)", request_start)
+        start_loading = source.index("setLoading(true)", request_start)
+        request = source.index("await apiGet", request_start)
+
+        # A successful A result is removed before B enters its loading state.
+        self.assertLess(clear_data, start_loading)
+        self.assertLess(start_loading, request)
+        # A cannot render while B is loading or alongside B's error; a
+        # successful B still renders after both transient states clear.
+        self.assertIn("!loading && !error && data &&", source)
+
     def test_ota_configuration_is_channel_bound(self) -> None:
         app = Path("mobile/app.json").read_text(encoding="utf-8")
         eas = Path("mobile/eas.json").read_text(encoding="utf-8")
