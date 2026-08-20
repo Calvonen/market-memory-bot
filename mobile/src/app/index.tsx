@@ -92,7 +92,11 @@ export default function HomeScreen() {
   }, []);
 
   useEffect(() => {
-    loadStatus();
+    const timer = setTimeout(() => {
+      void loadStatus();
+    }, 0);
+
+    return () => clearTimeout(timer);
   }, [loadStatus]);
 
   const onRefresh = useCallback(async () => {

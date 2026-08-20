@@ -1,0 +1,2 @@
+import { Text, View } from 'react-native'; import { ScreenShell, shared } from '@/components/screen-shell';
+export default function TradesScreen(){return <ScreenShell title="Tradet" subtitle="Paper-trade-tilanne"><View style={shared.card}><Text style={shared.heading}>PAPER</Text><Text style={shared.text}>Avoimen tapahtumatraden tila ja riskipäätös näkyvät Etusivu / Tapahtumat -näkymässä. Trade lifecycle säilyy backendissä muuttumattomana.</Text></View></ScreenShell>}
