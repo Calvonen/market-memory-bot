@@ -14,6 +14,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
+from trading_system.calendar_provider import CalendarCandidate
+from trading_system.calendar_repository import (
+    CalendarEventNotFound,
+    CalendarEventRepository,
+    CalendarEventStatus,
+    InvalidCalendarEventTransition,
+)
 from trading_system.event_repository import (
     EventExpectationNotFound,
     EventExpectationRepository,
@@ -36,6 +43,7 @@ from trading_system.strategy_draft_repository import (
     StrategyDraftEventNotFound,
     SupabaseStrategyDraftApprovalRepository,
 )
+from trading_system.supabase_calendar_repository import SupabaseCalendarEventRepository
 from trading_system.supabase_event_repository import SupabaseEventExpectationRepository
 
 
@@ -134,6 +142,27 @@ def _expectation_payload(expectation: EventExpectation) -> dict[str, Any]:
     return asdict(expectation)
 
 
+def _calendar_event_payload(event: Any) -> dict[str, Any]:
+    payload = asdict(event)
+    payload["status"] = event.status.value
+    return payload
+
+
+class ManualCalendarEventRequest(BaseModel):
+    """Backend/tooling-only manual event entry - e.g. Afarak's production
+    report, which no earnings-calendar provider surfaces. Never called from
+    the Expo app; guarded by the same admin token as the direct expectation
+    write endpoint (see require_admin below)."""
+
+    company_name: str = Field(min_length=1, max_length=200)
+    instrument: str = Field(min_length=1, max_length=40)
+    market: str = Field(min_length=1, max_length=100)
+    event_type: str = Field(min_length=1, max_length=100)
+    scheduled_date: date
+    source: str = Field(default="manual", min_length=1, max_length=100)
+    initial_status: str = Field(default="candidate", pattern="^(candidate|tracked)$")
+
+
 def _json_safe(value: Any) -> Any:
     """Recursively replaces any non-finite float (Infinity/-Infinity/NaN)
     with its str() form.
@@ -164,6 +193,7 @@ def create_app(
     *,
     paper_repository: PaperStatusRepository | None = None,
     approval_repository: StrategyDraftApprovalRepository | None = None,
+    calendar_repository: CalendarEventRepository | None = None,
     admin_token: str | None = None,
     read_api_key: str | None = None,
     control_api_key: str | None = None,
@@ -194,6 +224,7 @@ def create_app(
     repo_cache: EventExpectationRepository | None = repository
     paper_repo_cache: PaperStatusRepository | None = paper_repository
     approval_repo_cache: StrategyDraftApprovalRepository | None = approval_repository
+    calendar_repo_cache: CalendarEventRepository | None = calendar_repository
     configured_admin_token = admin_token or os.environ.get("MARKETAI_ADMIN_API_KEY")
     configured_read_api_key = read_api_key or os.environ.get("MARKETAI_READ_API_KEY")
     # Backend-only control-auth for the strategy-draft approval endpoint. This
@@ -223,6 +254,12 @@ def create_app(
         if approval_repo_cache is None:
             approval_repo_cache = SupabaseStrategyDraftApprovalRepository.from_env()
         return approval_repo_cache
+
+    def get_calendar_repository() -> CalendarEventRepository:
+        nonlocal calendar_repo_cache
+        if calendar_repo_cache is None:
+            calendar_repo_cache = SupabaseCalendarEventRepository.from_env()
+        return calendar_repo_cache
 
     def require_admin(x_admin_token: str | None) -> None:
         if not configured_admin_token:
@@ -482,6 +519,90 @@ def create_app(
             "draft_fingerprint": request.draft_fingerprint,
             "approved_by": request.approved_by,
         }
+
+    # -- Earnings calendar / watchlist (candidate -> tracked only here) -----
+    #
+    # candidate and tracked calendar events never touch EventExpectationRepository,
+    # the release worker, or the PAPER pipeline - see
+    # trading_system/calendar_repository.py's CalendarEventRepository docstring.
+
+    @app.get("/api/v1/calendar/upcoming")
+    def list_upcoming_calendar_events(
+        from_date: date | None = Query(default=None),
+        to_date: date | None = Query(default=None),
+        x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
+    ) -> list[dict[str, Any]]:
+        require_read(x_marketai_key)
+        range_start = from_date or date.today()
+        range_end = to_date or date.fromordinal(range_start.toordinal() + 180)
+        try:
+            events = get_calendar_repository().list_upcoming(range_start, range_end)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return [_calendar_event_payload(event) for event in events]
+
+    @app.post("/api/v1/calendar/{calendar_event_id}/track")
+    def track_calendar_event(
+        calendar_event_id: str,
+        x_marketai_control_key: str | None = Header(default=None, alias="X-MarketAI-Control-Key"),
+    ) -> dict[str, Any]:
+        # Write auth for this candidate->tracked action deliberately reuses
+        # the existing control key (never the read key, never a new
+        # EXPO_PUBLIC_* secret) - the mobile app already ships this
+        # credential for the strategy-draft approve action.
+        require_control(x_marketai_control_key)
+        try:
+            updated = get_calendar_repository().track(calendar_event_id)
+        except CalendarEventNotFound as exc:
+            raise HTTPException(status_code=404, detail="Calendar event not found") from exc
+        except InvalidCalendarEventTransition as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return _calendar_event_payload(updated)
+
+    @app.post("/api/v1/calendar/{calendar_event_id}/untrack")
+    def untrack_calendar_event(
+        calendar_event_id: str,
+        x_marketai_control_key: str | None = Header(default=None, alias="X-MarketAI-Control-Key"),
+    ) -> dict[str, Any]:
+        require_control(x_marketai_control_key)
+        try:
+            updated = get_calendar_repository().untrack(calendar_event_id)
+        except CalendarEventNotFound as exc:
+            raise HTTPException(status_code=404, detail="Calendar event not found") from exc
+        except InvalidCalendarEventTransition as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return _calendar_event_payload(updated)
+
+    @app.post("/api/v1/calendar/manual", status_code=status.HTTP_201_CREATED)
+    def add_manual_calendar_event(
+        request: ManualCalendarEventRequest,
+        x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    ) -> dict[str, Any]:
+        # Backend/tooling-only, same as the direct admin expectation-write
+        # endpoint - never called from the Expo app. This is the "manual
+        # event addition" architecture path (e.g. a production report no
+        # calendar provider surfaces): event_type is caller-supplied, not
+        # hardcoded to "earnings".
+        require_admin(x_admin_token)
+        candidate = CalendarCandidate(
+            company_name=request.company_name,
+            instrument=request.instrument,
+            market=request.market,
+            event_type=request.event_type,
+            scheduled_date=request.scheduled_date,
+            source=request.source,
+        )
+        try:
+            saved = get_calendar_repository().add_manual_event(
+                candidate, status=CalendarEventStatus(request.initial_status)
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return _calendar_event_payload(saved)
 
     return app
 

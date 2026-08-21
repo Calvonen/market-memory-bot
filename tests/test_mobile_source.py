@@ -415,17 +415,22 @@ class MobileSourceTests(unittest.TestCase):
         ):
             self.assertIn(label, self.edit_source)
 
-    # -- upcoming/calendar foundation page: no fake data --------------------
+    # -- upcoming/calendar foundation page: real events + calendar data -----
 
-    def test_upcoming_screen_only_reads_the_real_events_endpoint(self) -> None:
+    def test_upcoming_screen_reads_both_the_events_and_calendar_endpoints(self) -> None:
         self.assertIn("getEvents", self.upcoming_source)
+        self.assertIn("getUpcomingCalendarEvents", self.upcoming_source)
+        self.assertIn("export function getUpcomingCalendarEvents(", self.api_source)
+        self.assertIn("/api/v1/calendar/upcoming", self.api_source)
         self.assertNotIn("fetch(", self.upcoming_source)
 
     def test_upcoming_screen_ignores_stale_overlapping_load_responses(self) -> None:
         # Same race as the home/detail screens: pull-to-refresh firing
-        # load() again while the first getEvents() is still pending must
-        # not let an older response replace an already-refreshed list or
-        # set an obsolete error over a successful refresh.
+        # load() again while the first requests are still pending must not
+        # let an older response replace an already-refreshed list or set an
+        # obsolete error over a successful refresh. Both getEvents() and
+        # getUpcomingCalendarEvents() are fetched independently (own
+        # try/catch each) so one failing/being slow never blocks the other.
         load_start = self.upcoming_source.index("const load = useCallback(async () => {")
         load_end = self.upcoming_source.index("}, []);", load_start)
         load_body = self.upcoming_source[load_start:load_end]
@@ -438,6 +443,12 @@ class MobileSourceTests(unittest.TestCase):
             "if (loadId !== latestLoadId.current) return;\n      setError(err instanceof Error ? err.message : 'Tuntematon virhe');",
             load_body,
         )
+        self.assertIn(
+            "if (loadId !== latestLoadId.current) return;\n      setCalendarEvents(list);", load_body
+        )
+        get_events_index = load_body.index("await getEvents()")
+        get_calendar_index = load_body.index("await getUpcomingCalendarEvents()")
+        self.assertLess(get_events_index, get_calendar_index)
 
     def test_upcoming_screen_has_no_mocked_calendar_data(self) -> None:
         for forbidden in ("mock", "Mock", "MOCK", "fakeEvents", "dummy", "sampleEvents"):
@@ -507,37 +518,97 @@ class MobileSourceTests(unittest.TestCase):
         self.assertEqual(outputs["AAPL"], "USA")
         self.assertEqual(outputs["HAS.L"], "Iso-Britannia")
 
+    def _extract_upcoming_function(self, signature: str, *, strip_types: bool = True) -> str:
+        start = self.upcoming_source.index(signature)
+        end = self.upcoming_source.index("\n}\n", start) + len("\n}")
+        source = self.upcoming_source[start:end]
+        if strip_types:
+            source = re.sub(r":\s*(EventExpectation|CalendarEvent|UpcomingRow)\[\]", "", source)
+            source = re.sub(r":\s*string\b", "", source)
+        return source
+
+    def test_merge_upcoming_rows_dedupes_already_tracked_instruments(self) -> None:
+        # Behavioral proof that Hays (or any other instrument already
+        # tracked through the real EventExpectation system) never also shows
+        # up as an untracked calendar candidate - mergeUpcomingRows() must
+        # drop a calendar row whose instrument matches an already-tracked
+        # expectation, case-insensitively.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        market_fn_js = self._extract_upcoming_function("function marketForInstrument(")
+        merge_fn_js = self._extract_upcoming_function("export function mergeUpcomingRows(").replace(
+            "export function ", "function "
+        )
+        for annotation in ("EventExpectation[]", "CalendarEvent[]", "UpcomingRow[]"):
+            self.assertNotIn(annotation, merge_fn_js)
+
+        script = f"""
+{market_fn_js}
+{merge_fn_js}
+
+const events = [
+  {{ event_id: 'hays-fy2026-results', instrument: 'HAS.L', event_name: 'Hays plc FY2026 results', scheduled_date: '2026-08-20' }},
+];
+const calendarEvents = [
+  {{ calendar_event_id: 'cal-1', company_name: 'Hays plc', instrument: 'has.l', market: 'Iso-Britannia', event_type: 'earnings', scheduled_date: '2026-08-20', source: 'finnhub', status: 'candidate', created_at: '', updated_at: '' }},
+  {{ calendar_event_id: 'cal-2', company_name: 'Apple Inc', instrument: 'AAPL', market: 'NASDAQ', event_type: 'earnings', scheduled_date: '2026-10-29', source: 'finnhub', status: 'candidate', created_at: '', updated_at: '' }},
+];
+
+const rows = mergeUpcomingRows(events, calendarEvents);
+console.log(JSON.stringify(rows.map((r) => ({{ instrument: r.instrument, kind: r.kind, status: r.status }}))));
+"""
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = json.loads(result.stdout)
+
+        instruments = [r["instrument"] for r in rows]
+        # The Hays calendar candidate ('cal-1', instrument 'has.l') must be
+        # dropped - only the already-tracked expectation row for HAS.L
+        # survives, and the unrelated AAPL candidate is untouched.
+        self.assertEqual(instruments.count("HAS.L"), 1)
+        hays_row = next(r for r in rows if r["instrument"] == "HAS.L")
+        self.assertEqual(hays_row["kind"], "expectation")
+        self.assertEqual(hays_row["status"], "tracked")
+        aapl_row = next(r for r in rows if r["instrument"] == "AAPL")
+        self.assertEqual(aapl_row["kind"], "calendar")
+        self.assertEqual(aapl_row["status"], "candidate")
+
     def test_date_range_filter_excludes_past_events_but_kaikki_keeps_history(self) -> None:
         # Behavioral proof for the date-range filter: extract the real
-        # filtered = useMemo(...) predicate from upcoming.tsx (plus the
-        # marketForInstrument() it calls), strip TS syntax, and run it with
-        # node against synthetic past/near/far events. A day-range filter
-        # (e.g. "7 pv") must exclude a released/past-dated event even though
-        # /api/v1/events intentionally still returns it (for Seurannassa);
+        # filtered = useMemo(...) predicate from upcoming.tsx, strip TS
+        # syntax, and run it with node against synthetic past/near/far rows.
+        # A day-range filter (e.g. "7 pv") must exclude a released/past-dated
+        # row even though calendar/tracked rows can be older than today;
         # "Kaikki" (no range selected) must keep showing it.
         node = shutil.which("node")
         if node is None:
             self.skipTest("node is not available in this environment")
 
-        market_fn_start = self.upcoming_source.index("function marketForInstrument(")
-        market_fn_end = self.upcoming_source.index("\n}\n", market_fn_start) + len("\n}")
-        market_fn_js = re.sub(
-            r":\s*string\b", "", self.upcoming_source[market_fn_start:market_fn_end], count=2
-        )
-
         filter_start = self.upcoming_source.index("const filtered = useMemo(() => {")
         filter_body_start = filter_start + len("const filtered = useMemo(() => {")
         filter_end = self.upcoming_source.index(
-            "}, [events, market, search, rangeDays]);", filter_start
+            "}, [rows, market, search, rangeDays]);", filter_start
         )
         filter_body = self.upcoming_source[filter_body_start:filter_end]
         filter_fn_js = (
-            "function filterEvents(events, market, search, rangeDays) {" + filter_body + "}"
+            "function filterRows(rows, market, search, rangeDays) {" + filter_body + "}"
         )
         self.assertNotIn(": string", filter_fn_js)
 
         script = f"""
-{market_fn_js}
 {filter_fn_js}
 
 function fmt(d) {{
@@ -552,15 +623,14 @@ function daysFromNow(n) {{
   return fmt(d);
 }}
 
-const events = [
-  {{ event_id: 'past', instrument: 'HAS.L', event_name: 'Past event', scheduled_date: daysFromNow(-10) }},
-  {{ event_id: 'today', instrument: 'HAS.L', event_name: 'Today event', scheduled_date: daysFromNow(0) }},
-  {{ event_id: 'near', instrument: 'HAS.L', event_name: 'Near event', scheduled_date: daysFromNow(3) }},
-  {{ event_id: 'far', instrument: 'HAS.L', event_name: 'Far event', scheduled_date: daysFromNow(60) }},
-];
+function row(key, days) {{
+  return {{ key, companyName: 'X', instrument: 'HAS.L', market: 'Iso-Britannia', scheduledDate: daysFromNow(days) }};
+}}
 
-const sevenDayIds = filterEvents(events, 'Kaikki', '', 7).map((e) => e.event_id);
-const allIds = filterEvents(events, 'Kaikki', '', null).map((e) => e.event_id);
+const rows = [row('past', -10), row('today', 0), row('near', 3), row('far', 60)];
+
+const sevenDayIds = filterRows(rows, 'Kaikki', '', 7).map((r) => r.key);
+const allIds = filterRows(rows, 'Kaikki', '', null).map((r) => r.key);
 console.log(JSON.stringify({{ sevenDayIds, allIds }}));
 """
 
@@ -578,16 +648,15 @@ console.log(JSON.stringify({{ sevenDayIds, allIds }}));
         self.assertEqual(result.returncode, 0, result.stderr)
         outputs = json.loads(result.stdout)
 
-        # "7 pv" must exclude the past event and the far (60 days out) event,
-        # but keep today's and the near (3 days out) event.
+        # "7 pv" must exclude the past row and the far (60 days out) row,
+        # but keep today's and the near (3 days out) row.
         self.assertNotIn("past", outputs["sevenDayIds"])
         self.assertNotIn("far", outputs["sevenDayIds"])
         self.assertIn("today", outputs["sevenDayIds"])
         self.assertIn("near", outputs["sevenDayIds"])
 
         # "Kaikki" (no range) must still surface the full tracked history,
-        # including the already-released past event - this is the whole
-        # point of removing list_upcoming()'s status/date filter.
+        # including the already-released past row.
         self.assertEqual(set(outputs["allIds"]), {"past", "today", "near", "far"})
 
     def test_upcoming_screen_has_filter_and_tracking_ui(self) -> None:
@@ -595,6 +664,36 @@ console.log(JSON.stringify({{ sevenDayIds, allIds }}));
         self.assertIn("MARKKINA", self.upcoming_source)
         self.assertIn("JULKAISUPÄIVÄ", self.upcoming_source)
         self.assertIn("Seurannassa", self.upcoming_source)
+        self.assertIn("Lisää seurantaan", self.upcoming_source)
+
+    # -- calendar candidate -> tracked action --------------------------------
+
+    def test_track_action_calls_track_calendar_event_and_updates_local_state(self) -> None:
+        self.assertIn("trackCalendarEvent", self.upcoming_source)
+        self.assertIn("export function trackCalendarEvent(", self.api_source)
+
+        on_track_start = self.upcoming_source.index("const onTrack = useCallback(async (calendarEventId")
+        on_track_end = self.upcoming_source.index("}, []);", on_track_start)
+        on_track_body = self.upcoming_source[on_track_start:on_track_end]
+
+        self.assertIn("await trackCalendarEvent(calendarEventId)", on_track_body)
+        # The returned (server-confirmed) event replaces the matching local
+        # entry - never a locally-guessed status flip - so the card's
+        # tracked/candidate state always reflects what the backend actually
+        # persisted.
+        self.assertIn("event.calendar_event_id === calendarEventId ? updated : event", on_track_body)
+
+        finally_start = on_track_body.index("} finally {")
+        finally_body = on_track_body[finally_start:]
+        self.assertIn("next.delete(calendarEventId);", finally_body)
+
+    def test_track_action_never_calls_untrack_or_uses_admin_auth(self) -> None:
+        self.assertNotIn("untrackCalendarEvent", self.upcoming_source)
+        self.assertNotIn("X-Admin-Token", self.upcoming_source)
+        self.assertNotIn("MARKETAI_ADMIN_API_KEY", self.upcoming_source)
+
+    def test_track_button_is_disabled_while_its_own_request_is_in_flight(self) -> None:
+        self.assertIn("disabled={trackingIds.has(row.calendarEventId ?? '')}", self.upcoming_source)
 
     # -- security boundary: admin key never present in the mobile app -------
 

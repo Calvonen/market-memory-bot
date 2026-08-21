@@ -1,0 +1,189 @@
+import unittest
+from datetime import date
+
+from fastapi.testclient import TestClient
+
+from trading_system.api import create_app
+from trading_system.calendar_provider import CalendarCandidate
+from trading_system.calendar_repository import InMemoryCalendarEventRepository
+from trading_system.event_repository import InMemoryEventExpectationRepository
+
+
+def _candidate(**overrides) -> CalendarCandidate:
+    defaults = dict(
+        company_name="Apple Inc",
+        instrument="AAPL",
+        market="NASDAQ",
+        event_type="earnings",
+        scheduled_date=date(2026, 10, 29),
+        source="finnhub",
+    )
+    defaults.update(overrides)
+    return CalendarCandidate(**defaults)
+
+
+class CalendarApiTests(unittest.TestCase):
+    READ_KEY = "test-read-api-key"
+    ADMIN_KEY = "test-admin-token"
+    CONTROL_KEY = "test-control-api-key"
+
+    def setUp(self) -> None:
+        self.calendar_repo = InMemoryCalendarEventRepository()
+        self.client = TestClient(
+            create_app(
+                InMemoryEventExpectationRepository(),
+                calendar_repository=self.calendar_repo,
+                admin_token=self.ADMIN_KEY,
+                read_api_key=self.READ_KEY,
+                control_api_key=self.CONTROL_KEY,
+            )
+        )
+
+    def _read_headers(self, key: str | None = None) -> dict[str, str]:
+        return {"X-MarketAI-Key": key if key is not None else self.READ_KEY}
+
+    def _control_headers(self, key: str | None = None) -> dict[str, str]:
+        return {"X-MarketAI-Control-Key": key if key is not None else self.CONTROL_KEY}
+
+    # -- GET /api/v1/calendar/upcoming: read auth ---------------------------
+
+    def test_upcoming_requires_the_read_key(self) -> None:
+        response = self.client.get("/api/v1/calendar/upcoming")
+        self.assertEqual(response.status_code, 401)
+
+    def test_upcoming_rejects_a_wrong_read_key(self) -> None:
+        response = self.client.get(
+            "/api/v1/calendar/upcoming", headers=self._read_headers("wrong-key")
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_upcoming_returns_synced_candidates(self) -> None:
+        self.calendar_repo.sync_candidates([_candidate()], source="finnhub")
+
+        response = self.client.get(
+            "/api/v1/calendar/upcoming", headers=self._read_headers()
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]["instrument"], "AAPL")
+        self.assertEqual(body[0]["status"], "candidate")
+
+    def test_upcoming_never_accepts_the_admin_token_as_read_auth(self) -> None:
+        response = self.client.get(
+            "/api/v1/calendar/upcoming", headers={"X-MarketAI-Key": self.ADMIN_KEY}
+        )
+        self.assertEqual(response.status_code, 401)
+
+    # -- POST .../track and .../untrack: write auth is the control key, ----
+    # -- never the read key --------------------------------------------------
+
+    def test_track_requires_the_control_key_not_the_read_key(self) -> None:
+        inserted = self.calendar_repo.sync_candidates([_candidate()], source="finnhub").inserted[0]
+
+        response = self.client.post(
+            f"/api/v1/calendar/{inserted}/track", headers=self._read_headers()
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_track_with_no_auth_header_is_rejected(self) -> None:
+        inserted = self.calendar_repo.sync_candidates([_candidate()], source="finnhub").inserted[0]
+
+        response = self.client.post(f"/api/v1/calendar/{inserted}/track")
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_track_with_the_control_key_promotes_a_candidate(self) -> None:
+        inserted = self.calendar_repo.sync_candidates([_candidate()], source="finnhub").inserted[0]
+
+        response = self.client.post(
+            f"/api/v1/calendar/{inserted}/track", headers=self._control_headers()
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "tracked")
+
+    def test_track_unknown_event_is_404(self) -> None:
+        response = self.client.post(
+            "/api/v1/calendar/does-not-exist/track", headers=self._control_headers()
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_untrack_requires_the_control_key_not_the_read_key(self) -> None:
+        inserted = self.calendar_repo.sync_candidates([_candidate()], source="finnhub").inserted[0]
+        self.calendar_repo.track(inserted)
+
+        response = self.client.post(
+            f"/api/v1/calendar/{inserted}/untrack", headers=self._read_headers()
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_untrack_with_the_control_key_demotes_a_tracked_event(self) -> None:
+        inserted = self.calendar_repo.sync_candidates([_candidate()], source="finnhub").inserted[0]
+        self.calendar_repo.track(inserted)
+
+        response = self.client.post(
+            f"/api/v1/calendar/{inserted}/untrack", headers=self._control_headers()
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "candidate")
+
+    # -- POST /api/v1/calendar/manual: admin-token only, backend/tooling ---
+
+    def test_manual_event_requires_the_admin_token(self) -> None:
+        response = self.client.post(
+            "/api/v1/calendar/manual",
+            json={
+                "company_name": "Afarak Group",
+                "instrument": "AFAGR.HE",
+                "market": "Suomi",
+                "event_type": "production_report",
+                "scheduled_date": "2026-10-15",
+                "source": "manual",
+            },
+            headers=self._control_headers(),
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_manual_event_with_admin_token_creates_a_non_earnings_candidate(self) -> None:
+        response = self.client.post(
+            "/api/v1/calendar/manual",
+            json={
+                "company_name": "Afarak Group",
+                "instrument": "AFAGR.HE",
+                "market": "Suomi",
+                "event_type": "production_report",
+                "scheduled_date": "2026-10-15",
+                "source": "manual",
+            },
+            headers={"X-Admin-Token": self.ADMIN_KEY},
+        )
+
+        self.assertEqual(response.status_code, 201)
+        body = response.json()
+        self.assertEqual(body["event_type"], "production_report")
+        self.assertEqual(body["status"], "candidate")
+
+    # -- service disabled (no read key configured) fails closed -------------
+
+    def test_upcoming_fails_closed_when_read_key_not_configured(self) -> None:
+        client = TestClient(
+            create_app(
+                InMemoryEventExpectationRepository(),
+                calendar_repository=InMemoryCalendarEventRepository(),
+                admin_token=self.ADMIN_KEY,
+                control_api_key=self.CONTROL_KEY,
+            )
+        )
+        response = client.get(
+            "/api/v1/calendar/upcoming", headers={"X-MarketAI-Key": "anything"}
+        )
+        self.assertEqual(response.status_code, 503)
+
+
+if __name__ == "__main__":
+    unittest.main()
