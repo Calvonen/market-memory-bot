@@ -49,6 +49,26 @@ class MobileSourceTests(unittest.TestCase):
         # successful B still renders after both transient states clear.
         self.assertIn("!loading && !error && data &&", source)
 
+    def test_ticker_edit_clears_stale_suggestions_and_invalidates_in_flight_request(self) -> None:
+        source = Path("mobile/src/app/memory.tsx").read_text(encoding="utf-8")
+        handler_start = source.index("onChangeText={(value) => {")
+        handler_end = source.index("}}", handler_start)
+        handler_body = source[handler_start:handler_end]
+
+        # Old suggestions must disappear the moment the field changes, not
+        # only once the next debounced fetch resolves.
+        self.assertIn("setSuggestions([])", handler_body)
+        # Any suggestion request already in flight must be invalidated here
+        # so a late response for the old query cannot repopulate the list.
+        self.assertIn("latestSuggestionRequestId.current", handler_body)
+
+        # The suggestion effect itself must still guard against races: it
+        # should only apply a response that matches the current request id.
+        effect_start = source.index("useEffect(", source.index("showSuggestions"))
+        effect_end = source.index("}, [showSuggestions, query]);", effect_start)
+        effect_body = source[effect_start:effect_end]
+        self.assertIn("requestId === latestSuggestionRequestId.current", effect_body)
+
     def test_ota_configuration_is_channel_bound(self) -> None:
         app = Path("mobile/app.json").read_text(encoding="utf-8")
         eas = Path("mobile/eas.json").read_text(encoding="utf-8")

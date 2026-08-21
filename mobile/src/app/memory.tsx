@@ -47,6 +47,7 @@ export default function MemoryScreen() {
     const requestedTicker = (selectedTicker ?? ticker).trim();
     if (selectedTicker) setTicker(selectedTicker);
 
+    latestSuggestionRequestId.current += 1;
     setSuggestions([]);
     setData(null);
     setLoading(true);
@@ -88,6 +89,12 @@ export default function MemoryScreen() {
           setTicker(value);
           setHasEditedTicker(true);
           setError(null);
+          // Drop stale suggestions and invalidate any in-flight suggestion
+          // request immediately, instead of waiting for the next debounced
+          // fetch to resolve — a late response for the old query must not
+          // be able to bring old suggestions back.
+          latestSuggestionRequestId.current += 1;
+          setSuggestions([]);
         }}
         style={shared.input}
         placeholder="Yritys tai ticker, esim. Apple / AAPL"
