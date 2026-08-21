@@ -180,6 +180,64 @@ class MobileSourceTests(unittest.TestCase):
         self.assertIn("invalidateScan();\n              setCountry(item.value);", source)
         self.assertIn("invalidateScan();\n              setScope(item);", source)
 
+    def test_reselecting_the_same_country_is_a_no_op(self) -> None:
+        source = Path("mobile/src/app/scanner.tsx").read_text(encoding="utf-8")
+
+        handler_start = source.index("onPress={() => {", source.index("COUNTRIES.map"))
+        handler_end = source.index("}}", handler_start)
+        handler_body = source[handler_start:handler_end]
+
+        guard_index = handler_body.index("if (item.value === country) return;")
+        invalidate_index = handler_body.index("invalidateScan();")
+        set_country_index = handler_body.index("setCountry(item.value);")
+
+        # Tapping the already-selected country must return before touching
+        # the scan at all, so loading/data/requestId are left exactly as
+        # they were - no stuck spinner from a request that never restarts.
+        self.assertLess(guard_index, invalidate_index)
+        self.assertLess(invalidate_index, set_country_index)
+
+    def test_reselecting_the_same_scope_is_a_no_op(self) -> None:
+        source = Path("mobile/src/app/scanner.tsx").read_text(encoding="utf-8")
+
+        handler_start = source.index("onPress={() => {", source.index("SCOPES.map"))
+        handler_end = source.index("}}", handler_start)
+        handler_body = source[handler_start:handler_end]
+
+        guard_index = handler_body.index("if (item === scope) return;")
+        invalidate_index = handler_body.index("invalidateScan();")
+        set_scope_index = handler_body.index("setScope(item);")
+
+        # Same guard for scope: tapping the already-selected scope must
+        # return before invalidating the scan or changing scope, so the
+        # spinner set by a stale invalidateScan() call is never left on.
+        self.assertLess(guard_index, invalidate_index)
+        self.assertLess(invalidate_index, set_scope_index)
+
+    def test_an_actual_market_change_still_invalidates_and_reloads(self) -> None:
+        source = Path("mobile/src/app/scanner.tsx").read_text(encoding="utf-8")
+
+        country_handler_start = source.index("onPress={() => {", source.index("COUNTRIES.map"))
+        country_handler_end = source.index("}}", country_handler_start)
+        country_handler = source[country_handler_start:country_handler_end]
+
+        scope_handler_start = source.index("onPress={() => {", source.index("SCOPES.map"))
+        scope_handler_end = source.index("}}", scope_handler_start)
+        scope_handler = source[scope_handler_start:scope_handler_end]
+
+        # A real selection change (the tapped item differs from the current
+        # one) must still fall through the guard and reach invalidateScan()
+        # plus the state setter, so market/limit change, loadScanner gets a
+        # new identity, and the debounced effect fires a fresh request.
+        for handler in (country_handler, scope_handler):
+            self.assertIn("invalidateScan();", handler)
+        self.assertIn("setCountry(item.value);", country_handler)
+        self.assertIn("setScope(item);", scope_handler)
+
+        # loadScanner still assigns its own fresh requestId once it runs,
+        # on top of whatever invalidateScan() already bumped for the change.
+        self.assertIn("const requestId = ++latestRequestId.current;", source)
+
     def test_ota_configuration_is_channel_bound(self) -> None:
         app = Path("mobile/app.json").read_text(encoding="utf-8")
         eas = Path("mobile/eas.json").read_text(encoding="utf-8")

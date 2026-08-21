@@ -79,6 +79,11 @@ export default function ScannerScreen() {
             key={item.value}
             accessibilityRole="button"
             onPress={() => {
+              // Re-tapping the already-selected country must be a no-op:
+              // market/limit would not change, so the debounced load
+              // effect below would never re-run and clear a loading state
+              // set here - the spinner would be stuck on forever.
+              if (item.value === country) return;
               invalidateScan();
               setCountry(item.value);
             }}
@@ -99,6 +104,9 @@ export default function ScannerScreen() {
             key={item}
             accessibilityRole="button"
             onPress={() => {
+              // Same guard for scope: re-tapping the already-selected
+              // scope must not touch loading/data/requestId either.
+              if (item === scope) return;
               invalidateScan();
               setScope(item);
             }}
