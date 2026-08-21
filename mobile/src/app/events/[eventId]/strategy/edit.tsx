@@ -15,7 +15,7 @@ import { useStrategyDraft } from './_layout';
 export default function StrategyDraftEditScreen() {
   const { eventId } = useLocalSearchParams<{ eventId: string }>();
   const router = useRouter();
-  const { draft, setDraft, event } = useStrategyDraft();
+  const { draft, setDraft, setPreview, event } = useStrategyDraft();
   // Lazy-initialized once from the shared context draft: edits here stay
   // local until "Tallenna luonnos" writes them back, so navigating away
   // without saving discards them instead of mutating the shared draft.
@@ -39,6 +39,13 @@ export default function StrategyDraftEditScreen() {
 
   const save = () => {
     setDraft(local);
+    // The just-saved draft may differ from whatever was last previewed -
+    // an existing preview's ESIKATSELTU state and warnings must never
+    // keep being shown (or be approvable) against a draft that has since
+    // changed. Clear it unconditionally on every save, not just when the
+    // edited fields obviously changed, so the user is always forced
+    // through a fresh preview before they can approve again.
+    setPreview(null);
     router.back();
   };
 

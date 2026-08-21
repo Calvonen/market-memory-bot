@@ -51,16 +51,34 @@ class ExpectationVersionRequest(BaseModel):
 class StrategyDraftApprovalRequest(BaseModel):
     draft: StrategyDraftPayload
     # Exactly a SHA-256 hex digest - see draft_fingerprint() in
-    # trading_system/strategy_draft.py. Enforced here, not just loosely
-    # length-checked, because secrets.compare_digest() below requires both
-    # arguments to be ASCII-only strings: a value with non-ASCII characters
-    # (or any other shape secrets.compare_digest doesn't accept) would
-    # otherwise raise an unhandled TypeError -> 500, instead of the 422 a
-    # malformed value should produce.
-    draft_fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-fA-F]{64}$")
+    # trading_system/strategy_draft.py, which always emits lowercase hex.
+    # Length/charset enforced here, not just loosely length-checked,
+    # because secrets.compare_digest() below requires both arguments to be
+    # ASCII-only strings: a value with non-ASCII characters (or any other
+    # shape secrets.compare_digest doesn't accept) would otherwise raise an
+    # unhandled TypeError -> 500, instead of the 422 a malformed value
+    # should produce. The pattern only accepts lowercase because the
+    # "before" validator below normalizes case first - an uppercase (or
+    # mixed-case) but otherwise-valid hex digest is still the exact same
+    # digest, and must never be rejected as a fingerprint mismatch (409)
+    # just because of letter case.
+    draft_fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
     base_expectation_version: int = Field(ge=1)
     approved_by: str = Field(min_length=1, max_length=200)
     approved_via: str | None = Field(default=None, max_length=100)
+
+    @field_validator("draft_fingerprint", mode="before")
+    @classmethod
+    def _normalize_fingerprint_case(cls, value: Any) -> Any:
+        # Normalize before the pattern/length check and before it ever
+        # reaches secrets.compare_digest() or the audit trail, so a
+        # semantically identical digest can never produce a false
+        # "changed since preview" conflict, and the audit record always
+        # stores the same canonical (lowercase) form draft_fingerprint()
+        # itself produces.
+        if isinstance(value, str):
+            return value.lower()
+        return value
 
     @field_validator("approved_by", mode="before")
     @classmethod

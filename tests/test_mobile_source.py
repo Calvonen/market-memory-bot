@@ -924,6 +924,24 @@ class StrategyDraftMobileSourceTests(unittest.TestCase):
         self.assertNotIn("approveStrategyDraft", self.edit_source)
         self.assertNotIn("fetch(", self.edit_source)
 
+    def test_saving_an_edited_draft_clears_the_stale_preview(self) -> None:
+        # A draft saved from the editor may differ from whatever was last
+        # previewed - the summary screen's ESIKATSELTU state and any
+        # preview warnings must never keep being shown (or be approvable)
+        # against a draft that has since changed underneath it. save()
+        # must clear the shared preview unconditionally, every time, not
+        # just when the edited fields happen to differ from before.
+        self.assertIn("setDraft, setPreview, event", self.edit_source)
+        save_start = self.edit_source.index("const save = () => {")
+        save_end = self.edit_source.index("\n  };", save_start)
+        save_body = self.edit_source[save_start:save_end]
+
+        self.assertIn("setDraft(local)", save_body)
+        self.assertIn("setPreview(null)", save_body)
+        # Must run on every save, not only conditionally when a preview
+        # already happens to be present.
+        self.assertNotIn("if (preview)", save_body)
+
     # -- confirmation screen: explicit, non-accidental approval -------------
 
     def test_confirm_screen_states_the_locked_version_and_no_trade_conditions(self) -> None:
@@ -1031,10 +1049,15 @@ class StrategyDraftMobileSourceTests(unittest.TestCase):
             "const value: Record<string, number | string | null> = {};",
             "const value = {};",
         )
+        combined = combined.replace(
+            "const entries: [string, number | string | null][] = [];",
+            "const entries = [];",
+        )
         combined = combined.replace(" as Record<string, unknown>", "")
         self.assertNotIn(": Record", combined)
         self.assertNotIn(": string", combined)
         self.assertNotIn(": unknown", combined)
+        self.assertNotIn(": [string,", combined)
         self.assertNotIn("TypedRecordParseResult", combined)
 
         script = combined + "\n" + script_suffix
@@ -1114,6 +1137,50 @@ console.log(JSON.stringify({ text, roundTripped }));
                 "plain_string": "manual",
             },
         )
+
+    def test_a_literal_proto_key_round_trips_instead_of_being_silently_dropped(
+        self,
+    ) -> None:
+        # Building the parsed record with `obj[key] = value` on a plain {}
+        # goes through Object.prototype's own __proto__ *setter* for a key
+        # literally named "__proto__", which silently discards non-object
+        # values instead of storing them - so a key named exactly that would
+        # vanish without any error. parseTypedRecord builds the record via
+        # Object.fromEntries instead, which creates a genuine own property
+        # for every key, "__proto__" included.
+        outputs = self._run_typed_record_script(
+            """
+// Written as a raw JSON string, not a `{ "__proto__": ... }` object
+// literal - an object *literal* with that exact key is itself
+// special-cased by the JS spec to set the prototype rather than create
+// an own property, which would trip this test up before parseTypedRecord
+// even runs. JSON.parse has no such special case: it always creates a
+// genuine own property, whatever the key's name.
+const text = '{"__proto__": "should not vanish", "other": 1}';
+const parsed = parseTypedRecord(text);
+const roundTripped = textToTypedRecord(text);
+console.log(JSON.stringify({
+  ok: parsed.ok,
+  hasOwnProto: Object.prototype.hasOwnProperty.call(parsed.value, "__proto__"),
+  protoValue: parsed.value["__proto__"],
+  roundTrippedHasOwnProto: Object.prototype.hasOwnProperty.call(roundTripped, "__proto__"),
+  roundTrippedProtoValue: roundTripped["__proto__"],
+  other: roundTripped.other,
+  valueIsStillAPlainObject: Object.getPrototypeOf(parsed.value) === Object.prototype,
+}));
+"""
+        )
+
+        self.assertTrue(outputs["ok"])
+        self.assertTrue(outputs["hasOwnProto"])
+        self.assertEqual(outputs["protoValue"], "should not vanish")
+        self.assertTrue(outputs["roundTrippedHasOwnProto"])
+        self.assertEqual(outputs["roundTrippedProtoValue"], "should not vanish")
+        self.assertEqual(outputs["other"], 1)
+        # Object.fromEntries still yields an ordinary object, not one whose
+        # prototype got reassigned - "__proto__" is stored as a data
+        # property, not interpreted as the prototype-setting accessor.
+        self.assertTrue(outputs["valueIsStillAPlainObject"])
 
     def test_invalid_structured_input_is_reported_as_an_error_not_guessed(self) -> None:
         outputs = self._run_typed_record_script(

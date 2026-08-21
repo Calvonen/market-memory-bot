@@ -411,11 +411,12 @@ class StrategyDraftApiTests(unittest.TestCase):
         self.assertEqual(self.repo.get("hays-fy2026-results").version, 1)
         self.assertEqual(self.approval_repo.audit_records, [])
 
-    def test_approve_accepts_a_well_formed_64_char_hex_fingerprint(self) -> None:
-        # Uppercase hex is valid SHA-256 hex-digest syntax too, even though
-        # draft_fingerprint() itself only ever emits lowercase - the
-        # boundary must not be stricter than "valid hex", only reject what
-        # secrets.compare_digest() could actually choke on.
+    def test_approve_normalizes_fingerprint_case_before_comparing(self) -> None:
+        # Uppercase (or mixed-case) hex is valid SHA-256 hex-digest syntax
+        # too, even though draft_fingerprint() itself only ever emits
+        # lowercase. A semantically identical digest must never be
+        # rejected as "changed since preview" just because of letter case -
+        # this is not a legitimate conflict, and not a validation error.
         draft = _valid_draft_body()
         preview = self._preview(draft).json()
         approval_body = {
@@ -427,10 +428,43 @@ class StrategyDraftApiTests(unittest.TestCase):
 
         response = self._approve(approval_body, key=self.CONTROL_KEY)
 
-        # An uppercase-but-otherwise-correct fingerprint no longer matches
-        # the lowercase one draft_fingerprint() computed byte-for-byte, so
-        # this is a legitimate conflict (409) - not a validation error, and
-        # never a 500.
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(self.repo.get("hays-fy2026-results").version, 2)
+
+    def test_approve_records_the_canonical_lowercase_fingerprint_in_the_audit_trail(
+        self,
+    ) -> None:
+        draft = _valid_draft_body()
+        preview = self._preview(draft).json()
+        lowercase_fingerprint = preview["draft_fingerprint"]
+        approval_body = {
+            "draft": draft,
+            "draft_fingerprint": lowercase_fingerprint.upper(),
+            "base_expectation_version": preview["base_expectation_version"],
+            "approved_by": "marko",
+        }
+
+        response = self._approve(approval_body, key=self.CONTROL_KEY)
+
+        self.assertEqual(response.status_code, 201)
+        # The response and the audit record both store the canonical
+        # (lowercase) form draft_fingerprint() itself produces, not
+        # whatever case the caller happened to submit.
+        self.assertEqual(response.json()["draft_fingerprint"], lowercase_fingerprint)
+        self.assertEqual(
+            self.approval_repo.audit_records[0]["draft_fingerprint"], lowercase_fingerprint
+        )
+
+    def test_mixed_case_fingerprint_with_a_real_mismatch_still_conflicts(self) -> None:
+        # Case-normalization must not weaken the actual integrity check -
+        # a mixed-case fingerprint that genuinely doesn't match the
+        # recomputed one is still a real conflict.
+        draft = _valid_draft_body()
+        approval_body = self._approval_body_from_preview(draft)
+        approval_body["draft_fingerprint"] = ("aB" * 32)  # well-formed hex, but wrong digest
+
+        response = self._approve(approval_body, key=self.CONTROL_KEY)
+
         self.assertEqual(response.status_code, 409)
 
     def test_repeated_identical_approve_does_not_create_duplicate_versions(self) -> None:

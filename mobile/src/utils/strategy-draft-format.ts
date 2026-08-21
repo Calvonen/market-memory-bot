@@ -80,7 +80,17 @@ export function parseTypedRecord(text: string): TypedRecordParseResult {
     };
   }
 
-  const value: Record<string, number | string | null> = {};
+  // Built via Object.fromEntries() below, never `result[key] = value` on a
+  // plain {} - a key literally named "__proto__" is a normal, valid JSON
+  // object key (JSON.parse itself creates it as a real own property, not
+  // through the accessor), but assigning to it with `obj[key] = value`
+  // goes through Object.prototype's __proto__ *setter*, which silently
+  // discards the value entirely for a non-object value like a string,
+  // number, or null - losing that key/value pair rather than storing it.
+  // Object.fromEntries uses CreateDataProperty semantics, so it creates a
+  // genuine own property named "__proto__" instead, exactly like every
+  // other key.
+  const entries: [string, number | string | null][] = [];
   for (const [key, raw] of Object.entries(parsed as Record<string, unknown>)) {
     if (raw !== null && typeof raw !== 'number' && typeof raw !== 'string') {
       return {
@@ -88,9 +98,9 @@ export function parseTypedRecord(text: string): TypedRecordParseResult {
         error: `Avaimen "${key}" arvon täytyy olla numero, merkkijono tai null (sai: ${typeof raw}).`,
       };
     }
-    value[key] = raw;
+    entries.push([key, raw]);
   }
-  return { ok: true, value };
+  return { ok: true, value: Object.fromEntries(entries) };
 }
 
 // Convenience for callers (draftFormToInput) that need a value or a thrown
