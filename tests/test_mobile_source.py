@@ -471,11 +471,10 @@ class MobileSourceTests(unittest.TestCase):
             "\n    const calendarPromise = getUpcomingCalendarEvents()", load_body
         )
 
-        # load() itself only ever awaits/depends on both together via
-        # Promise.all - never a sequential `await eventsPromise` before
-        # calendarPromise is even created.
+        # load() itself never sequences one request's own await before
+        # creating the other's promise.
         self.assertNotIn("await eventsPromise", load_body)
-        self.assertIn("return Promise.all([eventsPromise, calendarPromise]);", load_body)
+        self.assertIn("return Promise.race([eventsPromise, calendarPromise]);", load_body)
 
     def test_a_never_settling_get_events_does_not_block_calendar_data_from_rendering(
         self,
@@ -586,6 +585,77 @@ setTimeout(() => {{ console.log(JSON.stringify(calls)); }}, 50);
         self.assertIn("setEvents", names)
         events_call = next(c for c in calls if c[0] == "setEvents")
         self.assertEqual(events_call[1], ["event-1"])
+
+    # -- pull-to-refresh (P2 regression): must never hang on one source ----
+
+    def test_load_races_rather_than_waits_for_both_sources_to_settle(self) -> None:
+        # Structural proof: load() itself must resolve as soon as the FIRST
+        # of the two requests settles (Promise.race), not once both do
+        # (Promise.all) - otherwise onRefresh() below, which awaits load(),
+        # would hang forever if either source never settles, even though
+        # the other one already has data to show.
+        load_start = self.upcoming_source.index("const load = useCallback(() => {")
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[load_start:load_end]
+
+        self.assertIn("return Promise.race([eventsPromise, calendarPromise]);", load_body)
+        self.assertNotIn("Promise.all(", load_body)
+
+        on_refresh_start = self.upcoming_source.index("const onRefresh = useCallback(async () => {")
+        on_refresh_end = self.upcoming_source.index("}, [load]);", on_refresh_start)
+        on_refresh_body = self.upcoming_source[on_refresh_start:on_refresh_end]
+        self.assertIn("await load();", on_refresh_body)
+        self.assertIn("setRefreshing(false);", on_refresh_body)
+
+    def test_on_refresh_does_not_hang_when_one_source_never_settles(self) -> None:
+        # Behavioral proof: run the real load() body under node with
+        # getEvents() resolving quickly and getUpcomingCalendarEvents()
+        # stubbed to never settle (the reverse case is symmetric). The
+        # promise load() itself returns must still win a race against a
+        # 200ms timeout - if it were gated on both sources (Promise.all),
+        # it would never resolve at all and the timeout would always win,
+        # leaving onRefresh()'s `refreshing` state stuck true forever.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        load_start = self.upcoming_source.index("const load = useCallback(() => {")
+        body_start = load_start + len("const load = useCallback(() => {")
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[body_start:load_end]
+
+        script = f"""
+let latestLoadId = {{ current: 0 }};
+function setEvents() {{}}
+function setError() {{}}
+function setCalendarEvents() {{}}
+
+function getEvents() {{ return Promise.resolve(['event-1']); }}
+function getUpcomingCalendarEvents() {{ return new Promise(() => {{}}); }}
+
+function load() {{
+{load_body}
+}}
+
+Promise.race([
+  load().then(() => 'load-settled'),
+  new Promise((resolve) => setTimeout(() => resolve('timeout'), 200)),
+]).then((winner) => {{ console.log(JSON.stringify({{ winner }})); }});
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outcome = json.loads(result.stdout)
+        self.assertEqual(outcome["winner"], "load-settled")
 
     def test_upcoming_screen_has_no_mocked_calendar_data(self) -> None:
         for forbidden in ("mock", "Mock", "MOCK", "fakeEvents", "dummy", "sampleEvents"):

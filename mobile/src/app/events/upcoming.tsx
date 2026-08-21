@@ -184,9 +184,16 @@ export default function UpcomingEventsScreen() {
         setCalendarEvents([]);
       });
 
-    // onRefresh() below still awaits load() to know when to stop spinning -
-    // that's the only thing gated on both settling together.
-    return Promise.all([eventsPromise, calendarPromise]);
+    // onRefresh() below awaits load() to know when to stop spinning - it
+    // uses the exact same "first source to settle wins" policy the
+    // `loading` flag above already uses (loading clears the moment either
+    // source has data/an error, not once both do), so refresh and initial
+    // load never behave differently. Promise.race, not Promise.all: if one
+    // request hangs forever, the refresh indicator must still clear as
+    // soon as the *other* one settles, rather than waiting indefinitely on
+    // the stalled one - the hung source's own .then()/.catch() above still
+    // updates its state normally whenever (if ever) it does settle.
+    return Promise.race([eventsPromise, calendarPromise]);
   }, []);
 
   useEffect(() => {

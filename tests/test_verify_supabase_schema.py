@@ -32,6 +32,9 @@ ALL_PRESENT_ROW = {
     "approve_strategy_draft_function_exists": True,
     "insert_next_expectation_version_function_exists": True,
     "schema_version_matches": True,
+    "calendar_events_table_exists": True,
+    "upsert_calendar_candidate_function_exists": True,
+    "transition_calendar_event_status_function_exists": True,
 }
 
 
@@ -151,6 +154,57 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("implementation version", err)
 
+    # -- calendar/watchlist schema gate (P2 regression) ----------------------
+
+    def test_fails_closed_when_the_calendar_events_table_is_missing(self) -> None:
+        row = dict(ALL_PRESENT_ROW, calendar_events_table_exists=False)
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(SimpleNamespace(data=[row]))
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("calendar_events table", err)
+
+    def test_fails_closed_when_the_upsert_calendar_candidate_rpc_is_missing(self) -> None:
+        row = dict(ALL_PRESENT_ROW, upsert_calendar_candidate_function_exists=False)
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(SimpleNamespace(data=[row]))
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("upsert_calendar_candidate() function", err)
+
+    def test_fails_closed_when_the_transition_calendar_event_status_rpc_is_missing(
+        self,
+    ) -> None:
+        row = dict(ALL_PRESENT_ROW, transition_calendar_event_status_function_exists=False)
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(SimpleNamespace(data=[row]))
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("transition_calendar_event_status() function", err)
+
+    def test_fails_closed_when_the_calendar_schema_keys_are_absent_entirely(self) -> None:
+        # A Supabase project still on the pre-calendar verify_strategy_draft_
+        # schema() (before 20260825090000_calendar_schema_gate.sql) simply
+        # has no calendar_* keys in its result at all - must fail exactly
+        # like an explicit False for each, not be treated as "nothing to
+        # check" (the deploy-restart-then-fail scenario this gate exists to
+        # prevent).
+        row = dict(ALL_PRESENT_ROW)
+        del row["calendar_events_table_exists"]
+        del row["upsert_calendar_candidate_function_exists"]
+        del row["transition_calendar_event_status_function_exists"]
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(SimpleNamespace(data=[row]))
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("calendar_events table", err)
+        self.assertIn("upsert_calendar_candidate() function", err)
+        self.assertIn("transition_calendar_event_status() function", err)
+
     def test_fails_closed_when_the_schema_version_key_is_absent(self) -> None:
         # An older verify_strategy_draft_schema() (from before the version
         # marker existed) simply has no schema_version_matches key in its
@@ -174,6 +228,9 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
             "approve_strategy_draft_function_exists": False,
             "insert_next_expectation_version_function_exists": False,
             "schema_version_matches": False,
+            "calendar_events_table_exists": False,
+            "upsert_calendar_candidate_function_exists": False,
+            "transition_calendar_event_status_function_exists": False,
         }
         exit_code, _out, err = self._run_with_client(
             _FakeClient(SimpleNamespace(data=[row]))
@@ -184,6 +241,9 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertIn("approve_strategy_draft() function", err)
         self.assertIn("insert_next_expectation_version() function", err)
         self.assertIn("implementation version", err)
+        self.assertIn("calendar_events table", err)
+        self.assertIn("upsert_calendar_candidate() function", err)
+        self.assertIn("transition_calendar_event_status() function", err)
 
     # -- passes only when every required object is present -------------------
 

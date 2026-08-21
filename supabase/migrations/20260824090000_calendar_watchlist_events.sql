@@ -87,7 +87,8 @@ create or replace function public.upsert_calendar_candidate(
   input_occurrence_key text,
   input_scheduled_date date,
   input_source text
-) returns table (
+)
+returns table (
   out_id uuid,
   out_company_name text,
   out_instrument text,
@@ -100,7 +101,8 @@ create or replace function public.upsert_calendar_candidate(
   out_created_at timestamptz,
   out_updated_at timestamptz,
   out_action text
-) language plpgsql as $$
+)
+language plpgsql as $$
 declare
   existing_row public.calendar_events%rowtype;
   new_row public.calendar_events%rowtype;
@@ -176,7 +178,8 @@ create or replace function public.transition_calendar_event_status(
   input_calendar_event_id uuid,
   input_from_status text,
   input_to_status text
-) returns table (
+)
+returns table (
   out_id uuid,
   out_company_name text,
   out_instrument text,
@@ -189,7 +192,8 @@ create or replace function public.transition_calendar_event_status(
   out_created_at timestamptz,
   out_updated_at timestamptz,
   out_action text
-) language plpgsql as $$
+)
+language plpgsql as $$
 declare
   existing_row public.calendar_events%rowtype;
   new_row public.calendar_events%rowtype;

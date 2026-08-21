@@ -24,6 +24,15 @@ VERIFY_MIGRATION = Path(
 EXPECTATION_WRITE_V2_MIGRATION = Path(
     "supabase/migrations/20260823090000_expectation_write_atomic_response_and_schema_version.sql"
 )
+CALENDAR_MIGRATION = Path("supabase/migrations/20260824090000_calendar_watchlist_events.sql")
+# create or replace`s verify_strategy_draft_schema() again (adding the
+# calendar_events/upsert_calendar_candidate()/
+# transition_calendar_event_status() checks) on top of everything above -
+# this, not EXPECTATION_WRITE_V2_MIGRATION, is the source of truth for
+# verify_strategy_draft_schema()'s live definition.
+CALENDAR_SCHEMA_GATE_MIGRATION = Path(
+    "supabase/migrations/20260825090000_calendar_schema_gate.sql"
+)
 VERIFY_SCRIPT = Path("scripts/verify_supabase_schema.py")
 
 
@@ -125,21 +134,21 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
         cls.approvals_source = EVENT_STRATEGY_APPROVALS_MIGRATION.read_text(encoding="utf-8")
         cls.shared_lock_source = SHARED_LOCK_MIGRATION.read_text(encoding="utf-8")
         cls.write_v2_source = EXPECTATION_WRITE_V2_MIGRATION.read_text(encoding="utf-8")
-        # The live verify_strategy_draft_schema() is the one (re)declared
-        # by EXPECTATION_WRITE_V2_MIGRATION, not the one originally
-        # declared in VERIFY_MIGRATION - but unlike that original file
-        # (which held nothing else), this one also declares
-        # insert_next_expectation_version() alongside it, so this must be
-        # sliced down to just verify_strategy_draft_schema()'s own
-        # definition, not the whole file. It's declared with a plain
-        # `create function` here (not `create or replace`), since Postgres
-        # rejects `create or replace` for a same-signature RETURNS TABLE
-        # shape change - see the migration's own top-of-file note.
-        verify_start = cls.write_v2_source.index(
+        cls.calendar_source = CALENDAR_MIGRATION.read_text(encoding="utf-8")
+        cls.calendar_gate_source = CALENDAR_SCHEMA_GATE_MIGRATION.read_text(encoding="utf-8")
+        # The live verify_strategy_draft_schema() is the one (re)declared by
+        # CALENDAR_SCHEMA_GATE_MIGRATION, not the one in
+        # EXPECTATION_WRITE_V2_MIGRATION - it's the newest of the two
+        # `create function` declarations for this same function name, each
+        # of which (again) needed an explicit `drop function` first since
+        # its RETURNS TABLE shape grew (4 columns -> 7). It's declared alone
+        # in its own file, so slicing to "everything from `create function`
+        # to the closing `$$;`" is unambiguous here.
+        verify_start = cls.calendar_gate_source.index(
             "create function public.verify_strategy_draft_schema()"
         )
-        verify_end = cls.write_v2_source.index("$$;", verify_start) + len("$$;")
-        cls.verify_source = cls.write_v2_source[verify_start:verify_end]
+        verify_end = cls.calendar_gate_source.index("$$;", verify_start) + len("$$;")
+        cls.verify_source = cls.calendar_gate_source[verify_start:verify_end]
         cls.verify_script_source = VERIFY_SCRIPT.read_text(encoding="utf-8")
 
     @staticmethod
@@ -201,6 +210,59 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
             self._declared_param_types(self.shared_lock_source, "insert_next_expectation_version"),
         )
 
+    # -- calendar/watchlist schema gate (P2 regression) ----------------------
+
+    def test_verify_function_checks_the_real_upsert_calendar_candidate_signature(
+        self,
+    ) -> None:
+        declared_types = self._declared_param_types(
+            self.calendar_source, "upsert_calendar_candidate"
+        )
+        expected_signature = (
+            "public.upsert_calendar_candidate(" + ", ".join(declared_types) + ")"
+        )
+        self.assertIn(expected_signature, self.verify_source)
+
+    def test_verify_function_checks_the_real_transition_calendar_event_status_signature(
+        self,
+    ) -> None:
+        declared_types = self._declared_param_types(
+            self.calendar_source, "transition_calendar_event_status"
+        )
+        expected_signature = (
+            "public.transition_calendar_event_status(" + ", ".join(declared_types) + ")"
+        )
+        self.assertIn(expected_signature, self.verify_source)
+
+    def test_calendar_schema_gate_drops_verify_function_before_recreating(self) -> None:
+        # Same "cannot change return type of existing function" constraint
+        # as EXPECTATION_WRITE_V2_MIGRATION - verify_strategy_draft_schema()
+        # grows again here (4 columns -> 7), so this migration needs its
+        # own explicit drop immediately before its own create, not a bare
+        # `create or replace`.
+        drop_statement = "drop function if exists public.verify_strategy_draft_schema();"
+        self.assertIn(drop_statement, self.calendar_gate_source)
+        drop_index = self.calendar_gate_source.index(drop_statement)
+        create_index = self.calendar_gate_source.index(
+            "create function public.verify_strategy_draft_schema()", drop_index
+        )
+        between = self.calendar_gate_source[drop_index + len(drop_statement) : create_index]
+        self.assertNotIn("drop function", between)
+        self.assertNotIn("create function", between)
+        self.assertNotIn(
+            "create or replace function public.verify_strategy_draft_schema(",
+            self.calendar_gate_source,
+        )
+
+    def test_calendar_schema_gate_runs_as_one_explicit_transaction(self) -> None:
+        stripped = "\n".join(
+            line
+            for line in self.calendar_gate_source.splitlines()
+            if not line.strip().startswith("--")
+        )
+        self.assertTrue(stripped.strip().lower().startswith("begin;"))
+        self.assertTrue(stripped.strip().lower().endswith("commit;"))
+
     def test_verify_function_only_performs_catalog_lookups(self) -> None:
         # No data read/write of any kind - safe to call from an
         # unauthenticated-by-RLS-bypass service-role context on every
@@ -217,6 +279,9 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
             "approve_strategy_draft_function_exists",
             "insert_next_expectation_version_function_exists",
             "schema_version_matches",
+            "calendar_events_table_exists",
+            "upsert_calendar_candidate_function_exists",
+            "transition_calendar_event_status_function_exists",
         ):
             self.assertIn(key, self.verify_script_source)
             self.assertIn(key, self.verify_source)
