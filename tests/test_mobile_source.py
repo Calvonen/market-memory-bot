@@ -236,6 +236,89 @@ class MobileSourceTests(unittest.TestCase):
         self.assertEqual(outputs["AAPL"], "USA")
         self.assertEqual(outputs["HAS.L"], "Iso-Britannia")
 
+    def test_date_range_filter_excludes_past_events_but_kaikki_keeps_history(self) -> None:
+        # Behavioral proof for the date-range filter: extract the real
+        # filtered = useMemo(...) predicate from upcoming.tsx (plus the
+        # marketForInstrument() it calls), strip TS syntax, and run it with
+        # node against synthetic past/near/far events. A day-range filter
+        # (e.g. "7 pv") must exclude a released/past-dated event even though
+        # /api/v1/events intentionally still returns it (for Seurannassa);
+        # "Kaikki" (no range selected) must keep showing it.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        market_fn_start = self.upcoming_source.index("function marketForInstrument(")
+        market_fn_end = self.upcoming_source.index("\n}\n", market_fn_start) + len("\n}")
+        market_fn_js = re.sub(
+            r":\s*string\b", "", self.upcoming_source[market_fn_start:market_fn_end], count=2
+        )
+
+        filter_start = self.upcoming_source.index("const filtered = useMemo(() => {")
+        filter_body_start = filter_start + len("const filtered = useMemo(() => {")
+        filter_end = self.upcoming_source.index(
+            "}, [events, market, search, rangeDays]);", filter_start
+        )
+        filter_body = self.upcoming_source[filter_body_start:filter_end]
+        filter_fn_js = (
+            "function filterEvents(events, market, search, rangeDays) {" + filter_body + "}"
+        )
+        self.assertNotIn(": string", filter_fn_js)
+
+        script = f"""
+{market_fn_js}
+{filter_fn_js}
+
+function fmt(d) {{
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${{y}}-${{m}}-${{day}}`;
+}}
+function daysFromNow(n) {{
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return fmt(d);
+}}
+
+const events = [
+  {{ event_id: 'past', instrument: 'HAS.L', event_name: 'Past event', scheduled_date: daysFromNow(-10) }},
+  {{ event_id: 'today', instrument: 'HAS.L', event_name: 'Today event', scheduled_date: daysFromNow(0) }},
+  {{ event_id: 'near', instrument: 'HAS.L', event_name: 'Near event', scheduled_date: daysFromNow(3) }},
+  {{ event_id: 'far', instrument: 'HAS.L', event_name: 'Far event', scheduled_date: daysFromNow(60) }},
+];
+
+const sevenDayIds = filterEvents(events, 'Kaikki', '', 7).map((e) => e.event_id);
+const allIds = filterEvents(events, 'Kaikki', '', null).map((e) => e.event_id);
+console.log(JSON.stringify({{ sevenDayIds, allIds }}));
+"""
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+
+        # "7 pv" must exclude the past event and the far (60 days out) event,
+        # but keep today's and the near (3 days out) event.
+        self.assertNotIn("past", outputs["sevenDayIds"])
+        self.assertNotIn("far", outputs["sevenDayIds"])
+        self.assertIn("today", outputs["sevenDayIds"])
+        self.assertIn("near", outputs["sevenDayIds"])
+
+        # "Kaikki" (no range) must still surface the full tracked history,
+        # including the already-released past event - this is the whole
+        # point of removing list_upcoming()'s status/date filter.
+        self.assertEqual(set(outputs["allIds"]), {"past", "today", "near", "far"})
+
     def test_upcoming_screen_has_filter_and_tracking_ui(self) -> None:
         self.assertIn("Hae tickerillä", self.upcoming_source)
         self.assertIn("MARKKINA", self.upcoming_source)

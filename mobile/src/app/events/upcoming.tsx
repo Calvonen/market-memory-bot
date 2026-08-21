@@ -93,7 +93,14 @@ export default function UpcomingEventsScreen() {
     if (!events) return [];
     const query = search.trim().toLowerCase();
     const now = new Date();
-    const cutoff = rangeDays !== null ? now.getTime() + rangeDays * 24 * 60 * 60 * 1000 : null;
+    // Start-of-today, so a day-range filter means "the next N days" and
+    // excludes already-released events - /api/v1/events intentionally
+    // returns those too (for the Seurannassa list), but a "7 pv" filter
+    // here must not surface a years-old event just because it's older than
+    // the upper cutoff. "Kaikki" (rangeDays === null) is unaffected and
+    // still shows the full tracked history.
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const cutoff = rangeDays !== null ? startOfToday + rangeDays * 24 * 60 * 60 * 1000 : null;
 
     return events.filter((event) => {
       if (market !== 'Kaikki' && marketForInstrument(event.instrument) !== market) {
@@ -108,7 +115,7 @@ export default function UpcomingEventsScreen() {
       }
       if (cutoff !== null) {
         const scheduled = new Date(`${event.scheduled_date}T12:00:00`).getTime();
-        if (Number.isNaN(scheduled) || scheduled > cutoff) {
+        if (Number.isNaN(scheduled) || scheduled < startOfToday || scheduled > cutoff) {
           return false;
         }
       }
