@@ -55,7 +55,20 @@ class SupabaseEventExpectationRepository(EventExpectationRepository):
             .order("scheduled_date")
             .execute()
         )
-        return tuple(self._row_to_expectation(row) for row in (response.data or []))
+        events = tuple(self._row_to_expectation(row) for row in (response.data or []))
+        return tuple(sorted(events, key=self._list_upcoming_sort_key))
+
+    @staticmethod
+    def _list_upcoming_sort_key(event: EventExpectation) -> tuple[bool, int]:
+        # Plain ascending scheduled_date would bury today's/upcoming events
+        # under accumulating history once past events are retained (see
+        # above). Active/upcoming events (today or later) sort first,
+        # soonest first; already-released events follow, most recently
+        # released first, so the home screen's "Seurannassa" list leads
+        # with what's actually current.
+        is_past = event.scheduled_date < date.today()
+        ordinal = event.scheduled_date.toordinal()
+        return (is_past, -ordinal if is_past else ordinal)
 
     def save(
         self,

@@ -1,5 +1,5 @@
 import unittest
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -102,6 +102,42 @@ class SupabaseEventExpectationRepositoryTests(unittest.TestCase):
         self.assertNotIn("eq", client.calls)
         self.assertNotIn("gte", client.calls)
         self.assertIn("order", client.calls)
+
+    def test_list_upcoming_orders_active_events_ahead_of_history(self) -> None:
+        # Plain ascending scheduled_date buries today's/upcoming events
+        # under accumulating history now that past events are retained
+        # (the fix above). Active events (today or later) must sort first,
+        # soonest first; already-released events follow, most recently
+        # released first - so the home screen's "Seurannassa" list leads
+        # with what's current instead of the oldest tracked event.
+        today = date.today()
+
+        def row(event_id: str, days_offset: int) -> dict[str, Any]:
+            scheduled = today + timedelta(days=days_offset)
+            return {
+                "event_id": event_id,
+                "instrument": "X.L",
+                "event_name": event_id,
+                "scheduled_date": scheduled.isoformat(),
+                "version": 1,
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+
+        rows = [
+            row("far-past", -10),
+            row("near-past", -2),
+            row("far-future", 5),
+            row("near-future", 1),
+            row("today", 0),
+        ]
+        client = _ListUpcomingClient(rows)
+        repo = SupabaseEventExpectationRepository(client)
+
+        results = [event.event_id for event in repo.list_upcoming()]
+
+        self.assertEqual(
+            results, ["today", "near-future", "far-future", "near-past", "far-past"]
+        )
 
     def test_only_postgres_unique_violation_is_retryable(self) -> None:
         class UniqueError(Exception):

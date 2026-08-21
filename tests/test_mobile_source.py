@@ -234,6 +234,34 @@ class MobileSourceTests(unittest.TestCase):
         self.assertNotIn("X-Admin-Token", self.edit_source)
         self.assertNotIn("MARKETAI_ADMIN_API_KEY", self.edit_source)
 
+    def test_edit_screen_initial_load_failure_offers_a_retry(self) -> None:
+        # Same dead-end the detail screen used to have: a failed initial
+        # getEvent() must not strand the user on a static error view with
+        # no way back in short of leaving and reopening the editor.
+        error_only_start = self.edit_source.index("if (error && !event) {")
+        error_only_end = self.edit_source.index("\n  }", error_only_start)
+        error_only_block = self.edit_source[error_only_start:error_only_end]
+        self.assertIn("onPress={() => void load()}", error_only_block)
+        self.assertIn("Yritä uudelleen", error_only_block)
+
+    def test_edit_screen_ignores_stale_overlapping_load_responses(self) -> None:
+        # Same overlapping-load race already fixed on the home/detail/
+        # upcoming screens: an older getEvent() response resolving after a
+        # newer one (e.g. eventId changing quickly, or load() re-invoked)
+        # must not overwrite state with stale field values.
+        load_start = self.edit_source.index("const load = useCallback(async () => {")
+        load_end = self.edit_source.index("}, [eventId]);", load_start)
+        load_body = self.edit_source[load_start:load_end]
+
+        self.assertIn("const loadId = ++latestLoadId.current;", load_body)
+        self.assertIn(
+            "if (loadId !== latestLoadId.current) return;\n      setEvent(detail);", load_body
+        )
+        self.assertIn(
+            "if (loadId !== latestLoadId.current) return;\n      setError(err instanceof Error ? err.message : 'Tuntematon virhe');",
+            load_body,
+        )
+
     def test_edit_screen_exposes_the_editable_fields(self) -> None:
         for label in (
             "Konsensusmetriikat",

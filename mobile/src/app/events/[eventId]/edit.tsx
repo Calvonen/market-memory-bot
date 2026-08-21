@@ -1,7 +1,8 @@
 import { useLocalSearchParams } from 'expo-router';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -41,12 +42,17 @@ export default function EventEditScreen() {
   const [invalidationText, setInvalidationText] = useState('');
   const [sourceName, setSourceName] = useState('');
   const [sourceUrl, setSourceUrl] = useState('');
+  const latestLoadId = useRef(0);
 
   const load = useCallback(async () => {
     if (!eventId) return;
+    // Guard against overlapping load() calls landing out of order, same as
+    // the detail and upcoming screens.
+    const loadId = ++latestLoadId.current;
     try {
       setError(null);
       const detail = await getEvent(eventId);
+      if (loadId !== latestLoadId.current) return;
       setEvent(detail);
       setConsensusText(recordToText(detail.consensus));
       setKpiText(listToText(detail.important_kpis));
@@ -58,6 +64,7 @@ export default function EventEditScreen() {
       setSourceName(detail.source_name ?? '');
       setSourceUrl(detail.source_url ?? '');
     } catch (err) {
+      if (loadId !== latestLoadId.current) return;
       setError(err instanceof Error ? err.message : 'Tuntematon virhe');
     }
   }, [eventId]);
@@ -81,6 +88,9 @@ export default function EventEditScreen() {
     return (
       <View style={styles.loadingScreen}>
         <Text style={styles.errorText}>{error}</Text>
+        <Pressable style={styles.retryButton} onPress={() => void load()}>
+          <Text style={styles.retryButtonText}>Yritä uudelleen</Text>
+        </Pressable>
       </View>
     );
   }
@@ -217,6 +227,21 @@ const styles = StyleSheet.create({
     backgroundColor: '#0b0e13',
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  retryButton: {
+    backgroundColor: '#131821',
+    borderWidth: 1,
+    borderColor: '#202734',
+    borderRadius: 14,
+    paddingVertical: 13,
+    paddingHorizontal: 24,
+    marginTop: 16,
+  },
+  retryButtonText: {
+    color: '#72b8db',
+    fontSize: 14,
+    fontWeight: '700',
   },
   content: {
     paddingHorizontal: 18,
