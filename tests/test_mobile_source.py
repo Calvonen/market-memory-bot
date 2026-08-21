@@ -1088,6 +1088,44 @@ console.log(JSON.stringify({ text, roundTripped }));
             "useResetOnKeyChange(eventId, () => setLocal(draft))", self.edit_source
         )
 
+    def test_summary_screen_invalidates_in_flight_load_before_anything_else_on_route_change(
+        self,
+    ) -> None:
+        # load() only guards against a stale response via
+        # `loadId !== latestLoadId.current`, and load() itself is invoked
+        # from a deferred setTimeout(0) - so the ref must be bumped
+        # synchronously the moment eventId changes (here, in the
+        # useResetOnKeyChange callback), not only from inside load() the
+        # next time it happens to run. Otherwise a slow response for the
+        # *previous* event could resolve in the gap between the route
+        # changing and the new load() actually starting, still pass the
+        # (not-yet-bumped) staleness check, and repopulate the freshly
+        # cleared screen with the wrong event's data.
+        self.assertIn("useResetOnKeyChange(eventId, () => {", self.summary_source)
+        reset_start = self.summary_source.index("useResetOnKeyChange(eventId, () => {")
+        reset_end = self.summary_source.index("});", reset_start)
+        reset_body = self.summary_source[reset_start:reset_end]
+
+        self.assertIn("latestLoadId.current += 1;", reset_body)
+        self.assertIn("setError(null);", reset_body)
+
+        # The ref bump must be the first statement in the callback, ahead
+        # of the state resets - not merely present somewhere in the body.
+        bump_index = reset_body.index("latestLoadId.current += 1;")
+        set_error_index = reset_body.index("setError(null);")
+        self.assertLess(bump_index, set_error_index)
+
+    def test_load_still_guards_against_its_own_stale_responses(self) -> None:
+        # The existing same-event staleness guard (e.g. overlapping
+        # pull-to-refresh calls) must remain intact alongside the route
+        # -change invalidation above - both must hold at once.
+        load_start = self.summary_source.index("const load = useCallback(async () => {")
+        load_end = self.summary_source.index("}, [eventId]);", load_start)
+        load_body = self.summary_source[load_start:load_end]
+
+        self.assertIn("const loadId = ++latestLoadId.current;", load_body)
+        self.assertIn("if (loadId !== latestLoadId.current) return;", load_body)
+
     def test_confirm_screen_resets_approval_state_on_route_change(self) -> None:
         self.assertIn("useResetOnKeyChange(eventId, () => {", self.confirm_source)
         reset_start = self.confirm_source.index("useResetOnKeyChange(eventId, () => {")

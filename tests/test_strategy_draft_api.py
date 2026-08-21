@@ -149,6 +149,34 @@ class StrategyDraftApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertEqual(self.repo.get("hays-fy2026-results").version, 1)
 
+    def test_preview_rejects_whitespace_only_summary_and_change_note(self) -> None:
+        for field, value in (("summary", "   "), ("change_note", "\t\n  ")):
+            with self.subTest(field=field):
+                response = self._preview(_valid_draft_body(**{field: value}))
+
+                self.assertEqual(response.status_code, 422)
+
+    def test_approve_rejects_whitespace_only_summary_and_change_note(self) -> None:
+        # Even if a caller somehow builds an approval body bypassing
+        # preview's own validation, approve() re-validates the same
+        # StrategyDraftPayload and must reject it too - a whitespace-only
+        # change_note/summary can never reach the persisted expectation
+        # version or the audit trail.
+        for field, value in (("summary", "   "), ("change_note", "\t\n  ")):
+            with self.subTest(field=field):
+                approval_body = {
+                    "draft": _valid_draft_body(**{field: value}),
+                    "draft_fingerprint": "0" * 64,
+                    "base_expectation_version": 1,
+                    "approved_by": "marko",
+                }
+
+                response = self._approve(approval_body, key=self.CONTROL_KEY)
+
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(self.repo.get("hays-fy2026-results").version, 1)
+                self.assertEqual(self.approval_repo.audit_records, [])
+
     def test_preview_unknown_event_is_404(self) -> None:
         response = self.client.post(
             "/api/v1/events/does-not-exist/strategy-draft/preview",
@@ -457,6 +485,50 @@ class StrategyDraftApiTests(unittest.TestCase):
         self.assertEqual(retry.status_code, 201)
         self.assertEqual(self.repo.get("hays-fy2026-results").version, 2)
         self.assertEqual(len(self.approval_repo.audit_records), 1)
+
+    def test_concurrent_admin_write_and_approval_never_5xx(self) -> None:
+        # The admin direct-write endpoint and the strategy-draft approval
+        # endpoint both allocate the next event_expectation_versions row.
+        # In production they now take the same pg_advisory_xact_lock (see
+        # supabase/migrations/20260821140000_shared_expectation_version_lock.sql);
+        # the in-memory doubles mirror that by sharing one lock object
+        # (InMemoryStrategyDraftApprovalRepository.expectations.lock). A
+        # race between them must never surface as an unhandled 500 - the
+        # admin write always succeeds (it has no base-version expectation
+        # of its own), and approve either succeeds or gets a clean 409 if
+        # the admin write happened to land first and moved the version out
+        # from under it.
+        approval_body = self._approval_body_from_preview(_valid_draft_body())
+
+        def do_admin_write():
+            return self.client.post(
+                "/api/v1/events/hays-fy2026-results/expectation-versions",
+                headers={"X-Admin-Token": self.ADMIN_KEY},
+                json={
+                    "change_note": "concurrent admin edit",
+                    "triggers": {"bull_fy27_operating_profit_gbp_m": 99.0},
+                },
+            )
+
+        def do_approve():
+            return self._approve(approval_body, key=self.CONTROL_KEY)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            admin_future = executor.submit(do_admin_write)
+            approve_future = executor.submit(do_approve)
+            admin_response = admin_future.result()
+            approve_response = approve_future.result()
+
+        self.assertLess(admin_response.status_code, 500)
+        self.assertLess(approve_response.status_code, 500)
+        self.assertEqual(admin_response.status_code, 201)
+        self.assertIn(approve_response.status_code, (201, 409))
+
+        # No matter which order they actually ran in, exactly one final
+        # version results - never a crash, never two colliding version 2s.
+        final = self.repo.get("hays-fy2026-results")
+        self.assertIsNotNone(final)
+        self.assertGreaterEqual(final.version, 2)
 
 
 if __name__ == "__main__":

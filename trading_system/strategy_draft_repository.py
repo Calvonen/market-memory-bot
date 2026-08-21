@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import threading
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from typing import Any, Protocol
@@ -72,6 +71,14 @@ class InMemoryStrategyDraftApprovalRepository:
     succeeds, so a failure partway through leaves nothing changed. Real
     atomicity/isolation is provided by Postgres in production; this class
     exists only so the approval contract can be unit-tested without one.
+
+    Deliberately reuses `expectations.lock` rather than a lock of its own:
+    in production, approve_strategy_draft() and the admin write endpoint's
+    insert_next_expectation_version() both take the *same*
+    pg_advisory_xact_lock for a given event_id, so a concurrent admin write
+    and approval can never race each other at the database level. Sharing
+    one lock object here is what makes that same guarantee testable against
+    the in-memory doubles.
     """
 
     expectations: InMemoryEventExpectationRepository
@@ -80,7 +87,6 @@ class InMemoryStrategyDraftApprovalRepository:
     # the same transaction as the expectation-version insert, to prove nothing
     # is left half-written.
     fail_audit_insert: bool = False
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def approve(
         self,
@@ -102,7 +108,7 @@ class InMemoryStrategyDraftApprovalRepository:
         approved_by: str,
         approved_via: str,
     ) -> StrategyDraftApprovalResult:
-        with self._lock:
+        with self.expectations.lock:
             current = self.expectations.events.get(event_id)
             if current is None:
                 raise StrategyDraftEventNotFound(event_id)
@@ -232,7 +238,22 @@ class SupabaseStrategyDraftApprovalRepository:
 
     @staticmethod
     def _is_version_conflict(exc: Exception) -> bool:
-        return "expectation_version_conflict" in str(exc) or getattr(exc, "code", None) == "P0001"
+        # The custom application-level conflict, and a defense-in-depth
+        # fallback: shared pg_advisory_xact_lock use across every
+        # event_expectation_versions writer (see
+        # supabase/migrations/*_shared_expectation_version_lock.sql) should
+        # make a raw unique-constraint violation (23505) here unreachable in
+        # practice, but if it were ever hit - e.g. a writer added later that
+        # forgets to take the lock - it must still surface as a controlled
+        # 409, never an unmapped 500.
+        message = str(exc)
+        code = getattr(exc, "code", None)
+        return (
+            "expectation_version_conflict" in message
+            or code == "P0001"
+            or code == "23505"
+            or "23505" in message
+        )
 
     @staticmethod
     def _is_event_not_found(exc: Exception) -> bool:

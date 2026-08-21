@@ -88,60 +88,42 @@ class SupabaseEventExpectationRepository(EventExpectationRepository):
             on_conflict="event_id",
         ).execute()
 
-        payload = {
-            "event_id": expectation.event_id,
-            "version": self._next_version(expectation.event_id),
-            "source_name": expectation.source_name or "manual",
-            "source_url": expectation.source_url,
-            "source_as_of": expectation.source_as_of.isoformat()
-            if expectation.source_as_of
-            else None,
-            "consensus": expectation.consensus,
-            "important_kpis": list(expectation.important_kpis),
-            "bull_case": list(expectation.bull_case),
-            "base_case": list(expectation.base_case),
-            "bear_case": list(expectation.bear_case),
-            "triggers": expectation.triggers,
-            "invalidation_conditions": list(expectation.invalidation_conditions),
-            "change_note": change_note,
-        }
+        # insert_next_expectation_version() takes the same
+        # pg_advisory_xact_lock (same key) as approve_strategy_draft() (see
+        # supabase/migrations/20260821140000_shared_expectation_version_lock.sql),
+        # so this admin write and a concurrent strategy-draft approval for
+        # the same event can never race each other's version allocation -
+        # this used to be its own unlocked "select max(version) then
+        # insert, retry on 23505" loop.
+        response = self.client.rpc(
+            "insert_next_expectation_version",
+            {
+                "input_event_id": expectation.event_id,
+                "input_source_name": expectation.source_name or "manual",
+                "input_source_url": expectation.source_url,
+                "input_source_as_of": expectation.source_as_of.isoformat()
+                if expectation.source_as_of
+                else None,
+                "input_consensus": expectation.consensus,
+                "input_important_kpis": list(expectation.important_kpis),
+                "input_bull_case": list(expectation.bull_case),
+                "input_base_case": list(expectation.base_case),
+                "input_bear_case": list(expectation.bear_case),
+                "input_triggers": expectation.triggers,
+                "input_invalidation_conditions": list(expectation.invalidation_conditions),
+                "input_change_note": change_note,
+            },
+        ).execute()
 
-        # Concurrent writers can race on version allocation. Retry only the
-        # unique-constraint conflict; permission, validation and network errors
-        # must surface instead of being hidden by retries.
-        for attempt in range(3):
-            try:
-                response = (
-                    self.client.table("event_expectation_versions")
-                    .insert(payload)
-                    .select("version, created_at")
-                    .execute()
-                )
-                row = (response.data or [{}])[0]
-                created_at = self._parse_datetime(row.get("created_at")) or now
-                return replace(
-                    expectation,
-                    version=int(row.get("version", payload["version"])),
-                    updated_at=created_at,
-                )
-            except Exception as exc:
-                if not self._is_unique_violation(exc) or attempt == 2:
-                    raise
-                payload["version"] = self._next_version(expectation.event_id)
-
-        raise RuntimeError("unreachable")
-
-    def _next_version(self, event_id: str) -> int:
-        response = (
-            self.client.table("event_expectation_versions")
-            .select("version")
-            .eq("event_id", event_id)
-            .order("version", desc=True)
-            .limit(1)
-            .execute()
-        )
         rows = response.data or []
-        return int(rows[0]["version"]) + 1 if rows else 1
+        if not rows:
+            raise RuntimeError("insert_next_expectation_version returned no rows")
+        row = rows[0]
+        return replace(
+            expectation,
+            version=int(row["new_version"]),
+            updated_at=self._parse_datetime(row.get("created_at")) or now,
+        )
 
     @classmethod
     def _row_to_expectation(cls, row: dict[str, Any]) -> EventExpectation:
@@ -178,7 +160,3 @@ class SupabaseEventExpectationRepository(EventExpectationRepository):
         if isinstance(value, datetime):
             return value if value.tzinfo else value.replace(tzinfo=UTC)
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
-
-    @staticmethod
-    def _is_unique_violation(exc: Exception) -> bool:
-        return getattr(exc, "code", None) == "23505" or "23505" in str(exc)

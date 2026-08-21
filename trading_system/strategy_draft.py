@@ -5,7 +5,7 @@ import json
 from datetime import date
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from trading_system.models import EventExpectation
 
@@ -38,6 +38,18 @@ class StrategyDraftPayload(BaseModel):
     summary: str = Field(min_length=1, max_length=2000)
     assumptions: list[str] = Field(default_factory=list)
     unresolved_questions: list[str] = Field(default_factory=list)
+
+    @field_validator("change_note", "summary", mode="before")
+    @classmethod
+    def _strip_before_length_check(cls, value: Any) -> Any:
+        # Pydantic's min_length constraint runs on whatever a "before"
+        # validator returns, so stripping here - not in normalize_draft(),
+        # which only runs after validation already passed - is what makes
+        # a whitespace-only value ("   ") actually fail min_length instead
+        # of sailing through as "long enough" and only becoming empty later.
+        if isinstance(value, str):
+            return value.strip()
+        return value
 
 
 def _clean_list(items: list[str]) -> list[str]:

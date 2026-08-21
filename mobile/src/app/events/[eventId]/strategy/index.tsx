@@ -30,9 +30,21 @@ export default function StrategySummaryScreen() {
   const [previewError, setPreviewError] = useState<string | null>(null);
   const latestLoadId = useRef(0);
 
-  // A previous event's preview error/in-flight state must not linger under
-  // a different event's route.
+  // A previous event's in-flight load, preview error, and in-flight state
+  // must not linger under - or repopulate - a different event's route.
   useResetOnKeyChange(eventId, () => {
+    // Invalidate any load() still in flight for the previous event FIRST,
+    // synchronously, before anything else below. load() itself is only
+    // (re)invoked from the effect further down via a deferred
+    // setTimeout(0) - there would otherwise be a window, between eventId
+    // changing here and that deferred call actually starting, where a
+    // slow response for the *old* event could still resolve, find
+    // latestLoadId.current unchanged, pass the staleness check, and
+    // repopulate this (freshly cleared) screen with the wrong event's
+    // data. Bumping the ref here - not inside load() - closes that window
+    // entirely: it happens in the same synchronous render pass that
+    // detects the eventId change.
+    latestLoadId.current += 1;
     setError(null);
     setPreviewing(false);
     setPreviewError(null);

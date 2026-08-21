@@ -1,6 +1,8 @@
 import unittest
 from datetime import date
 
+from pydantic import ValidationError
+
 from trading_system.models import EventExpectation
 from trading_system.strategy_draft import (
     StrategyDraftPayload,
@@ -55,6 +57,29 @@ def _expectation(**overrides) -> EventExpectation:
     )
     defaults.update(overrides)
     return EventExpectation(**defaults)
+
+
+class StrategyDraftPayloadValidationTests(unittest.TestCase):
+    def test_whitespace_only_change_note_is_rejected(self) -> None:
+        with self.assertRaises(ValidationError):
+            _payload(change_note="   ")
+
+    def test_whitespace_only_summary_is_rejected(self) -> None:
+        with self.assertRaises(ValidationError):
+            _payload(summary="\t\n  ")
+
+    def test_change_note_just_under_min_length_after_stripping_is_rejected(self) -> None:
+        # "ab" (2 chars) padded to whitespace-length 3 would pass a naive
+        # min_length=3 check before stripping; it must still fail once
+        # stripped, since the real content is only 2 characters.
+        with self.assertRaises(ValidationError):
+            _payload(change_note=" ab ")
+
+    def test_change_note_and_summary_are_stripped_after_validation(self) -> None:
+        payload = _payload(change_note="  raise bull threshold  ", summary="  Hays FY26 strategy  ")
+
+        self.assertEqual(payload.change_note, "raise bull threshold")
+        self.assertEqual(payload.summary, "Hays FY26 strategy")
 
 
 class NormalizeDraftTests(unittest.TestCase):
