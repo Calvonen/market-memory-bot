@@ -132,7 +132,7 @@ class MobileSourceTests(unittest.TestCase):
         # still let the fetched event's expectation data render, instead of
         # rejecting a combined Promise.all and leaving the screen error-only.
         self.assertNotIn("Promise.all", self.detail_source)
-        set_event_index = self.detail_source.index("setEvent(await getEvent(eventId))")
+        set_event_index = self.detail_source.index("const eventDetail = await getEvent(eventId);")
         get_status_index = self.detail_source.index("getPaperStatus(eventId)")
         self.assertLess(set_event_index, get_status_index)
         status_try_start = self.detail_source.rindex("try {", 0, get_status_index)
@@ -144,6 +144,35 @@ class MobileSourceTests(unittest.TestCase):
         # analysis section can say the status specifically failed to load.
         self.assertIn("setRun(null)", catch_body)
         self.assertIn("setStatusError(", catch_body)
+
+    def test_detail_screen_ignores_stale_overlapping_load_responses(self) -> None:
+        # If pull-to-refresh fires load() again while a previous call's
+        # getPaperStatus() is still pending, the two responses can resolve
+        # out of order. Every state update that follows an await must check
+        # a load-id ref (the same pattern already used on the home screen)
+        # first, so an older response can never overwrite a newer one -
+        # e.g. silently regressing a run from paper_executed back to
+        # waiting_confirmation.
+        load_start = self.detail_source.index("const load = useCallback(async () => {")
+        load_end = self.detail_source.index("}, [eventId]);", load_start)
+        load_body = self.detail_source[load_start:load_end]
+
+        self.assertIn("const loadId = ++latestLoadId.current;", load_body)
+        # Each state update that depends on an awaited response is guarded
+        # by the staleness check immediately beforehand - not just present
+        # somewhere in the function, but directly gating that specific
+        # setter.
+        guarded_pairs = [
+            ("if (loadId !== latestLoadId.current) return;\n      setEvent(eventDetail);", "setEvent after getEvent()"),
+            (
+                "if (loadId !== latestLoadId.current) return;\n      setError(err instanceof Error ? err.message : 'Tuntematon virhe');",
+                "setError in the getEvent() catch block",
+            ),
+            ("if (loadId !== latestLoadId.current) return;\n      setRun(status.paper_run);", "setRun after getPaperStatus()"),
+            ("if (loadId !== latestLoadId.current) return;\n      setRun(null);", "setRun in the getPaperStatus() catch block"),
+        ]
+        for snippet, description in guarded_pairs:
+            self.assertIn(snippet, load_body, f"missing staleness guard for {description}")
 
     def test_paper_status_failure_shows_an_explicit_error_in_the_analysis_section(self) -> None:
         # Requirement: pre-release expectation data (consensus/KPI/bull/

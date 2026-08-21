@@ -1,5 +1,5 @@
 import { Link, useLocalSearchParams } from 'expo-router';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -24,13 +24,24 @@ export default function EventDetailScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
+  const latestLoadId = useRef(0);
 
   const load = useCallback(async () => {
     if (!eventId) return;
+    // Guard against overlapping load() calls (e.g. pull-to-refresh fired
+    // again while the previous call's getPaperStatus() is still pending):
+    // an older response resolving after a newer one must never overwrite
+    // it, or a run could silently regress (e.g. paper_executed back to
+    // waiting_confirmation) even though it's the same expectation version,
+    // so the stale-run warning above wouldn't catch it either.
+    const loadId = ++latestLoadId.current;
     setError(null);
     try {
-      setEvent(await getEvent(eventId));
+      const eventDetail = await getEvent(eventId);
+      if (loadId !== latestLoadId.current) return;
+      setEvent(eventDetail);
     } catch (err) {
+      if (loadId !== latestLoadId.current) return;
       setError(err instanceof Error ? err.message : 'Tuntematon virhe');
       return;
     }
@@ -42,9 +53,11 @@ export default function EventDetailScreen() {
     // explicitly instead of silently looking like a pre-release event.
     try {
       const status = await getPaperStatus(eventId);
+      if (loadId !== latestLoadId.current) return;
       setRun(status.paper_run);
       setStatusError(null);
     } catch (err) {
+      if (loadId !== latestLoadId.current) return;
       setRun(null);
       setStatusError(err instanceof Error ? err.message : 'Tuntematon virhe');
     }
