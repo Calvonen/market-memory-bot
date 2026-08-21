@@ -18,6 +18,17 @@ class CalendarCandidate:
     string, not an enum pinned to "earnings" - a manually-entered event (e.g.
     a production report that no calendar provider tracks) is exactly as valid
     a candidate as a provider-sourced earnings date.
+
+    `occurrence_key` disambiguates *which* recurrence of
+    (instrument, event_type, source) this is - e.g. "2026Q3" vs. "2026Q4"
+    for two quarterly earnings releases of the same company. It is
+    deliberately never `scheduled_date` itself: a provider is free to move a
+    still-candidate occurrence's date on a later sync (see
+    CalendarEventRepository.sync_candidates()), so identity must survive
+    that, while a genuinely different occurrence (next quarter) must not
+    collide with an already-tracked one. Whoever constructs a
+    CalendarCandidate owns picking this value - the repository only ever
+    treats it as an opaque identity fragment.
     """
 
     company_name: str
@@ -26,6 +37,7 @@ class CalendarCandidate:
     event_type: str
     scheduled_date: date
     source: str
+    occurrence_key: str
 
 
 class EarningsCalendarProvider(Protocol):
@@ -40,6 +52,27 @@ class EarningsCalendarProvider(Protocol):
     name: str
 
     def fetch_upcoming(self, from_date: date, to_date: date) -> tuple[CalendarCandidate, ...]: ...
+
+
+def _finnhub_occurrence_key(row: dict[str, Any], scheduled_date: date) -> str:
+    """Derives a stable occurrence identity for one Finnhub earnings row.
+
+    Finnhub's /calendar/earnings rows normally carry integer `year`/
+    `quarter` fields identifying the fiscal period the release covers - that
+    is what actually distinguishes "AAPL Q3" from "AAPL Q4", independent of
+    `date` (which the row's date field, and therefore this occurrence's
+    scheduled_date, can still be revised across syncs without becoming a
+    different occurrence). Only if a row is missing either field do we fall
+    back to keying on the date itself - an accepted, documented limitation:
+    in that fallback-only case a later date revision of the *same*
+    occurrence would look like a new one, because there is nothing else in
+    the row to identify it by.
+    """
+    year = row.get("year")
+    quarter = row.get("quarter")
+    if isinstance(year, int) and isinstance(quarter, int):
+        return f"{year}Q{quarter}"
+    return f"date:{scheduled_date.isoformat()}"
 
 
 def _map_finnhub_row(row: dict[str, Any]) -> CalendarCandidate | None:
@@ -72,6 +105,7 @@ def _map_finnhub_row(row: dict[str, Any]) -> CalendarCandidate | None:
         event_type="earnings",
         scheduled_date=scheduled_date,
         source="finnhub",
+        occurrence_key=_finnhub_occurrence_key(row, scheduled_date),
     )
 
 

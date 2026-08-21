@@ -55,6 +55,7 @@ class CalendarEvent:
     event_type: str
     scheduled_date: date
     source: str
+    occurrence_key: str
     status: CalendarEventStatus = CalendarEventStatus.CANDIDATE
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
@@ -102,11 +103,14 @@ class CalendarEventRepository(Protocol):
     def untrack(self, calendar_event_id: str) -> CalendarEvent: ...
 
 
-def _identity_key(instrument: str, event_type: str, source: str) -> tuple[str, str, str]:
+def _identity_key(instrument: str, event_type: str, source: str, occurrence_key: str) -> tuple[str, str, str, str]:
     # Deliberately excludes scheduled_date: a provider is free to move a
     # still-candidate event's date on a later sync (see sync_candidates()),
     # so the date can never be part of what identifies "the same event".
-    return (instrument, event_type, source)
+    # occurrence_key is what distinguishes one recurrence from the next
+    # (e.g. "2026Q3" vs "2026Q4") - without it, every quarterly release of
+    # the same instrument+event_type+source would collide into one row.
+    return (instrument, event_type, source, occurrence_key)
 
 
 @dataclass
@@ -126,10 +130,15 @@ class InMemoryCalendarEventRepository:
         ]
         return tuple(sorted(matches, key=lambda event: (event.scheduled_date, event.instrument)))
 
-    def _find_by_identity(self, instrument: str, event_type: str, source: str) -> CalendarEvent | None:
-        key = _identity_key(instrument, event_type, source)
+    def _find_by_identity(
+        self, instrument: str, event_type: str, source: str, occurrence_key: str
+    ) -> CalendarEvent | None:
+        key = _identity_key(instrument, event_type, source, occurrence_key)
         for event in self.events.values():
-            if _identity_key(event.instrument, event.event_type, event.source) == key:
+            if (
+                _identity_key(event.instrument, event.event_type, event.source, event.occurrence_key)
+                == key
+            ):
                 return event
         return None
 
@@ -142,7 +151,9 @@ class InMemoryCalendarEventRepository:
 
         with self.lock:
             for candidate in candidates:
-                existing = self._find_by_identity(candidate.instrument, candidate.event_type, source)
+                existing = self._find_by_identity(
+                    candidate.instrument, candidate.event_type, source, candidate.occurrence_key
+                )
                 if existing is None:
                     event = CalendarEvent(
                         calendar_event_id=new_id(),
@@ -152,6 +163,7 @@ class InMemoryCalendarEventRepository:
                         event_type=candidate.event_type,
                         scheduled_date=candidate.scheduled_date,
                         source=source,
+                        occurrence_key=candidate.occurrence_key,
                         status=CalendarEventStatus.CANDIDATE,
                     )
                     self.events[event.calendar_event_id] = event
@@ -187,7 +199,9 @@ class InMemoryCalendarEventRepository:
         status: CalendarEventStatus = CalendarEventStatus.CANDIDATE,
     ) -> CalendarEvent:
         with self.lock:
-            existing = self._find_by_identity(candidate.instrument, candidate.event_type, candidate.source)
+            existing = self._find_by_identity(
+                candidate.instrument, candidate.event_type, candidate.source, candidate.occurrence_key
+            )
             if existing is not None:
                 return existing
             event = CalendarEvent(
@@ -198,6 +212,7 @@ class InMemoryCalendarEventRepository:
                 event_type=candidate.event_type,
                 scheduled_date=candidate.scheduled_date,
                 source=candidate.source,
+                occurrence_key=candidate.occurrence_key,
                 status=status,
             )
             self.events[event.calendar_event_id] = event

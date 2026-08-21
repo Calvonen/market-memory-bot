@@ -17,6 +17,7 @@ def _candidate(**overrides) -> CalendarCandidate:
         event_type="earnings",
         scheduled_date=date(2026, 10, 29),
         source="finnhub",
+        occurrence_key="2026Q4",
     )
     defaults.update(overrides)
     return CalendarCandidate(**defaults)
@@ -167,6 +168,74 @@ class CalendarApiTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["event_type"], "production_report")
         self.assertEqual(body["status"], "candidate")
+
+    def test_manual_event_works_without_a_fiscal_quarter_occurrence_key(self) -> None:
+        # A one-off production report has no notion of fiscal year/quarter -
+        # the request must not need to supply occurrence_key at all.
+        response = self.client.post(
+            "/api/v1/calendar/manual",
+            json={
+                "company_name": "Afarak Group",
+                "instrument": "AFAGR.HE",
+                "market": "Suomi",
+                "event_type": "production_report",
+                "scheduled_date": "2026-10-15",
+                "source": "manual",
+            },
+            headers={"X-Admin-Token": self.ADMIN_KEY},
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["occurrence_key"], "manual")
+
+        # Idempotent: re-posting the same manual event (still no
+        # occurrence_key) must not create a second row.
+        second = self.client.post(
+            "/api/v1/calendar/manual",
+            json={
+                "company_name": "Afarak Group",
+                "instrument": "AFAGR.HE",
+                "market": "Suomi",
+                "event_type": "production_report",
+                "scheduled_date": "2026-11-01",
+                "source": "manual",
+            },
+            headers={"X-Admin-Token": self.ADMIN_KEY},
+        )
+        self.assertEqual(second.status_code, 201)
+
+        upcoming = self.client.get(
+            "/api/v1/calendar/upcoming",
+            params={"from_date": "2026-01-01", "to_date": "2026-12-31"},
+            headers=self._read_headers(),
+        ).json()
+        self.assertEqual(len([e for e in upcoming if e["instrument"] == "AFAGR.HE"]), 1)
+
+    # -- occurrence identity (P1 fix) surfaced through the API --------------
+
+    def test_tracked_q3_does_not_prevent_q4_candidate_from_appearing_in_upcoming(self) -> None:
+        q3_id = self.calendar_repo.sync_candidates(
+            [_candidate(scheduled_date=date(2026, 7, 30), occurrence_key="2026Q3")],
+            source="finnhub",
+        ).inserted[0]
+        self.calendar_repo.track(q3_id)
+
+        self.calendar_repo.sync_candidates(
+            [_candidate(scheduled_date=date(2026, 10, 29), occurrence_key="2026Q4")],
+            source="finnhub",
+        )
+
+        response = self.client.get(
+            "/api/v1/calendar/upcoming",
+            params={"from_date": "2026-01-01", "to_date": "2026-12-31"},
+            headers=self._read_headers(),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        occurrence_keys = {(e["instrument"], e["occurrence_key"]): e["status"] for e in body}
+        self.assertEqual(occurrence_keys[("AAPL", "2026Q3")], "tracked")
+        self.assertEqual(occurrence_keys[("AAPL", "2026Q4")], "candidate")
 
     # -- service disabled (no read key configured) fails closed -------------
 

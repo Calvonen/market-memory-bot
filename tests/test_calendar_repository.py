@@ -1,4 +1,5 @@
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import date
 
@@ -19,6 +20,7 @@ def _candidate(**overrides) -> CalendarCandidate:
         event_type="earnings",
         scheduled_date=date(2026, 10, 29),
         source="finnhub",
+        occurrence_key="2026Q4",
     )
     defaults.update(overrides)
     return CalendarCandidate(**defaults)
@@ -168,6 +170,71 @@ class CalendarRepositorySyncTests(unittest.TestCase):
         self.assertEqual(still_tracked.company_name, "Apple Inc")
         self.assertEqual(still_tracked.market, "NASDAQ")
 
+    # -- occurrence identity (P1 fix): recurring events -----------------
+
+    def test_q3_and_q4_earnings_of_the_same_company_remain_two_distinct_events(self) -> None:
+        repo = InMemoryCalendarEventRepository()
+
+        result = repo.sync_candidates(
+            [
+                _candidate(scheduled_date=date(2026, 7, 30), occurrence_key="2026Q3"),
+                _candidate(scheduled_date=date(2026, 10, 29), occurrence_key="2026Q4"),
+            ],
+            source="finnhub",
+        )
+
+        self.assertEqual(len(result.inserted), 2)
+        all_events = repo.list_upcoming(date(2026, 1, 1), date(2026, 12, 31))
+        self.assertEqual(len(all_events), 2)
+        self.assertEqual(
+            {e.occurrence_key for e in all_events}, {"2026Q3", "2026Q4"}
+        )
+
+    def test_q3_date_shift_updates_the_same_candidate_not_a_duplicate(self) -> None:
+        repo = InMemoryCalendarEventRepository()
+        repo.sync_candidates(
+            [_candidate(scheduled_date=date(2026, 7, 30), occurrence_key="2026Q3")],
+            source="finnhub",
+        )
+
+        result = repo.sync_candidates(
+            [_candidate(scheduled_date=date(2026, 8, 6), occurrence_key="2026Q3")],
+            source="finnhub",
+        )
+
+        self.assertEqual(result.inserted, ())
+        self.assertEqual(len(result.updated), 1)
+        all_events = repo.list_upcoming(date(2026, 1, 1), date(2026, 12, 31))
+        self.assertEqual(len(all_events), 1)
+        self.assertEqual(all_events[0].scheduled_date, date(2026, 8, 6))
+        self.assertEqual(all_events[0].occurrence_key, "2026Q3")
+
+    def test_tracked_q3_does_not_block_q4_candidate_creation(self) -> None:
+        repo = InMemoryCalendarEventRepository()
+        q3_id = repo.sync_candidates(
+            [_candidate(scheduled_date=date(2026, 7, 30), occurrence_key="2026Q3")],
+            source="finnhub",
+        ).inserted[0]
+        repo.track(q3_id)
+
+        result = repo.sync_candidates(
+            [
+                _candidate(scheduled_date=date(2026, 7, 30), occurrence_key="2026Q3"),
+                _candidate(scheduled_date=date(2026, 10, 29), occurrence_key="2026Q4"),
+            ],
+            source="finnhub",
+        )
+
+        # Q3 (already tracked) is neither duplicated nor overwritten; Q4 is
+        # inserted as its own brand-new candidate, unaffected by Q3's status.
+        self.assertEqual(result.skipped_locked, (q3_id,))
+        self.assertEqual(len(result.inserted), 1)
+        q4 = repo.get(result.inserted[0])
+        assert q4 is not None
+        self.assertEqual(q4.occurrence_key, "2026Q4")
+        self.assertEqual(q4.status, CalendarEventStatus.CANDIDATE)
+        self.assertEqual(repo.get(q3_id).status, CalendarEventStatus.TRACKED)
+
     # -- list_upcoming ---------------------------------------------------
 
     def test_list_upcoming_only_returns_candidate_and_tracked_within_range(self) -> None:
@@ -218,6 +285,33 @@ class CalendarRepositorySyncTests(unittest.TestCase):
         second = repo.add_manual_event(candidate)
 
         self.assertEqual(first.calendar_event_id, second.calendar_event_id)
+
+    # -- concurrency regression (P2): first-insert race ---------------------
+
+    def test_concurrent_first_syncs_of_the_same_new_candidate_never_duplicate_or_error(self) -> None:
+        # InMemoryCalendarEventRepository serializes sync_candidates() calls
+        # behind one lock (unlike the Supabase RPC, which relies on an
+        # atomic INSERT ... ON CONFLICT for this same guarantee - see
+        # upsert_calendar_candidate() in the migration). This is a
+        # defense-in-depth regression proof that racing callers never
+        # observe a duplicate row or a raised exception, whichever
+        # implementation is under test.
+        repo = InMemoryCalendarEventRepository()
+        candidate = _candidate()
+
+        def sync_once() -> int:
+            result = repo.sync_candidates([candidate], source="finnhub")
+            return len(result.inserted)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            insert_counts = list(pool.map(lambda _: sync_once(), range(8)))
+
+        # Exactly one of the eight racing calls actually inserted the row;
+        # every other call observed it as already existing (update/no-op),
+        # never raised, and never created a second row.
+        self.assertEqual(sum(insert_counts), 1)
+        all_events = repo.list_upcoming(date(2026, 1, 1), date(2027, 1, 1))
+        self.assertEqual(len(all_events), 1)
 
 
 if __name__ == "__main__":

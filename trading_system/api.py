@@ -161,6 +161,13 @@ class ManualCalendarEventRequest(BaseModel):
     scheduled_date: date
     source: str = Field(default="manual", min_length=1, max_length=100)
     initial_status: str = Field(default="candidate", pattern="^(candidate|tracked)$")
+    # Disambiguates recurring manual events of the same
+    # (instrument, event_type, source) - e.g. a caller who does know the
+    # fiscal period can pass "2026Q3". Most non-earnings manual events (a
+    # one-off production report) have no such notion and can omit this; the
+    # endpoint then falls back to a fixed per-identity key, matching this
+    # endpoint's original single-slot-per-identity idempotency.
+    occurrence_key: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 def _json_safe(value: Any) -> Any:
@@ -595,6 +602,7 @@ def create_app(
             event_type=request.event_type,
             scheduled_date=request.scheduled_date,
             source=request.source,
+            occurrence_key=request.occurrence_key or "manual",
         )
         try:
             saved = get_calendar_repository().add_manual_event(

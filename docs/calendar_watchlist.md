@@ -22,10 +22,11 @@ of scope here.
 ## Minimal schema
 
 `company_name`, `instrument`, `market`, `event_type`, `scheduled_date`,
-`source`, `status` - deliberately no time-of-day, release URL, consensus, or
-KPI data at the candidate/tracked stage. `event_type` is a plain string, not
-hardcoded to `"earnings"` - a manually-entered event (e.g. a production
-report no calendar provider tracks) is exactly as valid a candidate.
+`source`, `occurrence_key`, `status` - deliberately no time-of-day, release
+URL, consensus, or KPI data at the candidate/tracked stage. `event_type` is
+a plain string, not hardcoded to `"earnings"` - a manually-entered event
+(e.g. a production report no calendar provider tracks) is exactly as valid
+a candidate.
 
 ## Provider interface
 
@@ -36,17 +37,46 @@ without touching `CalendarEventRepository` or the API layer.
 `FinnhubEarningsCalendarProvider` is the first adapter; `FINNHUB_API_KEY` is
 backend-only and is never shipped to the Expo app.
 
+## Occurrence identity
+
+Identity for idempotent sync is `(instrument, event_type, source,
+occurrence_key)` - deliberately excluding `scheduled_date`, since a provider
+is free to move a still-`candidate` event's date on a later sync.
+`occurrence_key` is what keeps recurring releases of the same company from
+colliding: for Finnhub earnings it is derived from the row's `year`/
+`quarter` fields (e.g. `"2026Q3"` vs. `"2026Q4"`), so a Q3 release moving its
+date still updates the same candidate, while Q4 - once it appears - is a
+genuinely new row, even if Q3 is already `tracked`. If Finnhub ever omits
+`year`/`quarter`, `FinnhubEarningsCalendarProvider` falls back to keying on
+the date itself (a documented limitation of that fallback-only path: a later
+date revision would then look like a new occurrence). Manual entries have no
+fiscal quarter by default and fall back to a fixed `"manual"` key per
+`(instrument, event_type, source)` unless the caller supplies an explicit
+`occurrence_key` (e.g. for a manually-tracked recurring report).
+
 ## Idempotent sync
 
-`CalendarEventRepository.sync_candidates()` upserts by `(instrument,
-event_type, source)` - deliberately excluding `scheduled_date`, since a
-provider is free to move a still-`candidate` event's date on a later sync.
-Once a row is `tracked` (or any later stage), a sync can never silently
-overwrite its date, company name, or market, and can never move its status
-back to `candidate`. In Supabase this is enforced atomically by
-`upsert_calendar_candidate()` (a `select ... for update` + conditional
-`update`, see `supabase/migrations/20260824090000_calendar_watchlist_events.sql`),
-not by an application-level check-then-act.
+`CalendarEventRepository.sync_candidates()` upserts by the occurrence
+identity above. Once a row is `tracked` (or any later stage), a sync can
+never silently overwrite its date, company name, or market, and can never
+move its status back to `candidate`. In Supabase this is enforced atomically
+by `upsert_calendar_candidate()` (see
+`supabase/migrations/20260824090000_calendar_watchlist_events.sql`), not by
+an application-level check-then-act:
+
+- **First insert** is a plain `insert ... on conflict (instrument,
+  event_type, source, occurrence_key) do nothing`. This is what makes two
+  concurrent syncs racing to insert the *same* brand-new occurrence
+  race-safe: `select ... for update` cannot lock a row that doesn't exist
+  yet, so without the `on conflict` clause the loser of such a race would
+  hit a raw unique-violation instead of an idempotent result. Postgres
+  itself serializes the two inserts against the same unique index entry;
+  the loser's insert becomes a no-op and falls through to the same locked
+  read below.
+- **Once a row exists**, a `select ... for update` row lock plus a
+  conditional `update` (only when `status = 'candidate'`) is what makes
+  "already tracked -> never silently overwritten" atomic against a
+  concurrent sync or `track()`/`untrack()` call.
 
 ## API
 

@@ -19,6 +19,14 @@ create table if not exists public.calendar_events (
   -- candidate as a provider-sourced earnings date. See
   -- trading_system/calendar_provider.py's CalendarCandidate.
   event_type text not null,
+  -- Disambiguates *which* recurrence of (instrument, event_type, source)
+  -- this row is - e.g. "2026Q3" vs "2026Q4" for two quarterly earnings
+  -- releases of the same company. Deliberately not scheduled_date (see
+  -- below) and deliberately not optional: without it, every future
+  -- occurrence of the same instrument/event_type/source would collide into
+  -- one row, silently losing the next quarter's release once the current
+  -- one is tracked. See CalendarCandidate.occurrence_key.
+  occurrence_key text not null,
   scheduled_date date not null,
   source text not null,
   status text not null default 'candidate' check (
@@ -37,8 +45,8 @@ create table if not exists public.calendar_events (
   -- Identity for idempotent provider sync deliberately excludes
   -- scheduled_date: a provider may move a still-candidate event's date on a
   -- later sync (see upsert_calendar_candidate() below), so the date can
-  -- never be part of what identifies "the same event".
-  unique (instrument, event_type, source)
+  -- never be part of what identifies "the same event occurrence".
+  unique (instrument, event_type, source, occurrence_key)
 );
 
 alter table public.calendar_events enable row level security;
@@ -49,15 +57,34 @@ create index if not exists calendar_events_scheduled_date_idx
   on public.calendar_events(scheduled_date);
 
 -- Idempotent, race-safe upsert used by the provider sync worker (and by
--- manual event entry). A `select ... for update` row lock plus a single
--- transaction is what makes "already tracked/beyond -> never silently
--- overwritten" atomic against a concurrent sync or track()/untrack() call -
--- not just "usually true" from running syncs one at a time.
+-- manual event entry).
+--
+-- The first-insert path is a plain `insert ... on conflict (...) do
+-- nothing`: this is what actually makes concurrent first-sight-of-a-
+-- candidate calls race-safe. `select ... for update` cannot lock a row that
+-- does not exist yet, so two concurrent callers racing to insert the *same*
+-- brand-new occurrence would otherwise both pass a "not found" check and
+-- both attempt to insert, and the loser would fail with a raw unique-
+-- violation instead of getting back an idempotent result. `on conflict ...
+-- do nothing` makes Postgres itself serialize the two inserts against the
+-- same unique index entry: exactly one of them inserts the row, and the
+-- other's insert becomes a no-op (`new_row.id` stays null) rather than
+-- raising - it falls through to the same locked read+update-or-skip path
+-- used for any other already-existing row, so both callers still observe a
+-- consistent, idempotent outcome (one 'inserted', the other 'updated' or
+-- 'skipped_locked' depending on what actually happened to the row by the
+-- time it reads it).
+--
+-- Once a row exists, the `select ... for update` + conditional `update`
+-- pair is what makes "already tracked/beyond -> never silently overwritten"
+-- atomic against a concurrent sync or track()/untrack() call - not just
+-- "usually true" from running syncs one at a time.
 create or replace function public.upsert_calendar_candidate(
   input_company_name text,
   input_instrument text,
   input_market text,
   input_event_type text,
+  input_occurrence_key text,
   input_scheduled_date date,
   input_source text
 ) returns table (
@@ -66,6 +93,7 @@ create or replace function public.upsert_calendar_candidate(
   out_instrument text,
   out_market text,
   out_event_type text,
+  out_occurrence_key text,
   out_scheduled_date date,
   out_source text,
   out_status text,
@@ -77,33 +105,46 @@ declare
   existing_row public.calendar_events%rowtype;
   new_row public.calendar_events%rowtype;
 begin
+  insert into public.calendar_events (
+    company_name, instrument, market, event_type, occurrence_key, scheduled_date, source, status
+  ) values (
+    input_company_name, input_instrument, input_market, input_event_type,
+    input_occurrence_key, input_scheduled_date, input_source, 'candidate'
+  )
+  on conflict (instrument, event_type, source, occurrence_key) do nothing
+  returning * into new_row;
+
+  if new_row.id is not null then
+    return query select
+      new_row.id, new_row.company_name, new_row.instrument, new_row.market,
+      new_row.event_type, new_row.occurrence_key, new_row.scheduled_date, new_row.source,
+      new_row.status, new_row.created_at, new_row.updated_at, 'inserted'::text;
+    return;
+  end if;
+
+  -- Either this call lost the insert race above (a concurrent caller won),
+  -- or the row already existed from an earlier sync - either way, lock it
+  -- now and apply the same "candidate only" update-or-skip rule.
   select * into existing_row
   from public.calendar_events
   where instrument = input_instrument
     and event_type = input_event_type
     and source = input_source
+    and occurrence_key = input_occurrence_key
   for update;
 
   if existing_row.id is null then
-    insert into public.calendar_events (
-      company_name, instrument, market, event_type, scheduled_date, source, status
-    ) values (
-      input_company_name, input_instrument, input_market, input_event_type,
-      input_scheduled_date, input_source, 'candidate'
-    )
-    returning * into new_row;
-
-    return query select
-      new_row.id, new_row.company_name, new_row.instrument, new_row.market,
-      new_row.event_type, new_row.scheduled_date, new_row.source, new_row.status,
-      new_row.created_at, new_row.updated_at, 'inserted'::text;
-    return;
+    -- Should be unreachable (the insert above only no-ops on a genuine
+    -- conflict), but fail loudly rather than return an empty result set if
+    -- it ever happens.
+    raise exception 'calendar_event_upsert_race_unresolved';
   end if;
 
   if existing_row.status <> 'candidate' then
     return query select
       existing_row.id, existing_row.company_name, existing_row.instrument, existing_row.market,
-      existing_row.event_type, existing_row.scheduled_date, existing_row.source, existing_row.status,
+      existing_row.event_type, existing_row.occurrence_key, existing_row.scheduled_date,
+      existing_row.source, existing_row.status,
       existing_row.created_at, existing_row.updated_at, 'skipped_locked'::text;
     return;
   end if;
@@ -118,8 +159,8 @@ begin
 
   return query select
     new_row.id, new_row.company_name, new_row.instrument, new_row.market,
-    new_row.event_type, new_row.scheduled_date, new_row.source, new_row.status,
-    new_row.created_at, new_row.updated_at, 'updated'::text;
+    new_row.event_type, new_row.occurrence_key, new_row.scheduled_date, new_row.source,
+    new_row.status, new_row.created_at, new_row.updated_at, 'updated'::text;
 end;
 $$;
 
@@ -141,6 +182,7 @@ create or replace function public.transition_calendar_event_status(
   out_instrument text,
   out_market text,
   out_event_type text,
+  out_occurrence_key text,
   out_scheduled_date date,
   out_source text,
   out_status text,
@@ -164,7 +206,8 @@ begin
   if existing_row.status = input_to_status then
     return query select
       existing_row.id, existing_row.company_name, existing_row.instrument, existing_row.market,
-      existing_row.event_type, existing_row.scheduled_date, existing_row.source, existing_row.status,
+      existing_row.event_type, existing_row.occurrence_key, existing_row.scheduled_date,
+      existing_row.source, existing_row.status,
       existing_row.created_at, existing_row.updated_at, 'noop_already'::text;
     return;
   end if;
@@ -181,8 +224,8 @@ begin
 
   return query select
     new_row.id, new_row.company_name, new_row.instrument, new_row.market,
-    new_row.event_type, new_row.scheduled_date, new_row.source, new_row.status,
-    new_row.created_at, new_row.updated_at, 'updated'::text;
+    new_row.event_type, new_row.occurrence_key, new_row.scheduled_date, new_row.source,
+    new_row.status, new_row.created_at, new_row.updated_at, 'updated'::text;
 end;
 $$;
 

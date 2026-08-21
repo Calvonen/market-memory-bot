@@ -35,6 +35,8 @@ class FinnhubEarningsCalendarProviderMappingTests(unittest.TestCase):
                         "date": "2026-10-29",
                         "name": "Apple Inc",
                         "exchange": "NASDAQ",
+                        "year": 2026,
+                        "quarter": 4,
                     }
                 ]
             }
@@ -52,6 +54,7 @@ class FinnhubEarningsCalendarProviderMappingTests(unittest.TestCase):
                     event_type="earnings",
                     scheduled_date=date(2026, 10, 29),
                     source="finnhub",
+                    occurrence_key="2026Q4",
                 ),
             ),
         )
@@ -71,6 +74,44 @@ class FinnhubEarningsCalendarProviderMappingTests(unittest.TestCase):
         self.assertEqual(candidate.market, "Unknown")
         self.assertEqual(candidate.event_type, "earnings")
         self.assertEqual(candidate.source, "finnhub")
+
+    # -- occurrence identity (P1 fix): distinguishing recurring releases ----
+
+    def test_two_quarterly_releases_of_the_same_symbol_get_distinct_occurrence_keys(self) -> None:
+        provider = self._provider(
+            {
+                "earningsCalendar": [
+                    {"symbol": "AAPL", "date": "2026-07-30", "year": 2026, "quarter": 3},
+                    {"symbol": "AAPL", "date": "2026-10-29", "year": 2026, "quarter": 4},
+                ]
+            }
+        )
+
+        candidates = provider.fetch_upcoming(date(2026, 1, 1), date(2026, 12, 31))
+
+        self.assertEqual(len(candidates), 2)
+        occurrence_keys = {c.occurrence_key for c in candidates}
+        self.assertEqual(occurrence_keys, {"2026Q3", "2026Q4"})
+        self.assertTrue(all(c.instrument == "AAPL" for c in candidates))
+
+    def test_occurrence_key_falls_back_to_date_when_finnhub_omits_fiscal_period(self) -> None:
+        # Documented limitation of this fallback-only path: without
+        # year/quarter there is nothing else in the row to identify the
+        # occurrence by, so the key is derived from the date itself.
+        provider = self._provider({"earningsCalendar": [{"symbol": "HAS.L", "date": "2026-08-20"}]})
+
+        candidates = provider.fetch_upcoming(date(2026, 8, 1), date(2026, 9, 1))
+
+        self.assertEqual(candidates[0].occurrence_key, "date:2026-08-20")
+
+    def test_occurrence_key_falls_back_to_date_when_only_one_fiscal_field_present(self) -> None:
+        provider = self._provider(
+            {"earningsCalendar": [{"symbol": "HAS.L", "date": "2026-08-20", "year": 2026}]}
+        )
+
+        candidates = provider.fetch_upcoming(date(2026, 8, 1), date(2026, 9, 1))
+
+        self.assertEqual(candidates[0].occurrence_key, "date:2026-08-20")
 
     def test_drops_rows_missing_symbol_or_date_without_failing_the_whole_batch(self) -> None:
         provider = self._provider(

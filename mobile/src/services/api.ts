@@ -194,6 +194,10 @@ export type CalendarEvent = {
   instrument: string;
   market: string;
   event_type: string;
+  // Disambiguates recurring occurrences of the same instrument/event_type/
+  // source (e.g. "2026Q3" vs "2026Q4") - opaque here, never parsed by the
+  // mobile app.
+  occurrence_key: string;
   scheduled_date: string;
   source: string;
   status: 'candidate' | 'tracked' | 'research' | 'decision_to_prepare_strategy' | 'enrich_event_details' | 'preview' | 'approve';
