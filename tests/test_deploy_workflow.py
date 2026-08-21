@@ -96,7 +96,7 @@ class DeployWorkflowGateTests(unittest.TestCase):
 
     def test_gate_sources_env_from_the_backend_env_file_not_a_literal(self) -> None:
         body = self._deploy_step_body()
-        self.assertIn("source /home/marko/marketai-repo/.env", body)
+        self.assertIn("source /home/marko/marketai/.env", body)
 
     def test_compile_step_covers_the_new_scripts_directory(self) -> None:
         compile_start = self.workflow_source.index("Compile Python")
