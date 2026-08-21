@@ -23,6 +23,7 @@ export default function EventDetailScreen() {
   const [run, setRun] = useState<PaperRun | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!eventId) return;
@@ -35,12 +36,17 @@ export default function EventDetailScreen() {
     }
     // The paper run is a separate, optional overlay: an event whose release
     // hasn't happened yet (or whose paper-status lookup fails) must still
-    // show the pre-release expectation data fetched above.
+    // show the pre-release expectation data fetched above. A fetch failure
+    // here is reported distinctly (statusError) from "not released yet"
+    // (run === null with no error) so the analysis section can say so
+    // explicitly instead of silently looking like a pre-release event.
     try {
       const status = await getPaperStatus(eventId);
       setRun(status.paper_run);
-    } catch {
+      setStatusError(null);
+    } catch (err) {
       setRun(null);
+      setStatusError(err instanceof Error ? err.message : 'Tuntematon virhe');
     }
   }, [eventId]);
 
@@ -86,15 +92,7 @@ export default function EventDetailScreen() {
     run?.status === 'waiting_confirmation' ? run.message : null;
   const isReleased = Boolean(run);
 
-  const statusText = !run
-    ? 'Odottaa virallista tulosjulkistusta'
-    : run.status === 'waiting_confirmation'
-      ? 'Odottaa vahvistusta'
-      : run.status === 'expired_no_trade'
-        ? 'Vanhentui – ei kauppaa'
-        : run.status === 'paper_executed'
-          ? 'Paperikauppa toteutettu'
-          : 'Käsitellään';
+  const statusText = describeStatus(run, statusError);
 
   const scheduled = new Date(`${event.scheduled_date}T12:00:00`);
   const dateLabel = Number.isNaN(scheduled.getTime())
@@ -261,6 +259,17 @@ export default function EventDetailScreen() {
             ) : null}
           </View>
         </>
+      ) : statusError ? (
+        <>
+          <Text style={styles.sectionTitle}>ANALYYSI</Text>
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>ANALYYSIN TILA</Text>
+            <Text style={styles.errorText}>
+              Tila ei saatavilla: analyysin ja paperikaupan tietoja ei juuri nyt saatu
+              haettua ({statusError}). Odotukset yllä ovat silti ajan tasalla.
+            </Text>
+          </View>
+        </>
       ) : null}
 
       <Text style={styles.footer}>MarketAI • vain PAPER-kaupankäynti</Text>
@@ -293,6 +302,21 @@ function MetricCard({ title, value, state }: { title: string; value: string; sta
       <Text style={styles.metricState}>{state}</Text>
     </View>
   );
+}
+
+function describeStatus(run: PaperRun | null, statusError: string | null): string {
+  if (statusError) return 'Tila ei saatavilla';
+  if (!run) return 'Odottaa virallista tulosjulkistusta';
+  switch (run.status) {
+    case 'waiting_confirmation':
+      return 'Odottaa vahvistusta';
+    case 'expired_no_trade':
+      return 'Vanhentui – ei kauppaa';
+    case 'paper_executed':
+      return 'Paperikauppa toteutettu';
+    default:
+      return 'Käsitellään';
+  }
 }
 
 function localizeDirection(direction?: string) {

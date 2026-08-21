@@ -1,3 +1,8 @@
+import json
+import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -109,9 +114,33 @@ class MobileSourceTests(unittest.TestCase):
         get_status_index = self.detail_source.index("getPaperStatus(eventId)")
         self.assertLess(set_event_index, get_status_index)
         status_try_start = self.detail_source.rindex("try {", 0, get_status_index)
-        status_catch_start = self.detail_source.index("} catch {", status_try_start)
-        status_catch_end = self.detail_source.index("}", status_catch_start + len("} catch {"))
-        self.assertIn("setRun(null)", self.detail_source[status_catch_start:status_catch_end])
+        status_catch_start = self.detail_source.index("} catch (err) {", status_try_start)
+        status_catch_end = self.detail_source.index("}", status_catch_start + len("} catch (err) {"))
+        catch_body = self.detail_source[status_catch_start:status_catch_end]
+        # The failure must be recorded separately from "not released yet"
+        # (run === null with no error), not silently swallowed - so the
+        # analysis section can say the status specifically failed to load.
+        self.assertIn("setRun(null)", catch_body)
+        self.assertIn("setStatusError(", catch_body)
+
+    def test_paper_status_failure_shows_an_explicit_error_in_the_analysis_section(self) -> None:
+        # Requirement: pre-release expectation data (consensus/KPI/bull/
+        # base/bear/triggers/invalidation/source) stays visible regardless,
+        # while the analysis/paper section shows a distinct "not available"
+        # message instead of silently looking like the event just hasn't
+        # released yet.
+        self.assertIn("statusError ? (", self.detail_source)
+        analysis_error_start = self.detail_source.index("statusError ? (")
+        analysis_error_end = self.detail_source.index(") : null}", analysis_error_start)
+        analysis_error_block = self.detail_source[analysis_error_start:analysis_error_end]
+        self.assertIn("Tila ei saatavilla", analysis_error_block)
+        self.assertIn("{statusError}", analysis_error_block)
+
+        # And that block must be the sibling "else" of the isReleased dashboard,
+        # not a replacement for it - the full dashboard still wins once a real
+        # paper run is present.
+        is_released_index = self.detail_source.index("{isReleased ? (")
+        self.assertLess(is_released_index, analysis_error_start)
 
     # -- settings/editor draft never bypasses admin auth with the read key -
 
@@ -159,6 +188,53 @@ class MobileSourceTests(unittest.TestCase):
         default_case = function_body.index("default:")
         default_body = function_body[default_case:]
         self.assertNotIn("'USA'", default_body)
+
+    def test_market_for_instrument_actually_classifies_unknown_european_suffixes(self) -> None:
+        # Behavioral proof, not just a structural string check: extract the
+        # real marketForInstrument() body from upcoming.tsx, strip its (tiny,
+        # type-annotation-only) TypeScript syntax, and execute it with node
+        # for a handful of unmapped European suffixes (.PA Paris, .AS
+        # Amsterdam, .SW Swiss) plus the mapped/no-suffix baselines.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        function_start = self.upcoming_source.index("function marketForInstrument(")
+        function_end = self.upcoming_source.index("\n}\n", function_start) + len("\n}")
+        function_source = self.upcoming_source[function_start:function_end]
+
+        # Strip the parameter/return type annotations - the only
+        # TypeScript-specific syntax in this otherwise-plain-JS function.
+        js_function = re.sub(r":\s*string\b", "", function_source, count=2)
+        self.assertNotIn(": string", js_function)
+
+        cases = ["BNPP.PA", "ASML.AS", "NOVN.SW", "AAPL", "HAS.L"]
+        script = (
+            js_function
+            + "\nconsole.log(JSON.stringify("
+            + json.dumps(cases)
+            + ".map(marketForInstrument)));\n"
+        )
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = dict(zip(cases, json.loads(result.stdout)))
+
+        for suffix_case in ("BNPP.PA", "ASML.AS", "NOVN.SW"):
+            self.assertNotEqual(outputs[suffix_case], "USA", outputs)
+
+        self.assertEqual(outputs["AAPL"], "USA")
+        self.assertEqual(outputs["HAS.L"], "Iso-Britannia")
 
     def test_upcoming_screen_has_filter_and_tracking_ui(self) -> None:
         self.assertIn("Hae tickerillä", self.upcoming_source)
