@@ -52,12 +52,15 @@ jobs:
           /home/marko/marketai-repo/.venv/bin/pip install -r requirements.txt
 
       - name: Fast-forward production checkout to tested commit
+        id: fast_forward
         env:
           DEPLOY_SHA: ${{ github.sha }}
         run: |
           cd /home/marko/marketai-repo
           test "$(git branch --show-current)" = "feature/trading-system-foundation"
           test -z "$(git status --porcelain --untracked-files=no)"
+          PREVIOUS_SHA="$(git rev-parse HEAD 2>/dev/null || true)"
+          echo "previous_sha=${PREVIOUS_SHA}" >> "$GITHUB_OUTPUT"
           git fetch origin feature/trading-system-foundation
           git merge --ff-only "$DEPLOY_SHA"
 
@@ -82,8 +85,96 @@ jobs:
           cat /tmp/marketai-health.json
           /usr/bin/systemctl is-active --quiet marketai-hays-release.service
 
+      # Fail-safe guard: an OTA update can only contain JS-bundle-level changes.
+      # If anything that affects the native build (dependencies, app config,
+      # EAS config, native/plugin sources) changed since the previously
+      # deployed commit, publishing an OTA would ship a bundle that the
+      # currently installed native binary cannot run. In that case we must
+      # skip OTA and require a fresh EAS build / version bump instead.
+      - name: Detect native-affecting mobile changes
+        id: native_guard
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
+          PREVIOUS_SHA: ${{ steps.fast_forward.outputs.previous_sha }}
+        run: |
+          cd /home/marko/marketai-repo || exit 1
+
+          # Anything under mobile/ that influences the compiled native app
+          # rather than just the JS bundle: dependency manifests/lockfiles,
+          # Expo/EAS config, native project folders and config plugins.
+          NATIVE_PATTERNS='^mobile/package\.json$|^mobile/package-lock\.json$|^mobile/yarn\.lock$|^mobile/pnpm-lock\.yaml$|^mobile/app\.json$|^mobile/app\.config\.(js|ts|json)$|^mobile/eas\.json$|^mobile/ios/|^mobile/android/|^mobile/plugins/|\.podspec$'
+
+          DELIM="GITHUB_OUTPUT_EOF_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+
+          if [ -z "$PREVIOUS_SHA" ]; then
+            echo "native_change=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "reason<<$DELIM"
+              echo "No previous deployed commit could be determined (first deploy on this host). Treating this as a native change and skipping OTA to be safe."
+              echo "$DELIM"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$PREVIOUS_SHA" = "$DEPLOY_SHA" ]; then
+            echo "native_change=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "reason<<$DELIM"
+              echo "No new commits since the previously deployed commit (${PREVIOUS_SHA})."
+              echo "$DELIM"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git cat-file -e "${PREVIOUS_SHA}^{commit}" 2>/dev/null; then
+            echo "native_change=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "reason<<$DELIM"
+              echo "Previously deployed commit ${PREVIOUS_SHA} is not present in this checkout's history, so the diff cannot be verified. Treating this as a native change and skipping OTA to be safe."
+              echo "$DELIM"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CHANGED_FILES="$(git diff --name-only "${PREVIOUS_SHA}" "${DEPLOY_SHA}")"
+          NATIVE_FILES="$(printf '%s\n' "$CHANGED_FILES" | grep -E "$NATIVE_PATTERNS" || true)"
+
+          if [ -n "$NATIVE_FILES" ]; then
+            echo "native_change=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "reason<<$DELIM"
+              echo "Native-affecting mobile files changed between ${PREVIOUS_SHA:0:7} and ${DEPLOY_SHA:0:7}:"
+              echo "$NATIVE_FILES"
+              echo "A new EAS build (and, if app.json/eas.json version fields changed, a version bump) is required before these changes can reach devices. Run an EAS build for the affected platform(s) first."
+              echo "$DELIM"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "native_change=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "reason<<$DELIM"
+              echo "No native-affecting mobile files changed between ${PREVIOUS_SHA:0:7} and ${DEPLOY_SHA:0:7}. Safe to publish an OTA update."
+              echo "$DELIM"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report native-change guard result
+        if: always() && steps.native_guard.outcome == 'success'
+        env:
+          NATIVE_CHANGE: ${{ steps.native_guard.outputs.native_change }}
+          REASON: ${{ steps.native_guard.outputs.reason }}
+        run: |
+          {
+            echo "### OTA native-change guard"
+            echo
+            echo "native_change=${NATIVE_CHANGE}"
+            echo
+            echo '```'
+            echo "$REASON"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Publish preview OTA update
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.native_guard.outputs.native_change != 'true'
         working-directory: mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
@@ -95,8 +186,16 @@ jobs:
             --message "GitHub ${GITHUB_SHA}" \
             --non-interactive
 
+      - name: Skip preview OTA update (native change detected)
+        if: github.event_name == 'push' && steps.native_guard.outputs.native_change == 'true'
+        env:
+          REASON: ${{ steps.native_guard.outputs.reason }}
+        run: |
+          echo "::warning::Skipping preview OTA publish - native-affecting mobile files changed since the previous deploy. Build and restart still completed normally."
+          echo "$REASON"
+
       - name: Publish manually selected OTA update
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && steps.native_guard.outputs.native_change != 'true'
         working-directory: mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
@@ -108,3 +207,12 @@ jobs:
             --environment "$OTA_CHANNEL" \
             --message "Manual GitHub ${GITHUB_SHA}" \
             --non-interactive
+
+      - name: Refuse manual OTA update (native change detected)
+        if: github.event_name == 'workflow_dispatch' && steps.native_guard.outputs.native_change == 'true'
+        env:
+          REASON: ${{ steps.native_guard.outputs.reason }}
+        run: |
+          echo "::error::Refusing to publish a manual OTA update - native-affecting mobile files changed since the previous deploy. A new EAS build / version bump is required first; this guard cannot be bypassed by a manual run."
+          echo "$REASON"
+          exit 1
