@@ -2,41 +2,167 @@ import unittest
 from pathlib import Path
 
 
-HOME_SCREEN = Path("mobile/src/app/index.tsx")
+HOME_SCREEN = Path("mobile/src/app/(tabs)/index.tsx")
+EVENT_DETAIL_SCREEN = Path("mobile/src/app/events/[eventId].tsx")
+EVENT_EDIT_SCREEN = Path("mobile/src/app/events/[eventId]/edit.tsx")
+UPCOMING_SCREEN = Path("mobile/src/app/events/upcoming.tsx")
+API_SERVICE = Path("mobile/src/services/api.ts")
 NATIVE_TABS = Path("mobile/src/components/app-tabs.tsx")
+MOBILE_SRC_ROOT = Path("mobile/src")
 
 
 class MobileSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.source = HOME_SCREEN.read_text(encoding="utf-8")
+        cls.home_source = HOME_SCREEN.read_text(encoding="utf-8")
+        cls.detail_source = EVENT_DETAIL_SCREEN.read_text(encoding="utf-8")
+        cls.edit_source = EVENT_EDIT_SCREEN.read_text(encoding="utf-8")
+        cls.upcoming_source = UPCOMING_SCREEN.read_text(encoding="utf-8")
+        cls.api_source = API_SERVICE.read_text(encoding="utf-8")
+
+    # -- regression: detail page keeps the previous Hays dashboard info ----
 
     def test_rejected_risk_reasons_remain_visible_with_quantity_and_reward_risk(self) -> None:
-        self.assertIn("risk.reasons.join(' • ')", self.source)
-        self.assertIn("risk?.status === 'REJECT'", self.source)
-        self.assertIn("Enimmäismäärä ${risk.max_quantity", self.source)
-        self.assertIn("Tuotto/riski ${risk.reward_risk", self.source)
+        self.assertIn("risk.reasons.join(' • ')", self.detail_source)
+        self.assertIn("risk?.status === 'REJECT'", self.detail_source)
+        self.assertIn("Enimmäismäärä ${risk.max_quantity", self.detail_source)
+        self.assertIn("Tuotto/riski ${risk.reward_risk", self.detail_source)
 
     def test_waiting_confirmation_preserves_the_persisted_reason(self) -> None:
         self.assertIn(
             "run?.status === 'waiting_confirmation' ? run.message : null",
-            self.source,
+            self.detail_source,
         )
-        self.assertIn("{confirmationReason}", self.source)
+        self.assertIn("{confirmationReason}", self.detail_source)
 
     def test_unified_navigation_preserves_event_dashboard(self) -> None:
         tabs = NATIVE_TABS.read_text(encoding="utf-8")
         for route in ('name="index"', 'name="memory"', 'name="scanner"', 'name="trades"', 'name="settings"'):
             self.assertIn(route, tabs)
-        self.assertIn("paper-status", self.source)
+        self.assertIn("paper-status", self.api_source)
+
+    # -- home screen: generic tracked-events list, not hardcoded to Hays ---
+
+    def test_home_screen_uses_the_events_list_endpoint(self) -> None:
+        self.assertIn("getEvents", self.home_source)
+        self.assertIn("/api/v1/events", self.api_source)
+        self.assertIn("export function getEvents(", self.api_source)
+
+    def test_hays_is_no_longer_hardcoded_as_the_only_event(self) -> None:
+        self.assertNotIn("hays-fy2026-results", self.home_source)
+        self.assertNotIn("Hays plc", self.home_source)
+        # The home screen must render whatever /api/v1/events returns.
+        self.assertIn("events?.map", self.home_source)
+
+    def test_home_screen_does_not_build_its_own_fetch_or_auth_logic(self) -> None:
+        self.assertNotIn("fetch(", self.home_source)
+        self.assertNotIn("X-MarketAI-Key", self.home_source)
+        self.assertNotIn("EXPO_PUBLIC_MARKETAI_READ_API_KEY", self.home_source)
+
+    def test_home_screen_links_to_upcoming_events(self) -> None:
+        self.assertIn("/events/upcoming", self.home_source)
+
+    # -- event card navigates to the detail route with the event id --------
+
+    def test_event_card_navigates_to_detail_with_event_id(self) -> None:
+        self.assertIn("pathname: '/events/[eventId]'", self.home_source)
+        self.assertIn("params: { eventId: event.event_id }", self.home_source)
+
+    # -- detail screen fetches the event and its paper status --------------
+
+    def test_detail_screen_fetches_event_and_paper_status(self) -> None:
+        self.assertIn("getEvent(eventId)", self.detail_source)
+        self.assertIn("getPaperStatus(eventId)", self.detail_source)
+        self.assertIn("export function getEvent(", self.api_source)
+        self.assertIn("export function getPaperStatus(", self.api_source)
+        self.assertIn("/api/v1/events/${encodeURIComponent(eventId)}`", self.api_source)
+        self.assertIn("/paper-status`", self.api_source)
+
+    def test_detail_screen_shows_pre_release_expectation_fields(self) -> None:
+        for field in (
+            "event.consensus",
+            "event.important_kpis",
+            "event.bull_case",
+            "event.base_case",
+            "event.bear_case",
+            "event.triggers",
+            "event.invalidation_conditions",
+            "event.source_name",
+            "event.source_as_of",
+        ):
+            self.assertIn(field, self.detail_source)
+
+    def test_detail_screen_is_not_hardcoded_to_hays(self) -> None:
+        self.assertNotIn("hays-fy2026-results", self.detail_source)
+        self.assertIn("useLocalSearchParams", self.detail_source)
+
+    def test_detail_screen_links_to_settings_editor(self) -> None:
+        self.assertIn("pathname: '/events/[eventId]/edit'", self.detail_source)
+
+    # -- settings/editor draft never bypasses admin auth with the read key -
+
+    def test_edit_screen_never_calls_the_write_endpoint(self) -> None:
+        self.assertNotIn("expectation-versions", self.edit_source)
+        self.assertNotIn("X-Admin-Token", self.edit_source)
+        self.assertNotIn("MARKETAI_ADMIN_API_KEY", self.edit_source)
+
+    def test_edit_screen_exposes_the_editable_fields(self) -> None:
+        for label in (
+            "Konsensusmetriikat",
+            "Tärkeimmät KPI",
+            "Bull-skenaario",
+            "Base-skenaario",
+            "Bear-skenaario",
+            "Triggerit",
+            "Mitätöintiehdot",
+            "Lähde",
+        ):
+            self.assertIn(label, self.edit_source)
+
+    # -- upcoming/calendar foundation page: no fake data --------------------
+
+    def test_upcoming_screen_only_reads_the_real_events_endpoint(self) -> None:
+        self.assertIn("getEvents", self.upcoming_source)
+        self.assertNotIn("fetch(", self.upcoming_source)
+
+    def test_upcoming_screen_has_no_mocked_calendar_data(self) -> None:
+        for forbidden in ("mock", "Mock", "MOCK", "fakeEvents", "dummy", "sampleEvents"):
+            self.assertNotIn(forbidden, self.upcoming_source)
+
+    def test_upcoming_screen_has_filter_and_tracking_ui(self) -> None:
+        self.assertIn("Hae tickerillä", self.upcoming_source)
+        self.assertIn("MARKKINA", self.upcoming_source)
+        self.assertIn("JULKAISUPÄIVÄ", self.upcoming_source)
+        self.assertIn("Seurannassa", self.upcoming_source)
+
+    # -- security boundary: admin key never present in the mobile app -------
+
+    def test_admin_api_key_is_absent_from_the_mobile_source_tree(self) -> None:
+        offending: list[str] = []
+        for path in MOBILE_SRC_ROOT.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix not in {".ts", ".tsx", ".js", ".jsx", ".json"}:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if "MARKETAI_ADMIN_API_KEY" in text or "X-Admin-Token" in text:
+                offending.append(str(path))
+        self.assertEqual(offending, [])
+
+    def test_no_expo_public_env_var_carries_the_admin_key_name(self) -> None:
+        for path in MOBILE_SRC_ROOT.rglob("*.ts*"):
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            self.assertNotIn("EXPO_PUBLIC_MARKETAI_ADMIN", text)
+
+    # -- market memory / scanner regressions (unchanged after the move) -----
 
     def test_market_memory_screen_has_mobile_states(self) -> None:
-        source = Path("mobile/src/app/memory.tsx").read_text(encoding="utf-8")
+        source = Path("mobile/src/app/(tabs)/memory.tsx").read_text(encoding="utf-8")
         for text in ("Ticker", "Analysoi", "ActivityIndicator", "Tärkeimmät analogiat"):
             self.assertIn(text, source)
 
     def test_new_market_memory_request_hides_previous_result(self) -> None:
-        source = Path("mobile/src/app/memory.tsx").read_text(encoding="utf-8")
+        source = Path("mobile/src/app/(tabs)/memory.tsx").read_text(encoding="utf-8")
         request_start = source.index("async function analyze(")
         clear_data = source.index("setData(null)", request_start)
         start_loading = source.index("setLoading(true)", request_start)
@@ -50,7 +176,7 @@ class MobileSourceTests(unittest.TestCase):
         self.assertIn("!loading && !error && data &&", source)
 
     def test_ticker_edit_clears_stale_suggestions_and_invalidates_in_flight_request(self) -> None:
-        source = Path("mobile/src/app/memory.tsx").read_text(encoding="utf-8")
+        source = Path("mobile/src/app/(tabs)/memory.tsx").read_text(encoding="utf-8")
         handler_start = source.index("onChangeText={(value) => {")
         handler_end = source.index("}}", handler_start)
         handler_body = source[handler_start:handler_end]
@@ -70,7 +196,7 @@ class MobileSourceTests(unittest.TestCase):
         self.assertIn("requestId === latestSuggestionRequestId.current", effect_body)
 
     def test_selecting_a_suggestion_suppresses_further_suggestions(self) -> None:
-        source = Path("mobile/src/app/memory.tsx").read_text(encoding="utf-8")
+        source = Path("mobile/src/app/(tabs)/memory.tsx").read_text(encoding="utf-8")
 
         analyze_start = source.index("async function analyze(")
         analyze_end = source.index("\n  return (", analyze_start)
@@ -101,7 +227,7 @@ class MobileSourceTests(unittest.TestCase):
         self.assertIn("setHasEditedTicker(true)", source[handler_start:handler_end])
 
     def test_only_selected_suggestion_ends_suggestion_mode(self) -> None:
-        source = Path("mobile/src/app/memory.tsx").read_text(encoding="utf-8")
+        source = Path("mobile/src/app/(tabs)/memory.tsx").read_text(encoding="utf-8")
 
         analyze_start = source.index("async function analyze(")
         analyze_end = source.index("\n  return (", analyze_start)
@@ -121,7 +247,7 @@ class MobileSourceTests(unittest.TestCase):
         self.assertNotIn("setHasEditedTicker(false)", outside_selected_ticker_block)
 
     def test_failed_direct_submit_keeps_suggestion_mode_available(self) -> None:
-        source = Path("mobile/src/app/memory.tsx").read_text(encoding="utf-8")
+        source = Path("mobile/src/app/(tabs)/memory.tsx").read_text(encoding="utf-8")
 
         analyze_start = source.index("async function analyze(")
         analyze_end = source.index("\n  return (", analyze_start)
@@ -149,7 +275,7 @@ class MobileSourceTests(unittest.TestCase):
         self.assertIn("data?.ticker !== query.toUpperCase()", show_suggestions_expr)
 
     def test_market_selection_invalidates_active_scan_before_new_load(self) -> None:
-        source = Path("mobile/src/app/scanner.tsx").read_text(encoding="utf-8")
+        source = Path("mobile/src/app/(tabs)/scanner.tsx").read_text(encoding="utf-8")
 
         invalidate_start = source.index("function invalidateScan() {")
         invalidate_end = source.index("\n  }", invalidate_start)
@@ -181,7 +307,7 @@ class MobileSourceTests(unittest.TestCase):
         self.assertIn("invalidateScan();\n              setScope(item);", source)
 
     def test_reselecting_the_same_country_is_a_no_op(self) -> None:
-        source = Path("mobile/src/app/scanner.tsx").read_text(encoding="utf-8")
+        source = Path("mobile/src/app/(tabs)/scanner.tsx").read_text(encoding="utf-8")
 
         handler_start = source.index("onPress={() => {", source.index("COUNTRIES.map"))
         handler_end = source.index("}}", handler_start)
@@ -198,7 +324,7 @@ class MobileSourceTests(unittest.TestCase):
         self.assertLess(invalidate_index, set_country_index)
 
     def test_reselecting_the_same_scope_is_a_no_op(self) -> None:
-        source = Path("mobile/src/app/scanner.tsx").read_text(encoding="utf-8")
+        source = Path("mobile/src/app/(tabs)/scanner.tsx").read_text(encoding="utf-8")
 
         handler_start = source.index("onPress={() => {", source.index("SCOPES.map"))
         handler_end = source.index("}}", handler_start)
@@ -215,7 +341,7 @@ class MobileSourceTests(unittest.TestCase):
         self.assertLess(invalidate_index, set_scope_index)
 
     def test_an_actual_market_change_still_invalidates_and_reloads(self) -> None:
-        source = Path("mobile/src/app/scanner.tsx").read_text(encoding="utf-8")
+        source = Path("mobile/src/app/(tabs)/scanner.tsx").read_text(encoding="utf-8")
 
         country_handler_start = source.index("onPress={() => {", source.index("COUNTRIES.map"))
         country_handler_end = source.index("}}", country_handler_start)
