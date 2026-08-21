@@ -1,5 +1,5 @@
 import { Link } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -61,12 +61,21 @@ export default function UpcomingEventsScreen() {
   const [search, setSearch] = useState('');
   const [market, setMarket] = useState<string>('Kaikki');
   const [rangeDays, setRangeDays] = useState<number | null>(null);
+  const latestLoadId = useRef(0);
 
   const load = useCallback(async () => {
+    // Guard against overlapping load() calls (e.g. pull-to-refresh fired
+    // again while the first getEvents() is still pending): an older
+    // response resolving after a newer one must never replace the already
+    // refreshed list, or set an obsolete error over a successful refresh.
+    const loadId = ++latestLoadId.current;
     try {
       setError(null);
-      setEvents(await getEvents());
+      const list = await getEvents();
+      if (loadId !== latestLoadId.current) return;
+      setEvents(list);
     } catch (err) {
+      if (loadId !== latestLoadId.current) return;
       setError(err instanceof Error ? err.message : 'Tuntematon virhe');
     }
   }, []);

@@ -241,6 +241,24 @@ class MobileSourceTests(unittest.TestCase):
         self.assertIn("getEvents", self.upcoming_source)
         self.assertNotIn("fetch(", self.upcoming_source)
 
+    def test_upcoming_screen_ignores_stale_overlapping_load_responses(self) -> None:
+        # Same race as the home/detail screens: pull-to-refresh firing
+        # load() again while the first getEvents() is still pending must
+        # not let an older response replace an already-refreshed list or
+        # set an obsolete error over a successful refresh.
+        load_start = self.upcoming_source.index("const load = useCallback(async () => {")
+        load_end = self.upcoming_source.index("}, []);", load_start)
+        load_body = self.upcoming_source[load_start:load_end]
+
+        self.assertIn("const loadId = ++latestLoadId.current;", load_body)
+        self.assertIn(
+            "if (loadId !== latestLoadId.current) return;\n      setEvents(list);", load_body
+        )
+        self.assertIn(
+            "if (loadId !== latestLoadId.current) return;\n      setError(err instanceof Error ? err.message : 'Tuntematon virhe');",
+            load_body,
+        )
+
     def test_upcoming_screen_has_no_mocked_calendar_data(self) -> None:
         for forbidden in ("mock", "Mock", "MOCK", "fakeEvents", "dummy", "sampleEvents"):
             self.assertNotIn(forbidden, self.upcoming_source)
