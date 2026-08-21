@@ -105,6 +105,16 @@ Current endpoints:
 
 Every write endpoint creates a new version; none of them edit a previous version in place.
 
+## Deploy gate: Supabase schema verification
+
+The strategy-draft approval flow's backend code calls Supabase objects - `public.event_strategy_approvals`, `public.approve_strategy_draft()`, `public.insert_next_expectation_version()` - that exist only once their migrations (`supabase/migrations/20260821090000_event_strategy_approvals.sql`, `20260821140000_shared_expectation_version_lock.sql`, `20260822090000_verify_strategy_draft_schema.sql`) have been applied to the target Supabase project.
+
+**Migrations are applied out-of-band, not by CI.** `.github/workflows/deploy-seesam-hub.yml`'s self-hosted deploy job holds no Postgres-DDL-capable credential and is never given one - it only has the same `MARKETAI_SUPABASE_URL`/`MARKETAI_SUPABASE_SECRET_KEY` the running backend service itself uses (via the Supabase Data API/PostgREST, which cannot execute arbitrary DDL). Before merging a commit that depends on new Supabase schema, apply the corresponding migration(s) to the target project yourself (`supabase db push`, or the SQL editor in the Supabase dashboard) using your own Supabase CLI/dashboard credentials - never a secret added to this repo, to CI, or to the mobile bundle.
+
+**The deploy workflow still verifies this deterministically, every time - it does not rely on remembering to check manually.** The "Deploy backend to seesam-hub (locked)" step now runs `scripts/verify_supabase_schema.py` after fast-forwarding the checkout but *before* either `systemctl restart` line. That script calls the read-only `verify_strategy_draft_schema()` RPC (added by the third migration above), which checks `to_regclass()`/`to_regprocedure()` catalog existence for all three required objects - no data is read or written, and calling it repeatedly is always safe. If the RPC call fails outright (almost always meaning the migrations haven't been applied yet - including the case where the verify RPC itself is missing) or any individual check comes back false, the script exits non-zero.
+
+GitHub Actions `run:` steps use `bash -eo pipefail` by default, so that non-zero exit stops the step immediately: neither `systemctl restart marketai-api.service` nor `systemctl restart marketai-hays-release.service` runs, and the currently-running (older) backend keeps serving traffic untouched - **fail closed**, never a bad restart. This applies to *every* push to `feature/trading-system-foundation`, not just this PR's schema - any future PR that adds a new Supabase dependency should extend `verify_strategy_draft_schema()` (or add a similarly-shaped RPC) and `scripts/verify_supabase_schema.py`'s `REQUIRED_CHECKS` the same way.
+
 ## Safety boundary
 
 Editable event values can influence Strategy Engine evidence but cannot:
