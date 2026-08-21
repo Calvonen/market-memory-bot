@@ -268,6 +268,37 @@ class MobileSourceTests(unittest.TestCase):
         self.assertLess(guard_start, update_ref_index)
         self.assertLess(update_ref_index, fetch_index)
 
+    def test_detail_screen_shows_loading_instead_of_a_false_pre_release_state(self) -> None:
+        # Between getEvent() resolving and getPaperStatus() resolving, both
+        # run and statusError are still null - indistinguishable from "not
+        # released yet" - so an already-released event would otherwise
+        # flash the wrong status text and lose its analysis section for the
+        # duration of that request. statusLoading must gate the status
+        # text, default true, be reset on an actual eventId change (not a
+        # same-event refresh, which should keep showing stale-but-known
+        # data), and clear once the paper-status request settles either way.
+        self.assertIn("useState(true);", self.detail_source[: self.detail_source.index("const load = useCallback")])
+        self.assertIn(
+            "statusLoading ? 'Ladataan tilaa...' : describeStatus(run, statusError)",
+            self.detail_source,
+        )
+
+        load_start = self.detail_source.index("const load = useCallback(async () => {")
+        load_end = self.detail_source.index("}, [eventId]);", load_start)
+        load_body = self.detail_source[load_start:load_end]
+
+        guard_start = load_body.index("if (loadedEventIdRef.current !== eventId) {")
+        guard_end = load_body.index("}", guard_start)
+        self.assertIn("setStatusLoading(true);", load_body[guard_start:guard_end])
+
+        # Cleared once getPaperStatus() settles, on both the success and
+        # failure paths - a finally block covers both without duplicating
+        # the loadId staleness check.
+        finally_start = load_body.rindex("} finally {")
+        finally_end = load_body.index("}", finally_start + len("} finally {"))
+        finally_body = load_body[finally_start:finally_end]
+        self.assertIn("if (loadId === latestLoadId.current) setStatusLoading(false);", finally_body)
+
     def test_paper_status_failure_shows_an_explicit_error_in_the_analysis_section(self) -> None:
         # Requirement: pre-release expectation data (consensus/KPI/bull/
         # base/bear/triggers/invalidation/source) stays visible regardless,

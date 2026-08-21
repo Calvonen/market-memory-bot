@@ -25,6 +25,13 @@ export default function EventDetailScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
+  // True while a paper-status lookup for the currently loaded event is in
+  // flight and none has resolved yet. Without this, the brief window
+  // between getEvent() resolving and getPaperStatus() resolving has
+  // run === null and statusError === null - indistinguishable from "not
+  // released yet" - so an already-released event would flash as pre-release
+  // and lose its analysis section for the duration of that request.
+  const [statusLoading, setStatusLoading] = useState(true);
   const latestLoadId = useRef(0);
   const loadedEventIdRef = useRef<string | null>(null);
 
@@ -42,11 +49,13 @@ export default function EventDetailScreen() {
       // the previous event/run belongs to a different event and must not
       // keep rendering - or stay editable via its now-wrong edit link -
       // under this new URL while the new fetch is in flight or fails. An
-      // ordinary refresh of the same event intentionally skips this, so a
-      // transient failure still leaves the last known good data visible.
+      // ordinary refresh of the same event intentionally skips this (and
+      // statusLoading below), so a transient failure still leaves the last
+      // known good data visible instead of flashing a loading state.
       setEvent(null);
       setRun(null);
       setStatusError(null);
+      setStatusLoading(true);
     }
     loadedEventIdRef.current = eventId;
     setError(null);
@@ -74,6 +83,8 @@ export default function EventDetailScreen() {
       if (loadId !== latestLoadId.current) return;
       setRun(null);
       setStatusError(err instanceof Error ? err.message : 'Tuntematon virhe');
+    } finally {
+      if (loadId === latestLoadId.current) setStatusLoading(false);
     }
   }, [eventId]);
 
@@ -133,7 +144,7 @@ export default function EventDetailScreen() {
     run?.expectation_version !== undefined &&
     run.expectation_version !== event.version;
 
-  const statusText = describeStatus(run, statusError);
+  const statusText = statusLoading ? 'Ladataan tilaa...' : describeStatus(run, statusError);
 
   const scheduled = new Date(`${event.scheduled_date}T12:00:00`);
   const dateLabel = Number.isNaN(scheduled.getTime())
