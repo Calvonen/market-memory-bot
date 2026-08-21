@@ -43,19 +43,55 @@ the last backend deploy that passed its health check. This is a plain
 state file on the seesam-hub host, not something inferred from run
 ordering or either job's concurrency group:
 
-- `deploy` writes the deployed commit's SHA to
-  `/home/marko/marketai-deploy-state/last-deployed-backend.sha` as its
-  final step, only after the health check step has already succeeded (a
-  failed step stops the job before this one runs).
-- `publish-ota`'s first real step reads that file and compares it byte-for-byte
-  to `github.sha`. Any mismatch - including the file not existing yet - fails
-  the job immediately with a clear error, before checkout, before mobile
-  validation, before `eas update` ever runs.
+- `deploy`'s locked step (see "Filesystem lock" below) writes the
+  deployed commit's SHA to
+  `/home/marko/marketai-deploy-state/last-deployed-backend.sha` only
+  after the fast-forward, service restart and health check have all
+  already succeeded.
+- `publish-ota` checks this twice: an early, unlocked check right after
+  the branch restriction (fails fast, before spending time on checkout
+  and mobile validation), and an authoritative, locked re-check
+  immediately before `eas update` runs. Either one failing - including
+  the file not existing yet - refuses to publish with a clear error.
 
 This means: push the commit, wait for `deploy` to go green, *then* run
 `workflow_dispatch` for that exact commit. Dispatching for a commit that
 hasn't deployed yet, or that's been superseded by a newer deploy, is
 refused rather than silently publishing something unverified.
+
+## Filesystem lock closes the approve/publish race
+
+The early check above is a convenience, not a guarantee: `github.sha`
+could match the deployed SHA when that check runs and no longer match by
+the time `eas update` actually executes a few seconds/minutes later, if a
+new `deploy` run lands on the backend in between. GitHub's concurrency
+groups don't prevent this either - they only stop `deploy` and
+`publish-ota` runs from racing each other at the *scheduling* level, they
+say nothing about interleaving within the time between one job's steps.
+
+To close that gap, both jobs take the same exclusive `flock` on
+`/tmp/marketai-deploy-ota.lock` (host-local, both jobs run on the same
+seesam-hub self-hosted runner) around their respective critical
+sections:
+
+- `deploy`'s "Deploy backend to seesam-hub (locked)" step holds the lock
+  for the entire fast-forward -> dependency install -> service restart ->
+  health check -> state-file write sequence.
+- `publish-ota`'s "Verify deployed SHA and publish OTA update (locked)"
+  step acquires the *same* lock, re-reads the state file, re-compares it
+  to `github.sha`, and only then runs `eas update` - all still holding the
+  lock. It releases only once `eas update` has finished (success or
+  failure).
+
+Because both critical sections hold the same lock, they can never
+interleave: `deploy` cannot advance the state file while `publish-ota` is
+between its locked re-check and the actual `eas update` call, and
+`publish-ota` cannot publish based on a SHA that `deploy` is only
+partway through changing.
+
+Both `flock` calls use `-w 300` (a 5-minute wait), so a stuck lock holder
+fails the *other* job with a clear error after 5 minutes instead of
+hanging it forever.
 
 ## The rule
 
