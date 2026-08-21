@@ -69,6 +69,32 @@ class MobileSourceTests(unittest.TestCase):
         effect_body = source[effect_start:effect_end]
         self.assertIn("requestId === latestSuggestionRequestId.current", effect_body)
 
+    def test_selecting_a_suggestion_suppresses_further_suggestions(self) -> None:
+        source = Path("mobile/src/app/memory.tsx").read_text(encoding="utf-8")
+
+        analyze_start = source.index("async function analyze(")
+        analyze_end = source.index("\n  return (", analyze_start)
+        analyze_body = source[analyze_start:analyze_end]
+
+        # Choosing a suggestion (or submitting directly) must immediately end
+        # suggestion mode: stop treating the field as "being edited" so the
+        # effect does not restart a search for the ticker just committed to.
+        self.assertIn("setHasEditedTicker(false)", analyze_body)
+        # And whatever suggestion state/request exists must be dropped too.
+        self.assertIn("setSuggestions([])", analyze_body)
+        self.assertIn("latestSuggestionRequestId.current", analyze_body)
+
+        # Suggestions must never render while an analysis request is loading,
+        # regardless of how the field state got there.
+        show_suggestions_start = source.index("const showSuggestions =")
+        show_suggestions_end = source.index(";", show_suggestions_start)
+        self.assertIn("!loading", source[show_suggestions_start:show_suggestions_end])
+
+        # Direct typing must still turn suggestion mode back on normally.
+        handler_start = source.index("onChangeText={(value) => {")
+        handler_end = source.index("}}", handler_start)
+        self.assertIn("setHasEditedTicker(true)", source[handler_start:handler_end])
+
     def test_ota_configuration_is_channel_bound(self) -> None:
         app = Path("mobile/app.json").read_text(encoding="utf-8")
         eas = Path("mobile/eas.json").read_text(encoding="utf-8")

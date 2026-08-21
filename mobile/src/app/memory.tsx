@@ -16,7 +16,7 @@ export default function MemoryScreen() {
 
   const query = ticker.trim();
   const showSuggestions =
-    hasEditedTicker && query.length >= 2 && data?.ticker !== query.toUpperCase();
+    hasEditedTicker && !loading && query.length >= 2 && data?.ticker !== query.toUpperCase();
 
   useEffect(() => {
     if (!showSuggestions) {
@@ -47,6 +47,11 @@ export default function MemoryScreen() {
     const requestedTicker = (selectedTicker ?? ticker).trim();
     if (selectedTicker) setTicker(selectedTicker);
 
+    // Choosing a suggestion (or submitting directly) ends suggestion mode
+    // right away: stop treating the field as "being edited" so the effect
+    // below does not restart a suggestion search for the ticker we just
+    // committed to, and invalidate/clear whatever suggestion state exists.
+    setHasEditedTicker(false);
     latestSuggestionRequestId.current += 1;
     setSuggestions([]);
     setData(null);
