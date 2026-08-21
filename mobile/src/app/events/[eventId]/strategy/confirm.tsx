@@ -1,5 +1,5 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -33,17 +33,33 @@ export default function StrategyConfirmScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
+  const latestApprovalRequestId = useRef(0);
 
   // A stale "acknowledged"/approvedBy from a previous event's approval
   // flow must never silently carry over and let a new event's approval
   // through without a fresh, explicit acknowledgement.
   useResetOnKeyChange(eventId, () => {
+    // Invalidate a pending approveStrategyDraft() call FIRST, synchronously,
+    // before anything else below - a response for the *previous* event's
+    // approval must never clear this (freshly reset) screen's draft/preview
+    // or navigate away, no matter when it resolves relative to the route
+    // change.
+    latestApprovalRequestId.current += 1;
     setApprovedBy('');
     setAcknowledged(false);
     setSubmitting(false);
     setError(null);
     setConflict(false);
   });
+
+  // Same invalidation on unmount: navigating away entirely must also stop
+  // a still-in-flight approval response from touching state on an
+  // unmounted screen or firing a stray navigation/draft-clear.
+  useEffect(() => {
+    return () => {
+      latestApprovalRequestId.current += 1;
+    };
+  }, []);
 
   if (!draft || !preview) {
     return (
@@ -69,6 +85,7 @@ export default function StrategyConfirmScreen() {
 
   const submitApproval = async () => {
     if (!eventId) return;
+    const requestId = ++latestApprovalRequestId.current;
     setSubmitting(true);
     setError(null);
     try {
@@ -79,10 +96,16 @@ export default function StrategyConfirmScreen() {
         approved_by: approvedBy.trim(),
         approved_via: 'mobile-app',
       });
+      // A stale success for an eventId change or an unmount that happened
+      // while this request was in flight must never clear the (possibly
+      // already-different) draft/preview or navigate - both would act on
+      // the wrong event.
+      if (requestId !== latestApprovalRequestId.current) return;
       setDraft(null);
       setPreview(null);
       router.replace({ pathname: '/events/[eventId]', params: { eventId } });
     } catch (err) {
+      if (requestId !== latestApprovalRequestId.current) return;
       const message = err instanceof Error ? err.message : 'Hyväksyntä epäonnistui';
       setError(message);
       // The backend reports both the fingerprint and version CAS checks as
@@ -93,7 +116,7 @@ export default function StrategyConfirmScreen() {
         setConflict(true);
       }
     } finally {
-      setSubmitting(false);
+      if (requestId === latestApprovalRequestId.current) setSubmitting(false);
     }
   };
 

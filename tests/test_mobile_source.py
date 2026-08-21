@@ -1191,6 +1191,86 @@ console.log(JSON.stringify({ text, roundTripped }));
         self.assertIn("setError(null)", reset_body)
         self.assertIn("setConflict(false)", reset_body)
 
+        # A pending approveStrategyDraft() call for the previous event must
+        # be invalidated first, ahead of every state reset in this same
+        # callback - not left to resolve and act on the new event's screen.
+        self.assertIn("latestApprovalRequestId.current += 1;", reset_body)
+        bump_index = reset_body.index("latestApprovalRequestId.current += 1;")
+        set_approved_by_index = reset_body.index("setApprovedBy('')")
+        self.assertLess(bump_index, set_approved_by_index)
+
+    # -- approveStrategyDraft() request cancellation guard -------------------
+    #
+    # Regression scenario: event A's approval is submitted and still
+    # in-flight when the route changes to event B (eventId changes while
+    # this screen stays mounted, or the confirm screen for B is opened
+    # fresh while A's request is still pending in the background). A's
+    # response resolving afterwards must never clear B's draft/preview,
+    # must never navigate away from B, and must never write B's
+    # error/conflict/submitting state.
+
+    def test_submit_approval_captures_a_request_id_before_awaiting(self) -> None:
+        submit_start = self.confirm_source.index("const submitApproval = async () => {")
+        submit_end = self.confirm_source.index("\n  };", submit_start)
+        submit_body = self.confirm_source[submit_start:submit_end]
+
+        request_id_index = submit_body.index(
+            "const requestId = ++latestApprovalRequestId.current;"
+        )
+        await_index = submit_body.index("await approveStrategyDraft(")
+        self.assertLess(request_id_index, await_index)
+
+    def test_stale_approval_success_cannot_clear_state_or_navigate(self) -> None:
+        submit_start = self.confirm_source.index("const submitApproval = async () => {")
+        submit_end = self.confirm_source.index("\n  };", submit_start)
+        submit_body = self.confirm_source[submit_start:submit_end]
+
+        await_index = submit_body.index("await approveStrategyDraft(")
+        catch_index = submit_body.index("} catch (err) {")
+        success_block = submit_body[await_index:catch_index]
+
+        guard = "if (requestId !== latestApprovalRequestId.current) return;"
+        self.assertIn(guard, success_block)
+        guard_index = success_block.index(guard)
+
+        # The guard must sit ahead of every state-clearing/navigating call
+        # in the success path - not merely appear somewhere in the block.
+        for call in ("setDraft(null)", "setPreview(null)", "router.replace("):
+            call_index = success_block.index(call)
+            self.assertLess(
+                guard_index, call_index, f"{call} is not guarded by the stale-response check"
+            )
+
+    def test_stale_approval_error_and_finally_cannot_update_the_screen(self) -> None:
+        submit_start = self.confirm_source.index("const submitApproval = async () => {")
+        submit_end = self.confirm_source.index("\n  };", submit_start)
+        submit_body = self.confirm_source[submit_start:submit_end]
+
+        catch_start = submit_body.index("} catch (err) {")
+        finally_start = submit_body.index("} finally {")
+        catch_block = submit_body[catch_start:finally_start]
+        finally_block = submit_body[finally_start:]
+
+        guard = "if (requestId !== latestApprovalRequestId.current) return;"
+        self.assertIn(guard, catch_block)
+        guard_index = catch_block.index(guard)
+        set_error_index = catch_block.index("setError(message)")
+        self.assertLess(guard_index, set_error_index)
+
+        self.assertIn(
+            "if (requestId === latestApprovalRequestId.current) setSubmitting(false);",
+            finally_block,
+        )
+
+    def test_approval_request_id_is_invalidated_on_unmount(self) -> None:
+        unmount_effect_start = self.confirm_source.index(
+            "useEffect(() => {\n    return () => {\n      latestApprovalRequestId.current += 1;"
+        )
+        self.assertGreaterEqual(unmount_effect_start, 0)
+        effect_end = self.confirm_source.index("}, []);", unmount_effect_start)
+        effect_body = self.confirm_source[unmount_effect_start:effect_end]
+        self.assertIn("latestApprovalRequestId.current += 1;", effect_body)
+
     def test_reset_hook_updates_synchronously_during_render_not_in_an_effect(self) -> None:
         # A useEffect-based reset would leave a one-frame window where the
         # previous event's draft/preview/approval state is still rendered

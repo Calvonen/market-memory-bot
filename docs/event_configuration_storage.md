@@ -141,4 +141,6 @@ The draft/preview/approval-confirmation state lives in `strategy/_layout.tsx`'s 
 
 `onApprovePress`'s `previewStrategyDraft()` call carries the same kind of guard (`latestPreviewRequestId`), invalidated both by that same route-change reset and by the screen unmounting (a `useEffect` cleanup). A stale preview response - resolved after the user already changed events or navigated away - can therefore never call `setPreview()` or push the confirmation screen for the wrong event.
 
+`strategy/confirm.tsx`'s `submitApproval()` carries the identical guard (`latestApprovalRequestId`), invalidated by its own route-change reset and unmount cleanup. If event A's approval is still in flight when the route moves to event B, A's eventual response can neither clear B's draft/preview nor navigate away from B nor write B's error/conflict/submitting state - the success, catch, and finally branches are each guarded independently.
+
 `mobile/src/utils/strategy-draft-format.ts` renders a `null` consensus value as the text `key: null` (a JS template literal coerces `null` to that string) and must parse that exact token back to a real `null` on save - `textToConsensusRecord()` special-cases it, so consensus values round-trip through the draft editor without a real `null` silently becoming the *string* `"null"`.
