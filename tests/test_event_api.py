@@ -144,6 +144,29 @@ class EventApiTests(unittest.TestCase):
         self.assertEqual(run["confirmation_deadline_at"], "2026-08-20T15:45:00+00:00")
         self.assertIsNone(run["paper_order"])
 
+    def test_paper_status_passes_through_the_run_expectation_version(self) -> None:
+        # The mobile app must be able to tell a run computed against an
+        # older expectation version apart from the event's current version
+        # (e.g. after an admin edits consensus/triggers) - that comparison
+        # only works if the run's own expectation_version reaches the
+        # client unmodified.
+        self.paper_repo.run = {
+            "status": "paper_executed",
+            "message": "",
+            "expectation_version": 1,
+            "strategy": {"direction": "LONG", "confidence": 70},
+            "risk": {"status": "PASS"},
+            "paper_order": None,
+        }
+
+        response = self.client.get(
+            "/api/v1/events/hays-fy2026-results/paper-status",
+            headers=self._read_headers(),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["paper_run"]["expectation_version"], 1)
+
     def test_paper_status_without_read_key_is_denied(self) -> None:
         response = self.client.get("/api/v1/events/hays-fy2026-results/paper-status")
 
