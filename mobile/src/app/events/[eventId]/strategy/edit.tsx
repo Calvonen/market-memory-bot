@@ -62,7 +62,7 @@ export default function StrategyDraftEditScreen() {
         />
       </Field>
 
-      <Field label="Konsensusmetriikat (avain: arvo per rivi)">
+      <Field label='Konsensusmetriikat (avain: JSON-arvo per rivi — 55.6, "merkkijono" tai null)'>
         <TextInput
           style={styles.textArea}
           multiline
@@ -113,7 +113,7 @@ export default function StrategyDraftEditScreen() {
         />
       </Field>
 
-      <Field label="Triggerit (bull_/bear_ + metriikka: arvo per rivi)">
+      <Field label='Triggerit (bull_/bear_ + metriikka: JSON-arvo per rivi — 62.0 tai "merkkijono")'>
         <TextInput
           style={styles.textArea}
           multiline

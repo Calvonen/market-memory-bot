@@ -360,6 +360,58 @@ class StrategyDraftApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 409)
 
+    def test_approve_rejects_malformed_fingerprints_without_ever_500ing(self) -> None:
+        # secrets.compare_digest() raises TypeError on a non-ASCII string
+        # argument - a malformed draft_fingerprint must never reach that
+        # call at all. Field(pattern=...) rejects it (422) at the request
+        # boundary first, for every shape of "malformed" including the
+        # exact one that used to crash the comparison.
+        draft = _valid_draft_body()
+        approval_body = self._approval_body_from_preview(draft)
+        malformed_fingerprints = {
+            "too_short": "a" * 63,
+            "too_long": "a" * 65,
+            "non_hex_chars": "g" * 64,
+            "non_ascii": "ñ" * 64,
+            "empty": "",
+            "whitespace_only": " " * 64,
+            "hex_with_uppercase_and_symbols": "A1b2!" + "0" * 59,
+        }
+        for label, fingerprint in malformed_fingerprints.items():
+            with self.subTest(label=label):
+                body = dict(approval_body)
+                body["draft_fingerprint"] = fingerprint
+
+                response = self._approve(body, key=self.CONTROL_KEY)
+
+                self.assertEqual(response.status_code, 422)
+                self.assertLess(response.status_code, 500)
+        # Nothing malformed ever reached persistence or the audit trail.
+        self.assertEqual(self.repo.get("hays-fy2026-results").version, 1)
+        self.assertEqual(self.approval_repo.audit_records, [])
+
+    def test_approve_accepts_a_well_formed_64_char_hex_fingerprint(self) -> None:
+        # Uppercase hex is valid SHA-256 hex-digest syntax too, even though
+        # draft_fingerprint() itself only ever emits lowercase - the
+        # boundary must not be stricter than "valid hex", only reject what
+        # secrets.compare_digest() could actually choke on.
+        draft = _valid_draft_body()
+        preview = self._preview(draft).json()
+        approval_body = {
+            "draft": draft,
+            "draft_fingerprint": preview["draft_fingerprint"].upper(),
+            "base_expectation_version": preview["base_expectation_version"],
+            "approved_by": "marko",
+        }
+
+        response = self._approve(approval_body, key=self.CONTROL_KEY)
+
+        # An uppercase-but-otherwise-correct fingerprint no longer matches
+        # the lowercase one draft_fingerprint() computed byte-for-byte, so
+        # this is a legitimate conflict (409) - not a validation error, and
+        # never a 500.
+        self.assertEqual(response.status_code, 409)
+
     def test_repeated_identical_approve_does_not_create_duplicate_versions(self) -> None:
         draft = _valid_draft_body()
         approval_body = self._approval_body_from_preview(draft)

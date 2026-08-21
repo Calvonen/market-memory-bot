@@ -50,7 +50,14 @@ class ExpectationVersionRequest(BaseModel):
 
 class StrategyDraftApprovalRequest(BaseModel):
     draft: StrategyDraftPayload
-    draft_fingerprint: str = Field(min_length=32, max_length=128)
+    # Exactly a SHA-256 hex digest - see draft_fingerprint() in
+    # trading_system/strategy_draft.py. Enforced here, not just loosely
+    # length-checked, because secrets.compare_digest() below requires both
+    # arguments to be ASCII-only strings: a value with non-ASCII characters
+    # (or any other shape secrets.compare_digest doesn't accept) would
+    # otherwise raise an unhandled TypeError -> 500, instead of the 422 a
+    # malformed value should produce.
+    draft_fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-fA-F]{64}$")
     base_expectation_version: int = Field(ge=1)
     approved_by: str = Field(min_length=1, max_length=200)
     approved_via: str | None = Field(default=None, max_length=100)

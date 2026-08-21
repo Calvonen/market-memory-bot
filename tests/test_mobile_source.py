@@ -998,54 +998,42 @@ class StrategyDraftMobileSourceTests(unittest.TestCase):
         self.assertNotIn("fetch(", self.format_util_source)
         self.assertNotIn("apiPost", self.format_util_source)
 
-    # -- consensus null round-trip -------------------------------------------
+    # -- consensus/trigger lossless round-trip -------------------------------
 
-    def test_consensus_null_round_trips_as_real_null_not_the_string_null(self) -> None:
-        # recordToText() renders a null consensus value as the literal text
-        # "key: null" (a JS template literal coerces null to that string).
-        # The reverse parse (textToConsensusRecord) must recognize that
-        # exact token and produce real `null` back - the bug this guards
-        # against is Number("null") being NaN, falling through to store the
-        # *string* "null" instead.
+    def _run_typed_record_script(self, script_suffix: str) -> dict:
+        """Extracts recordToText/parseTypedScalar/textToTypedRecord from
+        strategy-draft-format.ts, strips their TS-only syntax, and runs them
+        under node with the given trailing script appended. Returns the
+        parsed JSON the script printed."""
         node = shutil.which("node")
         if node is None:
             self.skipTest("node is not available in this environment")
 
         source = self.format_util_source
+        start = source.index("export function recordToText(")
+        end = source.index("\n\nexport function draftFormFromEvent", start)
+        combined = source[start:end]
 
-        record_to_text_start = source.index("export function recordToText(")
-        record_to_text_end = source.index("\n}\n", record_to_text_start) + len("\n}")
-        record_to_text_js = source[record_to_text_start:record_to_text_end]
-
-        consensus_start = source.index("export function textToConsensusRecord(")
-        consensus_end = source.index("\n}\n", consensus_start) + len("\n}")
-        consensus_js = source[consensus_start:consensus_end]
-
-        combined = record_to_text_js + "\n" + consensus_js
         combined = combined.replace("export function ", "function ")
+        combined = combined.replace("(record: Record<string, unknown>): string", "(record)")
+        combined = combined.replace("(rawValue: string): number | string | null", "(rawValue)")
         combined = combined.replace(
             "(text: string): Record<string, number | string | null>", "(text)"
         )
-        combined = combined.replace("(record: Record<string, unknown>): string", "(record)")
+        combined = combined.replace(
+            "const parsed: unknown = JSON.parse(rawValue);",
+            "const parsed = JSON.parse(rawValue);",
+        )
         combined = combined.replace(
             "const record: Record<string, number | string | null> = {};",
             "const record = {};",
         )
         self.assertNotIn(": Record", combined)
         self.assertNotIn(": string", combined)
+        self.assertNotIn(": unknown", combined)
+        self.assertNotIn(": number", combined)
 
-        script = (
-            combined
-            + """
-const original = {
-  fy27_operating_profit_pre_exceptional_gbp_m: null,
-  other_metric_gbp_m: 55.6,
-};
-const text = recordToText(original);
-const roundTripped = textToConsensusRecord(text);
-console.log(JSON.stringify({ text, roundTripped }));
-"""
-        )
+        script = combined + "\n" + script_suffix
 
         with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
             handle.write(script)
@@ -1059,18 +1047,83 @@ console.log(JSON.stringify({ text, roundTripped }));
             Path(script_path).unlink(missing_ok=True)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        outputs = json.loads(result.stdout)
+        return json.loads(result.stdout)
 
-        self.assertIn("fy27_operating_profit_pre_exceptional_gbp_m: null", outputs["text"])
+    def test_every_scalar_type_round_trips_losslessly(self) -> None:
+        # No heuristic numeric/null guessing: each value is rendered as a
+        # JSON literal (recordToText) and parsed back as one
+        # (textToTypedRecord), so type is preserved exactly rather than
+        # guessed from the text's shape.
+        outputs = self._run_typed_record_script(
+            """
+const original = {
+  leading_zero_string: "001",
+  literal_null_string: "null",
+  actual_null: null,
+  plain_number: 1,
+  decimal_number: 55.6,
+  plain_string: "manual",
+};
+const text = recordToText(original);
+const roundTripped = textToTypedRecord(text);
+console.log(JSON.stringify({ text, roundTripped }));
+"""
+        )
+
+        text = outputs["text"]
+        # The rendered text distinguishes each case purely by JSON syntax:
+        # strings are quoted, null and numbers are bare.
+        self.assertIn('leading_zero_string: "001"', text)
+        self.assertIn('literal_null_string: "null"', text)
+        self.assertIn("actual_null: null", text)
+        self.assertIn("plain_number: 1", text)
+        self.assertIn("decimal_number: 55.6", text)
+        self.assertIn('plain_string: "manual"', text)
+
         round_tripped = outputs["roundTripped"]
-        # A real JSON null decodes to Python None here - a str "null" would
-        # decode to the Python string "null" instead, which is exactly the
-        # bug this test catches.
-        self.assertIsNone(round_tripped["fy27_operating_profit_pre_exceptional_gbp_m"])
-        self.assertEqual(round_tripped["other_metric_gbp_m"], 55.6)
+        # The string "001" must never become the number 1.
+        self.assertEqual(round_tripped["leading_zero_string"], "001")
+        self.assertIsInstance(round_tripped["leading_zero_string"], str)
+        # The string "null" must never become real null.
+        self.assertEqual(round_tripped["literal_null_string"], "null")
+        self.assertIsInstance(round_tripped["literal_null_string"], str)
+        # Real null must stay null, not become the string "null".
+        self.assertIsNone(round_tripped["actual_null"])
+        # A real number must stay a number.
+        self.assertEqual(round_tripped["plain_number"], 1)
+        self.assertNotIsInstance(round_tripped["plain_number"], str)
+        self.assertEqual(round_tripped["decimal_number"], 55.6)
+        self.assertEqual(round_tripped["plain_string"], "manual")
 
-    def test_draft_to_input_uses_the_consensus_specific_null_aware_parser(self) -> None:
-        self.assertIn("consensus: textToConsensusRecord(draft.consensusText)", self.format_util_source)
+    def test_hand_typed_leading_zero_string_is_not_coerced_to_a_number(self) -> None:
+        # Distinct from the round-trip test above: a user typing "001"
+        # directly (not going through recordToText first) must get the
+        # same lossless behavior - "001" is invalid JSON number syntax, so
+        # it falls through to the literal-string fallback rather than
+        # Number("001") silently coercing it to 1.
+        outputs = self._run_typed_record_script(
+            """
+const result = textToTypedRecord('metric: 001\\nother: null\\nquoted: "null"');
+console.log(JSON.stringify(result));
+"""
+        )
+
+        self.assertEqual(outputs["metric"], "001")
+        self.assertIsInstance(outputs["metric"], str)
+        self.assertIsNone(outputs["other"])
+        self.assertEqual(outputs["quoted"], "null")
+
+    def test_draft_to_input_uses_the_same_typed_parser_for_consensus_and_triggers(self) -> None:
+        self.assertIn(
+            "consensus: textToTypedRecord(draft.consensusText)", self.format_util_source
+        )
+        self.assertIn(
+            "triggers: textToTypedRecord(draft.triggersText)", self.format_util_source
+        )
+        # The old heuristic numeric/null-guessing parsers must be gone
+        # entirely, not just unused.
+        self.assertNotIn("Number(rawValue)", self.format_util_source)
+        self.assertNotIn("Number.isFinite", self.format_util_source)
 
     # -- route event change resets stale draft/preview/approval state -------
 

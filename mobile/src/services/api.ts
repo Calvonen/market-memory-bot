@@ -153,7 +153,13 @@ export type StrategyDraftInput = {
   bull_case: string[];
   base_case: string[];
   bear_case: string[];
-  triggers: Record<string, number | string>;
+  // Nullable to match the mobile draft editor's lossless text<->value
+  // parsing (see textToTypedRecord in strategy-draft-format.ts), which
+  // cannot itself prevent a user from typing a null trigger value - the
+  // backend's own StrategyDraftPayload.triggers type is the real boundary
+  // that rejects one (422), since a trigger conceptually never should be
+  // null.
+  triggers: Record<string, number | string | null>;
   invalidation_conditions: string[];
   source_name: string | null;
   source_url: string | null;

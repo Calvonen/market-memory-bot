@@ -36,34 +36,46 @@ export function textToList(text: string): string[] {
     .filter((line) => line.length > 0);
 }
 
+// Values are always rendered as a JSON literal, never a bare
+// `${value}` interpolation - that's what makes the round trip through
+// textToTypedRecord() below lossless and unambiguous. A number renders bare
+// (`1`, `55.6`), `null` renders bare (`null`), and a string always renders
+// *quoted* (`"001"`, `"null"`, `"manual"`) - so the string "001" is never
+// confusable with the number 1, and the string "null" is never confusable
+// with real null, purely from the text alone.
 export function recordToText(record: Record<string, unknown>): string {
   return Object.entries(record)
-    .map(([key, value]) => `${key}: ${value}`)
+    .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
     .join('\n');
 }
 
-export function textToRecord(text: string): Record<string, number | string> {
-  const record: Record<string, number | string> = {};
-  for (const line of text.split('\n')) {
-    const separatorIndex = line.indexOf(':');
-    if (separatorIndex === -1) continue;
-    const key = line.slice(0, separatorIndex).trim();
-    const rawValue = line.slice(separatorIndex + 1).trim();
-    if (!key || !rawValue) continue;
-    const numeric = Number(rawValue);
-    record[key] = Number.isFinite(numeric) && rawValue !== '' ? numeric : rawValue;
+// Parses one "key: value" line's value as a JSON scalar - the only
+// unambiguous way to tell the number 1 from the string "1", the string
+// "001" from the number 1 (leading zeros make "001" invalid JSON number
+// syntax, so it falls through to the literal-string fallback below rather
+// than ever being coerced), and real `null` from the three-character
+// string "null" (which only round-trips back to that exact string because
+// recordToText() always JSON.stringifies values, quoting every string).
+// No heuristic "does this look numeric" guessing anywhere in this function.
+function parseTypedScalar(rawValue: string): number | string | null {
+  try {
+    const parsed: unknown = JSON.parse(rawValue);
+    if (parsed === null || typeof parsed === 'number' || typeof parsed === 'string') {
+      return parsed;
+    }
+    // A boolean, array, or object isn't a value type consensus/triggers
+    // use - fall through to the literal-string fallback below rather than
+    // silently coercing or dropping it.
+  } catch {
+    // Not valid JSON (e.g. a bare, unquoted word, or "001") - fall through
+    // to the literal-string fallback below.
   }
-  return record;
+  return rawValue;
 }
 
-// Same "key: value per line" format as textToRecord, but for consensus
-// specifically: recordToText() renders a null value as the literal text
-// "key: null" (a JS template literal coerces null to that string), so the
-// reverse parse must recognize that exact token and produce a real `null`
-// back - not the *string* "null" (Number("null") is NaN, so without this
-// special case the fallback branch below would silently store the string
-// instead of round-tripping the actual null value).
-export function textToConsensusRecord(text: string): Record<string, number | string | null> {
+// Shared by both consensus and triggers: same "key: value per line" text
+// format, same lossless JSON-scalar parsing per value.
+export function textToTypedRecord(text: string): Record<string, number | string | null> {
   const record: Record<string, number | string | null> = {};
   for (const line of text.split('\n')) {
     const separatorIndex = line.indexOf(':');
@@ -71,12 +83,7 @@ export function textToConsensusRecord(text: string): Record<string, number | str
     const key = line.slice(0, separatorIndex).trim();
     const rawValue = line.slice(separatorIndex + 1).trim();
     if (!key || !rawValue) continue;
-    if (rawValue.toLowerCase() === 'null') {
-      record[key] = null;
-      continue;
-    }
-    const numeric = Number(rawValue);
-    record[key] = Number.isFinite(numeric) ? numeric : rawValue;
+    record[key] = parseTypedScalar(rawValue);
   }
   return record;
 }
@@ -108,12 +115,12 @@ export function draftFormToInput(draft: DraftFormState): StrategyDraftInput {
     instrument: draft.instrument,
     event_name: draft.eventName,
     scheduled_date: draft.scheduledDate,
-    consensus: textToConsensusRecord(draft.consensusText),
+    consensus: textToTypedRecord(draft.consensusText),
     important_kpis: textToList(draft.kpiText),
     bull_case: textToList(draft.bullText),
     base_case: textToList(draft.baseText),
     bear_case: textToList(draft.bearText),
-    triggers: textToRecord(draft.triggersText),
+    triggers: textToTypedRecord(draft.triggersText),
     invalidation_conditions: textToList(draft.invalidationText),
     source_name: draft.sourceName.trim() || null,
     source_url: draft.sourceUrl.trim() || null,
