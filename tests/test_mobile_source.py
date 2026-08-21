@@ -1126,6 +1126,61 @@ console.log(JSON.stringify({ text, roundTripped }));
         self.assertIn("const loadId = ++latestLoadId.current;", load_body)
         self.assertIn("if (loadId !== latestLoadId.current) return;", load_body)
 
+    # -- preview request cancellation guard ----------------------------------
+
+    def test_approve_press_guards_against_a_stale_preview_response(self) -> None:
+        # A previewStrategyDraft() response that resolves after eventId
+        # changed or the screen unmounted must never call setPreview() or
+        # navigate to the confirmation screen - both would act on the
+        # wrong event.
+        press_start = self.summary_source.index("const onApprovePress = useCallback(async () => {")
+        press_end = self.summary_source.index("}, [eventId, draft, router, setPreview]);", press_start)
+        press_body = self.summary_source[press_start:press_end]
+
+        self.assertIn("const requestId = ++latestPreviewRequestId.current;", press_body)
+
+        # setPreview() must be guarded by the requestId check immediately
+        # before it, not just somewhere earlier in the function.
+        set_preview_index = press_body.index("setPreview(result);")
+        guard_before_set_preview = press_body.rindex(
+            "if (requestId !== latestPreviewRequestId.current) return;", 0, set_preview_index
+        )
+        self.assertLess(guard_before_set_preview, set_preview_index)
+        # And nothing else must sit between that guard and setPreview() -
+        # the navigation call included, since a stale response must skip
+        # the push() too.
+        between = press_body[guard_before_set_preview:set_preview_index]
+        self.assertNotIn("router.push", between)
+
+        # The catch/finally branches must carry their own guard too - a
+        # stale error/loading-cleared update must not apply either.
+        catch_start = press_body.index("} catch (err) {")
+        finally_start = press_body.index("} finally {")
+        catch_block = press_body[catch_start:finally_start]
+        finally_block = press_body[finally_start:]
+        self.assertIn("if (requestId !== latestPreviewRequestId.current) return;", catch_block)
+        self.assertIn("if (requestId === latestPreviewRequestId.current) setPreviewing(false);", finally_block)
+
+    def test_preview_request_id_is_invalidated_on_route_change(self) -> None:
+        reset_start = self.summary_source.index("useResetOnKeyChange(eventId, () => {")
+        reset_end = self.summary_source.index("});", reset_start)
+        reset_body = self.summary_source[reset_start:reset_end]
+
+        self.assertIn("latestPreviewRequestId.current += 1;", reset_body)
+
+    def test_preview_request_id_is_invalidated_on_unmount(self) -> None:
+        # Distinct from the route-change reset above: navigating away from
+        # the strategy flow entirely (not just to a different eventId)
+        # must also stop a still-in-flight preview response from touching
+        # state on an unmounted screen or firing a stray navigation.
+        unmount_effect_start = self.summary_source.index(
+            "useEffect(() => {\n    return () => {\n      latestPreviewRequestId.current += 1;"
+        )
+        self.assertGreaterEqual(unmount_effect_start, 0)
+        effect_end = self.summary_source.index("}, []);", unmount_effect_start)
+        effect_body = self.summary_source[unmount_effect_start:effect_end]
+        self.assertIn("latestPreviewRequestId.current += 1;", effect_body)
+
     def test_confirm_screen_resets_approval_state_on_route_change(self) -> None:
         self.assertIn("useResetOnKeyChange(eventId, () => {", self.confirm_source)
         reset_start = self.confirm_source.index("useResetOnKeyChange(eventId, () => {")

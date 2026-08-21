@@ -177,6 +177,32 @@ class StrategyDraftApiTests(unittest.TestCase):
                 self.assertEqual(self.repo.get("hays-fy2026-results").version, 1)
                 self.assertEqual(self.approval_repo.audit_records, [])
 
+    def test_approve_rejects_whitespace_only_approved_by(self) -> None:
+        for value in ("   ", "\t\n  "):
+            with self.subTest(value=repr(value)):
+                approval_body = self._approval_body_from_preview(
+                    _valid_draft_body(), approved_by=value
+                )
+
+                response = self._approve(approval_body, key=self.CONTROL_KEY)
+
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(self.repo.get("hays-fy2026-results").version, 1)
+                # A whitespace-only identity must never reach the audit
+                # trail, whitespace-padded or otherwise.
+                self.assertEqual(self.approval_repo.audit_records, [])
+
+    def test_approve_strips_approved_by_before_recording_it(self) -> None:
+        approval_body = self._approval_body_from_preview(
+            _valid_draft_body(), approved_by="  marko  "
+        )
+
+        response = self._approve(approval_body, key=self.CONTROL_KEY)
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["approved_by"], "marko")
+        self.assertEqual(self.approval_repo.audit_records[0]["approved_by"], "marko")
+
     def test_preview_unknown_event_is_404(self) -> None:
         response = self.client.post(
             "/api/v1/events/does-not-exist/strategy-draft/preview",

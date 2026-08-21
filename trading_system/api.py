@@ -8,7 +8,7 @@ from typing import Any, Protocol
 
 
 from fastapi import FastAPI, Header, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from trading_system.event_repository import EventExpectationRepository
 from trading_system.models import EventExpectation
@@ -54,6 +54,19 @@ class StrategyDraftApprovalRequest(BaseModel):
     base_expectation_version: int = Field(ge=1)
     approved_by: str = Field(min_length=1, max_length=200)
     approved_via: str | None = Field(default=None, max_length=100)
+
+    @field_validator("approved_by", mode="before")
+    @classmethod
+    def _strip_approved_by_before_length_check(cls, value: Any) -> Any:
+        # Same reasoning as StrategyDraftPayload.change_note/summary
+        # (trading_system/strategy_draft.py): stripping must happen before
+        # Pydantic's min_length constraint runs, or a whitespace-only
+        # identity ("   ") passes validation as "long enough" and is only
+        # discovered to be empty afterwards - by which point it could
+        # already have been written into the approval audit trail.
+        if isinstance(value, str):
+            return value.strip()
+        return value
 
 
 def _analyze_market_ticker(ticker: str) -> dict[str, Any]:

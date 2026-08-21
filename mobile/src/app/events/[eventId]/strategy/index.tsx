@@ -29,6 +29,7 @@ export default function StrategySummaryScreen() {
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const latestLoadId = useRef(0);
+  const latestPreviewRequestId = useRef(0);
 
   // A previous event's in-flight load, preview error, and in-flight state
   // must not linger under - or repopulate - a different event's route.
@@ -45,10 +46,25 @@ export default function StrategySummaryScreen() {
     // entirely: it happens in the same synchronous render pass that
     // detects the eventId change.
     latestLoadId.current += 1;
+    // Same reasoning for an in-flight previewStrategyDraft() call: a
+    // resolved preview for the *previous* event must never call
+    // setPreview() or navigate to the confirmation screen under the new
+    // event's route.
+    latestPreviewRequestId.current += 1;
     setError(null);
     setPreviewing(false);
     setPreviewError(null);
   });
+
+  // Same invalidation on unmount: navigating away entirely (not just to a
+  // different eventId) must also stop a still-in-flight preview response
+  // from calling setState on an unmounted screen or firing a navigation
+  // nobody asked for anymore.
+  useEffect(() => {
+    return () => {
+      latestPreviewRequestId.current += 1;
+    };
+  }, []);
 
   const load = useCallback(async () => {
     if (!eventId) return;
@@ -79,16 +95,22 @@ export default function StrategySummaryScreen() {
 
   const onApprovePress = useCallback(async () => {
     if (!eventId || !draft) return;
+    const requestId = ++latestPreviewRequestId.current;
     setPreviewError(null);
     setPreviewing(true);
     try {
       const result = await previewStrategyDraft(eventId, draftFormToInput(draft));
+      // A stale response for an eventId change or an unmount that happened
+      // while this request was in flight must never call setPreview() or
+      // navigate - both would apply/act on the wrong event.
+      if (requestId !== latestPreviewRequestId.current) return;
       setPreview(result);
       router.push({ pathname: '/events/[eventId]/strategy/confirm', params: { eventId } });
     } catch (err) {
+      if (requestId !== latestPreviewRequestId.current) return;
       setPreviewError(err instanceof Error ? err.message : 'Esikatselu epäonnistui');
     } finally {
-      setPreviewing(false);
+      if (requestId === latestPreviewRequestId.current) setPreviewing(false);
     }
   }, [eventId, draft, router, setPreview]);
 
