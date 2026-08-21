@@ -41,7 +41,7 @@ jobs:
 
       - name: Compile Python
         run: |
-          /home/marko/marketai-repo/.venv/bin/python -m py_compile trading_system/*.py trading_system/brokers/*.py tests/*.py
+          /home/marko/marketai-repo/.venv/bin/python -m py_compile trading_system/*.py trading_system/brokers/*.py scripts/*.py tests/*.py
 
       - name: Run Python tests
         run: |
@@ -87,6 +87,30 @@ jobs:
           test -z "$(git status --porcelain --untracked-files=no)"
           git fetch origin feature/trading-system-foundation
           git merge --ff-only "$DEPLOY_SHA"
+
+          # Fail-closed pre-restart gate: this commit's strategy-draft
+          # endpoints depend on Supabase objects (event_strategy_approvals,
+          # approve_strategy_draft(), insert_next_expectation_version())
+          # that are applied out-of-band, before merging, through a
+          # separate secure mechanism - never by this workflow, which holds
+          # no Postgres-DDL-capable credential and is never given one. This
+          # step only *verifies* that schema is present, reusing the same
+          # MARKETAI_SUPABASE_URL/MARKETAI_SUPABASE_SECRET_KEY the
+          # already-running backend service reads from this same env file -
+          # never a GitHub Actions secret, never checked into the repo, and
+          # never something a mobile build receives. `run:` steps use
+          # `bash -eo pipefail` by default, so a non-zero exit from the
+          # script below stops this step immediately: neither
+          # `systemctl restart` line runs, and the currently-running (older)
+          # backend keeps serving traffic untouched. See "Deploy gate:
+          # Supabase schema verification" in
+          # docs/event_configuration_storage.md for the full contract and
+          # scripts/verify_supabase_schema.py for what is actually checked.
+          set -a
+          # shellcheck disable=SC1091
+          source /home/marko/marketai-repo/.env
+          set +a
+          /home/marko/marketai-repo/.venv/bin/python scripts/verify_supabase_schema.py
 
           sudo /usr/bin/systemctl restart marketai-api.service
           sudo /usr/bin/systemctl restart marketai-hays-release.service

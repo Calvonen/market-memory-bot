@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import secrets
 from dataclasses import asdict, replace
@@ -7,12 +8,34 @@ from datetime import date
 from typing import Any, Protocol
 
 
-from fastapi import FastAPI, Header, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, Header, HTTPException, Query, Request, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
-from trading_system.event_repository import EventExpectationRepository
+from trading_system.event_repository import (
+    EventExpectationNotFound,
+    EventExpectationRepository,
+    ExpectationPatch,
+)
 from trading_system.models import EventExpectation
 from trading_system.paper_trade_repository import SupabasePaperTradeRepository
+from trading_system.strategy_draft import (
+    StrategyDraftPayload,
+    changed_fields,
+    draft_fingerprint,
+    draft_warnings,
+    identity_mismatches,
+    normalize_draft,
+    reject_non_finite_numbers,
+)
+from trading_system.strategy_draft_repository import (
+    ExpectationVersionConflict,
+    StrategyDraftApprovalRepository,
+    StrategyDraftEventNotFound,
+    SupabaseStrategyDraftApprovalRepository,
+)
 from trading_system.supabase_event_repository import SupabaseEventExpectationRepository
 
 
@@ -32,6 +55,64 @@ class ExpectationVersionRequest(BaseModel):
     source_name: str | None = Field(default=None, max_length=200)
     source_url: str | None = Field(default=None, max_length=2000)
     source_as_of: date | None = None
+
+    @field_validator("consensus", "triggers", mode="after")
+    @classmethod
+    def _reject_non_finite_values(
+        cls, value: dict[str, Any] | None, info: ValidationInfo
+    ) -> dict[str, Any] | None:
+        # None here means "not part of this patch" (see ExpectationPatch),
+        # not "an empty record" - nothing to check in that case.
+        if value is None:
+            return value
+        assert info.field_name is not None
+        return reject_non_finite_numbers(info.field_name, value)
+
+
+class StrategyDraftApprovalRequest(BaseModel):
+    draft: StrategyDraftPayload
+    # Exactly a SHA-256 hex digest - see draft_fingerprint() in
+    # trading_system/strategy_draft.py, which always emits lowercase hex.
+    # Length/charset enforced here, not just loosely length-checked,
+    # because secrets.compare_digest() below requires both arguments to be
+    # ASCII-only strings: a value with non-ASCII characters (or any other
+    # shape secrets.compare_digest doesn't accept) would otherwise raise an
+    # unhandled TypeError -> 500, instead of the 422 a malformed value
+    # should produce. The pattern only accepts lowercase because the
+    # "before" validator below normalizes case first - an uppercase (or
+    # mixed-case) but otherwise-valid hex digest is still the exact same
+    # digest, and must never be rejected as a fingerprint mismatch (409)
+    # just because of letter case.
+    draft_fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    base_expectation_version: int = Field(ge=1)
+    approved_by: str = Field(min_length=1, max_length=200)
+    approved_via: str | None = Field(default=None, max_length=100)
+
+    @field_validator("draft_fingerprint", mode="before")
+    @classmethod
+    def _normalize_fingerprint_case(cls, value: Any) -> Any:
+        # Normalize before the pattern/length check and before it ever
+        # reaches secrets.compare_digest() or the audit trail, so a
+        # semantically identical digest can never produce a false
+        # "changed since preview" conflict, and the audit record always
+        # stores the same canonical (lowercase) form draft_fingerprint()
+        # itself produces.
+        if isinstance(value, str):
+            return value.lower()
+        return value
+
+    @field_validator("approved_by", mode="before")
+    @classmethod
+    def _strip_approved_by_before_length_check(cls, value: Any) -> Any:
+        # Same reasoning as StrategyDraftPayload.change_note/summary
+        # (trading_system/strategy_draft.py): stripping must happen before
+        # Pydantic's min_length constraint runs, or a whitespace-only
+        # identity ("   ") passes validation as "long enough" and is only
+        # discovered to be empty afterwards - by which point it could
+        # already have been written into the approval audit trail.
+        if isinstance(value, str):
+            return value.strip()
+        return value
 
 
 def _analyze_market_ticker(ticker: str) -> dict[str, Any]:
@@ -53,12 +134,39 @@ def _expectation_payload(expectation: EventExpectation) -> dict[str, Any]:
     return asdict(expectation)
 
 
+def _json_safe(value: Any) -> Any:
+    """Recursively replaces any non-finite float (Infinity/-Infinity/NaN)
+    with its str() form.
+
+    Starlette's JSONResponse renders with allow_nan=False (unlike
+    json.dumps()'s own permissive default), so it raises an unhandled
+    ValueError - not a clean response - if a non-finite float ever reaches
+    it. reject_non_finite_numbers() (trading_system/strategy_draft.py)
+    stops such a value from ever being accepted into a request, but
+    FastAPI's default RequestValidationError handler echoes the rejected
+    value straight back in the 422 body's error detail (Pydantic's "input"
+    field) - so without this, the very error response reporting "this
+    value is invalid" would itself fail to serialize. Used only for that
+    error-detail response, never for any value this backend accepts and
+    persists.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 def create_app(
     repository: EventExpectationRepository | None = None,
     *,
     paper_repository: PaperStatusRepository | None = None,
+    approval_repository: StrategyDraftApprovalRepository | None = None,
     admin_token: str | None = None,
     read_api_key: str | None = None,
+    control_api_key: str | None = None,
     market_analyzer=_analyze_market_ticker,
     market_scanner=_scan_market,
     market_symbol_searcher=_search_market_symbols,
@@ -68,10 +176,35 @@ def create_app(
         version="0.1.0",
         description="Backend API for versioned event research and paper trading.",
     )
+
+    @app.exception_handler(RequestValidationError)
+    async def _handle_request_validation_error(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        # Same shape as FastAPI's own default handler
+        # (fastapi.exception_handlers.request_validation_exception_handler) -
+        # just with _json_safe() applied, so a rejected non-finite number
+        # (see reject_non_finite_numbers() in trading_system/strategy_draft.py)
+        # never crashes the very 422 response reporting that rejection.
+        return JSONResponse(
+            status_code=422,
+            content=_json_safe(jsonable_encoder({"detail": exc.errors()})),
+        )
+
     repo_cache: EventExpectationRepository | None = repository
     paper_repo_cache: PaperStatusRepository | None = paper_repository
+    approval_repo_cache: StrategyDraftApprovalRepository | None = approval_repository
     configured_admin_token = admin_token or os.environ.get("MARKETAI_ADMIN_API_KEY")
     configured_read_api_key = read_api_key or os.environ.get("MARKETAI_READ_API_KEY")
+    # Backend-only control-auth for the strategy-draft approval endpoint. This
+    # is deliberately a *third*, independent credential: it must never be the
+    # read key (which must never authorize a write) and it must never be the
+    # admin token (which callers - including the Expo app - must never hold).
+    # It is the credential a provider-agnostic external control-API caller
+    # (e.g. a trusted assistant integration) and the mobile app's own
+    # approval action use; scope is narrow (this one endpoint), not general
+    # admin CRUD, which keeps its blast radius well below the admin token's.
+    configured_control_api_key = control_api_key or os.environ.get("MARKETAI_CONTROL_API_KEY")
 
     def get_repository() -> EventExpectationRepository:
         nonlocal repo_cache
@@ -84,6 +217,12 @@ def create_app(
         if paper_repo_cache is None:
             paper_repo_cache = SupabasePaperTradeRepository.from_env()
         return paper_repo_cache
+
+    def get_approval_repository() -> StrategyDraftApprovalRepository:
+        nonlocal approval_repo_cache
+        if approval_repo_cache is None:
+            approval_repo_cache = SupabaseStrategyDraftApprovalRepository.from_env()
+        return approval_repo_cache
 
     def require_admin(x_admin_token: str | None) -> None:
         if not configured_admin_token:
@@ -99,6 +238,16 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Read access is disabled until MARKETAI_READ_API_KEY is configured")
         if not x_marketai_key or not secrets.compare_digest(x_marketai_key, configured_read_api_key):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing read API key")
+
+    def require_control(x_marketai_control_key: str | None) -> None:
+        # Strong write-auth for persisting an approved strategy draft. Must
+        # be checked against its own configured value only - never falls
+        # back to accepting the read key or the admin token, so neither can
+        # substitute for it even by coincidence of a shared header name.
+        if not configured_control_api_key:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Strategy approval is disabled until MARKETAI_CONTROL_API_KEY is configured")
+        if not x_marketai_control_key or not secrets.compare_digest(x_marketai_control_key, configured_control_api_key):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing control API key")
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -163,25 +312,176 @@ def create_app(
     @app.post("/api/v1/events/{event_id}/expectation-versions", status_code=status.HTTP_201_CREATED)
     def create_expectation_version(event_id: str, request: ExpectationVersionRequest, x_admin_token: str | None = Header(default=None, alias="X-Admin-Token")) -> dict[str, Any]:
         require_admin(x_admin_token)
-        repo = get_repository()
-        current = repo.get(event_id)
+        # Deliberately no repo.get() here: reading "current" before the
+        # per-event lock and merging this patch into it in Python is
+        # exactly the race that used to let a concurrent strategy-draft
+        # approval's untouched fields get reverted by this endpoint. The
+        # unresolved patch is handed straight to the repository, which
+        # reads "current" itself only after acquiring the same lock
+        # approve_strategy_draft() takes, resolves the patch against that
+        # read, and writes the merged next version - all atomically.
+        patch = ExpectationPatch(
+            consensus=request.consensus,
+            important_kpis=tuple(request.important_kpis) if request.important_kpis is not None else None,
+            bull_case=tuple(request.bull_case) if request.bull_case is not None else None,
+            base_case=tuple(request.base_case) if request.base_case is not None else None,
+            bear_case=tuple(request.bear_case) if request.bear_case is not None else None,
+            triggers=request.triggers,
+            invalidation_conditions=tuple(request.invalidation_conditions) if request.invalidation_conditions is not None else None,
+            source_name=request.source_name,
+            source_url=request.source_url,
+            source_as_of=request.source_as_of,
+        )
+        try:
+            saved = get_repository().apply_partial_update(
+                event_id, patch, change_note=request.change_note
+            )
+        except EventExpectationNotFound as exc:
+            raise HTTPException(status_code=404, detail="Event not found") from exc
+        return _expectation_payload(saved)
+
+    @app.post("/api/v1/events/{event_id}/strategy-draft/preview")
+    def preview_strategy_draft(
+        event_id: str,
+        request: StrategyDraftPayload,
+        x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
+    ) -> dict[str, Any]:
+        # Read-tier auth only: this endpoint never writes to Supabase, never
+        # triggers the worker, and never creates a paper trade - it is pure
+        # validation/normalization/diffing against the current version, so
+        # the same low-privilege credential the mobile app already holds is
+        # sufficient (and appropriate - drafting/previewing must not require
+        # the stronger control credential that only approval needs).
+        require_read(x_marketai_key)
+        try:
+            current = get_repository().get(event_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         if current is None:
             raise HTTPException(status_code=404, detail="Event not found")
-        updated = replace(
+
+        normalized = normalize_draft(event_id, request)
+        return {
+            "event_id": event_id,
+            "base_expectation_version": current.version,
+            "draft": normalized,
+            "draft_fingerprint": draft_fingerprint(normalized),
+            "current": _expectation_payload(current),
+            "changed_fields": changed_fields(normalized, current),
+            "warnings": draft_warnings(normalized, current),
+        }
+
+    @app.post(
+        "/api/v1/events/{event_id}/strategy-draft/approve",
+        status_code=status.HTTP_201_CREATED,
+    )
+    def approve_strategy_draft(
+        event_id: str,
+        request: StrategyDraftApprovalRequest,
+        x_marketai_control_key: str | None = Header(
+            default=None, alias="X-MarketAI-Control-Key"
+        ),
+    ) -> dict[str, Any]:
+        require_control(x_marketai_control_key)
+        repo = get_repository()
+        try:
+            current = repo.get(event_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if current is None:
+            raise HTTPException(status_code=404, detail="Event not found")
+
+        normalized = normalize_draft(event_id, request.draft)
+
+        # Draft-integrity check: the approved payload must be byte-identical
+        # to whatever a preview call validated and a human/assistant
+        # reviewed - not just "some draft for this event_id".
+        recomputed_fingerprint = draft_fingerprint(normalized)
+        if not secrets.compare_digest(recomputed_fingerprint, request.draft_fingerprint):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Draft fingerprint mismatch: the draft changed since it was previewed. Request a new preview before approving.",
+            )
+
+        # Identity check: the {event_id} in the URL is authoritative. A
+        # draft's instrument/event_name/scheduled_date must match the event
+        # it is being approved against exactly - unlike preview (where this
+        # is only a warning), a mismatch here must hard-fail rather than
+        # silently retarget/rename/reschedule a different event's identity.
+        mismatches = identity_mismatches(normalized, current)
+        if mismatches:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Draft identity does not match event '{event_id}' from the URL, "
+                    f"which is authoritative: {'; '.join(mismatches)}."
+                ),
+            )
+
+        # Expectation-version CAS, the new expectation-version insert, and
+        # the approval audit-trail insert all happen as a single atomic
+        # database operation - never EventExpectationRepository.save()'s own
+        # max(version)+1 retry loop, which has no way to enforce "the
+        # version I previewed against is still current" and would let two
+        # concurrent approvals against the same base version both succeed.
+        try:
+            result = get_approval_repository().approve(
+                event_id=event_id,
+                expected_base_version=request.base_expectation_version,
+                source_name=normalized["source_name"],
+                source_url=normalized["source_url"],
+                source_as_of=date.fromisoformat(normalized["source_as_of"])
+                if normalized["source_as_of"]
+                else None,
+                consensus=normalized["consensus"],
+                important_kpis=normalized["important_kpis"],
+                bull_case=normalized["bull_case"],
+                base_case=normalized["base_case"],
+                bear_case=normalized["bear_case"],
+                triggers=normalized["triggers"],
+                invalidation_conditions=normalized["invalidation_conditions"],
+                change_note=normalized["change_note"],
+                draft_fingerprint=request.draft_fingerprint,
+                approved_by=request.approved_by,
+                approved_via=request.approved_via or "unspecified",
+            )
+        except ExpectationVersionConflict as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Expectation version changed since preview "
+                    f"(expected {request.base_expectation_version}). Request a new preview before approving. "
+                    f"({exc})"
+                ),
+            ) from exc
+        except StrategyDraftEventNotFound as exc:
+            raise HTTPException(status_code=404, detail="Event not found") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        saved = replace(
             current,
-            consensus=request.consensus if request.consensus is not None else current.consensus,
-            important_kpis=tuple(request.important_kpis) if request.important_kpis is not None else current.important_kpis,
-            bull_case=tuple(request.bull_case) if request.bull_case is not None else current.bull_case,
-            base_case=tuple(request.base_case) if request.base_case is not None else current.base_case,
-            bear_case=tuple(request.bear_case) if request.bear_case is not None else current.bear_case,
-            triggers=request.triggers if request.triggers is not None else current.triggers,
-            invalidation_conditions=tuple(request.invalidation_conditions) if request.invalidation_conditions is not None else current.invalidation_conditions,
-            source_name=request.source_name if request.source_name is not None else current.source_name,
-            source_url=request.source_url if request.source_url is not None else current.source_url,
-            source_as_of=request.source_as_of if request.source_as_of is not None else current.source_as_of,
+            consensus=normalized["consensus"],
+            important_kpis=tuple(normalized["important_kpis"]),
+            bull_case=tuple(normalized["bull_case"]),
+            base_case=tuple(normalized["base_case"]),
+            bear_case=tuple(normalized["bear_case"]),
+            triggers=normalized["triggers"],
+            invalidation_conditions=tuple(normalized["invalidation_conditions"]),
+            source_name=normalized["source_name"],
+            source_url=normalized["source_url"],
+            source_as_of=date.fromisoformat(normalized["source_as_of"])
+            if normalized["source_as_of"]
+            else None,
+            version=result.version,
+            updated_at=result.updated_at,
         )
-        saved = repo.save(updated, change_note=request.change_note)
-        return _expectation_payload(saved)
+
+        return {
+            **_expectation_payload(saved),
+            "draft_fingerprint": request.draft_fingerprint,
+            "approved_by": request.approved_by,
+        }
 
     return app
 

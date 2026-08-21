@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
-from dataclasses import replace
 from datetime import UTC, date, datetime
 from typing import Any
 
-from trading_system.event_repository import EventExpectationRepository
+from trading_system.event_repository import (
+    EventExpectationNotFound,
+    EventExpectationRepository,
+    ExpectationPatch,
+)
 from trading_system.models import EventExpectation
 
 
@@ -70,78 +73,99 @@ class SupabaseEventExpectationRepository(EventExpectationRepository):
         ordinal = event.scheduled_date.toordinal()
         return (is_past, -ordinal if is_past else ordinal)
 
-    def save(
+    def apply_partial_update(
         self,
-        expectation: EventExpectation,
+        event_id: str,
+        patch: ExpectationPatch,
         *,
-        change_note: str | None = None,
+        change_note: str,
     ) -> EventExpectation:
-        now = datetime.now(UTC)
-        self.client.table("market_events").upsert(
-            {
-                "event_id": expectation.event_id,
-                "instrument": expectation.instrument,
-                "event_name": expectation.event_name,
-                "scheduled_date": expectation.scheduled_date.isoformat(),
-                "updated_at": now.isoformat(),
-            },
-            on_conflict="event_id",
-        ).execute()
+        # insert_next_expectation_version() takes the same
+        # pg_advisory_xact_lock (same key) as approve_strategy_draft() (see
+        # supabase/migrations/20260821140000_shared_expectation_version_lock.sql).
+        # It now does the entire "read current, resolve this partial patch
+        # against it, write the merged next version" sequence itself, in
+        # one transaction, after acquiring that lock - not this method,
+        # and not any caller of this method. The old approach read
+        # "current" via a separate, unlocked get() call, merged the patch
+        # into a full EventExpectation in Python *before* any lock was
+        # taken, and only then called this RPC - so a strategy-draft
+        # approval that committed in that window would have its untouched
+        # fields silently reverted by the admin write that followed it.
+        # `None` on any patch field is passed straight through as SQL NULL
+        # here; the function coalesces it against whatever it reads as
+        # current, exactly mirroring "None means unchanged."
+        try:
+            response = self.client.rpc(
+                "insert_next_expectation_version",
+                {
+                    "input_event_id": event_id,
+                    "input_source_name": patch.source_name,
+                    "input_source_url": patch.source_url,
+                    "input_source_as_of": patch.source_as_of.isoformat()
+                    if patch.source_as_of
+                    else None,
+                    "input_consensus": patch.consensus,
+                    "input_important_kpis": list(patch.important_kpis)
+                    if patch.important_kpis is not None
+                    else None,
+                    "input_bull_case": list(patch.bull_case) if patch.bull_case is not None else None,
+                    "input_base_case": list(patch.base_case) if patch.base_case is not None else None,
+                    "input_bear_case": list(patch.bear_case) if patch.bear_case is not None else None,
+                    "input_triggers": patch.triggers,
+                    "input_invalidation_conditions": list(patch.invalidation_conditions)
+                    if patch.invalidation_conditions is not None
+                    else None,
+                    "input_change_note": change_note,
+                },
+            ).execute()
+        except Exception as exc:
+            if self._is_event_not_found(exc):
+                raise EventExpectationNotFound(event_id) from exc
+            raise
 
-        payload = {
-            "event_id": expectation.event_id,
-            "version": self._next_version(expectation.event_id),
-            "source_name": expectation.source_name or "manual",
-            "source_url": expectation.source_url,
-            "source_as_of": expectation.source_as_of.isoformat()
-            if expectation.source_as_of
-            else None,
-            "consensus": expectation.consensus,
-            "important_kpis": list(expectation.important_kpis),
-            "bull_case": list(expectation.bull_case),
-            "base_case": list(expectation.base_case),
-            "bear_case": list(expectation.bear_case),
-            "triggers": expectation.triggers,
-            "invalidation_conditions": list(expectation.invalidation_conditions),
-            "change_note": change_note,
-        }
-
-        # Concurrent writers can race on version allocation. Retry only the
-        # unique-constraint conflict; permission, validation and network errors
-        # must surface instead of being hidden by retries.
-        for attempt in range(3):
-            try:
-                response = (
-                    self.client.table("event_expectation_versions")
-                    .insert(payload)
-                    .select("version, created_at")
-                    .execute()
-                )
-                row = (response.data or [{}])[0]
-                created_at = self._parse_datetime(row.get("created_at")) or now
-                return replace(
-                    expectation,
-                    version=int(row.get("version", payload["version"])),
-                    updated_at=created_at,
-                )
-            except Exception as exc:
-                if not self._is_unique_violation(exc) or attempt == 2:
-                    raise
-                payload["version"] = self._next_version(expectation.event_id)
-
-        raise RuntimeError("unreachable")
-
-    def _next_version(self, event_id: str) -> int:
-        response = (
-            self.client.table("event_expectation_versions")
-            .select("version")
-            .eq("event_id", event_id)
-            .order("version", desc=True)
-            .limit(1)
-            .execute()
-        )
         rows = response.data or []
-        return int(rows[0]["version"]) + 1 if rows else 1
+        if not rows:
+            raise RuntimeError("insert_next_expectation_version returned no rows")
+
+        # Built entirely from the RPC's own return row - never a follow-up
+        # get() call. A post-commit get() is its own separate, unlocked
+        # read: if a second writer (another admin patch, or a
+        # strategy-draft approval) committed a *later* version for this
+        # same event_id in the gap between this RPC's transaction
+        # committing and that follow-up read running, the read would
+        # return the later writer's row - so this call would incorrectly
+        # report someone else's version and fields as its own result.
+        # insert_next_expectation_version() now returns every field this
+        # method needs (including instrument/event_name/scheduled_date,
+        # which live on market_events, not event_expectation_versions)
+        # directly from the same row it just inserted, so there is nothing
+        # left to re-read.
+        row = rows[0]
+        return EventExpectation(
+            event_id=event_id,
+            instrument=str(row["out_instrument"]),
+            event_name=str(row["out_event_name"]),
+            scheduled_date=self._parse_date(row["out_scheduled_date"]),
+            consensus=dict(row.get("out_consensus") or {}),
+            important_kpis=tuple(row.get("out_important_kpis") or ()),
+            bull_case=tuple(row.get("out_bull_case") or ()),
+            base_case=tuple(row.get("out_base_case") or ()),
+            bear_case=tuple(row.get("out_bear_case") or ()),
+            triggers=dict(row.get("out_triggers") or {}),
+            invalidation_conditions=tuple(row.get("out_invalidation_conditions") or ()),
+            source_name=row.get("out_source_name"),
+            source_url=row.get("out_source_url"),
+            source_as_of=self._parse_date(row["out_source_as_of"])
+            if row.get("out_source_as_of")
+            else None,
+            version=int(row["out_version"]),
+            updated_at=self._parse_datetime(row.get("out_created_at")) or datetime.now(UTC),
+        )
+
+    @staticmethod
+    def _is_event_not_found(exc: Exception) -> bool:
+        return "event_not_found" in str(exc) or getattr(exc, "code", None) == "P0002"
 
     @classmethod
     def _row_to_expectation(cls, row: dict[str, Any]) -> EventExpectation:
@@ -178,7 +202,3 @@ class SupabaseEventExpectationRepository(EventExpectationRepository):
         if isinstance(value, datetime):
             return value if value.tzinfo else value.replace(tzinfo=UTC)
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
-
-    @staticmethod
-    def _is_unique_violation(exc: Exception) -> bool:
-        return getattr(exc, "code", None) == "23505" or "23505" in str(exc)

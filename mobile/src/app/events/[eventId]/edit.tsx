@@ -13,11 +13,13 @@ import {
 import { BackButton } from '@/components/back-button';
 import { EventExpectation, getEvent } from '@/services/api';
 
-// Draft-only editor. Saving requires an admin-authenticated write and the
-// mobile app only ever holds the low-privilege read key (see
-// docs/event_configuration_storage.md), so this screen never calls the
-// versioned admin write endpoint. A future PR must add a real
-// mobile-control-auth flow before this form can persist anything.
+// Advanced/debug raw field viewer. The primary strategy UX now lives at
+// /events/[eventId]/strategy (summary -> edit draft -> preview -> explicit
+// confirmation -> approve), which persists through the strategy-draft
+// preview/approve endpoints under a dedicated control-auth credential. This
+// screen intentionally still never calls the admin-authenticated
+// versioned-write endpoint - the mobile app must never hold the backend's
+// admin token - so its Save action stays disabled.
 
 function listToText(items: string[]): string {
   return items.join('\n');
@@ -108,19 +110,21 @@ export default function EventEditScreen() {
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <BackButton label="Takaisin" />
 
-      <Text style={styles.title}>Muokkaa seuranta-asetuksia</Text>
+      <Text style={styles.title}>Raakakenttäeditori (debug)</Text>
       <Text style={styles.subtitle}>
         {event?.event_name} · {event?.instrument}
       </Text>
 
       <View style={styles.draftNotice}>
-        <Text style={styles.draftNoticeTitle}>LUONNOS</Text>
+        <Text style={styles.draftNoticeTitle}>ADVANCED / DEBUG</Text>
         <Text style={styles.draftNoticeText}>
-          Tämä näkymä on UI-luonnos. Tallennus vaatii tulevan turvallisen
-          mobile-control-auth-ratkaisun; se ei ole vielä toteutettu, joten
-          Tallenna-painike on pois käytöstä eikä lomake kutsu admin-suojattua
-          kirjoitusrajapintaa. Read-avainta ei koskaan käytetä
-          kirjoitusoperaatioihin.
+          Tämä näkymä näyttää nykyisen hyväksytyn expectation-version raa&apos;at
+          kentät vain tarkastelua varten. Strategian valmistelu ja
+          hyväksyntä tehdään &ldquo;Valmistele strategia&rdquo; -näkymässä
+          (draft → preview → hyväksyntä). Tämä lomake ei koskaan kutsu
+          admin-suojattua kirjoitusrajapintaa eikä read-avainta koskaan
+          käytetä kirjoitusoperaatioihin, joten Tallenna-painike pysyy pois
+          käytöstä.
         </Text>
       </View>
 
