@@ -148,6 +148,38 @@ class MobileSourceTests(unittest.TestCase):
         self.assertIn("!loading", show_suggestions_expr)
         self.assertIn("data?.ticker !== query.toUpperCase()", show_suggestions_expr)
 
+    def test_market_selection_invalidates_active_scan_before_new_load(self) -> None:
+        source = Path("mobile/src/app/scanner.tsx").read_text(encoding="utf-8")
+
+        invalidate_start = source.index("function invalidateScan() {")
+        invalidate_end = source.index("\n  }", invalidate_start)
+        invalidate_body = source[invalidate_start:invalidate_end]
+
+        # 1) The previous market's data must be dropped synchronously here -
+        # never deferred to an effect or timer - so it can never render
+        # under the new "Valittu" label once the selection changes.
+        self.assertNotIn("useEffect", invalidate_body)
+        self.assertNotIn("setTimeout", invalidate_body)
+        self.assertIn("setData(null)", invalidate_body)
+        self.assertIn("setLoading(true)", invalidate_body)
+
+        # 2) The active request must be invalidated in the very same place,
+        # so a late response from before the selection change can never
+        # update state again - even if the new loadScanner() has not
+        # started yet.
+        self.assertIn("latestRequestId.current", invalidate_body)
+
+        # invalidateScan is defined ahead of, and is independent of, the
+        # debounced load effect that eventually starts the new request.
+        debounce_effect_start = source.index("setTimeout(() => {\n      void loadScanner();")
+        self.assertLess(invalidate_start, debounce_effect_start)
+
+        # Both the country and the scope selector must call it synchronously,
+        # right before changing the underlying state - not after, and not
+        # through a separate deferred hook.
+        self.assertIn("invalidateScan();\n              setCountry(item.value);", source)
+        self.assertIn("invalidateScan();\n              setScope(item);", source)
+
     def test_ota_configuration_is_channel_bound(self) -> None:
         app = Path("mobile/app.json").read_text(encoding="utf-8")
         eas = Path("mobile/eas.json").read_text(encoding="utf-8")

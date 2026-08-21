@@ -25,6 +25,18 @@ export default function ScannerScreen() {
   const market = `${country} ${scope}`;
   const limit = SCOPE_LIMITS[scope];
 
+  // Invalidate any in-flight scanner request and drop the previous
+  // market's data synchronously, right when the selection changes - before
+  // the debounced loadScanner effect below even runs. A late response for
+  // the old market can then never update state again, and the old results
+  // can never render under the new "Valittu" label.
+  function invalidateScan() {
+    latestRequestId.current += 1;
+    setData(null);
+    setLoading(true);
+    setError('');
+  }
+
   const loadScanner = useCallback(async () => {
     const requestId = ++latestRequestId.current;
     setLoading(true);
@@ -66,7 +78,10 @@ export default function ScannerScreen() {
           <Pressable
             key={item.value}
             accessibilityRole="button"
-            onPress={() => setCountry(item.value)}
+            onPress={() => {
+              invalidateScan();
+              setCountry(item.value);
+            }}
             style={[
               shared.card,
               { marginTop: 0, paddingVertical: 10, paddingHorizontal: 14 },
@@ -83,7 +98,10 @@ export default function ScannerScreen() {
           <Pressable
             key={item}
             accessibilityRole="button"
-            onPress={() => setScope(item)}
+            onPress={() => {
+              invalidateScan();
+              setScope(item);
+            }}
             style={[
               shared.card,
               { marginTop: 0, paddingVertical: 10, paddingHorizontal: 18 },
