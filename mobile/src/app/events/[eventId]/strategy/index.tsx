@@ -11,7 +11,12 @@ import {
 
 import { BackButton } from '@/components/back-button';
 import { getEvent, previewStrategyDraft } from '@/services/api';
-import { draftFormFromEvent, draftFormToInput, textToList } from '@/utils/strategy-draft-format';
+import {
+  draftFormFromEvent,
+  draftFormToInput,
+  parseTypedRecord,
+  textToList,
+} from '@/utils/strategy-draft-format';
 import { useResetOnKeyChange } from '@/utils/use-reset-on-key-change';
 import { useStrategyDraft } from './_layout';
 
@@ -164,7 +169,7 @@ export default function StrategySummaryScreen() {
       </View>
 
       <Text style={styles.sectionTitle}>KONSENSUS</Text>
-      <TextBlockCard text={draft.consensusText} empty="Ei konsensuslukuja." />
+      <RecordCard text={draft.consensusText} empty="Ei konsensuslukuja." />
 
       <Text style={styles.sectionTitle}>TÄRKEIMMÄT KPI:T</Text>
       <TextBlockCard text={draft.kpiText} empty="Ei merkintöjä." />
@@ -179,7 +184,7 @@ export default function StrategySummaryScreen() {
       <TextBlockCard text={draft.bearText} empty="Ei merkintöjä." />
 
       <Text style={styles.sectionTitle}>TRIGGERIT</Text>
-      <TextBlockCard text={draft.triggersText} empty="Ei triggereitä." />
+      <RecordCard text={draft.triggersText} empty="Ei triggereitä." />
 
       <Text style={styles.sectionTitle}>NO TRADE / MITÄTÖINTIEHDOT</Text>
       <TextBlockCard text={draft.invalidationText} empty="Ei mitätöintiehtoja." />
@@ -261,6 +266,38 @@ function TextBlockCard({ text, empty }: { text: string; empty: string }) {
   );
 }
 
+// consensus/triggers are stored as raw JSON object text (see
+// strategy-draft-format.ts) - this parses and renders it as key/value
+// rows, and shows the parser's own error message (never a guess) when the
+// text isn't valid JSON or contains a value type consensus/triggers don't
+// support.
+function RecordCard({ text, empty }: { text: string; empty: string }) {
+  const result = parseTypedRecord(text);
+  if (!result.ok) {
+    return (
+      <View style={styles.card}>
+        <Text style={styles.errorText}>{result.error}</Text>
+      </View>
+    );
+  }
+
+  const entries = Object.entries(result.value);
+  return (
+    <View style={styles.card}>
+      {entries.length === 0 ? (
+        <Text style={styles.muted}>{empty}</Text>
+      ) : (
+        entries.map(([key, value]) => (
+          <View key={key} style={styles.scoreRow}>
+            <Text style={styles.muted}>{key}</Text>
+            <Text style={styles.score}>{value === null ? 'null' : String(value)}</Text>
+          </View>
+        ))
+      )}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#0b0e13' },
   loadingScreen: {
@@ -323,6 +360,8 @@ const styles = StyleSheet.create({
   summaryText: { color: '#d9dee7', fontSize: 14, lineHeight: 21 },
   muted: { color: '#6f7a8b', fontSize: 12, lineHeight: 18 },
   listItem: { color: '#b7c2d7', fontSize: 13, lineHeight: 20 },
+  scoreRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4 },
+  score: { color: '#c7ced8', fontWeight: '700' },
   warningCard: {
     backgroundColor: '#241d10',
     borderWidth: 1,

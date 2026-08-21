@@ -998,10 +998,16 @@ class StrategyDraftMobileSourceTests(unittest.TestCase):
         self.assertNotIn("fetch(", self.format_util_source)
         self.assertNotIn("apiPost", self.format_util_source)
 
-    # -- consensus/trigger lossless round-trip -------------------------------
+    # -- consensus/trigger lossless round-trip (JSON object representation) -
+
+    def _extract_function(self, name: str) -> str:
+        source = self.format_util_source
+        start = source.index(f"export function {name}(")
+        end = source.index("\n}\n", start) + len("\n}")
+        return source[start:end]
 
     def _run_typed_record_script(self, script_suffix: str) -> dict:
-        """Extracts recordToText/parseTypedScalar/textToTypedRecord from
+        """Extracts recordToText/parseTypedRecord/textToTypedRecord from
         strategy-draft-format.ts, strips their TS-only syntax, and runs them
         under node with the given trailing script appended. Returns the
         parsed JSON the script printed."""
@@ -1009,29 +1015,27 @@ class StrategyDraftMobileSourceTests(unittest.TestCase):
         if node is None:
             self.skipTest("node is not available in this environment")
 
-        source = self.format_util_source
-        start = source.index("export function recordToText(")
-        end = source.index("\n\nexport function draftFormFromEvent", start)
-        combined = source[start:end]
+        combined = "\n".join(
+            self._extract_function(name)
+            for name in ("recordToText", "parseTypedRecord", "textToTypedRecord")
+        )
 
         combined = combined.replace("export function ", "function ")
         combined = combined.replace("(record: Record<string, unknown>): string", "(record)")
-        combined = combined.replace("(rawValue: string): number | string | null", "(rawValue)")
+        combined = combined.replace("(text: string): TypedRecordParseResult", "(text)")
         combined = combined.replace(
             "(text: string): Record<string, number | string | null>", "(text)"
         )
+        combined = combined.replace("let parsed: unknown;", "let parsed;")
         combined = combined.replace(
-            "const parsed: unknown = JSON.parse(rawValue);",
-            "const parsed = JSON.parse(rawValue);",
+            "const value: Record<string, number | string | null> = {};",
+            "const value = {};",
         )
-        combined = combined.replace(
-            "const record: Record<string, number | string | null> = {};",
-            "const record = {};",
-        )
+        combined = combined.replace(" as Record<string, unknown>", "")
         self.assertNotIn(": Record", combined)
         self.assertNotIn(": string", combined)
         self.assertNotIn(": unknown", combined)
-        self.assertNotIn(": number", combined)
+        self.assertNotIn("TypedRecordParseResult", combined)
 
         script = combined + "\n" + script_suffix
 
@@ -1049,14 +1053,18 @@ class StrategyDraftMobileSourceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
-    def test_every_scalar_type_round_trips_losslessly(self) -> None:
-        # No heuristic numeric/null guessing: each value is rendered as a
-        # JSON literal (recordToText) and parsed back as one
-        # (textToTypedRecord), so type is preserved exactly rather than
-        # guessed from the text's shape.
+    def test_every_scalar_type_and_a_colon_containing_key_round_trip_losslessly(
+        self,
+    ) -> None:
+        # The representation is a single JSON object literal (recordToText
+        # -> JSON.stringify, textToTypedRecord -> JSON.parse), not "key:
+        # value" lines - so there is no colon-splitting anywhere to trip up
+        # on a key that itself contains a colon, and no heuristic
+        # numeric/null guessing to mis-type a value.
         outputs = self._run_typed_record_script(
             """
 const original = {
+  "Revenue: FY27": "colon-in-key value",
   leading_zero_string: "001",
   literal_null_string: "null",
   actual_null: null,
@@ -1070,17 +1078,13 @@ console.log(JSON.stringify({ text, roundTripped }));
 """
         )
 
-        text = outputs["text"]
-        # The rendered text distinguishes each case purely by JSON syntax:
-        # strings are quoted, null and numbers are bare.
-        self.assertIn('leading_zero_string: "001"', text)
-        self.assertIn('literal_null_string: "null"', text)
-        self.assertIn("actual_null: null", text)
-        self.assertIn("plain_number: 1", text)
-        self.assertIn("decimal_number: 55.6", text)
-        self.assertIn('plain_string: "manual"', text)
-
         round_tripped = outputs["roundTripped"]
+        # A key containing ":" must survive completely unchanged - this is
+        # exactly the case a line-based "key: value" format cannot express
+        # unambiguously, since it can't tell the key's own colon apart from
+        # the key/value separator.
+        self.assertIn("Revenue: FY27", round_tripped)
+        self.assertEqual(round_tripped["Revenue: FY27"], "colon-in-key value")
         # The string "001" must never become the number 1.
         self.assertEqual(round_tripped["leading_zero_string"], "001")
         self.assertIsInstance(round_tripped["leading_zero_string"], str)
@@ -1095,23 +1099,57 @@ console.log(JSON.stringify({ text, roundTripped }));
         self.assertEqual(round_tripped["decimal_number"], 55.6)
         self.assertEqual(round_tripped["plain_string"], "manual")
 
-    def test_hand_typed_leading_zero_string_is_not_coerced_to_a_number(self) -> None:
-        # Distinct from the round-trip test above: a user typing "001"
-        # directly (not going through recordToText first) must get the
-        # same lossless behavior - "001" is invalid JSON number syntax, so
-        # it falls through to the literal-string fallback rather than
-        # Number("001") silently coercing it to 1.
+        # And the rendered text is genuinely the value's own JSON
+        # representation - not a hand-built "${value}" interpolation that
+        # could itself be ambiguous.
+        self.assertEqual(
+            json.loads(outputs["text"]),
+            {
+                "Revenue: FY27": "colon-in-key value",
+                "leading_zero_string": "001",
+                "literal_null_string": "null",
+                "actual_null": None,
+                "plain_number": 1,
+                "decimal_number": 55.6,
+                "plain_string": "manual",
+            },
+        )
+
+    def test_invalid_structured_input_is_reported_as_an_error_not_guessed(self) -> None:
         outputs = self._run_typed_record_script(
             """
-const result = textToTypedRecord('metric: 001\\nother: null\\nquoted: "null"');
-console.log(JSON.stringify(result));
+const invalidJson = parseTypedRecord('{not valid json');
+const notAnObject = parseTypedRecord('[1, 2, 3]');
+const badValueType = parseTypedRecord('{"key": true}');
+const nestedObject = parseTypedRecord('{"key": {"nested": 1}}');
+const validEmpty = parseTypedRecord('');
+let threwForInvalidJson = false;
+try {
+  textToTypedRecord('{not valid json');
+} catch (err) {
+  threwForInvalidJson = true;
+}
+console.log(JSON.stringify({
+  invalidJson, notAnObject, badValueType, nestedObject, validEmpty, threwForInvalidJson,
+}));
 """
         )
 
-        self.assertEqual(outputs["metric"], "001")
-        self.assertIsInstance(outputs["metric"], str)
-        self.assertIsNone(outputs["other"])
-        self.assertEqual(outputs["quoted"], "null")
+        for case_name in ("invalidJson", "notAnObject", "badValueType", "nestedObject"):
+            case = outputs[case_name]
+            self.assertFalse(case["ok"], f"{case_name} was incorrectly accepted")
+            self.assertTrue(case.get("error"), f"{case_name} has no error message")
+
+        # Empty/whitespace-only text is treated as "no entries yet", not an
+        # error - a freshly-opened draft with nothing typed must not show a
+        # validation error before the user has written anything.
+        self.assertTrue(outputs["validEmpty"]["ok"])
+        self.assertEqual(outputs["validEmpty"]["value"], {})
+
+        # textToTypedRecord() (used by draftFormToInput -> preview/approve)
+        # must raise for the same invalid input parseTypedRecord flags -
+        # never silently normalize/guess a value to send to the backend.
+        self.assertTrue(outputs["threwForInvalidJson"])
 
     def test_draft_to_input_uses_the_same_typed_parser_for_consensus_and_triggers(self) -> None:
         self.assertIn(
@@ -1120,10 +1158,32 @@ console.log(JSON.stringify(result));
         self.assertIn(
             "triggers: textToTypedRecord(draft.triggersText)", self.format_util_source
         )
-        # The old heuristic numeric/null-guessing parsers must be gone
-        # entirely, not just unused.
+        # The old heuristic numeric/null-guessing parser and the old
+        # colon-split line format must be gone entirely, not just unused -
+        # line.indexOf(':') was specifically how a key's own ":" used to
+        # get confused with the key/value separator (the explanatory
+        # comment at the top of the file still references the old pattern
+        # by name, which is fine - only the actual code matters here).
         self.assertNotIn("Number(rawValue)", self.format_util_source)
         self.assertNotIn("Number.isFinite", self.format_util_source)
+        self.assertNotIn("separatorIndex", self.format_util_source)
+        self.assertNotIn("line.slice(", self.format_util_source)
+
+    def test_summary_screen_renders_consensus_and_triggers_via_the_typed_parser(self) -> None:
+        # Confirms the summary screen doesn't reintroduce line-splitting to
+        # *display* consensus/triggers even though textToTypedRecord/
+        # draftFormToInput are only used for the API payload - RecordCard
+        # must use the same parseTypedRecord() as everything else, and must
+        # show its error rather than rendering garbage from a naive split.
+        self.assertIn("function RecordCard(", self.summary_source)
+        record_card_start = self.summary_source.index("function RecordCard(")
+        record_card_end = self.summary_source.index("\n}\n", record_card_start)
+        record_card_body = self.summary_source[record_card_start:record_card_end]
+
+        self.assertIn("parseTypedRecord(text)", record_card_body)
+        self.assertIn("result.error", record_card_body)
+        self.assertIn("RecordCard text={draft.consensusText}", self.summary_source)
+        self.assertIn("RecordCard text={draft.triggersText}", self.summary_source)
 
     # -- route event change resets stale draft/preview/approval state -------
 

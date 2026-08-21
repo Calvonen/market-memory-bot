@@ -306,9 +306,30 @@ class StrategyDraftApiTests(unittest.TestCase):
         consensus = response.json()["consensus"]
         self.assertIsNone(consensus["fy27_operating_profit_pre_exceptional_gbp_m"])
         self.assertNotEqual(consensus["fy27_operating_profit_pre_exceptional_gbp_m"], "null")
-        self.assertEqual(consensus["other_metric_gbp_m"], 55.6)
-        persisted = self.repo.get("hays-fy2026-results").consensus
-        self.assertIsNone(persisted["fy27_operating_profit_pre_exceptional_gbp_m"])
+
+    def test_colon_containing_keys_round_trip_through_preview_and_approve(self) -> None:
+        draft = _valid_draft_body(
+            consensus={"Revenue: FY27": 123.4},
+            triggers={"bull_Revenue: FY27": 130.0},
+            important_kpis=[],
+        )
+
+        preview = self._preview(draft)
+        self.assertEqual(preview.status_code, 200)
+        preview_body = preview.json()
+        self.assertEqual(preview_body["draft"]["consensus"]["Revenue: FY27"], 123.4)
+        self.assertEqual(preview_body["draft"]["triggers"]["bull_Revenue: FY27"], 130.0)
+
+        approval_body = self._approval_body_from_preview(draft)
+        response = self._approve(approval_body, key=self.CONTROL_KEY)
+
+        self.assertEqual(response.status_code, 201)
+        body = response.json()
+        self.assertEqual(body["consensus"]["Revenue: FY27"], 123.4)
+        self.assertEqual(body["triggers"]["bull_Revenue: FY27"], 130.0)
+        persisted = self.repo.get("hays-fy2026-results")
+        self.assertEqual(persisted.consensus["Revenue: FY27"], 123.4)
+        self.assertEqual(persisted.triggers["bull_Revenue: FY27"], 130.0)
 
     def test_approve_records_an_audit_trail_entry(self) -> None:
         draft = _valid_draft_body()

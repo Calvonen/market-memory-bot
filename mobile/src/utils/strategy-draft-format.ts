@@ -1,7 +1,13 @@
 // Shared text <-> structured-field conversion for the strategy draft flow.
-// The mobile UI edits lists/records as one-entry-per-line text (same
-// convention as the older raw field editor) so this stays a single place
-// that both the draft editor and the summary/confirm screens rely on.
+// consensus/triggers are edited as raw JSON object text, not "key: value"
+// lines - a line-based, colon-split format can never be genuinely lossless
+// for arbitrary keys, since nothing stops a real metric/trigger name from
+// containing a colon itself (e.g. "Revenue: FY27"), which a naive
+// `line.indexOf(':')` split can't tell apart from the key/value separator.
+// JSON is the structured representation with no such ambiguity: a key is
+// always exactly the JSON string it was written as, whatever characters it
+// contains, and a value's type (string/number/null) is explicit in its
+// syntax rather than guessed from its shape.
 
 import { EventExpectation, StrategyDraftInput } from '@/services/api';
 
@@ -36,56 +42,67 @@ export function textToList(text: string): string[] {
     .filter((line) => line.length > 0);
 }
 
-// Values are always rendered as a JSON literal, never a bare
-// `${value}` interpolation - that's what makes the round trip through
-// textToTypedRecord() below lossless and unambiguous. A number renders bare
-// (`1`, `55.6`), `null` renders bare (`null`), and a string always renders
-// *quoted* (`"001"`, `"null"`, `"manual"`) - so the string "001" is never
-// confusable with the number 1, and the string "null" is never confusable
-// with real null, purely from the text alone.
+// Pretty-printed JSON object literal - the single source of truth for how
+// a consensus/triggers record is represented as editable text. Every key
+// and value round-trips through JSON.stringify/JSON.parse exactly: keys
+// keep any character they contain (including ":"), strings stay strings
+// (quoted), numbers stay numbers, and null stays null.
 export function recordToText(record: Record<string, unknown>): string {
-  return Object.entries(record)
-    .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
-    .join('\n');
+  return JSON.stringify(record, null, 2);
 }
 
-// Parses one "key: value" line's value as a JSON scalar - the only
-// unambiguous way to tell the number 1 from the string "1", the string
-// "001" from the number 1 (leading zeros make "001" invalid JSON number
-// syntax, so it falls through to the literal-string fallback below rather
-// than ever being coerced), and real `null` from the three-character
-// string "null" (which only round-trips back to that exact string because
-// recordToText() always JSON.stringifies values, quoting every string).
-// No heuristic "does this look numeric" guessing anywhere in this function.
-function parseTypedScalar(rawValue: string): number | string | null {
+export type TypedRecordParseResult =
+  | { ok: true; value: Record<string, number | string | null> }
+  | { ok: false; error: string };
+
+// The one parser for consensus/triggers text. Never guesses or silently
+// normalizes: invalid JSON, a non-object top level, or a value that isn't
+// string/number/null is reported back as an explicit error for the caller
+// to show the user, not coerced into "something reasonable."
+export function parseTypedRecord(text: string): TypedRecordParseResult {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) {
+    return { ok: true, value: {} };
+  }
+
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(rawValue);
-    if (parsed === null || typeof parsed === 'number' || typeof parsed === 'string') {
-      return parsed;
-    }
-    // A boolean, array, or object isn't a value type consensus/triggers
-    // use - fall through to the literal-string fallback below rather than
-    // silently coercing or dropping it.
-  } catch {
-    // Not valid JSON (e.g. a bare, unquoted word, or "001") - fall through
-    // to the literal-string fallback below.
+    parsed = JSON.parse(trimmed);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Tuntematon JSON-virhe';
+    return { ok: false, error: `Virheellinen JSON: ${message}` };
   }
-  return rawValue;
+
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return {
+      ok: false,
+      error: 'Arvon täytyy olla JSON-objekti, esim. {"avain": 1.0}',
+    };
+  }
+
+  const value: Record<string, number | string | null> = {};
+  for (const [key, raw] of Object.entries(parsed as Record<string, unknown>)) {
+    if (raw !== null && typeof raw !== 'number' && typeof raw !== 'string') {
+      return {
+        ok: false,
+        error: `Avaimen "${key}" arvon täytyy olla numero, merkkijono tai null (sai: ${typeof raw}).`,
+      };
+    }
+    value[key] = raw;
+  }
+  return { ok: true, value };
 }
 
-// Shared by both consensus and triggers: same "key: value per line" text
-// format, same lossless JSON-scalar parsing per value.
+// Convenience for callers (draftFormToInput) that need a value or a thrown
+// error, never a silently guessed/normalized fallback - invalid consensus/
+// triggers text must stop a preview/approve attempt, not send something
+// "close enough" to the backend.
 export function textToTypedRecord(text: string): Record<string, number | string | null> {
-  const record: Record<string, number | string | null> = {};
-  for (const line of text.split('\n')) {
-    const separatorIndex = line.indexOf(':');
-    if (separatorIndex === -1) continue;
-    const key = line.slice(0, separatorIndex).trim();
-    const rawValue = line.slice(separatorIndex + 1).trim();
-    if (!key || !rawValue) continue;
-    record[key] = parseTypedScalar(rawValue);
+  const result = parseTypedRecord(text);
+  if (!result.ok) {
+    throw new Error(result.error);
   }
-  return record;
+  return result.value;
 }
 
 export function draftFormFromEvent(event: EventExpectation): DraftFormState {

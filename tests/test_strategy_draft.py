@@ -121,6 +121,29 @@ class NormalizeDraftTests(unittest.TestCase):
         )
         self.assertEqual(normalized["consensus"]["other_metric_gbp_m"], 55.6)
 
+    def test_colon_containing_consensus_and_trigger_keys_round_trip_unchanged(self) -> None:
+        # The backend's consensus/triggers are plain JSON-object dicts, so a
+        # key containing ":" was never actually ambiguous here - this test
+        # pins that down explicitly, matching the fix on the mobile side
+        # (strategy-draft-format.ts) where a line-based "key: value" format
+        # used to be genuinely lossy for a key like this.
+        payload = _payload(
+            consensus={"Revenue: FY27": 123.4},
+            triggers={"bull_Revenue: FY27": 130.0},
+        )
+        normalized = normalize_draft("hays-fy2026-results", payload)
+
+        self.assertIn("Revenue: FY27", normalized["consensus"])
+        self.assertEqual(normalized["consensus"]["Revenue: FY27"], 123.4)
+        self.assertIn("bull_Revenue: FY27", normalized["triggers"])
+        self.assertEqual(normalized["triggers"]["bull_Revenue: FY27"], 130.0)
+
+        # And the fingerprint is still computed over the exact same keys -
+        # a colon in a key must not get lost/merged when the draft is
+        # canonicalized for hashing.
+        fingerprint = draft_fingerprint(normalized)
+        self.assertEqual(len(fingerprint), 64)
+
 
 class DraftFingerprintTests(unittest.TestCase):
     def test_identical_drafts_produce_identical_fingerprints(self) -> None:

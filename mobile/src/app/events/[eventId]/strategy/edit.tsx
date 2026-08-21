@@ -1,9 +1,9 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { BackButton } from '@/components/back-button';
-import { DraftFormState } from '@/utils/strategy-draft-format';
+import { DraftFormState, parseTypedRecord } from '@/utils/strategy-draft-format';
 import { useResetOnKeyChange } from '@/utils/use-reset-on-key-change';
 import { useStrategyDraft } from './_layout';
 
@@ -42,6 +42,14 @@ export default function StrategyDraftEditScreen() {
     router.back();
   };
 
+  // Consensus/triggers are edited as raw JSON object text - shown here so
+  // an invalid value is visible immediately, not just when the user later
+  // tries to preview/approve. Never blocks saving the draft locally
+  // (that's harmless client-side state); only preview/approve actually
+  // enforces this (draftFormToInput throws for the same reason).
+  const consensusValidation = parseTypedRecord(local.consensusText);
+  const triggersValidation = parseTypedRecord(local.triggersText);
+
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <BackButton label="Takaisin" />
@@ -62,15 +70,20 @@ export default function StrategyDraftEditScreen() {
         />
       </Field>
 
-      <Field label='Konsensusmetriikat (avain: JSON-arvo per rivi — 55.6, "merkkijono" tai null)'>
+      <Field label="Konsensusmetriikat (JSON-objekti)">
         <TextInput
-          style={styles.textArea}
+          style={styles.jsonArea}
           multiline
+          autoCapitalize="none"
+          autoCorrect={false}
           value={local.consensusText}
           onChangeText={(value) => update({ consensusText: value })}
-          placeholder="fy27_operating_profit_pre_exceptional_gbp_m: 55.6"
+          placeholder='{"fy27_operating_profit_pre_exceptional_gbp_m": 55.6}'
           placeholderTextColor="#4e5868"
         />
+        {!consensusValidation.ok ? (
+          <Text style={styles.fieldError}>{consensusValidation.error}</Text>
+        ) : null}
       </Field>
 
       <Field label="Tärkeimmät KPI:t (yksi per rivi)">
@@ -113,14 +126,20 @@ export default function StrategyDraftEditScreen() {
         />
       </Field>
 
-      <Field label='Triggerit (bull_/bear_ + metriikka: JSON-arvo per rivi — 62.0 tai "merkkijono")'>
+      <Field label="Triggerit (JSON-objekti, avaimet bull_/bear_ + metriikka)">
         <TextInput
-          style={styles.textArea}
+          style={styles.jsonArea}
           multiline
+          autoCapitalize="none"
+          autoCorrect={false}
           value={local.triggersText}
           onChangeText={(value) => update({ triggersText: value })}
+          placeholder='{"bull_fy27_operating_profit_gbp_m": 62.0}'
           placeholderTextColor="#4e5868"
         />
+        {!triggersValidation.ok ? (
+          <Text style={styles.fieldError}>{triggersValidation.error}</Text>
+        ) : null}
       </Field>
 
       <Field label="NO TRADE / mitätöintiehdot (yksi per rivi)">
@@ -229,6 +248,19 @@ const styles = StyleSheet.create({
     minHeight: 80,
     textAlignVertical: 'top',
   },
+  jsonArea: {
+    backgroundColor: '#131821',
+    borderWidth: 1,
+    borderColor: '#202734',
+    borderRadius: 12,
+    padding: 12,
+    color: '#e3e8f0',
+    minHeight: 120,
+    textAlignVertical: 'top',
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
+    fontSize: 13,
+  },
+  fieldError: { color: '#e17878', fontSize: 12, lineHeight: 17, marginTop: 6 },
   textInput: {
     backgroundColor: '#131821',
     borderWidth: 1,
