@@ -10,7 +10,13 @@ class MarketMemoryApiTests(unittest.TestCase):
         def analyzer(ticker):
             self.calls.append(ticker)
             return {"ticker": ticker.upper(), "price": 101.5, "latest_market_state": [], "pivots": [], "analog_matches": [{"score": .91}], "trend": "Bullish", "momentum": "Strengthening", "result": {"direction": "LONG"}, "series": []}
-        self.client = TestClient(create_app(InMemoryEventExpectationRepository(), read_api_key="read", market_analyzer=analyzer, market_scanner=lambda market, limit: {"market": market, "results": [], "partial": True}))
+        self.client = TestClient(create_app(
+            InMemoryEventExpectationRepository(),
+            read_api_key="read",
+            market_analyzer=analyzer,
+            market_scanner=lambda market, limit: {"market": market, "markets": ["Finland Top", "USA Top"], "results": [], "partial": True},
+            market_symbol_searcher=lambda query, limit: [{"ticker": "AAPL", "name": "Apple Inc.", "exchange": "Nasdaq"}] if query.lower().startswith("app") else [],
+        ))
 
     def test_analysis_contract_and_core_service_boundary(self):
         response = self.client.get("/api/v1/market-memory/aapl", headers={"X-MarketAI-Key": "read"})
@@ -21,6 +27,13 @@ class MarketMemoryApiTests(unittest.TestCase):
     def test_analysis_and_scanner_require_read_key(self):
         self.assertEqual(self.client.get("/api/v1/market-memory/AAPL").status_code, 401)
         self.assertEqual(self.client.get("/api/v1/scanner").status_code, 401)
+        self.assertEqual(self.client.get("/api/v1/symbols?q=app").status_code, 401)
+
+    def test_symbol_search_contract(self):
+        response = self.client.get("/api/v1/symbols?q=app", headers={"X-MarketAI-Key": "read"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()[0]["ticker"], "AAPL")
+        self.assertEqual(response.json()[0]["name"], "Apple Inc.")
 
     def test_scanner_foundation_contract(self):
         response = self.client.get("/api/v1/scanner?market=Finland%20Top", headers={"X-MarketAI-Key": "read"})
