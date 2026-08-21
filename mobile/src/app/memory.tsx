@@ -45,13 +45,17 @@ export default function MemoryScreen() {
   async function analyze(selectedTicker?: string) {
     const requestId = ++latestRequestId.current;
     const requestedTicker = (selectedTicker ?? ticker).trim();
-    if (selectedTicker) setTicker(selectedTicker);
+    if (selectedTicker) {
+      setTicker(selectedTicker);
+      // Choosing a suggestion ends suggestion mode right away: stop
+      // treating the field as "being edited" so the effect below does not
+      // restart a suggestion search for the ticker we just committed to.
+      // A direct submit (no selectedTicker) leaves this alone, so a
+      // company name/ticker guess that turns out invalid can still bring
+      // suggestions back for the same text once loading ends.
+      setHasEditedTicker(false);
+    }
 
-    // Choosing a suggestion (or submitting directly) ends suggestion mode
-    // right away: stop treating the field as "being edited" so the effect
-    // below does not restart a suggestion search for the ticker we just
-    // committed to, and invalidate/clear whatever suggestion state exists.
-    setHasEditedTicker(false);
     latestSuggestionRequestId.current += 1;
     setSuggestions([]);
     setData(null);

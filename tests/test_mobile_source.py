@@ -76,11 +76,16 @@ class MobileSourceTests(unittest.TestCase):
         analyze_end = source.index("\n  return (", analyze_start)
         analyze_body = source[analyze_start:analyze_end]
 
-        # Choosing a suggestion (or submitting directly) must immediately end
-        # suggestion mode: stop treating the field as "being edited" so the
-        # effect does not restart a search for the ticker just committed to.
-        self.assertIn("setHasEditedTicker(false)", analyze_body)
-        # And whatever suggestion state/request exists must be dropped too.
+        # Choosing a suggestion must immediately end suggestion mode: stop
+        # treating the field as "being edited" so the effect does not
+        # restart a search for the ticker just committed to.
+        if_start = analyze_body.index("if (selectedTicker) {")
+        if_end = analyze_body.index("\n    }", if_start)
+        selected_ticker_block = analyze_body[if_start:if_end]
+        self.assertIn("setHasEditedTicker(false)", selected_ticker_block)
+
+        # And whatever suggestion state/request exists must be dropped too,
+        # whether a suggestion was chosen or the ticker was submitted directly.
         self.assertIn("setSuggestions([])", analyze_body)
         self.assertIn("latestSuggestionRequestId.current", analyze_body)
 
@@ -94,6 +99,54 @@ class MobileSourceTests(unittest.TestCase):
         handler_start = source.index("onChangeText={(value) => {")
         handler_end = source.index("}}", handler_start)
         self.assertIn("setHasEditedTicker(true)", source[handler_start:handler_end])
+
+    def test_only_selected_suggestion_ends_suggestion_mode(self) -> None:
+        source = Path("mobile/src/app/memory.tsx").read_text(encoding="utf-8")
+
+        analyze_start = source.index("async function analyze(")
+        analyze_end = source.index("\n  return (", analyze_start)
+        analyze_body = source[analyze_start:analyze_end]
+
+        if_start = analyze_body.index("if (selectedTicker) {")
+        if_end = analyze_body.index("\n    }", if_start)
+        selected_ticker_block = analyze_body[if_start:if_end]
+        outside_selected_ticker_block = analyze_body[:if_start] + analyze_body[if_end:]
+
+        # Suggestion mode is only ended when a real suggestion ticker was
+        # chosen (selectedTicker truthy) ...
+        self.assertIn("setHasEditedTicker(false)", selected_ticker_block)
+        # ... never as a side effect of a direct submit, a failed request, or
+        # loading finishing - a company-name/ticker guess typed by hand must
+        # not permanently disable suggestions.
+        self.assertNotIn("setHasEditedTicker(false)", outside_selected_ticker_block)
+
+    def test_failed_direct_submit_keeps_suggestion_mode_available(self) -> None:
+        source = Path("mobile/src/app/memory.tsx").read_text(encoding="utf-8")
+
+        analyze_start = source.index("async function analyze(")
+        analyze_end = source.index("\n  return (", analyze_start)
+        analyze_body = source[analyze_start:analyze_end]
+
+        catch_start = analyze_body.index("} catch (requestError) {")
+        finally_start = analyze_body.index("} finally {")
+        catch_block = analyze_body[catch_start:finally_start]
+        finally_block = analyze_body[finally_start:]
+
+        # A failed request - e.g. a company name typed and submitted
+        # directly that the backend rejects as an unknown ticker - must not
+        # touch hasEditedTicker. data stays null and loading clears, so
+        # showSuggestions naturally re-evaluates to true for the still
+        # unmatched query and the debounced effect can search it again.
+        self.assertNotIn("setHasEditedTicker", catch_block)
+        self.assertNotIn("setHasEditedTicker", finally_block)
+        self.assertNotIn("setData(", catch_block)
+
+        show_suggestions_start = source.index("const showSuggestions =")
+        show_suggestions_end = source.index(";", show_suggestions_start)
+        show_suggestions_expr = source[show_suggestions_start:show_suggestions_end]
+        self.assertIn("hasEditedTicker", show_suggestions_expr)
+        self.assertIn("!loading", show_suggestions_expr)
+        self.assertIn("data?.ticker !== query.toUpperCase()", show_suggestions_expr)
 
     def test_ota_configuration_is_channel_bound(self) -> None:
         app = Path("mobile/app.json").read_text(encoding="utf-8")
