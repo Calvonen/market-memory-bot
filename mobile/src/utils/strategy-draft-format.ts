@@ -56,6 +56,31 @@ export function textToRecord(text: string): Record<string, number | string> {
   return record;
 }
 
+// Same "key: value per line" format as textToRecord, but for consensus
+// specifically: recordToText() renders a null value as the literal text
+// "key: null" (a JS template literal coerces null to that string), so the
+// reverse parse must recognize that exact token and produce a real `null`
+// back - not the *string* "null" (Number("null") is NaN, so without this
+// special case the fallback branch below would silently store the string
+// instead of round-tripping the actual null value).
+export function textToConsensusRecord(text: string): Record<string, number | string | null> {
+  const record: Record<string, number | string | null> = {};
+  for (const line of text.split('\n')) {
+    const separatorIndex = line.indexOf(':');
+    if (separatorIndex === -1) continue;
+    const key = line.slice(0, separatorIndex).trim();
+    const rawValue = line.slice(separatorIndex + 1).trim();
+    if (!key || !rawValue) continue;
+    if (rawValue.toLowerCase() === 'null') {
+      record[key] = null;
+      continue;
+    }
+    const numeric = Number(rawValue);
+    record[key] = Number.isFinite(numeric) ? numeric : rawValue;
+  }
+  return record;
+}
+
 export function draftFormFromEvent(event: EventExpectation): DraftFormState {
   return {
     instrument: event.instrument,
@@ -83,7 +108,7 @@ export function draftFormToInput(draft: DraftFormState): StrategyDraftInput {
     instrument: draft.instrument,
     event_name: draft.eventName,
     scheduled_date: draft.scheduledDate,
-    consensus: textToRecord(draft.consensusText),
+    consensus: textToConsensusRecord(draft.consensusText),
     important_kpis: textToList(draft.kpiText),
     bull_case: textToList(draft.bullText),
     base_case: textToList(draft.baseText),

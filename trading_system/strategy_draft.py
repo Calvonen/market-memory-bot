@@ -154,17 +154,41 @@ def draft_warnings(normalized: dict[str, Any], current: EventExpectation | None)
         warnings.append(f"{count} ratkaisematonta kysymystä ennen hyväksyntää")
 
     if current is not None:
-        if normalized["instrument"] != current.instrument:
-            warnings.append(
-                f"instrument '{normalized['instrument']}' poikkeaa nykyisestä ('{current.instrument}')"
-            )
-        if normalized["scheduled_date"] != current.scheduled_date.isoformat():
-            warnings.append(
-                f"scheduled_date '{normalized['scheduled_date']}' poikkeaa nykyisestä "
-                f"('{current.scheduled_date.isoformat()}')"
-            )
+        for mismatch in identity_mismatches(normalized, current):
+            warnings.append(f"{mismatch} - tarkista, ettei luonnos ole väärän eventin")
 
     return warnings
+
+
+def identity_mismatches(normalized: dict[str, Any], current: EventExpectation) -> list[str]:
+    """Which identity fields (instrument/event_name/scheduled_date) differ
+    between the draft and the event identified by the URL's {event_id}.
+
+    event_id itself is never client-controllable - normalize_draft() always
+    takes it from the URL path, never from the request body - so it cannot
+    drift by construction. These three fields *are* present in the request
+    body, so a draft built against the wrong event (or hand-edited
+    carelessly) could otherwise silently retarget/rename/reschedule a
+    different event. preview() surfaces a mismatch here only as a warning;
+    approve() must treat a non-empty result as a hard failure - the
+    {event_id} in the URL is authoritative and a draft must never be able
+    to override it.
+    """
+    mismatches: list[str] = []
+    if normalized["instrument"] != current.instrument:
+        mismatches.append(
+            f"instrument '{normalized['instrument']}' poikkeaa nykyisestä ('{current.instrument}')"
+        )
+    if normalized["event_name"] != current.event_name:
+        mismatches.append(
+            f"event_name '{normalized['event_name']}' poikkeaa nykyisestä ('{current.event_name}')"
+        )
+    if normalized["scheduled_date"] != current.scheduled_date.isoformat():
+        mismatches.append(
+            f"scheduled_date '{normalized['scheduled_date']}' poikkeaa nykyisestä "
+            f"('{current.scheduled_date.isoformat()}')"
+        )
+    return mismatches
 
 
 _DIFF_FIELDS = (

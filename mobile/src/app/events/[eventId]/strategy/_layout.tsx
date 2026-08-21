@@ -1,8 +1,9 @@
-import { Stack } from 'expo-router';
+import { Stack, useLocalSearchParams } from 'expo-router';
 import { Dispatch, SetStateAction, createContext, useContext, useMemo, useState } from 'react';
 
 import { EventExpectation, StrategyDraftPreview } from '@/services/api';
 import { DraftFormState } from '@/utils/strategy-draft-format';
+import { useResetOnKeyChange } from '@/utils/use-reset-on-key-change';
 
 // Shared draft/preview state across strategy/index (summary), strategy/edit
 // (structured draft editor) and strategy/confirm (the explicit-confirmation
@@ -35,9 +36,19 @@ export function useStrategyDraft(): StrategyDraftContextValue {
 }
 
 export default function StrategyLayout() {
+  const { eventId } = useLocalSearchParams<{ eventId: string }>();
   const [event, setEvent] = useState<EventExpectation | null>(null);
   const [draft, setDraft] = useState<DraftFormState | null>(null);
   const [preview, setPreview] = useState<StrategyDraftPreview | null>(null);
+
+  // A different event's draft/preview must never be shown or approvable
+  // under this event's route - reset all three the moment eventId changes,
+  // before any child screen renders with the previous event's state.
+  useResetOnKeyChange(eventId, () => {
+    setEvent(null);
+    setDraft(null);
+    setPreview(null);
+  });
 
   const value = useMemo<StrategyDraftContextValue>(
     () => ({ event, setEvent, draft, setDraft, preview, setPreview }),

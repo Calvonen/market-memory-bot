@@ -21,6 +21,7 @@ STRATEGY_SUMMARY_SCREEN = Path("mobile/src/app/events/[eventId]/strategy/index.t
 STRATEGY_EDIT_SCREEN = Path("mobile/src/app/events/[eventId]/strategy/edit.tsx")
 STRATEGY_CONFIRM_SCREEN = Path("mobile/src/app/events/[eventId]/strategy/confirm.tsx")
 STRATEGY_DRAFT_FORMAT_UTIL = Path("mobile/src/utils/strategy-draft-format.ts")
+RESET_ON_KEY_CHANGE_UTIL = Path("mobile/src/utils/use-reset-on-key-change.ts")
 
 
 class MobileSourceTests(unittest.TestCase):
@@ -855,6 +856,7 @@ class StrategyDraftMobileSourceTests(unittest.TestCase):
         cls.edit_source = STRATEGY_EDIT_SCREEN.read_text(encoding="utf-8")
         cls.confirm_source = STRATEGY_CONFIRM_SCREEN.read_text(encoding="utf-8")
         cls.format_util_source = STRATEGY_DRAFT_FORMAT_UTIL.read_text(encoding="utf-8")
+        cls.reset_hook_source = RESET_ON_KEY_CHANGE_UTIL.read_text(encoding="utf-8")
 
     # -- api.ts: preview vs. approve use distinct, correctly-scoped auth ---
 
@@ -995,6 +997,118 @@ class StrategyDraftMobileSourceTests(unittest.TestCase):
     def test_format_util_never_touches_the_network(self) -> None:
         self.assertNotIn("fetch(", self.format_util_source)
         self.assertNotIn("apiPost", self.format_util_source)
+
+    # -- consensus null round-trip -------------------------------------------
+
+    def test_consensus_null_round_trips_as_real_null_not_the_string_null(self) -> None:
+        # recordToText() renders a null consensus value as the literal text
+        # "key: null" (a JS template literal coerces null to that string).
+        # The reverse parse (textToConsensusRecord) must recognize that
+        # exact token and produce real `null` back - the bug this guards
+        # against is Number("null") being NaN, falling through to store the
+        # *string* "null" instead.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        source = self.format_util_source
+
+        record_to_text_start = source.index("export function recordToText(")
+        record_to_text_end = source.index("\n}\n", record_to_text_start) + len("\n}")
+        record_to_text_js = source[record_to_text_start:record_to_text_end]
+
+        consensus_start = source.index("export function textToConsensusRecord(")
+        consensus_end = source.index("\n}\n", consensus_start) + len("\n}")
+        consensus_js = source[consensus_start:consensus_end]
+
+        combined = record_to_text_js + "\n" + consensus_js
+        combined = combined.replace("export function ", "function ")
+        combined = combined.replace(
+            "(text: string): Record<string, number | string | null>", "(text)"
+        )
+        combined = combined.replace("(record: Record<string, unknown>): string", "(record)")
+        combined = combined.replace(
+            "const record: Record<string, number | string | null> = {};",
+            "const record = {};",
+        )
+        self.assertNotIn(": Record", combined)
+        self.assertNotIn(": string", combined)
+
+        script = (
+            combined
+            + """
+const original = {
+  fy27_operating_profit_pre_exceptional_gbp_m: null,
+  other_metric_gbp_m: 55.6,
+};
+const text = recordToText(original);
+const roundTripped = textToConsensusRecord(text);
+console.log(JSON.stringify({ text, roundTripped }));
+"""
+        )
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+
+        self.assertIn("fy27_operating_profit_pre_exceptional_gbp_m: null", outputs["text"])
+        round_tripped = outputs["roundTripped"]
+        # A real JSON null decodes to Python None here - a str "null" would
+        # decode to the Python string "null" instead, which is exactly the
+        # bug this test catches.
+        self.assertIsNone(round_tripped["fy27_operating_profit_pre_exceptional_gbp_m"])
+        self.assertEqual(round_tripped["other_metric_gbp_m"], 55.6)
+
+    def test_draft_to_input_uses_the_consensus_specific_null_aware_parser(self) -> None:
+        self.assertIn("consensus: textToConsensusRecord(draft.consensusText)", self.format_util_source)
+
+    # -- route event change resets stale draft/preview/approval state -------
+
+    def test_layout_resets_event_draft_and_preview_on_route_change(self) -> None:
+        self.assertIn("useResetOnKeyChange(eventId,", self.layout_source)
+        reset_start = self.layout_source.index("useResetOnKeyChange(eventId, () => {")
+        reset_end = self.layout_source.index("});", reset_start)
+        reset_body = self.layout_source[reset_start:reset_end]
+        self.assertIn("setEvent(null)", reset_body)
+        self.assertIn("setDraft(null)", reset_body)
+        self.assertIn("setPreview(null)", reset_body)
+
+    def test_edit_screen_resyncs_local_draft_on_route_change(self) -> None:
+        self.assertIn(
+            "useResetOnKeyChange(eventId, () => setLocal(draft))", self.edit_source
+        )
+
+    def test_confirm_screen_resets_approval_state_on_route_change(self) -> None:
+        self.assertIn("useResetOnKeyChange(eventId, () => {", self.confirm_source)
+        reset_start = self.confirm_source.index("useResetOnKeyChange(eventId, () => {")
+        reset_end = self.confirm_source.index("});", reset_start)
+        reset_body = self.confirm_source[reset_start:reset_end]
+        self.assertIn("setApprovedBy('')", reset_body)
+        self.assertIn("setAcknowledged(false)", reset_body)
+        self.assertIn("setError(null)", reset_body)
+        self.assertIn("setConflict(false)", reset_body)
+
+    def test_reset_hook_updates_synchronously_during_render_not_in_an_effect(self) -> None:
+        # A useEffect-based reset would leave a one-frame window where the
+        # previous event's draft/preview/approval state is still rendered
+        # under the new event's route before the effect runs. The guarded
+        # conditional setState-during-render pattern has no such window.
+        self.assertNotIn("useEffect", self.reset_hook_source)
+        self.assertIn("if (key !== seenKey) {", self.reset_hook_source)
+
+    def test_every_strategy_screen_imports_the_reset_hook(self) -> None:
+        for source in (self.layout_source, self.edit_source, self.confirm_source, self.summary_source):
+            self.assertIn("useResetOnKeyChange", source)
 
 
 if __name__ == "__main__":

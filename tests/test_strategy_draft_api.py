@@ -1,4 +1,5 @@
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 from fastapi.testclient import TestClient
@@ -6,7 +7,7 @@ from fastapi.testclient import TestClient
 from trading_system.api import create_app
 from trading_system.event_repository import InMemoryEventExpectationRepository
 from trading_system.models import EventExpectation
-from trading_system.strategy_draft_repository import InMemoryStrategyApprovalAuditRepository
+from trading_system.strategy_draft_repository import InMemoryStrategyDraftApprovalRepository
 
 
 class FakePaperRepository:
@@ -62,7 +63,7 @@ class StrategyDraftApiTests(unittest.TestCase):
         )
         self.repo = InMemoryEventExpectationRepository(events={event.event_id: event})
         self.paper_repo = FakePaperRepository()
-        self.approval_repo = InMemoryStrategyApprovalAuditRepository()
+        self.approval_repo = InMemoryStrategyDraftApprovalRepository(expectations=self.repo)
         self.client = TestClient(
             create_app(
                 self.repo,
@@ -157,6 +158,22 @@ class StrategyDraftApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
 
+    def test_consensus_null_round_trips_through_preview_as_real_null(self) -> None:
+        draft = _valid_draft_body(
+            consensus={
+                "fy27_operating_profit_pre_exceptional_gbp_m": None,
+                "other_metric_gbp_m": 55.6,
+            }
+        )
+
+        response = self._preview(draft)
+
+        self.assertEqual(response.status_code, 200)
+        consensus = response.json()["draft"]["consensus"]
+        self.assertIsNone(consensus["fy27_operating_profit_pre_exceptional_gbp_m"])
+        self.assertNotEqual(consensus["fy27_operating_profit_pre_exceptional_gbp_m"], "null")
+        self.assertEqual(consensus["other_metric_gbp_m"], 55.6)
+
     # -- approve: strong write-auth ----------------------------------------
 
     def test_approve_without_control_key_is_401(self) -> None:
@@ -166,7 +183,7 @@ class StrategyDraftApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
         self.assertEqual(self.repo.get("hays-fy2026-results").version, 1)
-        self.assertEqual(self.approval_repo.records, [])
+        self.assertEqual(self.approval_repo.audit_records, [])
 
     def test_read_key_cannot_approve(self) -> None:
         approval_body = self._approval_body_from_preview(_valid_draft_body())
@@ -219,6 +236,26 @@ class StrategyDraftApiTests(unittest.TestCase):
         self.assertEqual(body["triggers"]["bull_fy27_operating_profit_gbp_m"], 62.0)
         self.assertEqual(self.repo.get("hays-fy2026-results").version, 2)
 
+    def test_consensus_null_round_trips_through_approve_as_real_null(self) -> None:
+        draft = _valid_draft_body(
+            consensus={
+                "fy27_operating_profit_pre_exceptional_gbp_m": None,
+                "other_metric_gbp_m": 55.6,
+            },
+            important_kpis=[],
+        )
+        approval_body = self._approval_body_from_preview(draft)
+
+        response = self._approve(approval_body, key=self.CONTROL_KEY)
+
+        self.assertEqual(response.status_code, 201)
+        consensus = response.json()["consensus"]
+        self.assertIsNone(consensus["fy27_operating_profit_pre_exceptional_gbp_m"])
+        self.assertNotEqual(consensus["fy27_operating_profit_pre_exceptional_gbp_m"], "null")
+        self.assertEqual(consensus["other_metric_gbp_m"], 55.6)
+        persisted = self.repo.get("hays-fy2026-results").consensus
+        self.assertIsNone(persisted["fy27_operating_profit_pre_exceptional_gbp_m"])
+
     def test_approve_records_an_audit_trail_entry(self) -> None:
         draft = _valid_draft_body()
         approval_body = self._approval_body_from_preview(draft, approved_by="marko@example.com")
@@ -226,8 +263,8 @@ class StrategyDraftApiTests(unittest.TestCase):
         response = self._approve(approval_body, key=self.CONTROL_KEY)
 
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(len(self.approval_repo.records), 1)
-        record = self.approval_repo.records[0]
+        self.assertEqual(len(self.approval_repo.audit_records), 1)
+        record = self.approval_repo.audit_records[0]
         self.assertEqual(record["event_id"], "hays-fy2026-results")
         self.assertEqual(record["expectation_version"], 2)
         self.assertEqual(record["base_expectation_version"], 1)
@@ -282,7 +319,7 @@ class StrategyDraftApiTests(unittest.TestCase):
         # is now stale) rather than silently creating version 3.
         self.assertEqual(second.status_code, 409)
         self.assertEqual(self.repo.get("hays-fy2026-results").version, 2)
-        self.assertEqual(len(self.approval_repo.records), 1)
+        self.assertEqual(len(self.approval_repo.audit_records), 1)
 
     def test_approve_unknown_event_is_404(self) -> None:
         approval_body = {
@@ -332,6 +369,94 @@ class StrategyDraftApiTests(unittest.TestCase):
 
         after_approve = self.repo.list_upcoming()
         self.assertEqual(after_approve[0].version, 2)
+
+    def test_approve_never_calls_repository_save_directly(self) -> None:
+        # CAS must be enforced by the atomic approval repository, never by
+        # EventExpectationRepository.save()'s own max(version)+1 retry loop -
+        # that loop has no way to check "the version I previewed against is
+        # still current."
+        original_save = self.repo.save
+        calls: list[bool] = []
+
+        def spy_save(*args, **kwargs):
+            calls.append(True)
+            return original_save(*args, **kwargs)
+
+        self.repo.save = spy_save  # type: ignore[assignment]
+
+        approval_body = self._approval_body_from_preview(_valid_draft_body())
+        response = self._approve(approval_body, key=self.CONTROL_KEY)
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(calls, [])
+
+    # -- identity: {event_id} in the URL is authoritative -------------------
+
+    def test_identity_mismatch_is_only_a_warning_in_preview(self) -> None:
+        drifted = _valid_draft_body(instrument="DIFFERENT.L")
+
+        response = self._preview(drifted)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(any("instrument" in w for w in response.json()["warnings"]))
+
+    def test_identity_mismatch_hard_fails_approval(self) -> None:
+        for field, value in (
+            ("instrument", "DIFFERENT.L"),
+            ("event_name", "A completely different event"),
+            ("scheduled_date", "2099-01-01"),
+        ):
+            with self.subTest(field=field):
+                drifted = _valid_draft_body(**{field: value})
+                approval_body = self._approval_body_from_preview(drifted)
+
+                response = self._approve(approval_body, key=self.CONTROL_KEY)
+
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(self.repo.get("hays-fy2026-results").version, 1)
+                self.assertEqual(self.approval_repo.audit_records, [])
+
+    # -- atomicity: concurrency and partial-failure regressions -------------
+
+    def test_two_concurrent_approvals_from_the_same_base_version_only_one_succeeds(
+        self,
+    ) -> None:
+        approval_body = self._approval_body_from_preview(_valid_draft_body())
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(self._approve, approval_body, self.CONTROL_KEY)
+                for _ in range(2)
+            ]
+            statuses = sorted(future.result().status_code for future in futures)
+
+        self.assertEqual(statuses, [201, 409])
+        # Exactly one new expectation version ...
+        self.assertEqual(self.repo.get("hays-fy2026-results").version, 2)
+        # ... and exactly one audit entry - never two, and never zero.
+        self.assertEqual(len(self.approval_repo.audit_records), 1)
+
+    def test_audit_insert_failure_leaves_the_expectation_unchanged(self) -> None:
+        # Simulates the audit insert failing inside the same transaction as
+        # the expectation-version insert (see the Postgres function this
+        # in-memory repository mirrors): nothing may be left half-written.
+        self.approval_repo.fail_audit_insert = True
+        approval_body = self._approval_body_from_preview(_valid_draft_body())
+
+        response = self._approve(approval_body, key=self.CONTROL_KEY)
+
+        self.assertGreaterEqual(response.status_code, 500)
+        self.assertEqual(self.repo.get("hays-fy2026-results").version, 1)
+        self.assertEqual(self.approval_repo.audit_records, [])
+
+        # And a subsequent, non-faulty approval against the same still-valid
+        # base version succeeds normally afterwards.
+        self.approval_repo.fail_audit_insert = False
+        retry = self._approve(approval_body, key=self.CONTROL_KEY)
+
+        self.assertEqual(retry.status_code, 201)
+        self.assertEqual(self.repo.get("hays-fy2026-results").version, 2)
+        self.assertEqual(len(self.approval_repo.audit_records), 1)
 
 
 if __name__ == "__main__":

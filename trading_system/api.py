@@ -18,11 +18,14 @@ from trading_system.strategy_draft import (
     changed_fields,
     draft_fingerprint,
     draft_warnings,
+    identity_mismatches,
     normalize_draft,
 )
 from trading_system.strategy_draft_repository import (
-    StrategyApprovalAuditRepository,
-    SupabaseStrategyApprovalAuditRepository,
+    ExpectationVersionConflict,
+    StrategyDraftApprovalRepository,
+    StrategyDraftEventNotFound,
+    SupabaseStrategyDraftApprovalRepository,
 )
 from trading_system.supabase_event_repository import SupabaseEventExpectationRepository
 
@@ -76,7 +79,7 @@ def create_app(
     repository: EventExpectationRepository | None = None,
     *,
     paper_repository: PaperStatusRepository | None = None,
-    approval_repository: StrategyApprovalAuditRepository | None = None,
+    approval_repository: StrategyDraftApprovalRepository | None = None,
     admin_token: str | None = None,
     read_api_key: str | None = None,
     control_api_key: str | None = None,
@@ -91,7 +94,7 @@ def create_app(
     )
     repo_cache: EventExpectationRepository | None = repository
     paper_repo_cache: PaperStatusRepository | None = paper_repository
-    approval_repo_cache: StrategyApprovalAuditRepository | None = approval_repository
+    approval_repo_cache: StrategyDraftApprovalRepository | None = approval_repository
     configured_admin_token = admin_token or os.environ.get("MARKETAI_ADMIN_API_KEY")
     configured_read_api_key = read_api_key or os.environ.get("MARKETAI_READ_API_KEY")
     # Backend-only control-auth for the strategy-draft approval endpoint. This
@@ -116,10 +119,10 @@ def create_app(
             paper_repo_cache = SupabasePaperTradeRepository.from_env()
         return paper_repo_cache
 
-    def get_approval_repository() -> StrategyApprovalAuditRepository:
+    def get_approval_repository() -> StrategyDraftApprovalRepository:
         nonlocal approval_repo_cache
         if approval_repo_cache is None:
-            approval_repo_cache = SupabaseStrategyApprovalAuditRepository.from_env()
+            approval_repo_cache = SupabaseStrategyDraftApprovalRepository.from_env()
         return approval_repo_cache
 
     def require_admin(x_admin_token: str | None) -> None:
@@ -293,26 +296,64 @@ def create_app(
                 detail="Draft fingerprint mismatch: the draft changed since it was previewed. Request a new preview before approving.",
             )
 
-        # Expectation-version CAS: the current version must be exactly the
-        # one this approval was based on. This also makes a duplicate/retried
-        # approve of the same request a no-op-that-fails rather than a
-        # duplicate version: the first call advances the version, so a
-        # second call with the same base_expectation_version now conflicts.
-        if current.version != request.base_expectation_version:
+        # Identity check: the {event_id} in the URL is authoritative. A
+        # draft's instrument/event_name/scheduled_date must match the event
+        # it is being approved against exactly - unlike preview (where this
+        # is only a warning), a mismatch here must hard-fail rather than
+        # silently retarget/rename/reschedule a different event's identity.
+        mismatches = identity_mismatches(normalized, current)
+        if mismatches:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Draft identity does not match event '{event_id}' from the URL, "
+                    f"which is authoritative: {'; '.join(mismatches)}."
+                ),
+            )
+
+        # Expectation-version CAS, the new expectation-version insert, and
+        # the approval audit-trail insert all happen as a single atomic
+        # database operation - never EventExpectationRepository.save()'s own
+        # max(version)+1 retry loop, which has no way to enforce "the
+        # version I previewed against is still current" and would let two
+        # concurrent approvals against the same base version both succeed.
+        try:
+            result = get_approval_repository().approve(
+                event_id=event_id,
+                expected_base_version=request.base_expectation_version,
+                source_name=normalized["source_name"],
+                source_url=normalized["source_url"],
+                source_as_of=date.fromisoformat(normalized["source_as_of"])
+                if normalized["source_as_of"]
+                else None,
+                consensus=normalized["consensus"],
+                important_kpis=normalized["important_kpis"],
+                bull_case=normalized["bull_case"],
+                base_case=normalized["base_case"],
+                bear_case=normalized["bear_case"],
+                triggers=normalized["triggers"],
+                invalidation_conditions=normalized["invalidation_conditions"],
+                change_note=normalized["change_note"],
+                draft_fingerprint=request.draft_fingerprint,
+                approved_by=request.approved_by,
+                approved_via=request.approved_via or "unspecified",
+            )
+        except ExpectationVersionConflict as exc:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
                     "Expectation version changed since preview "
-                    f"(expected {request.base_expectation_version}, current {current.version}). "
-                    "Request a new preview before approving."
+                    f"(expected {request.base_expectation_version}). Request a new preview before approving. "
+                    f"({exc})"
                 ),
-            )
+            ) from exc
+        except StrategyDraftEventNotFound as exc:
+            raise HTTPException(status_code=404, detail="Event not found") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-        updated = replace(
+        saved = replace(
             current,
-            instrument=normalized["instrument"],
-            event_name=normalized["event_name"],
-            scheduled_date=date.fromisoformat(normalized["scheduled_date"]),
             consensus=normalized["consensus"],
             important_kpis=tuple(normalized["important_kpis"]),
             bull_case=tuple(normalized["bull_case"]),
@@ -325,17 +366,8 @@ def create_app(
             source_as_of=date.fromisoformat(normalized["source_as_of"])
             if normalized["source_as_of"]
             else None,
-        )
-        saved = repo.save(updated, change_note=normalized["change_note"])
-
-        get_approval_repository().record(
-            event_id=event_id,
-            expectation_version=saved.version,
-            base_expectation_version=request.base_expectation_version,
-            draft_fingerprint=request.draft_fingerprint,
-            approved_by=request.approved_by,
-            approved_via=request.approved_via or "unspecified",
-            change_note=normalized["change_note"],
+            version=result.version,
+            updated_at=result.updated_at,
         )
 
         return {

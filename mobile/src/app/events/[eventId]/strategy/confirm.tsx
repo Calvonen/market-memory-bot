@@ -14,6 +14,7 @@ import {
 
 import { BackButton } from '@/components/back-button';
 import { approveStrategyDraft } from '@/services/api';
+import { useResetOnKeyChange } from '@/utils/use-reset-on-key-change';
 import { useStrategyDraft } from './_layout';
 
 // Approval confirmation screen. Two deliberate obstacles stand between
@@ -32,6 +33,17 @@ export default function StrategyConfirmScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
+
+  // A stale "acknowledged"/approvedBy from a previous event's approval
+  // flow must never silently carry over and let a new event's approval
+  // through without a fresh, explicit acknowledgement.
+  useResetOnKeyChange(eventId, () => {
+    setApprovedBy('');
+    setAcknowledged(false);
+    setSubmitting(false);
+    setError(null);
+    setConflict(false);
+  });
 
   if (!draft || !preview) {
     return (

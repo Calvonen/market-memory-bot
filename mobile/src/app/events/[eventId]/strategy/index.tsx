@@ -12,6 +12,7 @@ import {
 import { BackButton } from '@/components/back-button';
 import { getEvent, previewStrategyDraft } from '@/services/api';
 import { draftFormFromEvent, draftFormToInput, textToList } from '@/utils/strategy-draft-format';
+import { useResetOnKeyChange } from '@/utils/use-reset-on-key-change';
 import { useStrategyDraft } from './_layout';
 
 // Primary strategy UX: a clear, human-readable summary of the current
@@ -28,6 +29,14 @@ export default function StrategySummaryScreen() {
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const latestLoadId = useRef(0);
+
+  // A previous event's preview error/in-flight state must not linger under
+  // a different event's route.
+  useResetOnKeyChange(eventId, () => {
+    setError(null);
+    setPreviewing(false);
+    setPreviewError(null);
+  });
 
   const load = useCallback(async () => {
     if (!eventId) return;

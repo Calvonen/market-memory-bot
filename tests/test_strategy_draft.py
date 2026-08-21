@@ -77,6 +77,25 @@ class NormalizeDraftTests(unittest.TestCase):
         self.assertIsNone(normalized["source_name"])
         self.assertIsNone(normalized["source_url"])
 
+    def test_consensus_null_value_round_trips_as_real_none(self) -> None:
+        payload = _payload(
+            consensus={
+                "fy27_operating_profit_pre_exceptional_gbp_m": None,
+                "other_metric_gbp_m": 55.6,
+            }
+        )
+        normalized = normalize_draft("hays-fy2026-results", payload)
+
+        self.assertIsNone(
+            normalized["consensus"]["fy27_operating_profit_pre_exceptional_gbp_m"]
+        )
+        # Never the *string* "null" - a real None, distinguishable in a type
+        # check (isinstance check would fail for a stray string).
+        self.assertNotEqual(
+            normalized["consensus"]["fy27_operating_profit_pre_exceptional_gbp_m"], "null"
+        )
+        self.assertEqual(normalized["consensus"]["other_metric_gbp_m"], 55.6)
+
 
 class DraftFingerprintTests(unittest.TestCase):
     def test_identical_drafts_produce_identical_fingerprints(self) -> None:

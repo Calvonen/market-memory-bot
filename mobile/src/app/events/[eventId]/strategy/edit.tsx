@@ -1,9 +1,10 @@
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { BackButton } from '@/components/back-button';
 import { DraftFormState } from '@/utils/strategy-draft-format';
+import { useResetOnKeyChange } from '@/utils/use-reset-on-key-change';
 import { useStrategyDraft } from './_layout';
 
 // Structured draft editor: produces a local DraftFormState (never written
@@ -12,12 +13,18 @@ import { useStrategyDraft } from './_layout';
 // preview -> confirm -> approve, never from this screen.
 
 export default function StrategyDraftEditScreen() {
+  const { eventId } = useLocalSearchParams<{ eventId: string }>();
   const router = useRouter();
   const { draft, setDraft, event } = useStrategyDraft();
   // Lazy-initialized once from the shared context draft: edits here stay
   // local until "Tallenna luonnos" writes them back, so navigating away
   // without saving discards them instead of mutating the shared draft.
   const [local, setLocal] = useState<DraftFormState | null>(() => draft);
+
+  // If eventId changes while this screen stays mounted, re-sync `local`
+  // from the (now layout-reset) context draft immediately - never keep
+  // showing a previous event's edits under the new event's route.
+  useResetOnKeyChange(eventId, () => setLocal(draft));
 
   if (!draft || !local || !event) {
     return (
