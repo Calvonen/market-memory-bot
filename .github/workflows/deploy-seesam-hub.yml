@@ -23,8 +23,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  test-and-deploy:
-    name: Test, deploy and update app
+  # Push path: test and deploy the backend to seesam-hub. Never touches
+  # Expo/EAS - OTA is only ever published by the separate publish-ota job.
+  deploy:
+    name: Test and deploy backend
+    if: github.event_name == 'push'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 30
 
@@ -82,13 +85,44 @@ jobs:
           cat /tmp/marketai-health.json
           /usr/bin/systemctl is-active --quiet marketai-hays-release.service
 
-      # Expo OTA is manual-only (workflow_dispatch), never automatic on push.
-      # Whether an OTA update is safe to publish is a human judgment call:
-      # see docs/ota-native-changes.md for the rule (JS/TS-only -> OTA is
-      # fine; any native-affecting change -> bump the app/runtime version
-      # and ship a new EAS build first, do not use OTA).
+  # Manual path: publish an Expo OTA update. Completely independent of the
+  # deploy job - no backend deploy, no seesam-hub git checkout/fast-forward.
+  # actions/checkout below always checks out github.sha, i.e. exactly the
+  # commit/ref this run was dispatched from, so the OTA always ships what
+  # the operator actually selected - it never tries to align with whatever
+  # is currently checked out on the seesam-hub host.
+  #
+  # Whether an OTA update is safe to publish for that commit is a human
+  # judgment call: see docs/ota-native-changes.md for the rule (JS/TS-only
+  # -> OTA is fine; any native-affecting change -> bump the app/runtime
+  # version and ship a new EAS build first, do not use OTA).
+  publish-ota:
+    name: Publish manual Expo OTA update
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 15
+
+    steps:
+      - name: Restrict manual OTA to the deployment branch
+        env:
+          RUN_REF: ${{ github.ref }}
+        run: |
+          if [ "$RUN_REF" != "refs/heads/feature/trading-system-foundation" ]; then
+            echo "::error::Manual OTA runs are only allowed from refs/heads/feature/trading-system-foundation, not '${RUN_REF}'. Re-run this workflow with that branch selected."
+            exit 1
+          fi
+
+      - name: Checkout dispatched commit
+        uses: actions/checkout@v4
+
+      - name: Validate mobile app
+        working-directory: mobile
+        run: |
+          npm ci
+          npx tsc --noEmit
+          npm run lint
+
       - name: Publish OTA update
-        if: github.event_name == 'workflow_dispatch'
         working-directory: mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}

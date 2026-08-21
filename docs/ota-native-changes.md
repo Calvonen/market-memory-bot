@@ -7,6 +7,13 @@ workflow that decides whether a given commit is "OTA-safe" - that judgment
 call is the responsibility of whoever triggers the run, using the rule
 below.
 
+The manual OTA run is a separate job (`publish-ota`) from the backend
+deploy job (`deploy`): it does not deploy the backend, does not touch the
+seesam-hub checkout, and does not depend on a deploy having run first. It
+always publishes whatever commit/ref the workflow was dispatched from -
+never the backend host's currently deployed commit - and refuses to run
+at all unless dispatched from `feature/trading-system-foundation`.
+
 ## The rule
 
 | Change | OTA? |
