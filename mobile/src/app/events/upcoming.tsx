@@ -11,6 +11,7 @@ import {
   View,
 } from 'react-native';
 
+import { BackButton } from '@/components/back-button';
 import { EventExpectation, getEvents } from '@/services/api';
 
 // Foundation-only page. Every event rendered here comes from the real
@@ -141,6 +142,8 @@ export default function UpcomingEventsScreen() {
         <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#8a96a8" />
       }
     >
+      <BackButton label="Etusivulle" />
+
       <Text style={styles.title}>Kaikki tulevat julkaisut</Text>
       <Text style={styles.subtitle}>
         Toistaiseksi vain MarketAI:ssa seuratut tulosjulkaisut. Laajempi

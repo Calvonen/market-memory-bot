@@ -10,6 +10,7 @@ import {
   View,
 } from 'react-native';
 
+import { BackButton } from '@/components/back-button';
 import {
   EventExpectation,
   getEvent,
@@ -79,6 +80,7 @@ export default function EventDetailScreen() {
   if (!event && !error) {
     return (
       <View style={styles.loadingScreen}>
+        <BackButton label="Etusivulle" />
         <ActivityIndicator color="#8a96a8" />
       </View>
     );
@@ -87,6 +89,7 @@ export default function EventDetailScreen() {
   if (error && !event) {
     return (
       <View style={styles.loadingScreen}>
+        <BackButton label="Etusivulle" />
         <Text style={styles.errorText}>{error}</Text>
         <Pressable style={styles.retryButton} onPress={() => void load()}>
           <Text style={styles.retryButtonText}>Yritä uudelleen</Text>
@@ -144,6 +147,8 @@ export default function EventDetailScreen() {
         <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#8a96a8" />
       }
     >
+      <BackButton label="Etusivulle" />
+
       <View style={styles.eventCard}>
         <View style={styles.rowBetween}>
           <View>

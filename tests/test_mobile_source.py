@@ -13,6 +13,7 @@ EVENT_EDIT_SCREEN = Path("mobile/src/app/events/[eventId]/edit.tsx")
 UPCOMING_SCREEN = Path("mobile/src/app/events/upcoming.tsx")
 API_SERVICE = Path("mobile/src/services/api.ts")
 NATIVE_TABS = Path("mobile/src/components/app-tabs.tsx")
+BACK_BUTTON = Path("mobile/src/components/back-button.tsx")
 MOBILE_SRC_ROOT = Path("mobile/src")
 
 
@@ -24,6 +25,7 @@ class MobileSourceTests(unittest.TestCase):
         cls.edit_source = EVENT_EDIT_SCREEN.read_text(encoding="utf-8")
         cls.upcoming_source = UPCOMING_SCREEN.read_text(encoding="utf-8")
         cls.api_source = API_SERVICE.read_text(encoding="utf-8")
+        cls.back_button_source = BACK_BUTTON.read_text(encoding="utf-8")
 
     # -- regression: detail page keeps the previous Hays dashboard info ----
 
@@ -125,6 +127,33 @@ class MobileSourceTests(unittest.TestCase):
 
     def test_detail_screen_links_to_settings_editor(self) -> None:
         self.assertIn("pathname: '/events/[eventId]/edit'", self.detail_source)
+
+    # -- navigation: headerless events/* routes must never be dead ends ----
+
+    def test_back_button_falls_back_to_home_when_there_is_no_history(self) -> None:
+        # A deep link, a shared URL, or a web reload can open one of the
+        # events/* routes with no in-app history to pop - router.back()
+        # alone would be a dead end there, since the root Stack renders
+        # these headerless (see app/_layout.tsx).
+        self.assertIn("router.canGoBack()", self.back_button_source)
+        self.assertIn("router.back();", self.back_button_source)
+        self.assertIn("router.replace('/');", self.back_button_source)
+
+    def test_events_screens_always_offer_a_way_back(self) -> None:
+        # Every render path of every events/* screen - loading, error, and
+        # loaded - must include the shared BackButton, not just the happy
+        # path, since a deep link can land directly on any of these states.
+        self.assertIn("import { BackButton }", self.detail_source)
+        self.assertIn("import { BackButton }", self.edit_source)
+        self.assertIn("import { BackButton }", self.upcoming_source)
+
+        # detail and edit each have three render branches (loading, error,
+        # loaded) and must show the back control in all three.
+        self.assertEqual(self.detail_source.count("<BackButton"), 3)
+        self.assertEqual(self.edit_source.count("<BackButton"), 3)
+        # upcoming.tsx renders loading/error inline within one screen, so
+        # one BackButton at the top covers every state.
+        self.assertGreaterEqual(self.upcoming_source.count("<BackButton"), 1)
 
     def test_initial_load_failure_offers_a_retry_instead_of_a_dead_end(self) -> None:
         # When the very first getEvent() fails (no event fetched yet), the
@@ -261,6 +290,22 @@ class MobileSourceTests(unittest.TestCase):
             "if (loadId !== latestLoadId.current) return;\n      setError(err instanceof Error ? err.message : 'Tuntematon virhe');",
             load_body,
         )
+
+    def test_edit_screen_clears_the_previous_event_before_loading_a_new_one(self) -> None:
+        # If eventId changes while this screen stays mounted and the new
+        # getEvent() fails, the previous event (and its draft fields) must
+        # not keep rendering as if it were current: the error+retry branch
+        # only fires once `event` is null, so load() must clear it before
+        # starting the new fetch - not only on success.
+        load_start = self.edit_source.index("const load = useCallback(async () => {")
+        load_end = self.edit_source.index("}, [eventId]);", load_start)
+        load_body = self.edit_source[load_start:load_end]
+
+        load_id_index = load_body.index("const loadId = ++latestLoadId.current;")
+        clear_event_index = load_body.index("setEvent(null);")
+        try_index = load_body.index("try {")
+        self.assertLess(load_id_index, clear_event_index)
+        self.assertLess(clear_event_index, try_index)
 
     def test_edit_screen_exposes_the_editable_fields(self) -> None:
         for label in (

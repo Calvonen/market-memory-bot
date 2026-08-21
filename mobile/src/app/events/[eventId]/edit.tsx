@@ -10,6 +10,7 @@ import {
   View,
 } from 'react-native';
 
+import { BackButton } from '@/components/back-button';
 import { EventExpectation, getEvent } from '@/services/api';
 
 // Draft-only editor. Saving requires an admin-authenticated write and the
@@ -49,6 +50,12 @@ export default function EventEditScreen() {
     // Guard against overlapping load() calls landing out of order, same as
     // the detail and upcoming screens.
     const loadId = ++latestLoadId.current;
+    // Clear the previous event immediately: if eventId changes while this
+    // screen stays mounted and the new fetch fails, the stale event (and
+    // its draft fields) must not keep rendering as if it were the current
+    // one - the error+retry branch below only renders once `event` is
+    // null, so this is what makes that branch actually apply.
+    setEvent(null);
     try {
       setError(null);
       const detail = await getEvent(eventId);
@@ -79,6 +86,7 @@ export default function EventEditScreen() {
   if (!event && !error) {
     return (
       <View style={styles.loadingScreen}>
+        <BackButton label="Takaisin" />
         <ActivityIndicator color="#8a96a8" />
       </View>
     );
@@ -87,6 +95,7 @@ export default function EventEditScreen() {
   if (error && !event) {
     return (
       <View style={styles.loadingScreen}>
+        <BackButton label="Takaisin" />
         <Text style={styles.errorText}>{error}</Text>
         <Pressable style={styles.retryButton} onPress={() => void load()}>
           <Text style={styles.retryButtonText}>Yritä uudelleen</Text>
@@ -97,6 +106,8 @@ export default function EventEditScreen() {
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+      <BackButton label="Takaisin" />
+
       <Text style={styles.title}>Muokkaa seuranta-asetuksia</Text>
       <Text style={styles.subtitle}>
         {event?.event_name} · {event?.instrument}
