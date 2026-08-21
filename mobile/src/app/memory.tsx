@@ -6,32 +6,41 @@ import { apiGet, MarketMemoryResult, SymbolSuggestion } from '@/services/api';
 
 export default function MemoryScreen() {
   const [ticker, setTicker] = useState('AAPL');
+  const [hasEditedTicker, setHasEditedTicker] = useState(false);
   const [suggestions, setSuggestions] = useState<SymbolSuggestion[]>([]);
   const [data, setData] = useState<MarketMemoryResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const latestRequestId = useRef(0);
+  const latestSuggestionRequestId = useRef(0);
+
+  const query = ticker.trim();
+  const showSuggestions =
+    hasEditedTicker && query.length >= 2 && data?.ticker !== query.toUpperCase();
 
   useEffect(() => {
-    const query = ticker.trim();
-    if (query.length < 2 || data?.ticker === query.toUpperCase()) {
-      setSuggestions([]);
+    if (!showSuggestions) {
       return;
     }
 
+    const requestId = ++latestSuggestionRequestId.current;
     const timer = setTimeout(async () => {
       try {
         const result = await apiGet<SymbolSuggestion[]>(
           `/api/v1/symbols?q=${encodeURIComponent(query)}&limit=6`,
         );
-        setSuggestions(result);
+        if (requestId === latestSuggestionRequestId.current) {
+          setSuggestions(result);
+        }
       } catch {
-        setSuggestions([]);
+        if (requestId === latestSuggestionRequestId.current) {
+          setSuggestions([]);
+        }
       }
     }, 250);
 
     return () => clearTimeout(timer);
-  }, [ticker, data?.ticker]);
+  }, [showSuggestions, query]);
 
   async function analyze(selectedTicker?: string) {
     const requestId = ++latestRequestId.current;
@@ -77,24 +86,26 @@ export default function MemoryScreen() {
         value={ticker}
         onChangeText={(value) => {
           setTicker(value);
+          setHasEditedTicker(true);
           setError(null);
         }}
         style={shared.input}
         placeholder="Yritys tai ticker, esim. Apple / AAPL"
       />
 
-      {suggestions.map((item) => (
-        <Pressable
-          key={item.ticker}
-          accessibilityRole="button"
-          onPress={() => void analyze(item.ticker)}
-          style={[shared.card, { marginTop: 0, paddingVertical: 12 }]}>
-          <Text style={shared.heading}>{item.name}</Text>
-          <Text style={shared.text}>
-            {item.ticker}{item.exchange ? ` · ${item.exchange}` : ''}
-          </Text>
-        </Pressable>
-      ))}
+      {showSuggestions &&
+        suggestions.map((item) => (
+          <Pressable
+            key={item.ticker}
+            accessibilityRole="button"
+            onPress={() => void analyze(item.ticker)}
+            style={[shared.card, { marginTop: 0, paddingVertical: 12 }]}>
+            <Text style={shared.heading}>{item.name}</Text>
+            <Text style={shared.text}>
+              {item.ticker}{item.exchange ? ` · ${item.exchange}` : ''}
+            </Text>
+          </Pressable>
+        ))}
 
       <Pressable accessibilityRole="button" onPress={() => void analyze()} style={shared.button}>
         <Text style={shared.buttonText}>Analysoi</Text>

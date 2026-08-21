@@ -37,7 +37,7 @@ class MobileSourceTests(unittest.TestCase):
 
     def test_new_market_memory_request_hides_previous_result(self) -> None:
         source = Path("mobile/src/app/memory.tsx").read_text(encoding="utf-8")
-        request_start = source.index("async function analyze()")
+        request_start = source.index("async function analyze(")
         clear_data = source.index("setData(null)", request_start)
         start_loading = source.index("setLoading(true)", request_start)
         request = source.index("await apiGet", request_start)

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 
 import { ScreenShell, shared } from '@/components/screen-shell';
@@ -12,6 +12,7 @@ const COUNTRIES = [
 ];
 
 const SCOPES = ['Top', 'Full'] as const;
+const SCOPE_LIMITS: Record<(typeof SCOPES)[number], number> = { Top: 10, Full: 25 };
 
 export default function ScannerScreen() {
   const [country, setCountry] = useState('Finland');
@@ -19,24 +20,33 @@ export default function ScannerScreen() {
   const [data, setData] = useState<ScannerResult | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const latestRequestId = useRef(0);
 
   const market = `${country} ${scope}`;
+  const limit = SCOPE_LIMITS[scope];
 
   const loadScanner = useCallback(async () => {
+    const requestId = ++latestRequestId.current;
     setLoading(true);
     setError('');
 
     try {
       const result = await apiGet<ScannerResult>(
-        `/api/v1/scanner?market=${encodeURIComponent(market)}&limit=10`,
+        `/api/v1/scanner?market=${encodeURIComponent(market)}&limit=${limit}`,
       );
-      setData(result);
+      if (requestId === latestRequestId.current) {
+        setData(result);
+      }
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Scanneri epäonnistui');
+      if (requestId === latestRequestId.current) {
+        setError(requestError instanceof Error ? requestError.message : 'Scanneri epäonnistui');
+      }
     } finally {
-      setLoading(false);
+      if (requestId === latestRequestId.current) {
+        setLoading(false);
+      }
     }
-  }, [market]);
+  }, [market, limit]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -114,7 +124,7 @@ export default function ScannerScreen() {
 
       {!loading && !error && data?.partial && (
         <Text style={shared.text}>
-          Scanneri näyttää tässä vaiheessa 10 ensimmäistä analysoitua osaketta.
+          Scanneri näyttää tässä vaiheessa {limit} ensimmäistä analysoitua osaketta.
         </Text>
       )}
     </ScreenShell>

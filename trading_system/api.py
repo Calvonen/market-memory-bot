@@ -7,7 +7,7 @@ from datetime import date
 from typing import Any, Protocol
 
 
-from fastapi import FastAPI, Header, HTTPException, status
+from fastapi import FastAPI, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from trading_system.event_repository import EventExpectationRepository
@@ -92,6 +92,9 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid admin token")
 
     def require_read(x_marketai_key: str | None) -> None:
+        # A separate, lower-privilege credential for read-only clients (the
+        # mobile app): it must never be the admin token, and its absence must
+        # fail closed (503) rather than silently leaving these endpoints open.
         if not configured_read_api_key:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Read access is disabled until MARKETAI_READ_API_KEY is configured")
         if not x_marketai_key or not secrets.compare_digest(x_marketai_key, configured_read_api_key):
@@ -110,7 +113,7 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.get("/api/v1/symbols")
-    def symbols(q: str, limit: int = 8, x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key")) -> list[dict[str, str]]:
+    def symbols(q: str = Query(..., max_length=100), limit: int = 8, x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key")) -> list[dict[str, str]]:
         require_read(x_marketai_key)
         if len(q.strip()) < 1:
             return []
