@@ -85,6 +85,22 @@ jobs:
           cat /tmp/marketai-health.json
           /usr/bin/systemctl is-active --quiet marketai-hays-release.service
 
+      # Source of truth for "was this commit actually deployed to the
+      # backend": a plain file on the seesam-hub host, written only once
+      # the health check above has passed. Deliberately not the git repo
+      # (a commit here would itself be a push to feature/trading-system-foundation
+      # and re-trigger this workflow) and not a GitHub Actions artifact
+      # (adds a download/API round trip for no benefit when both jobs
+      # already run on the same host). publish-ota reads this file and
+      # refuses to publish unless its SHA matches exactly.
+      - name: Record last successfully deployed backend SHA
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          STATE_DIR="/home/marko/marketai-deploy-state"
+          mkdir -p "$STATE_DIR"
+          printf '%s\n' "$DEPLOY_SHA" > "$STATE_DIR/last-deployed-backend.sha"
+
   # Manual path: publish an Expo OTA update. Completely independent of the
   # deploy job - no backend deploy, no seesam-hub git checkout/fast-forward.
   # actions/checkout below always checks out github.sha, i.e. exactly the
@@ -111,6 +127,32 @@ jobs:
             echo "::error::Manual OTA runs are only allowed from refs/heads/feature/trading-system-foundation, not '${RUN_REF}'. Re-run this workflow with that branch selected."
             exit 1
           fi
+
+      # Fail-safe gate: never publish a commit that hasn't itself gone
+      # through a successful backend deploy + health check. This is an
+      # explicit state comparison, not an assumption based on job/run
+      # ordering or the concurrency group above - the concurrency group
+      # only prevents overlapping runs on the shared host, it says nothing
+      # about which commit was last actually verified healthy.
+      - name: Verify commit was already deployed to the backend
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          STATE_FILE="/home/marko/marketai-deploy-state/last-deployed-backend.sha"
+
+          if [ ! -f "$STATE_FILE" ]; then
+            echo "::error::No backend deploy has recorded a successful health check yet (${STATE_FILE} is missing). Refusing to publish OTA for ${DEPLOY_SHA}."
+            exit 1
+          fi
+
+          DEPLOYED_SHA="$(tr -d '[:space:]' < "$STATE_FILE")"
+
+          if [ "$DEPLOYED_SHA" != "$DEPLOY_SHA" ]; then
+            echo "::error::Refusing to publish OTA for ${DEPLOY_SHA} - it does not match the last successfully deployed backend commit (${DEPLOYED_SHA:-<empty>}). Push this exact commit to feature/trading-system-foundation and wait for its backend deploy + health check to succeed before running this workflow again."
+            exit 1
+          fi
+
+          echo "Commit ${DEPLOY_SHA} matches the last successfully deployed backend SHA - proceeding."
 
       - name: Checkout dispatched commit
         uses: actions/checkout@v4

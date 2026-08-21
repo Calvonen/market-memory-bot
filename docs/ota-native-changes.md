@@ -8,11 +8,36 @@ call is the responsibility of whoever triggers the run, using the rule
 below.
 
 The manual OTA run is a separate job (`publish-ota`) from the backend
-deploy job (`deploy`): it does not deploy the backend, does not touch the
-seesam-hub checkout, and does not depend on a deploy having run first. It
-always publishes whatever commit/ref the workflow was dispatched from -
-never the backend host's currently deployed commit - and refuses to run
-at all unless dispatched from `feature/trading-system-foundation`.
+deploy job (`deploy`): it never redeploys the backend and never touches
+the seesam-hub git checkout. It always publishes whatever commit/ref the
+workflow was dispatched from - never the backend host's currently
+deployed commit - and refuses to run at all unless dispatched from
+`feature/trading-system-foundation`.
+
+It does, however, require that the exact commit being published has
+already gone through a successful `deploy` run for that same commit. See
+"Backend-deploy gate" below.
+
+## Backend-deploy gate
+
+`publish-ota` refuses to publish unless `github.sha` matches the SHA of
+the last backend deploy that passed its health check. This is a plain
+state file on the seesam-hub host, not something inferred from run
+ordering or the workflow's `concurrency` group:
+
+- `deploy` writes the deployed commit's SHA to
+  `/home/marko/marketai-deploy-state/last-deployed-backend.sha` as its
+  final step, only after the health check step has already succeeded (a
+  failed step stops the job before this one runs).
+- `publish-ota`'s first real step reads that file and compares it byte-for-byte
+  to `github.sha`. Any mismatch - including the file not existing yet - fails
+  the job immediately with a clear error, before checkout, before mobile
+  validation, before `eas update` ever runs.
+
+This means: push the commit, wait for `deploy` to go green, *then* run
+`workflow_dispatch` for that exact commit. Dispatching for a commit that
+hasn't deployed yet, or that's been superseded by a newer deploy, is
+refused rather than silently publishing something unverified.
 
 ## The rule
 
