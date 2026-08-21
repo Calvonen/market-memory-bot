@@ -18,12 +18,30 @@ It does, however, require that the exact commit being published has
 already gone through a successful `deploy` run for that same commit. See
 "Backend-deploy gate" below.
 
+## Concurrency is isolated per job
+
+`deploy` and `publish-ota` each have their own job-level `concurrency`
+group - there is no shared/top-level group for the workflow:
+
+- `deploy` uses the single fixed group `marketai-backend-deploy`, so
+  backend deploys still serialize among themselves.
+- `publish-ota` uses `marketai-ota-<channel>` (i.e. `marketai-ota-preview`
+  or `marketai-ota-production`, depending on the channel picked at
+  dispatch time), so two OTA runs for the same channel serialize, but a
+  `preview` run and a `production` run never block each other.
+
+Because these groups never overlap, a manual OTA dispatch can never
+queue behind, cancel, or replace a pending/running backend deploy, and a
+push-triggered deploy can never do the same to a pending/running OTA
+run. `cancel-in-progress: false` on both, so even within a group runs
+queue rather than cancelling each other.
+
 ## Backend-deploy gate
 
 `publish-ota` refuses to publish unless `github.sha` matches the SHA of
 the last backend deploy that passed its health check. This is a plain
 state file on the seesam-hub host, not something inferred from run
-ordering or the workflow's `concurrency` group:
+ordering or either job's concurrency group:
 
 - `deploy` writes the deployed commit's SHA to
   `/home/marko/marketai-deploy-state/last-deployed-backend.sha` as its

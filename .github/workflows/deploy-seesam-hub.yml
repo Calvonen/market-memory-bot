@@ -18,18 +18,22 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: marketai-seesam-hub-deploy
-  cancel-in-progress: false
-
 jobs:
   # Push path: test and deploy the backend to seesam-hub. Never touches
   # Expo/EAS - OTA is only ever published by the separate publish-ota job.
+  #
+  # Concurrency is scoped to this job only, in its own group, so a manual
+  # OTA dispatch (see publish-ota below) can never queue behind, cancel, or
+  # otherwise interact with a pending/running backend deploy. Backend
+  # deploys still serialize among themselves.
   deploy:
     name: Test and deploy backend
     if: github.event_name == 'push'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 30
+    concurrency:
+      group: marketai-backend-deploy
+      cancel-in-progress: false
 
     steps:
       - name: Checkout exact commit
@@ -112,11 +116,21 @@ jobs:
   # judgment call: see docs/ota-native-changes.md for the rule (JS/TS-only
   # -> OTA is fine; any native-affecting change -> bump the app/runtime
   # version and ship a new EAS build first, do not use OTA).
+  #
+  # Concurrency is scoped to this job only, in its own per-channel group -
+  # entirely separate from deploy's marketai-backend-deploy group above, so
+  # this can never queue behind, cancel, or replace a pending/running
+  # backend deploy (and vice versa). Two manual OTA runs for the same
+  # channel still serialize against each other; preview and production
+  # runs never block one another.
   publish-ota:
     name: Publish manual Expo OTA update
     if: github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 15
+    concurrency:
+      group: marketai-ota-${{ inputs.ota_channel }}
+      cancel-in-progress: false
 
     steps:
       - name: Restrict manual OTA to the deployment branch
@@ -131,9 +145,10 @@ jobs:
       # Fail-safe gate: never publish a commit that hasn't itself gone
       # through a successful backend deploy + health check. This is an
       # explicit state comparison, not an assumption based on job/run
-      # ordering or the concurrency group above - the concurrency group
-      # only prevents overlapping runs on the shared host, it says nothing
-      # about which commit was last actually verified healthy.
+      # ordering or either job's concurrency group - those only serialize
+      # same-kind runs against each other (and now never against each
+      # other's kind), they say nothing about which commit was last
+      # actually verified healthy.
       - name: Verify commit was already deployed to the backend
         env:
           DEPLOY_SHA: ${{ github.sha }}
