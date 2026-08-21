@@ -793,6 +793,17 @@ console.log(JSON.stringify({{ sevenDayIds, allIds }}));
         self.assertIn('"channel": "preview"', eas)
         self.assertIn('"channel": "production"', eas)
 
+    def test_web_output_is_not_static_export(self) -> None:
+        # `web.output: "static"` pre-renders one HTML file per route at
+        # build time and needs generateStaticParams() for every dynamic
+        # route - events/[eventId].tsx and events/[eventId]/edit.tsx can't
+        # supply that meaningfully, since event ids are live API data, not
+        # known at build time. "single" (Expo's own default) is a true SPA:
+        # one index.html, all routing - including these dynamic ones -
+        # resolved client-side, so a direct link or reload still works.
+        app = Path("mobile/app.json").read_text(encoding="utf-8")
+        self.assertNotIn('"output": "static"', app)
+
 
 if __name__ == "__main__":
     unittest.main()

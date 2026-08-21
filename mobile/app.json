@@ -23,7 +23,7 @@
       "package": "com.markoworks.mobile"
     },
     "web": {
-      "output": "static",
+      "output": "single",
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
