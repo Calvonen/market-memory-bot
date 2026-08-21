@@ -1,5 +1,5 @@
 import { Link, router } from 'expo-router';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -17,33 +17,48 @@ import {
   PaperRun,
 } from '@/services/api';
 
-type TrackedEvent = {
-  event: EventExpectation;
-  run: PaperRun | null;
-  statusError: boolean;
-};
+type EventStatus = { run: PaperRun | null; statusError: boolean };
 
 export default function HomeScreen() {
-  const [events, setEvents] = useState<TrackedEvent[] | null>(null);
+  const [events, setEvents] = useState<EventExpectation[] | null>(null);
+  const [statuses, setStatuses] = useState<Record<string, EventStatus>>({});
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const latestLoadId = useRef(0);
 
   const loadEvents = useCallback(async () => {
+    const loadId = ++latestLoadId.current;
     try {
       setError(null);
       const list = await getEvents();
-      const withStatus = await Promise.all(
-        list.map(async (event): Promise<TrackedEvent> => {
-          try {
-            const status = await getPaperStatus(event.event_id);
-            return { event, run: status.paper_run, statusError: false };
-          } catch {
-            return { event, run: null, statusError: true };
-          }
-        }),
-      );
-      setEvents(withStatus);
+      if (loadId !== latestLoadId.current) return;
+      setEvents(list);
+      setStatuses({});
+
+      // The card list renders immediately from `list` above. Each event's
+      // paper-status is then fetched independently, not combined into one
+      // batched wait, so one slow or failing request can't hold up every
+      // other card - each card updates for itself as its own status
+      // arrives, instead of the whole screen waiting on the slowest of N.
+      list.forEach((event) => {
+        getPaperStatus(event.event_id)
+          .then((status) => {
+            if (loadId !== latestLoadId.current) return;
+            setStatuses((prev) => ({
+              ...prev,
+              [event.event_id]: { run: status.paper_run, statusError: false },
+            }));
+          })
+          .catch(() => {
+            if (loadId !== latestLoadId.current) return;
+            setStatuses((prev) => ({
+              ...prev,
+              [event.event_id]: { run: null, statusError: true },
+            }));
+          });
+      });
     } catch (err) {
+      if (loadId !== latestLoadId.current) return;
       setError(err instanceof Error ? err.message : 'Tuntematon virhe');
     }
   }, []);
@@ -103,8 +118,8 @@ export default function HomeScreen() {
         </View>
       ) : null}
 
-      {events?.map((tracked) => (
-        <EventCard key={tracked.event.event_id} tracked={tracked} />
+      {events?.map((event) => (
+        <EventCard key={event.event_id} event={event} status={statuses[event.event_id]} />
       ))}
 
       <Pressable
@@ -120,14 +135,13 @@ export default function HomeScreen() {
   );
 }
 
-function EventCard({ tracked }: { tracked: TrackedEvent }) {
-  const { event, run, statusError } = tracked;
-  const status = describeStatus(run, statusError);
+function EventCard({ event, status }: { event: EventExpectation; status?: EventStatus }) {
+  const statusText = status ? describeStatus(status.run, status.statusError) : 'Ladataan...';
   const scheduled = new Date(`${event.scheduled_date}T12:00:00`);
   const dateText = Number.isNaN(scheduled.getTime())
     ? event.scheduled_date
     : scheduled.toLocaleDateString('fi-FI');
-  const strategy = run?.strategy ?? null;
+  const strategy = status?.run?.strategy ?? null;
 
   return (
     <Link href={{ pathname: '/events/[eventId]', params: { eventId: event.event_id } }} asChild>
@@ -143,7 +157,7 @@ function EventCard({ tracked }: { tracked: TrackedEvent }) {
         </View>
 
         <View style={styles.statusRow}>
-          <Text style={styles.statusText}>{status}</Text>
+          <Text style={styles.statusText}>{statusText}</Text>
           {strategy ? (
             <Text style={styles.strategyText}>
               {localizeDirection(strategy.direction)}

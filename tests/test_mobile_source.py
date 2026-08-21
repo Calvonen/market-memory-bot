@@ -67,6 +67,28 @@ class MobileSourceTests(unittest.TestCase):
     def test_home_screen_links_to_upcoming_events(self) -> None:
         self.assertIn("/events/upcoming", self.home_source)
 
+    def test_home_screen_renders_the_list_before_all_statuses_resolve(self) -> None:
+        # The event list must render from setEvents(list) as soon as
+        # getEvents() resolves, with each event's paper-status fetched and
+        # applied independently afterwards - never gated behind a single
+        # Promise.all over N per-event status requests, which would block
+        # every card on the slowest (or a failing) one as the tracked list
+        # grows unbounded (see the P1 fix that made list_upcoming() return
+        # full history).
+        self.assertNotIn("Promise.all", self.home_source)
+
+        set_events_index = self.home_source.index("setEvents(list)")
+        for_each_index = self.home_source.index("list.forEach((event) => {")
+        get_status_index = self.home_source.index("getPaperStatus(event.event_id)")
+        self.assertLess(set_events_index, for_each_index)
+        self.assertLess(for_each_index, get_status_index)
+
+        # Each card looks up its own status by event id and must render
+        # with an explicit "still loading" state rather than nothing/undefined
+        # while its own request is still in flight.
+        self.assertIn("status={statuses[event.event_id]}", self.home_source)
+        self.assertIn("status ? describeStatus(status.run, status.statusError) : 'Ladataan...'", self.home_source)
+
     # -- event card navigates to the detail route with the event id --------
 
     def test_event_card_navigates_to_detail_with_event_id(self) -> None:
