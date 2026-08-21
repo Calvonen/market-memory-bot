@@ -93,15 +93,31 @@ export function mergeUpcomingRows(
     calendarEventId: null,
   }));
 
-  // Hays and any other instrument already tracked through the real trading
-  // system must never also show up as an untracked calendar candidate - the
-  // calendar provider (e.g. Finnhub) has no idea that instrument is already
-  // tracked elsewhere, so this app-side dedupe is what prevents the
-  // duplicate card.
-  const alreadyTrackedInstruments = new Set(events.map((event) => event.instrument.toUpperCase()));
+  // Hays and any other *occurrence* already tracked through the real
+  // trading system must never also show up as an untracked calendar
+  // candidate - the calendar provider (e.g. Finnhub) has no idea that
+  // occurrence is already tracked elsewhere, so this app-side dedupe is
+  // what prevents the duplicate card. Deliberately keyed on instrument +
+  // scheduled_date, not instrument alone: /api/v1/events intentionally
+  // keeps historical expectations forever (see upcoming.tsx's own
+  // date-range filter comment above), so an instrument-only match would
+  // let a past AAPL release hide AAPL's next, genuinely different,
+  // quarterly candidate indefinitely. EventExpectation has no explicit
+  // event_type of its own (it only ever represents "earnings"), so the
+  // match only applies to calendar rows that are themselves 'earnings' -
+  // a non-earnings candidate (e.g. a manual production report) for the
+  // same instrument+date is a different occurrence and must never be
+  // dropped by this.
+  const trackedEarningsOccurrences = new Set(
+    events.map((event) => `${event.instrument.toUpperCase()}|${event.scheduled_date}`),
+  );
 
   const calendarRows: UpcomingRow[] = calendarEvents
-    .filter((event) => !alreadyTrackedInstruments.has(event.instrument.toUpperCase()))
+    .filter((event) => {
+      if (event.event_type !== 'earnings') return true;
+      const key = `${event.instrument.toUpperCase()}|${event.scheduled_date}`;
+      return !trackedEarningsOccurrences.has(key);
+    })
     .map((event) => ({
       key: `calendar:${event.calendar_event_id}`,
       companyName: event.company_name,
@@ -131,7 +147,7 @@ export default function UpcomingEventsScreen() {
   const [rangeDays, setRangeDays] = useState<number | null>(null);
   const latestLoadId = useRef(0);
 
-  const load = useCallback(async () => {
+  const load = useCallback(() => {
     // Guard against overlapping load() calls (e.g. pull-to-refresh fired
     // again while the first requests are still pending): an older response
     // resolving after a newer one must never replace the already refreshed
@@ -139,26 +155,38 @@ export default function UpcomingEventsScreen() {
     const loadId = ++latestLoadId.current;
     setError(null);
 
-    try {
-      const list = await getEvents();
-      if (loadId !== latestLoadId.current) return;
-      setEvents(list);
-    } catch (err) {
-      if (loadId !== latestLoadId.current) return;
-      setError(err instanceof Error ? err.message : 'Tuntematon virhe');
-    }
+    // Both requests are started here, before either is awaited - a
+    // slow/never-settling getEvents() must never delay
+    // getUpcomingCalendarEvents() from even starting, and vice versa.
+    // Each one's .then/.catch below is its own independent chain (not a
+    // sequential await), so its state update fires the moment *that*
+    // request settles, regardless of whether the other one has settled,
+    // failed, or is still pending - a stalled getEvents() can never hold
+    // the calendar list (or the loading state, which clears as soon as
+    // either source has data/an error) hostage, and vice versa.
+    const eventsPromise = getEvents()
+      .then((list) => {
+        if (loadId !== latestLoadId.current) return;
+        setEvents(list);
+      })
+      .catch((err) => {
+        if (loadId !== latestLoadId.current) return;
+        setError(err instanceof Error ? err.message : 'Tuntematon virhe');
+      });
 
-    // Fetched independently of getEvents(): a failing/unavailable calendar
-    // sync must never block the already-tracked events from rendering, and
-    // vice versa.
-    try {
-      const list = await getUpcomingCalendarEvents();
-      if (loadId !== latestLoadId.current) return;
-      setCalendarEvents(list);
-    } catch {
-      if (loadId !== latestLoadId.current) return;
-      setCalendarEvents([]);
-    }
+    const calendarPromise = getUpcomingCalendarEvents()
+      .then((list) => {
+        if (loadId !== latestLoadId.current) return;
+        setCalendarEvents(list);
+      })
+      .catch(() => {
+        if (loadId !== latestLoadId.current) return;
+        setCalendarEvents([]);
+      });
+
+    // onRefresh() below still awaits load() to know when to stop spinning -
+    // that's the only thing gated on both settling together.
+    return Promise.all([eventsPromise, calendarPromise]);
   }, []);
 
   useEffect(() => {
