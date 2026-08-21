@@ -2,12 +2,18 @@ name: Deploy MarketAI to seesam-hub
 
 on:
   workflow_dispatch:
+    inputs:
+      ota_channel:
+        description: Expo OTA channel for a manual run
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - production
   push:
     branches:
       - feature/trading-system-foundation
-    paths:
-      - .github/workflows/deploy-seesam-hub.yml
-      - mobile/src/types/css.d.ts
 
 permissions:
   contents: read
@@ -18,9 +24,9 @@ concurrency:
 
 jobs:
   test-and-deploy:
-    name: Test and deploy
+    name: Test, deploy and update app
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Checkout exact commit
@@ -34,11 +40,12 @@ jobs:
         run: |
           /home/marko/marketai-repo/.venv/bin/python -m unittest discover -s tests -v
 
-      - name: Type-check mobile app
+      - name: Validate mobile app
         working-directory: mobile
         run: |
           npm ci
           npx tsc --noEmit
+          npm run lint
 
       - name: Install backend dependencies
         run: |
@@ -74,3 +81,30 @@ jobs:
           done
           cat /tmp/marketai-health.json
           /usr/bin/systemctl is-active --quiet marketai-hays-release.service
+
+      - name: Publish preview OTA update
+        if: github.event_name == 'push'
+        working-directory: mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          test -n "$EXPO_TOKEN" || { echo "Missing GitHub secret EXPO_TOKEN"; exit 1; }
+          npx --yes eas-cli update \
+            --channel preview \
+            --environment preview \
+            --message "GitHub ${GITHUB_SHA}" \
+            --non-interactive
+
+      - name: Publish manually selected OTA update
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          OTA_CHANNEL: ${{ inputs.ota_channel }}
+        run: |
+          test -n "$EXPO_TOKEN" || { echo "Missing GitHub secret EXPO_TOKEN"; exit 1; }
+          npx --yes eas-cli update \
+            --channel "$OTA_CHANNEL" \
+            --environment "$OTA_CHANNEL" \
+            --message "Manual GitHub ${GITHUB_SHA}" \
+            --non-interactive
