@@ -1,20 +1,44 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, Text, TextInput, View } from 'react-native';
 
 import { ScreenShell, shared } from '@/components/screen-shell';
-import { apiGet, MarketMemoryResult } from '@/services/api';
+import { apiGet, MarketMemoryResult, SymbolSuggestion } from '@/services/api';
 
 export default function MemoryScreen() {
   const [ticker, setTicker] = useState('AAPL');
+  const [suggestions, setSuggestions] = useState<SymbolSuggestion[]>([]);
   const [data, setData] = useState<MarketMemoryResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const latestRequestId = useRef(0);
 
-  async function analyze() {
-    const requestId = ++latestRequestId.current;
-    const requestedTicker = ticker.trim();
+  useEffect(() => {
+    const query = ticker.trim();
+    if (query.length < 2 || data?.ticker === query.toUpperCase()) {
+      setSuggestions([]);
+      return;
+    }
 
+    const timer = setTimeout(async () => {
+      try {
+        const result = await apiGet<SymbolSuggestion[]>(
+          `/api/v1/symbols?q=${encodeURIComponent(query)}&limit=6`,
+        );
+        setSuggestions(result);
+      } catch {
+        setSuggestions([]);
+      }
+    }, 250);
+
+    return () => clearTimeout(timer);
+  }, [ticker, data?.ticker]);
+
+  async function analyze(selectedTicker?: string) {
+    const requestId = ++latestRequestId.current;
+    const requestedTicker = (selectedTicker ?? ticker).trim();
+    if (selectedTicker) setTicker(selectedTicker);
+
+    setSuggestions([]);
     setData(null);
     setLoading(true);
     setError(null);
@@ -29,10 +53,11 @@ export default function MemoryScreen() {
       }
     } catch (requestError) {
       if (requestId === latestRequestId.current) {
+        const message = requestError instanceof Error ? requestError.message : '';
         setError(
-          requestError instanceof Error
-            ? requestError.message
-            : 'Analyysi epäonnistui',
+          message.includes('No data returned') || message.includes('Invalid ticker')
+            ? 'Osaketta ei löytynyt. Valitse ehdotus tai tarkista pörssitunnus.'
+            : message || 'Analyysi epäonnistui',
         );
       }
     } finally {
@@ -47,20 +72,37 @@ export default function MemoryScreen() {
       title="Market Memory"
       subtitle="Vertaa nykyhetkeä historiallisiin käännekohtiin">
       <TextInput
-        accessibilityLabel="Ticker"
+        accessibilityLabel="Osake tai ticker"
         autoCapitalize="characters"
         value={ticker}
-        onChangeText={setTicker}
+        onChangeText={(value) => {
+          setTicker(value);
+          setError(null);
+        }}
         style={shared.input}
-        placeholder="Ticker, esim. VALMT.HE"
+        placeholder="Yritys tai ticker, esim. Apple / AAPL"
       />
-      <Pressable accessibilityRole="button" onPress={analyze} style={shared.button}>
+
+      {suggestions.map((item) => (
+        <Pressable
+          key={item.ticker}
+          accessibilityRole="button"
+          onPress={() => void analyze(item.ticker)}
+          style={[shared.card, { marginTop: 0, paddingVertical: 12 }]}>
+          <Text style={shared.heading}>{item.name}</Text>
+          <Text style={shared.text}>
+            {item.ticker}{item.exchange ? ` · ${item.exchange}` : ''}
+          </Text>
+        </Pressable>
+      ))}
+
+      <Pressable accessibilityRole="button" onPress={() => void analyze()} style={shared.button}>
         <Text style={shared.buttonText}>Analysoi</Text>
       </Pressable>
       {loading && <ActivityIndicator />}
       {error && <Text style={{ color: '#ff8d8d' }}>{error}</Text>}
       {!loading && !error && !data && (
-        <Text style={shared.text}>Syötä ticker aloittaaksesi analyysin.</Text>
+        <Text style={shared.text}>Kirjoita yrityksen nimi tai pörssitunnus.</Text>
       )}
       {!loading && !error && data && (
         <>
