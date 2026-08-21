@@ -136,12 +136,23 @@ export default function HomeScreen() {
 }
 
 function EventCard({ event, status }: { event: EventExpectation; status?: EventStatus }) {
-  const statusText = status ? describeStatus(status.run, status.statusError) : 'Ladataan...';
+  const run = status?.run ?? null;
+  // A run computed against an older expectation version (the event was
+  // edited afterwards) must not present its status/direction/confidence as
+  // current here either - the detail screen already warns about this once
+  // opened, but the card is what the user sees first.
+  const isStale =
+    run?.expectation_version !== undefined && run.expectation_version !== event.version;
+  const statusText = !status
+    ? 'Ladataan...'
+    : isStale
+      ? 'Vanhentunut analyysi'
+      : describeStatus(status.run, status.statusError);
   const scheduled = new Date(`${event.scheduled_date}T12:00:00`);
   const dateText = Number.isNaN(scheduled.getTime())
     ? event.scheduled_date
     : scheduled.toLocaleDateString('fi-FI');
-  const strategy = status?.run?.strategy ?? null;
+  const strategy = isStale ? null : (run?.strategy ?? null);
 
   return (
     <Link href={{ pathname: '/events/[eventId]', params: { eventId: event.event_id } }} asChild>

@@ -26,6 +26,7 @@ export default function EventDetailScreen() {
   const [error, setError] = useState<string | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const latestLoadId = useRef(0);
+  const loadedEventIdRef = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     if (!eventId) return;
@@ -36,6 +37,18 @@ export default function EventDetailScreen() {
     // waiting_confirmation) even though it's the same expectation version,
     // so the stale-run warning above wouldn't catch it either.
     const loadId = ++latestLoadId.current;
+    if (loadedEventIdRef.current !== eventId) {
+      // eventId actually changed (not just a same-event pull-to-refresh):
+      // the previous event/run belongs to a different event and must not
+      // keep rendering - or stay editable via its now-wrong edit link -
+      // under this new URL while the new fetch is in flight or fails. An
+      // ordinary refresh of the same event intentionally skips this, so a
+      // transient failure still leaves the last known good data visible.
+      setEvent(null);
+      setRun(null);
+      setStatusError(null);
+    }
+    loadedEventIdRef.current = eventId;
     setError(null);
     try {
       const eventDetail = await getEvent(eventId);

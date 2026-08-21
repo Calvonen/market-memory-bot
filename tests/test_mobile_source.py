@@ -89,13 +89,35 @@ class MobileSourceTests(unittest.TestCase):
         # with an explicit "still loading" state rather than nothing/undefined
         # while its own request is still in flight.
         self.assertIn("status={statuses[event.event_id]}", self.home_source)
-        self.assertIn("status ? describeStatus(status.run, status.statusError) : 'Ladataan...'", self.home_source)
+        self.assertIn("!status\n    ? 'Ladataan...'", self.home_source)
 
     # -- event card navigates to the detail route with the event id --------
 
     def test_event_card_navigates_to_detail_with_event_id(self) -> None:
         self.assertIn("pathname: '/events/[eventId]'", self.home_source)
         self.assertIn("params: { eventId: event.event_id }", self.home_source)
+
+    def test_home_card_marks_a_run_computed_against_an_older_expectation(self) -> None:
+        # Same isStaleRun check as the detail screen, applied to the
+        # compact card too - the card is what the user sees first, and it
+        # must not present an outdated run's status/direction/confidence as
+        # current just because the detail screen's warning hasn't been seen
+        # yet.
+        card_start = self.home_source.index("function EventCard(")
+        card_end = self.home_source.index("\n}\n", card_start)
+        card_body = self.home_source[card_start:card_end]
+
+        self.assertIn(
+            "run?.expectation_version !== undefined && run.expectation_version !== event.version",
+            card_body,
+        )
+        self.assertIn("'Vanhentunut analyysi'", card_body)
+        # Both the status text and the direction/confidence badge must be
+        # suppressed/marked when stale, not just one of them.
+        status_text_index = card_body.index("const statusText =")
+        strategy_index = card_body.index("const strategy =")
+        self.assertIn("isStale", card_body[status_text_index:strategy_index])
+        self.assertIn("isStale ? null", card_body[strategy_index:])
 
     # -- detail screen fetches the event and its paper status --------------
 
@@ -214,6 +236,37 @@ class MobileSourceTests(unittest.TestCase):
         ]
         for snippet, description in guarded_pairs:
             self.assertIn(snippet, load_body, f"missing staleness guard for {description}")
+
+    def test_detail_screen_clears_stale_event_and_run_when_event_id_changes(self) -> None:
+        # If eventId changes while this screen stays mounted and the new
+        # getEvent() fails, the previous event/run must not keep rendering
+        # (or stay editable via a now-wrong edit link) under the new URL.
+        # An ordinary pull-to-refresh of the *same* event must not trigger
+        # this - it should keep showing the last known good data if the
+        # refresh itself fails - so the clear must be conditional on the
+        # event id actually having changed, not unconditional on every
+        # load() call.
+        load_start = self.detail_source.index("const load = useCallback(async () => {")
+        load_end = self.detail_source.index("}, [eventId]);", load_start)
+        load_body = self.detail_source[load_start:load_end]
+
+        self.assertIn("const loadedEventIdRef = useRef<string | null>(null);", self.detail_source)
+        self.assertIn("if (loadedEventIdRef.current !== eventId) {", load_body)
+
+        guard_start = load_body.index("if (loadedEventIdRef.current !== eventId) {")
+        guard_end = load_body.index("}", guard_start)
+        guard_body = load_body[guard_start:guard_end]
+        self.assertIn("setEvent(null);", guard_body)
+        self.assertIn("setRun(null);", guard_body)
+        self.assertIn("setStatusError(null);", guard_body)
+
+        # The guard must run before loadedEventIdRef is updated to the new
+        # id and before the fetch starts, otherwise the comparison is
+        # meaningless.
+        update_ref_index = load_body.index("loadedEventIdRef.current = eventId;")
+        fetch_index = load_body.index("await getEvent(eventId)")
+        self.assertLess(guard_start, update_ref_index)
+        self.assertLess(update_ref_index, fetch_index)
 
     def test_paper_status_failure_shows_an_explicit_error_in_the_analysis_section(self) -> None:
         # Requirement: pre-release expectation data (consensus/KPI/bull/
