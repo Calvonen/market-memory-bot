@@ -91,6 +91,15 @@ export default function EventDetailScreen() {
   const confirmationReason =
     run?.status === 'waiting_confirmation' ? run.message : null;
   const isReleased = Boolean(run);
+  // The run's analysis/strategy/risk/paper-order decision was computed
+  // against a specific expectation version. If the expectation has since
+  // been edited (event.version moved on), that decision no longer reflects
+  // the consensus/KPIs/triggers shown above - flag it instead of silently
+  // presenting a stale dashboard next to the current expectation.
+  const isStaleRun =
+    isReleased &&
+    run?.expectation_version !== undefined &&
+    run.expectation_version !== event.version;
 
   const statusText = describeStatus(run, statusError);
 
@@ -196,6 +205,18 @@ export default function EventDetailScreen() {
       {isReleased ? (
         <>
           <Text style={styles.sectionTitle}>ANALYYSI</Text>
+
+          {isStaleRun ? (
+            <View style={styles.staleRunNotice}>
+              <Text style={styles.staleRunNoticeTitle}>VANHENTUNUT ANALYYSI</Text>
+              <Text style={styles.staleRunNoticeText}>
+                Alla oleva analyysi, riski ja paperitoimeksianto perustuvat
+                odotusversioon {run?.expectation_version}, mutta odotukset on
+                sittemmin päivitetty versioon {event.version}. Tulokset eivät
+                välttämättä vastaa yllä näkyvää konsensusta.
+              </Text>
+            </View>
+          ) : null}
 
           <View style={styles.grid}>
             <MetricCard
@@ -406,6 +427,26 @@ const styles = StyleSheet.create({
     color: '#72b8db',
     fontSize: 14,
     fontWeight: '700',
+  },
+  staleRunNotice: {
+    backgroundColor: '#2a1717',
+    borderWidth: 1,
+    borderColor: '#4a2323',
+    borderRadius: 14,
+    padding: 15,
+    marginBottom: 16,
+  },
+  staleRunNoticeTitle: {
+    color: '#e17878',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+  },
+  staleRunNoticeText: {
+    color: '#d1a3a3',
+    fontSize: 13,
+    lineHeight: 19,
+    marginTop: 6,
   },
   sectionTitle: {
     color: '#687386',

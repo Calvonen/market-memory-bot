@@ -59,6 +59,11 @@ export type CompletedComponent = {
 export type PaperRun = {
   status?: string;
   message?: string;
+  // The expectation version this run's analysis/strategy/risk decision was
+  // computed against. Compare against the event's current `version` (from
+  // getEvent()) before presenting the dashboard as reflecting the latest
+  // consensus/triggers - an edited expectation can outdate an existing run.
+  expectation_version?: number;
   completed_components?: {
     fundamental?: CompletedComponent;
     catalyst?: CompletedComponent;

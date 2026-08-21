@@ -142,6 +142,28 @@ class MobileSourceTests(unittest.TestCase):
         is_released_index = self.detail_source.index("{isReleased ? (")
         self.assertLess(is_released_index, analysis_error_start)
 
+    def test_detail_screen_flags_a_paper_run_computed_against_an_older_expectation(self) -> None:
+        # A paper run's analysis/strategy/risk/paper-order decision is
+        # computed against a specific expectation version. If the
+        # expectation is edited afterwards (event.version moves on), the run
+        # no longer reflects the consensus/KPIs/triggers shown above it -
+        # the mismatch must be surfaced, not silently hidden.
+        self.assertIn("PaperRun", self.api_source)
+        self.assertIn("expectation_version?: number", self.api_source)
+
+        self.assertIn("run.expectation_version !== event.version", self.detail_source)
+        self.assertIn("isStaleRun", self.detail_source)
+        self.assertIn("VANHENTUNUT ANALYYSI", self.detail_source)
+
+        # The warning must render inside the released/isReleased branch,
+        # ahead of the score grid, so it sits directly above the dashboard
+        # it's warning about rather than replacing it.
+        is_released_index = self.detail_source.index("{isReleased ? (")
+        stale_notice_index = self.detail_source.index("isStaleRun ? (", is_released_index)
+        grid_index = self.detail_source.index("styles.grid", stale_notice_index)
+        self.assertLess(is_released_index, stale_notice_index)
+        self.assertLess(stale_notice_index, grid_index)
+
     # -- settings/editor draft never bypasses admin auth with the read key -
 
     def test_edit_screen_never_calls_the_write_endpoint(self) -> None:
