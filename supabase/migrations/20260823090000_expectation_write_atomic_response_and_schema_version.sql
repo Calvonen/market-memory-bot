@@ -20,18 +20,51 @@
 -- marker the schema gate checks by *value*, not just by the calling
 -- function's existence. A same-signature RPC from an older migration can
 -- never accidentally satisfy a newer required version.
-create or replace function public.strategy_draft_schema_version()
-returns integer
-language sql
-immutable
-security invoker
-set search_path = public
-as $$
-  select 1;
-$$;
-
-revoke all on function public.strategy_draft_schema_version() from public;
-grant execute on function public.strategy_draft_schema_version() to service_role;
+--
+-- Whole file runs as one transaction (explicit begin/commit, not relying
+-- on any particular migration tool's default) - either every statement
+-- below lands, or none of them do. This matters for two separate reasons:
+--
+-- 1. `create or replace function` cannot change a function's return type,
+--    and a RETURNS TABLE(...)/OUT-parameter shape change counts as one -
+--    Postgres rejects it outright ("cannot change return type of existing
+--    function", hinting to DROP FUNCTION first; verified by actually
+--    running this migration's earlier draft against a real Postgres
+--    instance during development). Both insert_next_expectation_version()
+--    (new OUT columns) and verify_strategy_draft_schema() (3 columns ->
+--    4) change shape here, so both need an explicit `drop function` for
+--    their exact existing signature before they can be recreated - this
+--    file cannot use a bare `create or replace` for either.
+-- 2. A `drop function` followed by `create function` is, on its own, only
+--    safe from a concurrent caller's perspective *because* Postgres DDL is
+--    transactional: another session's already-open transaction keeps
+--    seeing the pre-migration function right up until this transaction
+--    commits (never a "function does not exist" gap), and any statement
+--    below failing rolls back every earlier statement in this same
+--    transaction, including the drop - so a caller can also never observe
+--    a state where the old function has been dropped but the new one
+--    doesn't exist yet. Without the explicit transaction wrapper, running
+--    this file statement-by-statement (which is exactly how a plain
+--    `psql -f` invocation behaves by default) can leave a real gap: this
+--    was reproduced directly - an earlier draft of this file, run without
+--    begin/commit, failed partway through on the return-type-change error
+--    above and still left strategy_draft_schema_version() created and
+--    committed, with the function it exists to gate for
+--    (insert_next_expectation_version()) never actually updated. The
+--    schema gate would have reported schema_version_matches = true
+--    against a backend that still called the old, unfixed RPC body -
+--    silently defeating the entire point of the marker.
+--
+-- strategy_draft_schema_version() itself is created and granted *after*
+-- insert_next_expectation_version() has been dropped and recreated below,
+-- not before - so if that drop+create ever fails, this transaction rolls
+-- back before the marker is even attempted, and no half-applied state
+-- (the marker present, the RPC still old) can ever be committed. It must
+-- still exist before verify_strategy_draft_schema() is (re)created further
+-- down, since that function's own body calls it and `language sql`
+-- functions are analyzed - including the objects they reference - at
+-- creation time, not deferred to first call the way plpgsql bodies are.
+begin;
 
 -- Fix: insert_next_expectation_version() used to return only
 -- (new_version, created_at), so SupabaseEventExpectationRepository.
@@ -60,7 +93,11 @@ grant execute on function public.strategy_draft_schema_version() to service_role
 -- function's scope) with an actual column of the same bare name being
 -- selected from event_expectation_versions/market_events within the
 -- function body - out_consensus vs. the queried consensus column, etc.
-create or replace function public.insert_next_expectation_version(
+drop function if exists public.insert_next_expectation_version(
+  text, text, text, date, jsonb, jsonb, jsonb, jsonb, jsonb, jsonb, jsonb, text
+);
+
+create function public.insert_next_expectation_version(
   input_event_id text,
   input_source_name text,
   input_source_url text,
@@ -195,6 +232,23 @@ grant execute on function public.insert_next_expectation_version(
   text, text, text, date, jsonb, jsonb, jsonb, jsonb, jsonb, jsonb, jsonb, text
 ) to service_role;
 
+-- Only reached (and only committed, via the transaction wrapper above) if
+-- insert_next_expectation_version() itself was successfully dropped and
+-- recreated above - see the top-of-file note for why this ordering, and
+-- the transaction wrapper, both matter here.
+create or replace function public.strategy_draft_schema_version()
+returns integer
+language sql
+immutable
+security invoker
+set search_path = public
+as $$
+  select 1;
+$$;
+
+revoke all on function public.strategy_draft_schema_version() from public;
+grant execute on function public.strategy_draft_schema_version() to service_role;
+
 -- verify_strategy_draft_schema() now also reports whether
 -- strategy_draft_schema_version() matches the exact version this
 -- migration expects (1) - not just whether insert_next_expectation_version
@@ -204,8 +258,14 @@ grant execute on function public.insert_next_expectation_version(
 -- schema_version_matches = false, or has no strategy_draft_schema_version()
 -- to call at all - which PostgREST surfaces as this entire RPC call
 -- failing, the same fail-closed path the rest of this function already
--- relies on for "hasn't been migrated yet."
-create or replace function public.verify_strategy_draft_schema()
+-- relies on for "hasn't been migrated yet." Its return shape also grew a
+-- column (3 -> 4) versus the version declared in
+-- 20260822090000_verify_strategy_draft_schema.sql, so it needs the same
+-- explicit drop-then-create treatment as insert_next_expectation_version()
+-- above, for the same reason.
+drop function if exists public.verify_strategy_draft_schema();
+
+create function public.verify_strategy_draft_schema()
 returns table (
   event_strategy_approvals_table_exists boolean,
   approve_strategy_draft_function_exists boolean,
@@ -229,3 +289,5 @@ $$;
 
 revoke all on function public.verify_strategy_draft_schema() from public;
 grant execute on function public.verify_strategy_draft_schema() to service_role;
+
+commit;

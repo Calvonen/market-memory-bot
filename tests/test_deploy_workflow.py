@@ -125,15 +125,18 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
         cls.approvals_source = EVENT_STRATEGY_APPROVALS_MIGRATION.read_text(encoding="utf-8")
         cls.shared_lock_source = SHARED_LOCK_MIGRATION.read_text(encoding="utf-8")
         cls.write_v2_source = EXPECTATION_WRITE_V2_MIGRATION.read_text(encoding="utf-8")
-        # The live verify_strategy_draft_schema() is the one `create or
-        # replace`d by EXPECTATION_WRITE_V2_MIGRATION, not the one
-        # originally declared in VERIFY_MIGRATION - but unlike that
-        # original file (which held nothing else), this one also declares
+        # The live verify_strategy_draft_schema() is the one (re)declared
+        # by EXPECTATION_WRITE_V2_MIGRATION, not the one originally
+        # declared in VERIFY_MIGRATION - but unlike that original file
+        # (which held nothing else), this one also declares
         # insert_next_expectation_version() alongside it, so this must be
         # sliced down to just verify_strategy_draft_schema()'s own
-        # definition, not the whole file.
+        # definition, not the whole file. It's declared with a plain
+        # `create function` here (not `create or replace`), since Postgres
+        # rejects `create or replace` for a same-signature RETURNS TABLE
+        # shape change - see the migration's own top-of-file note.
         verify_start = cls.write_v2_source.index(
-            "create or replace function public.verify_strategy_draft_schema()"
+            "create function public.verify_strategy_draft_schema()"
         )
         verify_end = cls.write_v2_source.index("$$;", verify_start) + len("$$;")
         cls.verify_source = cls.write_v2_source[verify_start:verify_end]
@@ -141,8 +144,12 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
 
     @staticmethod
     def _declared_param_types(source: str, function_name: str) -> list[str]:
+        # Matches both `create or replace function ...` (used where the
+        # return shape is unchanged) and a plain `create function ...`
+        # (used, after an explicit `drop function`, where it isn't - see
+        # 20260823090000_expectation_write_atomic_response_and_schema_version.sql).
         match = re.search(
-            rf"create or replace function public\.{re.escape(function_name)}\(\s*(.*?)\)\s*\n",
+            rf"create (?:or replace )?function public\.{re.escape(function_name)}\(\s*(.*?)\)\s*\n",
             source,
             re.DOTALL,
         )
@@ -261,7 +268,7 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
         # so nothing calling this RPC ever needs a separate, unlocked
         # follow-up read to get a full result back.
         declare_start = self.write_v2_source.index(
-            "create or replace function public.insert_next_expectation_version("
+            "create function public.insert_next_expectation_version("
         )
         returns_start = self.write_v2_source.index("returns table (", declare_start)
         returns_end = self.write_v2_source.index(")", returns_start)
@@ -300,6 +307,78 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
         self.assertNotIn(" from ", return_block.lower())
         self.assertIn("merged_consensus", return_block)
         self.assertIn("event_row.instrument", return_block)
+
+    # -- same-signature return-shape change: drop-then-create, one transaction --
+
+    def test_functions_with_a_changed_return_shape_are_dropped_before_recreating(
+        self,
+    ) -> None:
+        # `create or replace function` cannot change an existing
+        # function's return type, and a RETURNS TABLE(...)/OUT-parameter
+        # shape change counts as one - Postgres rejects it outright
+        # ("cannot change return type of existing function"). Both
+        # functions below change shape versus their prior migration
+        # (insert_next_expectation_version: 2 columns -> 15;
+        # verify_strategy_draft_schema: 3 columns -> 4), so both need an
+        # explicit drop for their exact prior signature immediately before
+        # being recreated - a bare `create or replace` for either would
+        # fail this migration outright when actually applied.
+        for function_name, signature in (
+            (
+                "insert_next_expectation_version",
+                "text, text, text, date, jsonb, jsonb, jsonb, jsonb, jsonb, jsonb, jsonb, text",
+            ),
+            ("verify_strategy_draft_schema", ""),
+        ):
+            with self.subTest(function=function_name):
+                drop_statement = f"drop function if exists public.{function_name}("
+                self.assertIn(drop_statement, self.write_v2_source)
+                drop_index = self.write_v2_source.index(drop_statement)
+                create_index = self.write_v2_source.index(
+                    f"create function public.{function_name}(", drop_index
+                )
+                # The create must immediately follow its own drop, not
+                # some unrelated statement in between (and not the drop
+                # for the *other* function landing between them either).
+                between = self.write_v2_source[drop_index + len(drop_statement) : create_index]
+                self.assertNotIn("drop function", between)
+                self.assertNotIn("create function", between)
+                self.assertNotIn(
+                    f"create or replace function public.{function_name}(",
+                    self.write_v2_source,
+                )
+
+    def test_migration_runs_as_one_explicit_transaction(self) -> None:
+        # The drop-then-create pattern above is only safe from a
+        # concurrent caller's perspective because Postgres DDL is
+        # transactional - reproduced directly in manual testing: run
+        # without this wrapper, a failure partway through this file left
+        # strategy_draft_schema_version() (the schema-gate marker) created
+        # and committed even though insert_next_expectation_version()
+        # itself was never actually updated, which is exactly the
+        # half-applied state the marker exists to make impossible.
+        stripped = "\n".join(
+            line
+            for line in self.write_v2_source.splitlines()
+            if not line.strip().startswith("--")
+        )
+        self.assertTrue(stripped.strip().lower().startswith("begin;"))
+        self.assertTrue(stripped.strip().lower().endswith("commit;"))
+
+    def test_schema_version_marker_is_created_after_the_rpc_it_gates(self) -> None:
+        # Defense in depth on top of the transaction wrapper above: even
+        # statement order alone should reflect "the marker means both RPCs
+        # already changed," not the reverse - so a marker created before
+        # insert_next_expectation_version() would misdescribe the intent
+        # even though the transaction wrapper is what actually enforces
+        # atomicity.
+        insert_index = self.write_v2_source.index(
+            "create function public.insert_next_expectation_version("
+        )
+        marker_index = self.write_v2_source.index(
+            "create or replace function public.strategy_draft_schema_version()"
+        )
+        self.assertLess(insert_index, marker_index)
 
 
 if __name__ == "__main__":
