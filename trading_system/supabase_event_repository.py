@@ -45,12 +45,13 @@ class SupabaseEventExpectationRepository(EventExpectationRepository):
         return self._row_to_expectation(rows[0])
 
     def list_upcoming(self) -> tuple[EventExpectation, ...]:
-        today = date.today().isoformat()
+        # Every tracked event is returned regardless of date or status: the
+        # mobile app's "Seurannassa" list and an event's detail/paper-status
+        # view must stay reachable after its scheduled_date has passed, not
+        # just while it is still in the future.
         response = (
             self.client.table("current_event_expectations")
             .select("*")
-            .eq("status", "scheduled")
-            .gte("scheduled_date", today)
             .order("scheduled_date")
             .execute()
         )

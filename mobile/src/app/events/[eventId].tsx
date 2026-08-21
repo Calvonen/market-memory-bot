@@ -26,16 +26,21 @@ export default function EventDetailScreen() {
 
   const load = useCallback(async () => {
     if (!eventId) return;
+    setError(null);
     try {
-      setError(null);
-      const [eventDetail, status] = await Promise.all([
-        getEvent(eventId),
-        getPaperStatus(eventId),
-      ]);
-      setEvent(eventDetail);
-      setRun(status.paper_run);
+      setEvent(await getEvent(eventId));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Tuntematon virhe');
+      return;
+    }
+    // The paper run is a separate, optional overlay: an event whose release
+    // hasn't happened yet (or whose paper-status lookup fails) must still
+    // show the pre-release expectation data fetched above.
+    try {
+      const status = await getPaperStatus(eventId);
+      setRun(status.paper_run);
+    } catch {
+      setRun(null);
     }
   }, [eventId]);
 

@@ -28,7 +28,13 @@ const DATE_RANGES = [
 ] as const;
 
 function marketForInstrument(instrument: string): string {
-  const suffix = instrument.includes('.') ? instrument.split('.').pop() ?? '' : '';
+  // No suffix is the actual USA convention on this backend (e.g. "AAPL").
+  // An unrecognized suffix (".PA", ".AS", ".SW", ...) must not be guessed
+  // as USA - it gets its own bucket instead of a wrong market label.
+  if (!instrument.includes('.')) {
+    return 'USA';
+  }
+  const suffix = instrument.split('.').pop() ?? '';
   switch (suffix.toUpperCase()) {
     case 'L':
       return 'Iso-Britannia';
@@ -43,7 +49,7 @@ function marketForInstrument(instrument: string): string {
     case 'OL':
       return 'Norja';
     default:
-      return 'USA';
+      return `Muu (.${suffix.toUpperCase()})`;
   }
 }
 

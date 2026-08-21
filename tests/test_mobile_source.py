@@ -99,6 +99,20 @@ class MobileSourceTests(unittest.TestCase):
     def test_detail_screen_links_to_settings_editor(self) -> None:
         self.assertIn("pathname: '/events/[eventId]/edit'", self.detail_source)
 
+    def test_paper_status_failure_does_not_block_pre_release_expectation_render(self) -> None:
+        # getEvent() and getPaperStatus() must be awaited independently: a
+        # failing/unavailable paper-status lookup (e.g. before release) must
+        # still let the fetched event's expectation data render, instead of
+        # rejecting a combined Promise.all and leaving the screen error-only.
+        self.assertNotIn("Promise.all", self.detail_source)
+        set_event_index = self.detail_source.index("setEvent(await getEvent(eventId))")
+        get_status_index = self.detail_source.index("getPaperStatus(eventId)")
+        self.assertLess(set_event_index, get_status_index)
+        status_try_start = self.detail_source.rindex("try {", 0, get_status_index)
+        status_catch_start = self.detail_source.index("} catch {", status_try_start)
+        status_catch_end = self.detail_source.index("}", status_catch_start + len("} catch {"))
+        self.assertIn("setRun(null)", self.detail_source[status_catch_start:status_catch_end])
+
     # -- settings/editor draft never bypasses admin auth with the read key -
 
     def test_edit_screen_never_calls_the_write_endpoint(self) -> None:
@@ -128,6 +142,23 @@ class MobileSourceTests(unittest.TestCase):
     def test_upcoming_screen_has_no_mocked_calendar_data(self) -> None:
         for forbidden in ("mock", "Mock", "MOCK", "fakeEvents", "dummy", "sampleEvents"):
             self.assertNotIn(forbidden, self.upcoming_source)
+
+    def test_upcoming_screen_does_not_guess_unknown_exchange_suffixes_as_usa(self) -> None:
+        # Only the no-suffix case (the actual USA convention on this
+        # backend, e.g. "AAPL") may resolve to 'USA'. An unrecognized
+        # suffix such as ".PA" must not silently fall through to 'USA' too.
+        function_start = self.upcoming_source.index("function marketForInstrument(")
+        function_end = self.upcoming_source.index("\n}\n", function_start)
+        function_body = self.upcoming_source[function_start:function_end]
+
+        no_suffix_guard = function_body.index("if (!instrument.includes('.')) {")
+        no_suffix_return = function_body.index("return 'USA';", no_suffix_guard)
+        switch_start = function_body.index("switch (")
+        self.assertLess(no_suffix_return, switch_start)
+
+        default_case = function_body.index("default:")
+        default_body = function_body[default_case:]
+        self.assertNotIn("'USA'", default_body)
 
     def test_upcoming_screen_has_filter_and_tracking_ui(self) -> None:
         self.assertIn("Hae tickerillä", self.upcoming_source)
