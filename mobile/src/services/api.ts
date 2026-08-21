@@ -1,8 +1,14 @@
 export const API_URL = process.env.EXPO_PUBLIC_MARKETAI_API_URL ?? 'http://127.0.0.1:8001';
 const READ_API_KEY = process.env.EXPO_PUBLIC_MARKETAI_READ_API_KEY ?? '';
+// Strong write-auth for the strategy-draft approve endpoint only - a
+// separate, narrower-scoped credential from READ_API_KEY (which must never
+// authorize a write). This is still an MVP-tier shared secret bundled into
+// the client, same caveat as READ_API_KEY: it must never be the backend's
+// admin token or any Supabase service-role secret - this file must never
+// reference either.
+const CONTROL_API_KEY = process.env.EXPO_PUBLIC_MARKETAI_CONTROL_API_KEY ?? '';
 
-export async function apiGet<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, { headers: { 'X-MarketAI-Key': READ_API_KEY } });
+async function parseJsonResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     let message = `HTTP ${response.status}`;
     try {
@@ -14,6 +20,20 @@ export async function apiGet<T>(path: string): Promise<T> {
     throw new Error(message);
   }
   return response.json() as Promise<T>;
+}
+
+export async function apiGet<T>(path: string): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, { headers: { 'X-MarketAI-Key': READ_API_KEY } });
+  return parseJsonResponse<T>(response);
+}
+
+async function apiPost<T>(path: string, body: unknown, authHeader: Record<string, string>): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeader },
+    body: JSON.stringify(body),
+  });
+  return parseJsonResponse<T>(response);
 }
 
 export type SymbolSuggestion = { ticker: string; name: string; exchange: string };
@@ -120,4 +140,79 @@ export function getEvent(eventId: string): Promise<EventExpectation> {
 
 export function getPaperStatus(eventId: string): Promise<PaperStatus> {
   return apiGet<PaperStatus>(`/api/v1/events/${encodeURIComponent(eventId)}/paper-status`);
+}
+
+// -- Strategiadraft: draft -> preview -> approve -> persisted --------------
+
+export type StrategyDraftInput = {
+  instrument: string;
+  event_name: string;
+  scheduled_date: string;
+  consensus: Record<string, number | string | null>;
+  important_kpis: string[];
+  bull_case: string[];
+  base_case: string[];
+  bear_case: string[];
+  triggers: Record<string, number | string>;
+  invalidation_conditions: string[];
+  source_name: string | null;
+  source_url: string | null;
+  source_as_of: string | null;
+  change_note: string;
+  summary: string;
+  assumptions: string[];
+  unresolved_questions: string[];
+};
+
+export type NormalizedStrategyDraft = StrategyDraftInput & { event_id: string };
+
+export type StrategyDraftPreview = {
+  event_id: string;
+  base_expectation_version: number;
+  draft: NormalizedStrategyDraft;
+  draft_fingerprint: string;
+  current: EventExpectation;
+  changed_fields: string[];
+  warnings: string[];
+};
+
+// This POST never mutates anything server-side - the backend requires only
+// the same read-tier X-MarketAI-Key the rest of this file already uses, not
+// the control key. See docs/event_configuration_storage.md.
+export function previewStrategyDraft(
+  eventId: string,
+  draft: StrategyDraftInput,
+): Promise<StrategyDraftPreview> {
+  return apiPost<StrategyDraftPreview>(
+    `/api/v1/events/${encodeURIComponent(eventId)}/strategy-draft/preview`,
+    draft,
+    { 'X-MarketAI-Key': READ_API_KEY },
+  );
+}
+
+export type StrategyDraftApprovalRequest = {
+  draft: StrategyDraftInput;
+  draft_fingerprint: string;
+  base_expectation_version: number;
+  approved_by: string;
+  approved_via?: string;
+};
+
+export type StrategyDraftApprovalResult = EventExpectation & {
+  draft_fingerprint: string;
+  approved_by: string;
+};
+
+// The only write in this file. Requires the control key - never the read
+// key - and the backend independently re-validates the draft fingerprint
+// and expectation-version CAS before persisting anything.
+export function approveStrategyDraft(
+  eventId: string,
+  request: StrategyDraftApprovalRequest,
+): Promise<StrategyDraftApprovalResult> {
+  return apiPost<StrategyDraftApprovalResult>(
+    `/api/v1/events/${encodeURIComponent(eventId)}/strategy-draft/approve`,
+    request,
+    { 'X-MarketAI-Control-Key': CONTROL_API_KEY },
+  );
 }

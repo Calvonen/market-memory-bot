@@ -193,11 +193,11 @@ export default function EventDetailScreen() {
       </View>
 
       <Link
-        href={{ pathname: '/events/[eventId]/edit', params: { eventId: event.event_id } }}
+        href={{ pathname: '/events/[eventId]/strategy', params: { eventId: event.event_id } }}
         asChild
       >
         <Pressable style={styles.editButton}>
-          <Text style={styles.editButtonText}>Muokkaa asetuksia</Text>
+          <Text style={styles.editButtonText}>Valmistele strategia</Text>
         </Pressable>
       </Link>
 

@@ -16,6 +16,12 @@ NATIVE_TABS = Path("mobile/src/components/app-tabs.tsx")
 BACK_BUTTON = Path("mobile/src/components/back-button.tsx")
 MOBILE_SRC_ROOT = Path("mobile/src")
 
+STRATEGY_LAYOUT = Path("mobile/src/app/events/[eventId]/strategy/_layout.tsx")
+STRATEGY_SUMMARY_SCREEN = Path("mobile/src/app/events/[eventId]/strategy/index.tsx")
+STRATEGY_EDIT_SCREEN = Path("mobile/src/app/events/[eventId]/strategy/edit.tsx")
+STRATEGY_CONFIRM_SCREEN = Path("mobile/src/app/events/[eventId]/strategy/confirm.tsx")
+STRATEGY_DRAFT_FORMAT_UTIL = Path("mobile/src/utils/strategy-draft-format.ts")
+
 
 class MobileSourceTests(unittest.TestCase):
     @classmethod
@@ -147,8 +153,12 @@ class MobileSourceTests(unittest.TestCase):
         self.assertNotIn("hays-fy2026-results", self.detail_source)
         self.assertIn("useLocalSearchParams", self.detail_source)
 
-    def test_detail_screen_links_to_settings_editor(self) -> None:
-        self.assertIn("pathname: '/events/[eventId]/edit'", self.detail_source)
+    def test_detail_screen_links_to_the_strategy_flow(self) -> None:
+        # The primary action on the detail screen opens the strategy
+        # draft -> preview -> approve flow, not the raw field editor
+        # directly - that stays reachable only as an advanced/debug link
+        # from within the strategy summary screen.
+        self.assertIn("pathname: '/events/[eventId]/strategy'", self.detail_source)
 
     # -- navigation: headerless events/* routes must never be dead ends ----
 
@@ -834,6 +844,157 @@ console.log(JSON.stringify({{ sevenDayIds, allIds }}));
         # resolved client-side, so a direct link or reload still works.
         app = Path("mobile/app.json").read_text(encoding="utf-8")
         self.assertNotIn('"output": "static"', app)
+
+
+class StrategyDraftMobileSourceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.api_source = API_SERVICE.read_text(encoding="utf-8")
+        cls.layout_source = STRATEGY_LAYOUT.read_text(encoding="utf-8")
+        cls.summary_source = STRATEGY_SUMMARY_SCREEN.read_text(encoding="utf-8")
+        cls.edit_source = STRATEGY_EDIT_SCREEN.read_text(encoding="utf-8")
+        cls.confirm_source = STRATEGY_CONFIRM_SCREEN.read_text(encoding="utf-8")
+        cls.format_util_source = STRATEGY_DRAFT_FORMAT_UTIL.read_text(encoding="utf-8")
+
+    # -- api.ts: preview vs. approve use distinct, correctly-scoped auth ---
+
+    def test_preview_uses_the_read_key_not_the_control_key(self) -> None:
+        preview_start = self.api_source.index("export function previewStrategyDraft(")
+        preview_end = self.api_source.index("\n}\n", preview_start)
+        preview_body = self.api_source[preview_start:preview_end]
+
+        self.assertIn("X-MarketAI-Key", preview_body)
+        self.assertNotIn("X-MarketAI-Control-Key", preview_body)
+
+    def test_approve_uses_the_control_key_not_the_read_key(self) -> None:
+        approve_start = self.api_source.index("export function approveStrategyDraft(")
+        approve_end = self.api_source.index("\n}\n", approve_start)
+        approve_body = self.api_source[approve_start:approve_end]
+
+        self.assertIn("X-MarketAI-Control-Key", approve_body)
+        self.assertNotIn("X-MarketAI-Key", approve_body)
+
+    def test_control_key_env_var_is_distinct_from_admin_and_service_role(self) -> None:
+        self.assertIn("EXPO_PUBLIC_MARKETAI_CONTROL_API_KEY", self.api_source)
+        for path in MOBILE_SRC_ROOT.rglob("*.ts*"):
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            self.assertNotIn("MARKETAI_ADMIN_API_KEY", text)
+            self.assertNotIn("SERVICE_ROLE", text)
+            self.assertNotIn("MARKETAI_SUPABASE_SECRET_KEY", text)
+            self.assertNotIn("X-Admin-Token", text)
+
+    # -- strategy summary: two clear actions, draft state, all sections ----
+
+    def test_summary_screen_shows_the_two_primary_actions(self) -> None:
+        self.assertIn("Muokkaa luonnosta", self.summary_source)
+        self.assertIn("Hyväksy strategia", self.summary_source)
+
+    def test_summary_screen_shows_draft_state_and_every_required_section(self) -> None:
+        for text in (
+            "LUONNOS",
+            "YHTEENVETO",
+            "KONSENSUS",
+            "TÄRKEIMMÄT KPI",
+            "BULL-SKENAARIO",
+            "BASE-SKENAARIO",
+            "BEAR-SKENAARIO",
+            "TRIGGERIT",
+            "NO TRADE",
+            "LÄHTEET",
+        ):
+            self.assertIn(text, self.summary_source)
+
+    def test_summary_screen_links_to_the_advanced_raw_editor(self) -> None:
+        self.assertIn("pathname: '/events/[eventId]/edit'", self.summary_source)
+
+    def test_approve_action_only_calls_preview_never_approve_directly(self) -> None:
+        # Tapping "Hyväksy strategia" on the summary screen must only ever
+        # run a preview and navigate to the confirmation screen - it must
+        # never call approveStrategyDraft itself, so a draft can never be
+        # persisted without passing through the explicit confirm screen.
+        self.assertIn("previewStrategyDraft", self.summary_source)
+        self.assertNotIn("approveStrategyDraft", self.summary_source)
+
+    # -- draft editor never persists anything itself ------------------------
+
+    def test_draft_editor_never_calls_the_backend(self) -> None:
+        self.assertNotIn("previewStrategyDraft", self.edit_source)
+        self.assertNotIn("approveStrategyDraft", self.edit_source)
+        self.assertNotIn("fetch(", self.edit_source)
+
+    # -- confirmation screen: explicit, non-accidental approval -------------
+
+    def test_confirm_screen_states_the_locked_version_and_no_trade_conditions(self) -> None:
+        self.assertIn("lukitaan eventin expectation-versioksi", self.confirm_source)
+        self.assertIn("nextVersion", self.confirm_source)
+        self.assertIn("NO TRADE", self.confirm_source)
+        self.assertIn("invalidation_conditions", self.confirm_source)
+        self.assertIn("TRIGGERIT (RAJAT)", self.confirm_source)
+
+    def test_confirm_screen_requires_an_explicit_acknowledgement_switch(self) -> None:
+        self.assertIn("<Switch", self.confirm_source)
+        self.assertIn("acknowledged", self.confirm_source)
+        can_submit_index = self.confirm_source.index("const canSubmit =")
+        can_submit_end = self.confirm_source.index(";", can_submit_index)
+        self.assertIn("acknowledged", self.confirm_source[can_submit_index:can_submit_end])
+
+    def test_confirm_button_is_disabled_until_acknowledged(self) -> None:
+        self.assertIn("disabled={!canSubmit}", self.confirm_source)
+
+    def test_approve_requires_a_second_native_confirmation_dialog(self) -> None:
+        # A single tap on the approve button must open a native Alert with
+        # its own explicit confirm action - the actual API call only
+        # happens from that dialog's confirm button, not from the button
+        # press itself.
+        on_press_start = self.confirm_source.index("const onApprovePress = () => {")
+        on_press_end = self.confirm_source.index("\n  };", on_press_start)
+        on_press_body = self.confirm_source[on_press_start:on_press_end]
+
+        self.assertIn("Alert.alert(", on_press_body)
+        self.assertIn("void submitApproval()", on_press_body)
+        # The button's own handler must never call the API directly - only
+        # the dialog's confirm action (submitApproval, invoked above) does.
+        self.assertNotIn("await approveStrategyDraft(", on_press_body)
+
+        submit_start = self.confirm_source.index("const submitApproval = async () => {")
+        submit_end = self.confirm_source.index("\n  };", submit_start)
+        submit_body = self.confirm_source[submit_start:submit_end]
+        self.assertIn("await approveStrategyDraft(", submit_body)
+
+        approve_button_index = self.confirm_source.index("Hyväksy ja lukitse")
+        # The direct approve button handler is onApprovePress (opens the
+        # dialog), not a handler that calls the API synchronously.
+        self.assertLess(self.confirm_source.index("onPress={onApprovePress}"), approve_button_index)
+
+    def test_confirm_screen_requires_an_approver_identity(self) -> None:
+        self.assertIn("approvedBy", self.confirm_source)
+        can_submit_index = self.confirm_source.index("const canSubmit =")
+        can_submit_end = self.confirm_source.index(";", can_submit_index)
+        self.assertIn("approvedBy.trim().length > 0", self.confirm_source[can_submit_index:can_submit_end])
+
+    def test_conflict_response_forces_a_fresh_preview_not_a_resubmit(self) -> None:
+        self.assertIn("setConflict(true)", self.confirm_source)
+        self.assertIn("setPreview(null)", self.confirm_source)
+        self.assertIn("Tee esikatselu uudelleen", self.confirm_source)
+
+    def test_missing_preview_never_shows_the_approve_button(self) -> None:
+        guard_start = self.confirm_source.index("if (!draft || !preview) {")
+        guard_end = self.confirm_source.index("\n  }\n", guard_start)
+        guard_body = self.confirm_source[guard_start:guard_end]
+        self.assertNotIn("approveStrategyDraft", guard_body)
+        self.assertIn("return (", guard_body)
+
+    # -- draft state stays purely client-side until preview/approve --------
+
+    def test_strategy_layout_holds_draft_state_client_side(self) -> None:
+        self.assertIn("useState<", self.layout_source)
+        self.assertNotIn("fetch(", self.layout_source)
+        self.assertNotIn("approveStrategyDraft", self.layout_source)
+        self.assertNotIn("previewStrategyDraft", self.layout_source)
+
+    def test_format_util_never_touches_the_network(self) -> None:
+        self.assertNotIn("fetch(", self.format_util_source)
+        self.assertNotIn("apiPost", self.format_util_source)
 
 
 if __name__ == "__main__":
