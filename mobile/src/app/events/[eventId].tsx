@@ -88,6 +88,9 @@ export default function EventDetailScreen() {
     return (
       <View style={styles.loadingScreen}>
         <Text style={styles.errorText}>{error}</Text>
+        <Pressable style={styles.retryButton} onPress={() => void load()}>
+          <Text style={styles.retryButtonText}>Yritä uudelleen</Text>
+        </Pressable>
       </View>
     );
   }
@@ -369,6 +372,21 @@ const styles = StyleSheet.create({
     backgroundColor: '#0b0e13',
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  retryButton: {
+    backgroundColor: '#131821',
+    borderWidth: 1,
+    borderColor: '#202734',
+    borderRadius: 14,
+    paddingVertical: 13,
+    paddingHorizontal: 24,
+    marginTop: 16,
+  },
+  retryButtonText: {
+    color: '#72b8db',
+    fontSize: 14,
+    fontWeight: '700',
   },
   content: {
     paddingHorizontal: 18,

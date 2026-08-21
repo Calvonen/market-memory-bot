@@ -126,6 +126,18 @@ class MobileSourceTests(unittest.TestCase):
     def test_detail_screen_links_to_settings_editor(self) -> None:
         self.assertIn("pathname: '/events/[eventId]/edit'", self.detail_source)
 
+    def test_initial_load_failure_offers_a_retry_instead_of_a_dead_end(self) -> None:
+        # When the very first getEvent() fails (no event fetched yet), the
+        # screen used to render a plain static error view with no
+        # RefreshControl and no way to retry - the user had to navigate
+        # away and reopen the event. A retry action must be reachable
+        # directly from that error state and must call load() again.
+        error_only_start = self.detail_source.index("if (error && !event) {")
+        error_only_end = self.detail_source.index("\n  }", error_only_start)
+        error_only_block = self.detail_source[error_only_start:error_only_end]
+        self.assertIn("onPress={() => void load()}", error_only_block)
+        self.assertIn("Yritä uudelleen", error_only_block)
+
     def test_paper_status_failure_does_not_block_pre_release_expectation_render(self) -> None:
         # getEvent() and getPaperStatus() must be awaited independently: a
         # failing/unavailable paper-status lookup (e.g. before release) must
