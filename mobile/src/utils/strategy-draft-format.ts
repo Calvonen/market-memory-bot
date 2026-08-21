@@ -98,6 +98,20 @@ export function parseTypedRecord(text: string): TypedRecordParseResult {
         error: `Avaimen "${key}" arvon täytyy olla numero, merkkijono tai null (sai: ${typeof raw}).`,
       };
     }
+    // A JSON number literal can be syntactically valid but overflow to
+    // Infinity (e.g. "1e400") - JSON itself has no way to write NaN or
+    // literal Infinity/-Infinity tokens, so this overflow case is the only
+    // way a non-finite number reaches here. It must be rejected as a
+    // validation error, never silently accepted: JSON.stringify(Infinity)
+    // renders as `null`, so an accepted Infinity would quietly turn into a
+    // real null the next time this record round-trips through recordToText
+    // - a value the user never actually entered.
+    if (typeof raw === 'number' && !Number.isFinite(raw)) {
+      return {
+        ok: false,
+        error: `Avaimen "${key}" arvo ei ole äärellinen luku (sai: ${raw}).`,
+      };
+    }
     entries.push([key, raw]);
   }
   return { ok: true, value: Object.fromEntries(entries) };

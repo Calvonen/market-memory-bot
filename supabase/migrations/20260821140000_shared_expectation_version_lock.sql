@@ -22,6 +22,24 @@
 -- optimistic-concurrency semantics, it simply writes on top of whatever is
 -- current - so it always succeeds once it holds the lock; there is no
 -- separate conflict path here to consider.
+--
+-- input_source_name/input_source_url/input_source_as_of/input_consensus/
+-- input_important_kpis/input_bull_case/input_base_case/input_bear_case/
+-- input_triggers/input_invalidation_conditions are all a *partial patch*:
+-- SQL NULL on any of them means "leave this field as it currently is,"
+-- exactly like the admin endpoint's own optional request fields. This
+-- function resolves that patch itself, against a row it reads *after*
+-- acquiring the lock above - not against whatever the caller already had
+-- in hand before calling this function. The caller used to read "current"
+-- via its own separate, unlocked query, merge the patch into a fully
+-- resolved row in application code, and only then call this function with
+-- every field already filled in - so a concurrent approve_strategy_draft()
+-- call that committed in the window between that read and this insert
+-- would have any field the admin didn't touch silently reverted back to
+-- its pre-approval value. Reading "current" here, after the lock, is what
+-- closes that window: the two writers can still never interleave their
+-- read-then-insert steps, and now neither of them can act on a value read
+-- before the lock was held either.
 create or replace function public.insert_next_expectation_version(
   input_event_id text,
   input_source_name text,
@@ -42,7 +60,7 @@ security invoker
 set search_path = public
 as $$
 declare
-  current_version integer;
+  current_row public.event_expectation_versions%rowtype;
   next_version integer;
   inserted_at timestamptz;
 begin
@@ -50,13 +68,22 @@ begin
   -- contend on the identical advisory lock for a given event_id.
   perform pg_advisory_xact_lock(hashtextextended(input_event_id, 1));
 
-  select version into current_version
+  -- Read *after* acquiring the lock, not before - this is the row the
+  -- partial patch below is resolved against, and it is only safe to treat
+  -- as "current" because nothing else can write a new version for this
+  -- event_id until this transaction releases the lock it just took.
+  select *
+  into current_row
   from public.event_expectation_versions
   where event_id = input_event_id
   order by version desc
   limit 1;
 
-  next_version := coalesce(current_version, 0) + 1;
+  if not found then
+    raise exception 'event_not_found: %', input_event_id using errcode = 'P0002';
+  end if;
+
+  next_version := current_row.version + 1;
   inserted_at := clock_timestamp();
 
   insert into public.event_expectation_versions (
@@ -64,9 +91,25 @@ begin
     consensus, important_kpis, bull_case, base_case, bear_case,
     triggers, invalidation_conditions, change_note, created_at
   ) values (
-    input_event_id, next_version, input_source_name, input_source_url, input_source_as_of,
-    input_consensus, input_important_kpis, input_bull_case, input_base_case, input_bear_case,
-    input_triggers, input_invalidation_conditions, input_change_note, inserted_at
+    input_event_id,
+    next_version,
+    -- 'manual' is the same fallback the old Python-side merge applied
+    -- (expectation.source_name or "manual") for the case where neither
+    -- the patch nor the current row has ever had a source_name - kept
+    -- here so this behavior change is scoped only to *when* the merge
+    -- happens, not what it produces.
+    coalesce(input_source_name, current_row.source_name, 'manual'),
+    coalesce(input_source_url, current_row.source_url),
+    coalesce(input_source_as_of, current_row.source_as_of),
+    coalesce(input_consensus, current_row.consensus),
+    coalesce(input_important_kpis, current_row.important_kpis),
+    coalesce(input_bull_case, current_row.bull_case),
+    coalesce(input_base_case, current_row.base_case),
+    coalesce(input_bear_case, current_row.bear_case),
+    coalesce(input_triggers, current_row.triggers),
+    coalesce(input_invalidation_conditions, current_row.invalidation_conditions),
+    input_change_note,
+    inserted_at
   );
 
   return query select next_version, inserted_at;

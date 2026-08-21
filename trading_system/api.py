@@ -10,7 +10,11 @@ from typing import Any, Protocol
 from fastapi import FastAPI, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 
-from trading_system.event_repository import EventExpectationRepository
+from trading_system.event_repository import (
+    EventExpectationNotFound,
+    EventExpectationRepository,
+    ExpectationPatch,
+)
 from trading_system.models import EventExpectation
 from trading_system.paper_trade_repository import SupabasePaperTradeRepository
 from trading_system.strategy_draft import (
@@ -251,24 +255,32 @@ def create_app(
     @app.post("/api/v1/events/{event_id}/expectation-versions", status_code=status.HTTP_201_CREATED)
     def create_expectation_version(event_id: str, request: ExpectationVersionRequest, x_admin_token: str | None = Header(default=None, alias="X-Admin-Token")) -> dict[str, Any]:
         require_admin(x_admin_token)
-        repo = get_repository()
-        current = repo.get(event_id)
-        if current is None:
-            raise HTTPException(status_code=404, detail="Event not found")
-        updated = replace(
-            current,
-            consensus=request.consensus if request.consensus is not None else current.consensus,
-            important_kpis=tuple(request.important_kpis) if request.important_kpis is not None else current.important_kpis,
-            bull_case=tuple(request.bull_case) if request.bull_case is not None else current.bull_case,
-            base_case=tuple(request.base_case) if request.base_case is not None else current.base_case,
-            bear_case=tuple(request.bear_case) if request.bear_case is not None else current.bear_case,
-            triggers=request.triggers if request.triggers is not None else current.triggers,
-            invalidation_conditions=tuple(request.invalidation_conditions) if request.invalidation_conditions is not None else current.invalidation_conditions,
-            source_name=request.source_name if request.source_name is not None else current.source_name,
-            source_url=request.source_url if request.source_url is not None else current.source_url,
-            source_as_of=request.source_as_of if request.source_as_of is not None else current.source_as_of,
+        # Deliberately no repo.get() here: reading "current" before the
+        # per-event lock and merging this patch into it in Python is
+        # exactly the race that used to let a concurrent strategy-draft
+        # approval's untouched fields get reverted by this endpoint. The
+        # unresolved patch is handed straight to the repository, which
+        # reads "current" itself only after acquiring the same lock
+        # approve_strategy_draft() takes, resolves the patch against that
+        # read, and writes the merged next version - all atomically.
+        patch = ExpectationPatch(
+            consensus=request.consensus,
+            important_kpis=tuple(request.important_kpis) if request.important_kpis is not None else None,
+            bull_case=tuple(request.bull_case) if request.bull_case is not None else None,
+            base_case=tuple(request.base_case) if request.base_case is not None else None,
+            bear_case=tuple(request.bear_case) if request.bear_case is not None else None,
+            triggers=request.triggers,
+            invalidation_conditions=tuple(request.invalidation_conditions) if request.invalidation_conditions is not None else None,
+            source_name=request.source_name,
+            source_url=request.source_url,
+            source_as_of=request.source_as_of,
         )
-        saved = repo.save(updated, change_note=request.change_note)
+        try:
+            saved = get_repository().apply_partial_update(
+                event_id, patch, change_note=request.change_note
+            )
+        except EventExpectationNotFound as exc:
+            raise HTTPException(status_code=404, detail="Event not found") from exc
         return _expectation_payload(saved)
 
     @app.post("/api/v1/events/{event_id}/strategy-draft/preview")

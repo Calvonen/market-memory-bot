@@ -1218,6 +1218,45 @@ console.log(JSON.stringify({
         # never silently normalize/guess a value to send to the backend.
         self.assertTrue(outputs["threwForInvalidJson"])
 
+    def test_a_number_that_overflows_to_infinity_is_rejected_not_normalized_to_null(
+        self,
+    ) -> None:
+        # "1e400" is a syntactically valid JSON number literal - JSON has no
+        # way to write NaN or a literal Infinity/-Infinity token, so this
+        # overflow is the only route a non-finite number can take through
+        # JSON.parse. It must surface as a validation error the user sees,
+        # never be silently accepted: JSON.stringify(Infinity) renders as
+        # `null`, so an accepted 1e400 would quietly turn into a real null
+        # value the next time this record round-trips through recordToText.
+        outputs = self._run_typed_record_script(
+            """
+const overflow = parseTypedRecord('{"metric": 1e400}');
+const negativeOverflow = parseTypedRecord('{"metric": -1e400}');
+const finiteControl = parseTypedRecord('{"metric": 55.6}');
+let threwForOverflow = false;
+try {
+  textToTypedRecord('{"metric": 1e400}');
+} catch (err) {
+  threwForOverflow = true;
+}
+console.log(JSON.stringify({
+  overflow, negativeOverflow, finiteControl, threwForOverflow,
+}));
+"""
+        )
+
+        self.assertFalse(outputs["overflow"]["ok"])
+        self.assertTrue(outputs["overflow"].get("error"))
+        self.assertFalse(outputs["negativeOverflow"]["ok"])
+        self.assertTrue(outputs["negativeOverflow"].get("error"))
+        # An ordinary finite number must still be accepted - this isn't
+        # rejecting all numbers, only the non-finite ones.
+        self.assertTrue(outputs["finiteControl"]["ok"])
+        self.assertEqual(outputs["finiteControl"]["value"]["metric"], 55.6)
+        # textToTypedRecord() (used by draftFormToInput -> preview/approve)
+        # must raise for the same overflow, never send Infinity onward.
+        self.assertTrue(outputs["threwForOverflow"])
+
     def test_draft_to_input_uses_the_same_typed_parser_for_consensus_and_triggers(self) -> None:
         self.assertIn(
             "consensus: textToTypedRecord(draft.consensusText)", self.format_util_source
@@ -1231,8 +1270,11 @@ console.log(JSON.stringify({
         # get confused with the key/value separator (the explanatory
         # comment at the top of the file still references the old pattern
         # by name, which is fine - only the actual code matters here).
+        # Number.isFinite *is* still expected here - unlike the old
+        # heuristic Number(rawValue) guess, it's now used to reject a
+        # non-finite JSON number (e.g. "1e400" overflowing to Infinity),
+        # not to guess a value's type.
         self.assertNotIn("Number(rawValue)", self.format_util_source)
-        self.assertNotIn("Number.isFinite", self.format_util_source)
         self.assertNotIn("separatorIndex", self.format_util_source)
         self.assertNotIn("line.slice(", self.format_util_source)
 

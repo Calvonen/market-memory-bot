@@ -499,15 +499,15 @@ class StrategyDraftApiTests(unittest.TestCase):
 
     # -- draft never leaks into what the worker/paper-trading path sees ----
 
-    def test_preview_never_calls_repository_save(self) -> None:
-        original_save = self.repo.save
+    def test_preview_never_calls_repository_apply_partial_update(self) -> None:
+        original_apply_partial_update = self.repo.apply_partial_update
         calls: list[bool] = []
 
-        def spy_save(*args, **kwargs):
+        def spy_apply_partial_update(*args, **kwargs):
             calls.append(True)
-            return original_save(*args, **kwargs)
+            return original_apply_partial_update(*args, **kwargs)
 
-        self.repo.save = spy_save  # type: ignore[assignment]
+        self.repo.apply_partial_update = spy_apply_partial_update  # type: ignore[assignment]
 
         self._preview()
 
@@ -531,19 +531,20 @@ class StrategyDraftApiTests(unittest.TestCase):
         after_approve = self.repo.list_upcoming()
         self.assertEqual(after_approve[0].version, 2)
 
-    def test_approve_never_calls_repository_save_directly(self) -> None:
+    def test_approve_never_calls_repository_apply_partial_update_directly(self) -> None:
         # CAS must be enforced by the atomic approval repository, never by
-        # EventExpectationRepository.save()'s own max(version)+1 retry loop -
-        # that loop has no way to check "the version I previewed against is
-        # still current."
-        original_save = self.repo.save
+        # EventExpectationRepository.apply_partial_update() - that method
+        # has no caller-supplied expected base version to check at all, so
+        # using it here would silently drop the "the version I previewed
+        # against is still current" guarantee approval depends on.
+        original_apply_partial_update = self.repo.apply_partial_update
         calls: list[bool] = []
 
-        def spy_save(*args, **kwargs):
+        def spy_apply_partial_update(*args, **kwargs):
             calls.append(True)
-            return original_save(*args, **kwargs)
+            return original_apply_partial_update(*args, **kwargs)
 
-        self.repo.save = spy_save  # type: ignore[assignment]
+        self.repo.apply_partial_update = spy_apply_partial_update  # type: ignore[assignment]
 
         approval_body = self._approval_body_from_preview(_valid_draft_body())
         response = self._approve(approval_body, key=self.CONTROL_KEY)
@@ -662,6 +663,75 @@ class StrategyDraftApiTests(unittest.TestCase):
         final = self.repo.get("hays-fy2026-results")
         self.assertIsNotNone(final)
         self.assertGreaterEqual(final.version, 2)
+
+    def test_concurrent_admin_write_and_approval_neither_reverts_the_others_untouched_fields(
+        self,
+    ) -> None:
+        # The admin write endpoint used to read "current" via its own
+        # unlocked repo.get() call, merge its partial patch into a full
+        # EventExpectation in Python, and only *then* call the locked
+        # insert - so if a strategy-draft approval committed in the window
+        # between that read and that write, the admin write's eventual
+        # insert would silently revert whatever field the approval had
+        # just changed (any field the admin patch itself didn't touch).
+        # apply_partial_update() now resolves the patch against a read
+        # taken only after the same lock approve() holds is acquired, so
+        # this must never happen regardless of which of the two writers
+        # actually wins the race to go first.
+        original_consensus = self.repo.get("hays-fy2026-results").consensus[
+            "fy27_operating_profit_pre_exceptional_gbp_m"
+        ]
+        draft = _valid_draft_body()
+        draft["consensus"] = {"fy27_operating_profit_pre_exceptional_gbp_m": 57.25}
+        approval_body = self._approval_body_from_preview(draft)
+
+        def do_admin_write():
+            # Only patches triggers - consensus is deliberately left
+            # untouched by this request.
+            return self.client.post(
+                "/api/v1/events/hays-fy2026-results/expectation-versions",
+                headers={"X-Admin-Token": self.ADMIN_KEY},
+                json={
+                    "change_note": "concurrent admin edit - triggers only",
+                    "triggers": {"bull_fy27_operating_profit_gbp_m": 99.0},
+                },
+            )
+
+        def do_approve():
+            return self._approve(approval_body, key=self.CONTROL_KEY)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            admin_future = executor.submit(do_admin_write)
+            approve_future = executor.submit(do_approve)
+            admin_response = admin_future.result()
+            approve_response = approve_future.result()
+
+        self.assertEqual(admin_response.status_code, 201)
+        self.assertIn(approve_response.status_code, (201, 409))
+
+        final = self.repo.get("hays-fy2026-results")
+        # The admin's own explicit patch must land no matter which writer
+        # actually went first.
+        self.assertEqual(final.triggers["bull_fy27_operating_profit_gbp_m"], 99.0)
+
+        if approve_response.status_code == 201:
+            # Approval committed before the admin write did, so the admin
+            # write's patch - which never mentions consensus - must have
+            # been resolved against the newly *approved* consensus, not
+            # silently reverted back to what it was before the approval.
+            self.assertEqual(
+                final.consensus["fy27_operating_profit_pre_exceptional_gbp_m"],
+                57.25,
+            )
+        else:
+            # The admin write landed first and moved the version out from
+            # under the approval's expected base version (a correct 409,
+            # not a bug) - consensus was never touched by anyone here and
+            # must still read exactly as it started.
+            self.assertEqual(
+                final.consensus["fy27_operating_profit_pre_exceptional_gbp_m"],
+                original_consensus,
+            )
 
 
 if __name__ == "__main__":

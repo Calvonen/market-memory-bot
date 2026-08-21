@@ -34,9 +34,9 @@ class StrategyDraftApprovalRepository(Protocol):
     records the approval audit trail - all three, atomically - or none of
     them happen and ExpectationVersionConflict/StrategyDraftEventNotFound is
     raised. This is deliberately a different operation from
-    EventExpectationRepository.save(): that method's own max(version)+1
-    retry loop has no way to enforce "the version I previewed against is
-    still current," so it must never be used to implement this CAS.
+    EventExpectationRepository.apply_partial_update(): that method has no
+    caller-supplied expected base version to check against - it isn't a CAS
+    at all, and must never be used to implement one.
     """
 
     def approve(

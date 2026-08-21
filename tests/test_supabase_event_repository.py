@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
-from trading_system.models import EventExpectation
+from trading_system.event_repository import EventExpectationNotFound, ExpectationPatch
 from trading_system.supabase_event_repository import SupabaseEventExpectationRepository
 
 
@@ -43,17 +43,6 @@ class _ListUpcomingClient:
         return _ListUpcomingQuery(self.rows, self.calls)
 
 
-class _UpsertQuery:
-    def __init__(self) -> None:
-        pass
-
-    def upsert(self, _payload: dict[str, Any], on_conflict: str | None = None) -> "_UpsertQuery":
-        return self
-
-    def execute(self) -> SimpleNamespace:
-        return SimpleNamespace(data=[])
-
-
 class _RpcCall:
     def __init__(self, response: Any) -> None:
         self._response = response
@@ -64,19 +53,38 @@ class _RpcCall:
         return self._response
 
 
-class _SaveClient:
-    """Fake client for save(): records the market_events upsert and the
-    insert_next_expectation_version RPC call separately, since save() now
-    talks to both."""
+class _GetQuery:
+    """Mirrors get()'s .select('*').eq(...).limit(1).execute() chain."""
 
-    def __init__(self, rpc_response: Any) -> None:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+
+    def select(self, *_args: Any) -> "_GetQuery":
+        return self
+
+    def eq(self, *_args: Any) -> "_GetQuery":
+        return self
+
+    def limit(self, *_args: Any) -> "_GetQuery":
+        return self
+
+    def execute(self) -> SimpleNamespace:
+        return SimpleNamespace(data=self.rows)
+
+
+class _ApplyPartialUpdateClient:
+    """Fake client for apply_partial_update(): records the RPC call, then
+    serves a fixed row for the get() re-read apply_partial_update() does
+    afterwards - standing in for the row the RPC's own transaction already
+    committed by the time that re-read runs."""
+
+    def __init__(self, rpc_response: Any, row_after_commit: dict[str, Any] | None = None) -> None:
         self.rpc_response = rpc_response
-        self.table_calls: list[str] = []
+        self.row_after_commit = row_after_commit
         self.rpc_calls: list[tuple[str, dict[str, Any]]] = []
 
-    def table(self, name: str) -> _UpsertQuery:
-        self.table_calls.append(name)
-        return _UpsertQuery()
+    def table(self, _name: str) -> _GetQuery:
+        return _GetQuery([self.row_after_commit] if self.row_after_commit else [])
 
     def rpc(self, name: str, params: dict[str, Any]) -> _RpcCall:
         self.rpc_calls.append((name, params))
@@ -180,67 +188,87 @@ class SupabaseEventExpectationRepositoryTests(unittest.TestCase):
             results, ["today", "near-future", "far-future", "near-past", "far-past"]
         )
 
-    def test_save_upserts_identity_then_calls_the_locked_insert_rpc(self) -> None:
-        # save() must go through insert_next_expectation_version() (the
-        # pg_advisory_xact_lock-protected RPC shared with
-        # approve_strategy_draft()) rather than its own unlocked
-        # select-max-then-insert-with-retry - that unlocked version is what
-        # let a concurrent admin write and strategy-draft approval race
-        # each other's version allocation.
-        client = _SaveClient(
-            SimpleNamespace(data=[{"new_version": 2, "created_at": "2026-08-18T06:30:00+00:00"}])
+    def test_apply_partial_update_sends_the_unresolved_patch_to_the_locked_rpc(
+        self,
+    ) -> None:
+        # apply_partial_update() must go through
+        # insert_next_expectation_version() (the pg_advisory_xact_lock-
+        # protected RPC shared with approve_strategy_draft()) and must pass
+        # the patch straight through - None for any field the caller didn't
+        # set - rather than resolving it against a value read beforehand:
+        # that resolution now happens inside the RPC's own transaction,
+        # against a row it reads only after acquiring the lock, which is
+        # what keeps a concurrent approval's untouched fields from being
+        # silently reverted by this call.
+        client = _ApplyPartialUpdateClient(
+            SimpleNamespace(data=[{"new_version": 2, "created_at": "2026-08-18T06:30:00+00:00"}]),
+            row_after_commit={
+                "event_id": "hays-fy2026-results",
+                "instrument": "HAS.L",
+                "event_name": "Hays plc FY2026 results",
+                "scheduled_date": "2026-08-20",
+                "version": 2,
+                "consensus": {"fy27_operating_profit_pre_exceptional_gbp_m": 55.6},
+                "triggers": {"bull_fy27_operating_profit_gbp_m": 99.0},
+                "created_at": "2026-08-18T06:30:00+00:00",
+            },
         )
         repo = SupabaseEventExpectationRepository(client)
-        expectation = EventExpectation(
-            event_id="hays-fy2026-results",
-            instrument="HAS.L",
-            event_name="Hays plc FY2026 results",
-            scheduled_date=date(2026, 8, 20),
-            consensus={"fy27_operating_profit_pre_exceptional_gbp_m": 55.6},
-            triggers={"bull_fy27_operating_profit_gbp_m": 60.0},
-            version=1,
-        )
 
-        saved = repo.save(expectation, change_note="raise bull threshold")
+        saved = repo.apply_partial_update(
+            "hays-fy2026-results",
+            ExpectationPatch(triggers={"bull_fy27_operating_profit_gbp_m": 99.0}),
+            change_note="raise bull threshold",
+        )
 
         self.assertEqual(saved.version, 2)
+        self.assertEqual(saved.triggers["bull_fy27_operating_profit_gbp_m"], 99.0)
         self.assertEqual(
-            saved.updated_at, datetime(2026, 8, 18, 6, 30, tzinfo=UTC)
+            saved.consensus["fy27_operating_profit_pre_exceptional_gbp_m"], 55.6
         )
-        self.assertIn("market_events", client.table_calls)
         self.assertEqual(len(client.rpc_calls), 1)
         name, params = client.rpc_calls[0]
         self.assertEqual(name, "insert_next_expectation_version")
         self.assertEqual(params["input_event_id"], "hays-fy2026-results")
         self.assertEqual(params["input_change_note"], "raise bull threshold")
         self.assertEqual(
-            params["input_consensus"]["fy27_operating_profit_pre_exceptional_gbp_m"],
-            55.6,
+            params["input_triggers"]["bull_fy27_operating_profit_gbp_m"], 99.0
         )
-        self.assertEqual(
-            params["input_triggers"]["bull_fy27_operating_profit_gbp_m"], 60.0
-        )
+        # consensus was never set on the patch - it must be sent as None
+        # (SQL NULL), never guessed at or defaulted to some prior value
+        # here, so the RPC's own coalesce-against-current is what decides
+        # it stays unchanged.
+        self.assertIsNone(params["input_consensus"])
 
-    def test_save_propagates_rpc_errors_without_a_retry_loop(self) -> None:
-        # No more client-side retry-on-23505: the database lock is what
+    def test_apply_partial_update_propagates_rpc_errors_without_a_retry_loop(
+        self,
+    ) -> None:
+        # No client-side retry-on-23505: the database lock is what
         # prevents the race that used to cause those conflicts, so any RPC
         # error (including a lock-protected version conflict) must surface
         # to the caller unchanged, not be silently retried away.
         error = RuntimeError("expectation_version_conflict: expected 1 but current is 2")
-        client = _SaveClient(error)
+        client = _ApplyPartialUpdateClient(error)
         repo = SupabaseEventExpectationRepository(client)
-        expectation = EventExpectation(
-            event_id="hays-fy2026-results",
-            instrument="HAS.L",
-            event_name="Hays plc FY2026 results",
-            scheduled_date=date(2026, 8, 20),
-            version=1,
-        )
 
         with self.assertRaises(RuntimeError):
-            repo.save(expectation, change_note="raise bull threshold")
+            repo.apply_partial_update(
+                "hays-fy2026-results", ExpectationPatch(), change_note="raise bull threshold"
+            )
 
         self.assertEqual(len(client.rpc_calls), 1)
+
+    def test_apply_partial_update_maps_event_not_found_to_the_repository_exception(
+        self,
+    ) -> None:
+        error = RuntimeError("event_not_found: does-not-exist")
+        client = _ApplyPartialUpdateClient(error)
+        repo = SupabaseEventExpectationRepository(client)
+
+        with self.assertRaises(EventExpectationNotFound):
+            repo.apply_partial_update(
+                "does-not-exist", ExpectationPatch(), change_note="n/a"
+            )
 
 
 if __name__ == "__main__":
