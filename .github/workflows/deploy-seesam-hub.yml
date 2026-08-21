@@ -19,13 +19,6 @@ permissions:
   contents: read
 
 jobs:
-  # Push path: test and deploy the backend to seesam-hub. Never touches
-  # Expo/EAS - OTA is only ever published by the separate publish-ota job.
-  #
-  # Concurrency is scoped to this job only, in its own group, so a manual
-  # OTA dispatch (see publish-ota below) can never queue behind, cancel, or
-  # otherwise interact with a pending/running backend deploy. Backend
-  # deploys still serialize among themselves.
   deploy:
     name: Test and deploy backend
     if: github.event_name == 'push'
@@ -54,19 +47,6 @@ jobs:
           npx tsc --noEmit
           npm run lint
 
-      # Everything that touches the shared seesam-hub deploy state - the
-      # backend checkout, the running services, and the deployed-SHA state
-      # file - runs as one step under an exclusive flock on
-      # /tmp/marketai-deploy-ota.lock. publish-ota takes the same lock
-      # before its final SHA check + eas update (see below), so the two
-      # can never interleave: the backend can't move from commit A to B
-      # while an OTA run is between reading the deployed SHA and actually
-      # publishing. GitHub's separate concurrency groups (above, and on
-      # publish-ota below) stop the two *jobs* from racing at the
-      # scheduling level; this flock is the actual mutual-exclusion
-      # mechanism for the state itself, since concurrency groups alone are
-      # not a correctness guarantee here. -w gives flock a fail-safe
-      # timeout so a stuck lock holder can't wedge this job forever.
       - name: Deploy backend to seesam-hub (locked)
         env:
           DEPLOY_SHA: ${{ github.sha }}
@@ -88,27 +68,9 @@ jobs:
           git fetch origin feature/trading-system-foundation
           git merge --ff-only "$DEPLOY_SHA"
 
-          # Fail-closed pre-restart gate: this commit's strategy-draft
-          # endpoints depend on Supabase objects (event_strategy_approvals,
-          # approve_strategy_draft(), insert_next_expectation_version())
-          # that are applied out-of-band, before merging, through a
-          # separate secure mechanism - never by this workflow, which holds
-          # no Postgres-DDL-capable credential and is never given one. This
-          # step only *verifies* that schema is present, reusing the same
-          # MARKETAI_SUPABASE_URL/MARKETAI_SUPABASE_SECRET_KEY the
-          # already-running backend service reads from this same env file -
-          # never a GitHub Actions secret, never checked into the repo, and
-          # never something a mobile build receives. `run:` steps use
-          # `bash -eo pipefail` by default, so a non-zero exit from the
-          # script below stops this step immediately: neither
-          # `systemctl restart` line runs, and the currently-running (older)
-          # backend keeps serving traffic untouched. See "Deploy gate:
-          # Supabase schema verification" in
-          # docs/event_configuration_storage.md for the full contract and
-          # scripts/verify_supabase_schema.py for what is actually checked.
           set -a
           # shellcheck disable=SC1091
-          source /home/marko/marketai-repo/.env
+          source /home/marko/marketai/.env
           set +a
           /home/marko/marketai-repo/.venv/bin/python scripts/verify_supabase_schema.py
 
@@ -129,41 +91,10 @@ jobs:
           cat /tmp/marketai-health.json
           /usr/bin/systemctl is-active --quiet marketai-hays-release.service
 
-          # Source of truth for "was this commit actually deployed to the
-          # backend": a plain file on the seesam-hub host, written only
-          # once the health check above has passed. Deliberately not the
-          # git repo (a commit here would itself be a push to
-          # feature/trading-system-foundation and re-trigger this
-          # workflow) and not a GitHub Actions artifact (adds a
-          # download/API round trip for no benefit when both jobs already
-          # run on the same host). publish-ota reads this file, under the
-          # same lock, and refuses to publish unless its SHA matches
-          # exactly.
           STATE_DIR="/home/marko/marketai-deploy-state"
           mkdir -p "$STATE_DIR"
           printf '%s\n' "$DEPLOY_SHA" > "$STATE_DIR/last-deployed-backend.sha"
 
-          # Lock is released automatically when this step's shell exits
-          # and closes fd 200.
-
-  # Manual path: publish an Expo OTA update. Completely independent of the
-  # deploy job - no backend deploy, no seesam-hub git checkout/fast-forward.
-  # actions/checkout below always checks out github.sha, i.e. exactly the
-  # commit/ref this run was dispatched from, so the OTA always ships what
-  # the operator actually selected - it never tries to align with whatever
-  # is currently checked out on the seesam-hub host.
-  #
-  # Whether an OTA update is safe to publish for that commit is a human
-  # judgment call: see docs/ota-native-changes.md for the rule (JS/TS-only
-  # -> OTA is fine; any native-affecting change -> bump the app/runtime
-  # version and ship a new EAS build first, do not use OTA).
-  #
-  # Concurrency is scoped to this job only, in its own per-channel group -
-  # entirely separate from deploy's marketai-backend-deploy group above, so
-  # this can never queue behind, cancel, or replace a pending/running
-  # backend deploy (and vice versa). Two manual OTA runs for the same
-  # channel still serialize against each other; preview and production
-  # runs never block one another.
   publish-ota:
     name: Publish manual Expo OTA update
     if: github.event_name == 'workflow_dispatch'
@@ -183,11 +114,6 @@ jobs:
             exit 1
           fi
 
-      # Cheap early check, unlocked: fail fast if this commit obviously
-      # hasn't been deployed yet, before spending time on checkout and
-      # mobile validation below. This is NOT the authoritative gate - it
-      # can go stale between here and the actual publish, which is exactly
-      # why the locked re-check further down exists. Never skip that one.
       - name: Verify commit was already deployed to the backend (early check)
         env:
           DEPLOY_SHA: ${{ github.sha }}
@@ -218,17 +144,6 @@ jobs:
           npx tsc --noEmit
           npm run lint
 
-      # Authoritative gate, under the same exclusive flock the deploy job
-      # uses: re-read the deployed-SHA state file and re-compare against
-      # github.sha *after* acquiring the lock, then publish while still
-      # holding it. This closes the race the early check above cannot:
-      # without the lock, the backend could move from commit A to commit B
-      # in between an operator's OTA run being "approved" by the early
-      # check and eas update actually running. Holding the lock across
-      # both the re-check and the publish makes that impossible - deploy
-      # cannot advance the state file while this step holds fd 200, and
-      # this step cannot publish for a stale SHA it only just re-verified.
-      # -w gives flock a fail-safe timeout instead of waiting forever.
       - name: Verify deployed SHA and publish OTA update (locked)
         working-directory: mobile
         env:
@@ -267,7 +182,3 @@ jobs:
             --environment "$OTA_CHANNEL" \
             --message "Manual GitHub ${GITHUB_SHA}" \
             --non-interactive
-
-          # Lock is released automatically when this step's shell exits
-          # (success or failure) and closes fd 200 - i.e. only once eas
-          # update has actually finished.
