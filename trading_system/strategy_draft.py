@@ -2,12 +2,44 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import date
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from trading_system.models import EventExpectation
+
+
+def reject_non_finite_numbers(field_name: str, record: dict[str, Any]) -> dict[str, Any]:
+    """Raises ValueError if any value in `record` is a non-finite float -
+    NaN, Infinity, or -Infinity.
+
+    JSON has no literal syntax for any of those three, but a request body
+    can still produce one: Python's json module (what FastAPI/Starlette
+    parse request bodies with here) accepts the non-standard tokens
+    "NaN"/"Infinity"/"-Infinity" as an extension, and a syntactically
+    ordinary-looking number literal can numerically overflow to Infinity
+    when parsed (e.g. "1e400"). Pydantic's own float validation does not
+    reject any of this by default (`allow_inf_nan` defaults to true), so
+    without this check a non-finite value would sail straight through
+    request validation and reach draft_fingerprint()'s json.dumps() (which
+    is just as happy to re-emit "Infinity"/"NaN" as non-standard JSON) and
+    the eventual Postgres jsonb write (which is not: jsonb has no
+    representation for any of the three, so that write would fail as a
+    raw, unmapped database error instead of a clean validation response
+    the caller could act on).
+
+    Called from a Pydantic field_validator so the caller sees a 422 with a
+    clear message, at request-validation time - never later, and never
+    silently normalized to something else.
+    """
+    for key, value in record.items():
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(
+                f'{field_name}["{key}"] ei ole äärellinen luku (sai: {value}).'
+            )
+    return record
 
 
 class StrategyDraftPayload(BaseModel):
@@ -50,6 +82,14 @@ class StrategyDraftPayload(BaseModel):
         if isinstance(value, str):
             return value.strip()
         return value
+
+    @field_validator("consensus", "triggers", mode="after")
+    @classmethod
+    def _reject_non_finite_values(
+        cls, value: dict[str, Any], info: ValidationInfo
+    ) -> dict[str, Any]:
+        assert info.field_name is not None
+        return reject_non_finite_numbers(info.field_name, value)
 
 
 def _clean_list(items: list[str]) -> list[str]:

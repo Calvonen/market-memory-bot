@@ -1,3 +1,14 @@
+-- SUPERSEDED: insert_next_expectation_version()'s body below is not what
+-- is actually deployed once 20260823090000_expectation_write_atomic_response_
+-- and_schema_version.sql has been applied - that migration `create or
+-- replace`s the same signature with a body that also returns the full
+-- written row (avoiding a post-commit re-read race) and introduces
+-- strategy_draft_schema_version(), a deterministic marker the schema gate
+-- checks specifically so an older, same-signature version of this
+-- function - like the one below - can never silently pass as current. Kept
+-- here, unedited, as the historical record of when the lock was first
+-- introduced; see that later migration for what actually runs today.
+--
 -- The admin direct-write endpoint (POST /api/v1/events/{id}/expectation-versions)
 -- used to allocate the next event_expectation_versions row with its own
 -- unlocked "select max(version) then insert, retry on 23505" dance,

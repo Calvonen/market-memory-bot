@@ -73,22 +73,50 @@ class _GetQuery:
 
 
 class _ApplyPartialUpdateClient:
-    """Fake client for apply_partial_update(): records the RPC call, then
-    serves a fixed row for the get() re-read apply_partial_update() does
-    afterwards - standing in for the row the RPC's own transaction already
-    committed by the time that re-read runs."""
+    """Fake client for apply_partial_update(): records the RPC call, and
+    separately records every .table() call - apply_partial_update() must
+    never make one. `trap_row`, if set, is what a .table() call would
+    incorrectly return if apply_partial_update() ever regressed back to a
+    post-commit get() re-read; it is deliberately never wired up to any
+    query that method is expected to actually run, so a regression back to
+    that pattern would make a test using this fixture return trap_row's
+    (wrong) data instead of the RPC's own (right) data."""
 
-    def __init__(self, rpc_response: Any, row_after_commit: dict[str, Any] | None = None) -> None:
+    def __init__(self, rpc_response: Any, trap_row: dict[str, Any] | None = None) -> None:
         self.rpc_response = rpc_response
-        self.row_after_commit = row_after_commit
+        self.trap_row = trap_row
         self.rpc_calls: list[tuple[str, dict[str, Any]]] = []
+        self.table_calls: list[str] = []
 
-    def table(self, _name: str) -> _GetQuery:
-        return _GetQuery([self.row_after_commit] if self.row_after_commit else [])
+    def table(self, name: str) -> _GetQuery:
+        self.table_calls.append(name)
+        return _GetQuery([self.trap_row] if self.trap_row else [])
 
     def rpc(self, name: str, params: dict[str, Any]) -> _RpcCall:
         self.rpc_calls.append((name, params))
         return _RpcCall(self.rpc_response)
+
+
+def _rpc_row(**overrides: Any) -> dict[str, Any]:
+    row = {
+        "out_version": 2,
+        "out_created_at": "2026-08-18T06:30:00+00:00",
+        "out_instrument": "HAS.L",
+        "out_event_name": "Hays plc FY2026 results",
+        "out_scheduled_date": "2026-08-20",
+        "out_source_name": "manual",
+        "out_source_url": None,
+        "out_source_as_of": None,
+        "out_consensus": {"fy27_operating_profit_pre_exceptional_gbp_m": 55.6},
+        "out_important_kpis": [],
+        "out_bull_case": [],
+        "out_base_case": [],
+        "out_bear_case": [],
+        "out_triggers": {"bull_fy27_operating_profit_gbp_m": 99.0},
+        "out_invalidation_conditions": [],
+    }
+    row.update(overrides)
+    return row
 
 
 class SupabaseEventExpectationRepositoryTests(unittest.TestCase):
@@ -200,19 +228,7 @@ class SupabaseEventExpectationRepositoryTests(unittest.TestCase):
         # against a row it reads only after acquiring the lock, which is
         # what keeps a concurrent approval's untouched fields from being
         # silently reverted by this call.
-        client = _ApplyPartialUpdateClient(
-            SimpleNamespace(data=[{"new_version": 2, "created_at": "2026-08-18T06:30:00+00:00"}]),
-            row_after_commit={
-                "event_id": "hays-fy2026-results",
-                "instrument": "HAS.L",
-                "event_name": "Hays plc FY2026 results",
-                "scheduled_date": "2026-08-20",
-                "version": 2,
-                "consensus": {"fy27_operating_profit_pre_exceptional_gbp_m": 55.6},
-                "triggers": {"bull_fy27_operating_profit_gbp_m": 99.0},
-                "created_at": "2026-08-18T06:30:00+00:00",
-            },
-        )
+        client = _ApplyPartialUpdateClient(SimpleNamespace(data=[_rpc_row()]))
         repo = SupabaseEventExpectationRepository(client)
 
         saved = repo.apply_partial_update(
@@ -239,6 +255,66 @@ class SupabaseEventExpectationRepositoryTests(unittest.TestCase):
         # here, so the RPC's own coalesce-against-current is what decides
         # it stays unchanged.
         self.assertIsNone(params["input_consensus"])
+
+    def test_apply_partial_update_never_re_reads_after_the_rpc_commits(self) -> None:
+        # apply_partial_update() must build its entire result from the
+        # RPC's own return row - it must never call .table(...) (the
+        # underlying query get() uses) at all. A post-commit re-read is
+        # its own separate, unlocked query: if a second writer committed a
+        # later version for this event_id in the gap between this RPC's
+        # transaction committing and that re-read running, the re-read
+        # would return the later writer's row, not this call's own.
+        client = _ApplyPartialUpdateClient(SimpleNamespace(data=[_rpc_row()]))
+        repo = SupabaseEventExpectationRepository(client)
+
+        repo.apply_partial_update(
+            "hays-fy2026-results",
+            ExpectationPatch(triggers={"bull_fy27_operating_profit_gbp_m": 99.0}),
+            change_note="raise bull threshold",
+        )
+
+        self.assertEqual(client.table_calls, [])
+
+    def test_apply_partial_update_response_reflects_this_writes_own_version_not_a_later_one(
+        self,
+    ) -> None:
+        # Regression test for exactly the write -> reread race this fixed:
+        # simulates writer A's own RPC call committing version 2 (with
+        # writer A's own trigger value), while a second writer B races
+        # ahead and commits version 3 before writer A's response is built.
+        # `trap_row` stands in for what a get()-based re-read would
+        # incorrectly see if it ran at this point - writer B's version 3,
+        # with different field values. apply_partial_update() must return
+        # writer A's own version 2 and writer A's own values regardless -
+        # proven here by trap_row never actually being read (see
+        # test_apply_partial_update_never_re_reads_after_the_rpc_commits
+        # above), not by the two rows happening to agree.
+        writer_a_row = _rpc_row(
+            out_version=2, out_triggers={"bull_fy27_operating_profit_gbp_m": 99.0}
+        )
+        writer_b_trap_row = {
+            "event_id": "hays-fy2026-results",
+            "instrument": "HAS.L",
+            "event_name": "Hays plc FY2026 results",
+            "scheduled_date": "2026-08-20",
+            "version": 3,
+            "consensus": {},
+            "triggers": {"bull_fy27_operating_profit_gbp_m": 424242.0},
+            "created_at": "2026-08-18T06:31:00+00:00",
+        }
+        client = _ApplyPartialUpdateClient(
+            SimpleNamespace(data=[writer_a_row]), trap_row=writer_b_trap_row
+        )
+        repo = SupabaseEventExpectationRepository(client)
+
+        saved = repo.apply_partial_update(
+            "hays-fy2026-results",
+            ExpectationPatch(triggers={"bull_fy27_operating_profit_gbp_m": 99.0}),
+            change_note="raise bull threshold",
+        )
+
+        self.assertEqual(saved.version, 2)
+        self.assertEqual(saved.triggers["bull_fy27_operating_profit_gbp_m"], 99.0)
 
     def test_apply_partial_update_propagates_rpc_errors_without_a_retry_loop(
         self,

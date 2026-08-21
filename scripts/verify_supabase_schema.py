@@ -3,14 +3,27 @@
 
 This backend commit's strategy-draft endpoints
 (POST .../strategy-draft/approve, and the admin write endpoint's
-save()) depend on Supabase objects added by
+apply_partial_update()) depend on Supabase objects added by
 supabase/migrations/20260821090000_event_strategy_approvals.sql,
-supabase/migrations/20260821140000_shared_expectation_version_lock.sql, and
-supabase/migrations/20260822090000_verify_strategy_draft_schema.sql. Those
-migrations are applied out-of-band, before merging, through a separate
-secure mechanism (the Supabase CLI/dashboard) - this script and the CI it
-runs in hold no Postgres-DDL-capable credential and apply no migrations
-themselves.
+supabase/migrations/20260821140000_shared_expectation_version_lock.sql,
+supabase/migrations/20260822090000_verify_strategy_draft_schema.sql, and
+supabase/migrations/20260823090000_expectation_write_atomic_response_and_schema_version.sql.
+Those migrations are applied out-of-band, before merging, through a
+separate secure mechanism (the Supabase CLI/dashboard) - this script and
+the CI it runs in hold no Postgres-DDL-capable credential and apply no
+migrations themselves.
+
+Existence checks alone are not sufficient here: insert_next_expectation_
+version() has changed its actual behavior more than once while keeping the
+exact same call signature, so "a function with this signature exists" can
+be true against an outdated deployment whose body still has the earlier
+(buggy) semantics. schema_version_matches closes that gap - it calls
+strategy_draft_schema_version(), a small marker function bumped by every
+migration that changes this write path's semantics, and compares it
+against the exact value this backend commit requires. An older deployment
+either has no such function to call (which PostgREST surfaces as this
+entire RPC call failing - see "Fails closed" below) or has it returning a
+stale value, and either way this check reports it as missing/failed.
 
 This script only *verifies* the resulting schema is present, using the
 read-only verify_strategy_draft_schema() RPC and the same
@@ -40,6 +53,12 @@ REQUIRED_CHECKS: tuple[tuple[str, str], ...] = (
     (
         "insert_next_expectation_version_function_exists",
         "insert_next_expectation_version() function",
+    ),
+    (
+        "schema_version_matches",
+        "insert_next_expectation_version() implementation version "
+        "(strategy_draft_schema_version() mismatch or missing - a "
+        "same-signature but outdated function body is deployed)",
     ),
 )
 
@@ -73,9 +92,10 @@ def main() -> int:
             "SCHEMA GATE FAILED: could not call verify_strategy_draft_schema(). This "
             "almost always means the required Supabase migrations "
             "(supabase/migrations/20260821090000_event_strategy_approvals.sql, "
-            "20260821140000_shared_expectation_version_lock.sql, and "
-            "20260822090000_verify_strategy_draft_schema.sql) have not been applied to "
-            f"this Supabase project yet. Underlying error: {exc}",
+            "20260821140000_shared_expectation_version_lock.sql, "
+            "20260822090000_verify_strategy_draft_schema.sql, and "
+            "20260823090000_expectation_write_atomic_response_and_schema_version.sql) "
+            f"have not been applied to this Supabase project yet. Underlying error: {exc}",
             file=sys.stderr,
         )
         return 1
@@ -104,7 +124,8 @@ def main() -> int:
     print(
         "Supabase schema gate passed: event_strategy_approvals, "
         "approve_strategy_draft(), and insert_next_expectation_version() are all "
-        "present."
+        "present, and insert_next_expectation_version() is on the required "
+        "implementation version."
     )
     return 0
 

@@ -1,3 +1,4 @@
+import json
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
@@ -92,6 +93,33 @@ class StrategyDraftApiTests(unittest.TestCase):
             json=body,
         )
 
+    def _preview_raw(self, body: dict, key: str | None = None):
+        # httpx's json= convenience rejects non-finite floats client-side
+        # (it raises before a request is even sent) - unlike json.dumps()
+        # itself, which happily emits the non-standard Infinity/-Infinity/
+        # NaN tokens Python's own json module also accepts back on parse.
+        # Building the body text explicitly and sending it as raw content
+        # is what exercises the server's own parsing/validation of such a
+        # body, rather than being blocked one layer up in the test client.
+        return self.client.post(
+            "/api/v1/events/hays-fy2026-results/strategy-draft/preview",
+            headers={
+                "X-MarketAI-Key": key if key is not None else self.READ_KEY,
+                "Content-Type": "application/json",
+            },
+            content=json.dumps(body),
+        )
+
+    def _approve_raw(self, body: dict, key: str | None = None):
+        headers = {"Content-Type": "application/json"}
+        if key is not None:
+            headers["X-MarketAI-Control-Key"] = key
+        return self.client.post(
+            "/api/v1/events/hays-fy2026-results/strategy-draft/approve",
+            headers=headers,
+            content=json.dumps(body),
+        )
+
     def _approval_body_from_preview(self, preview_body: dict, **overrides) -> dict:
         preview = self._preview(preview_body).json()
         body = {
@@ -176,6 +204,83 @@ class StrategyDraftApiTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 422)
                 self.assertEqual(self.repo.get("hays-fy2026-results").version, 1)
                 self.assertEqual(self.approval_repo.audit_records, [])
+
+    def test_preview_rejects_non_finite_consensus_and_trigger_values(self) -> None:
+        # Non-finite values must be rejected at the backend boundary itself
+        # (a 422 validation response), never merely relied on the mobile
+        # app to filter out - a strategy draft can come from any trusted
+        # caller of this control API, not only the mobile app's own JSON
+        # editor.
+        for field in ("consensus", "triggers"):
+            for value in (float("inf"), float("-inf"), float("nan")):
+                with self.subTest(field=field, value=value):
+                    body = _valid_draft_body()
+                    body[field] = {"some_metric": value}
+
+                    response = self._preview_raw(body)
+
+                    self.assertEqual(response.status_code, 422)
+
+    def test_the_422_response_itself_is_valid_json_even_though_it_echoes_the_rejected_value(
+        self,
+    ) -> None:
+        # Rejecting a non-finite value is not enough on its own: FastAPI's
+        # default validation-error handler echoes the rejected value back
+        # in the 422 body's error detail (Pydantic's "input" field), and
+        # Starlette's JSONResponse renders with allow_nan=False - so
+        # without sanitizing that echoed value first, the very response
+        # reporting "this value is invalid" would itself raise an
+        # unhandled ValueError instead of ever reaching the caller.
+        body = _valid_draft_body()
+        body["consensus"] = {"some_metric": float("inf")}
+
+        response = self._preview_raw(body)
+
+        self.assertEqual(response.status_code, 422)
+        # This is the actual assertion: response.json() must not raise,
+        # and the body must not contain a literal Infinity/NaN token -
+        # only ever the sanitized string form of one.
+        parsed = response.json()
+        self.assertIn("detail", parsed)
+        self.assertNotIn("Infinity", response.text)
+        self.assertNotIn("NaN", response.text)
+
+    def test_preview_rejects_a_json_number_that_overflows_to_infinity(self) -> None:
+        # "1e400" is a syntactically ordinary JSON number literal, not an
+        # explicit Infinity/NaN token - it must still be rejected, since it
+        # numerically overflows to Infinity once parsed.
+        raw = json.dumps(_valid_draft_body()).replace(
+            '"fy27_operating_profit_pre_exceptional_gbp_m": 55.6',
+            '"fy27_operating_profit_pre_exceptional_gbp_m": 1e400',
+        )
+        self.assertIn("1e400", raw)
+
+        response = self.client.post(
+            "/api/v1/events/hays-fy2026-results/strategy-draft/preview",
+            headers={"X-MarketAI-Key": self.READ_KEY, "Content-Type": "application/json"},
+            content=raw,
+        )
+
+        self.assertEqual(response.status_code, 422)
+
+    def test_approve_rejects_non_finite_trigger_values(self) -> None:
+        # approve() re-validates the same StrategyDraftPayload as preview -
+        # a non-finite value must never reach the fingerprint check, the
+        # atomic write, or the audit trail, even via approve() directly.
+        draft = _valid_draft_body()
+        draft["triggers"] = {"bull_fy27_operating_profit_gbp_m": float("inf")}
+        approval_body = {
+            "draft": draft,
+            "draft_fingerprint": "0" * 64,
+            "base_expectation_version": 1,
+            "approved_by": "marko",
+        }
+
+        response = self._approve_raw(approval_body, key=self.CONTROL_KEY)
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(self.repo.get("hays-fy2026-results").version, 1)
+        self.assertEqual(self.approval_repo.audit_records, [])
 
     def test_approve_rejects_whitespace_only_approved_by(self) -> None:
         for value in ("   ", "\t\n  "):

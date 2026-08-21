@@ -1,3 +1,14 @@
+-- SUPERSEDED: verify_strategy_draft_schema()'s body below is not what is
+-- actually deployed once 20260823090000_expectation_write_atomic_response_
+-- and_schema_version.sql has been applied - that migration `create or
+-- replace`s this same 0-argument function to also report
+-- schema_version_matches (whether strategy_draft_schema_version() equals
+-- the exact value that migration expects). Kept here, unedited, as the
+-- historical record of the gate's original three checks; see that later
+-- migration for what actually runs today, and for why a fourth check was
+-- needed on top of "does insert_next_expectation_version() exist under
+-- this signature."
+--
 -- Pre-deploy schema gate for the strategy-draft approval flow.
 --
 -- The backend restart-on-deploy step (.github/workflows/deploy-seesam-hub.yml)

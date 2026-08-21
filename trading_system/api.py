@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import secrets
 from dataclasses import asdict, replace
@@ -7,8 +8,11 @@ from datetime import date
 from typing import Any, Protocol
 
 
-from fastapi import FastAPI, Header, HTTPException, Query, status
-from pydantic import BaseModel, Field, field_validator
+from fastapi import FastAPI, Header, HTTPException, Query, Request, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from trading_system.event_repository import (
     EventExpectationNotFound,
@@ -24,6 +28,7 @@ from trading_system.strategy_draft import (
     draft_warnings,
     identity_mismatches,
     normalize_draft,
+    reject_non_finite_numbers,
 )
 from trading_system.strategy_draft_repository import (
     ExpectationVersionConflict,
@@ -50,6 +55,18 @@ class ExpectationVersionRequest(BaseModel):
     source_name: str | None = Field(default=None, max_length=200)
     source_url: str | None = Field(default=None, max_length=2000)
     source_as_of: date | None = None
+
+    @field_validator("consensus", "triggers", mode="after")
+    @classmethod
+    def _reject_non_finite_values(
+        cls, value: dict[str, Any] | None, info: ValidationInfo
+    ) -> dict[str, Any] | None:
+        # None here means "not part of this patch" (see ExpectationPatch),
+        # not "an empty record" - nothing to check in that case.
+        if value is None:
+            return value
+        assert info.field_name is not None
+        return reject_non_finite_numbers(info.field_name, value)
 
 
 class StrategyDraftApprovalRequest(BaseModel):
@@ -117,6 +134,31 @@ def _expectation_payload(expectation: EventExpectation) -> dict[str, Any]:
     return asdict(expectation)
 
 
+def _json_safe(value: Any) -> Any:
+    """Recursively replaces any non-finite float (Infinity/-Infinity/NaN)
+    with its str() form.
+
+    Starlette's JSONResponse renders with allow_nan=False (unlike
+    json.dumps()'s own permissive default), so it raises an unhandled
+    ValueError - not a clean response - if a non-finite float ever reaches
+    it. reject_non_finite_numbers() (trading_system/strategy_draft.py)
+    stops such a value from ever being accepted into a request, but
+    FastAPI's default RequestValidationError handler echoes the rejected
+    value straight back in the 422 body's error detail (Pydantic's "input"
+    field) - so without this, the very error response reporting "this
+    value is invalid" would itself fail to serialize. Used only for that
+    error-detail response, never for any value this backend accepts and
+    persists.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 def create_app(
     repository: EventExpectationRepository | None = None,
     *,
@@ -134,6 +176,21 @@ def create_app(
         version="0.1.0",
         description="Backend API for versioned event research and paper trading.",
     )
+
+    @app.exception_handler(RequestValidationError)
+    async def _handle_request_validation_error(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        # Same shape as FastAPI's own default handler
+        # (fastapi.exception_handlers.request_validation_exception_handler) -
+        # just with _json_safe() applied, so a rejected non-finite number
+        # (see reject_non_finite_numbers() in trading_system/strategy_draft.py)
+        # never crashes the very 422 response reporting that rejection.
+        return JSONResponse(
+            status_code=422,
+            content=_json_safe(jsonable_encoder({"detail": exc.errors()})),
+        )
+
     repo_cache: EventExpectationRepository | None = repository
     paper_repo_cache: PaperStatusRepository | None = paper_repository
     approval_repo_cache: StrategyDraftApprovalRepository | None = approval_repository

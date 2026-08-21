@@ -128,20 +128,40 @@ class SupabaseEventExpectationRepository(EventExpectationRepository):
         if not rows:
             raise RuntimeError("insert_next_expectation_version returned no rows")
 
-        # event_expectation_versions has no instrument/event_name/
-        # scheduled_date columns of its own (those live on market_events,
-        # untouched by this patch), so the RPC's own return row can't carry
-        # a complete EventExpectation. Re-reading via get() is safe here -
-        # unlike the pre-lock read this method no longer takes, this read
-        # happens *after* the RPC's transaction has already committed, so
-        # it can only ever observe this write (or a later one), never a
-        # stale version this write should have superseded.
-        updated = self.get(event_id)
-        if updated is None:
-            raise RuntimeError(
-                f"event '{event_id}' vanished immediately after its own version insert"
-            )
-        return updated
+        # Built entirely from the RPC's own return row - never a follow-up
+        # get() call. A post-commit get() is its own separate, unlocked
+        # read: if a second writer (another admin patch, or a
+        # strategy-draft approval) committed a *later* version for this
+        # same event_id in the gap between this RPC's transaction
+        # committing and that follow-up read running, the read would
+        # return the later writer's row - so this call would incorrectly
+        # report someone else's version and fields as its own result.
+        # insert_next_expectation_version() now returns every field this
+        # method needs (including instrument/event_name/scheduled_date,
+        # which live on market_events, not event_expectation_versions)
+        # directly from the same row it just inserted, so there is nothing
+        # left to re-read.
+        row = rows[0]
+        return EventExpectation(
+            event_id=event_id,
+            instrument=str(row["out_instrument"]),
+            event_name=str(row["out_event_name"]),
+            scheduled_date=self._parse_date(row["out_scheduled_date"]),
+            consensus=dict(row.get("out_consensus") or {}),
+            important_kpis=tuple(row.get("out_important_kpis") or ()),
+            bull_case=tuple(row.get("out_bull_case") or ()),
+            base_case=tuple(row.get("out_base_case") or ()),
+            bear_case=tuple(row.get("out_bear_case") or ()),
+            triggers=dict(row.get("out_triggers") or {}),
+            invalidation_conditions=tuple(row.get("out_invalidation_conditions") or ()),
+            source_name=row.get("out_source_name"),
+            source_url=row.get("out_source_url"),
+            source_as_of=self._parse_date(row["out_source_as_of"])
+            if row.get("out_source_as_of")
+            else None,
+            version=int(row["out_version"]),
+            updated_at=self._parse_datetime(row.get("out_created_at")) or datetime.now(UTC),
+        )
 
     @staticmethod
     def _is_event_not_found(exc: Exception) -> bool:

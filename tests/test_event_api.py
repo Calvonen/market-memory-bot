@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import date
 
@@ -257,6 +258,32 @@ class EventApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 422)
+
+    def test_rejects_non_finite_consensus_and_trigger_values(self) -> None:
+        # Same backend-boundary validation as the strategy-draft preview/
+        # approve endpoints - a non-finite consensus/trigger value must
+        # never reach a persisted expectation version through this direct
+        # admin path either. Sent as raw content, not the json=
+        # convenience: httpx's own JSON encoder rejects non-finite floats
+        # client-side, unlike json.dumps() itself (which happily emits the
+        # non-standard Infinity/-Infinity/NaN tokens Python's own json
+        # module also accepts back on parse) - raw content is what
+        # actually exercises the server's own parsing/validation.
+        for field in ("consensus", "triggers"):
+            for value in (float("inf"), float("-inf"), float("nan")):
+                with self.subTest(field=field, value=value):
+                    body = {"change_note": "bad value", field: {"some_metric": value}}
+                    response = self.client.post(
+                        "/api/v1/events/hays-fy2026-results/expectation-versions",
+                        headers={
+                            "X-Admin-Token": self.ADMIN_KEY,
+                            "Content-Type": "application/json",
+                        },
+                        content=json.dumps(body),
+                    )
+
+                    self.assertEqual(response.status_code, 422)
+                    self.assertEqual(self.repo.get("hays-fy2026-results").version, 1)
 
 
 if __name__ == "__main__":
