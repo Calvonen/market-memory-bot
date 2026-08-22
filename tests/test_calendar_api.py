@@ -1,4 +1,5 @@
 import unittest
+import uuid
 from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
@@ -161,10 +162,69 @@ class CalendarApiTests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "tracked")
 
     def test_track_unknown_event_is_404(self) -> None:
+        # A syntactically valid UUID that just doesn't match any row -
+        # genuinely "not found", distinct from a malformed path segment
+        # (see the malformed-UUID tests below).
+        response = self.client.post(
+            f"/api/v1/calendar/{uuid.uuid4()}/track", headers=self._control_headers()
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_untrack_unknown_event_is_404(self) -> None:
+        response = self.client.post(
+            f"/api/v1/calendar/{uuid.uuid4()}/untrack", headers=self._control_headers()
+        )
+        self.assertEqual(response.status_code, 404)
+
+    # -- P2 regression: malformed calendar_event_id must never reach the ---
+    # -- repository (Supabase RPC) or surface as a 500 ----------------------
+
+    def test_track_with_a_malformed_uuid_is_a_clean_4xx_not_a_500(self) -> None:
+        # calendar_events.id is a Postgres uuid column in production - an
+        # arbitrary string must be rejected before it ever reaches the
+        # repository, not surface as an unhandled 500.
         response = self.client.post(
             "/api/v1/calendar/does-not-exist/track", headers=self._control_headers()
         )
-        self.assertEqual(response.status_code, 404)
+        self.assertIn(response.status_code, (400, 422))
+        self.assertLess(response.status_code, 500)
+
+    def test_untrack_with_a_malformed_uuid_is_a_clean_4xx_not_a_500(self) -> None:
+        response = self.client.post(
+            "/api/v1/calendar/does-not-exist/untrack", headers=self._control_headers()
+        )
+        self.assertIn(response.status_code, (400, 422))
+        self.assertLess(response.status_code, 500)
+
+    def test_track_and_untrack_reject_a_malformed_uuid_identically(self) -> None:
+        track_response = self.client.post(
+            "/api/v1/calendar/not-a-uuid/track", headers=self._control_headers()
+        )
+        untrack_response = self.client.post(
+            "/api/v1/calendar/not-a-uuid/untrack", headers=self._control_headers()
+        )
+        self.assertEqual(track_response.status_code, untrack_response.status_code)
+
+    def test_track_with_a_malformed_uuid_never_reaches_the_repository(self) -> None:
+        # Behavioral proof, not just a status-code check: the repository's
+        # track() must never even be called for a malformed id - a broken
+        # repository (or one that would otherwise 500 on bad input) must
+        # still yield a clean 4xx.
+        original_track = self.calendar_repo.track
+
+        def _track_should_not_be_called(*_args, **_kwargs):
+            raise AssertionError("repository.track() must not be called for a malformed UUID")
+
+        self.calendar_repo.track = _track_should_not_be_called
+        try:
+            response = self.client.post(
+                "/api/v1/calendar/not-a-uuid/track", headers=self._control_headers()
+            )
+        finally:
+            self.calendar_repo.track = original_track
+
+        self.assertLess(response.status_code, 500)
+        self.assertNotEqual(response.status_code, 200)
 
     def test_untrack_requires_the_control_key_not_the_read_key(self) -> None:
         inserted = self.calendar_repo.sync_candidates([_candidate()], source="finnhub").inserted[0]

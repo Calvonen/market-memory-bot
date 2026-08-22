@@ -141,7 +141,18 @@ never widens what a client can ask for in one call.
   optional; see "Range MVP" above for the default/max window.
 - `POST /api/v1/calendar/{id}/track` / `.../untrack` - write auth reuses the
   existing `X-MarketAI-Control-Key` (never the read key, and no new
-  `EXPO_PUBLIC_*` secret was added).
+  `EXPO_PUBLIC_*` secret was added). `{id}` is validated as a well-formed
+  UUID (`_require_valid_calendar_event_id()`) before it ever reaches the
+  repository - `calendar_events.id` is a Postgres `uuid` column in
+  production, and an arbitrary path segment would otherwise surface as an
+  unhandled invalid-UUID-syntax error from the `transition_calendar_event_
+  status` RPC (a 500) instead of a clean 400. The original string is
+  passed through unchanged rather than `str(uuid.UUID(...))`'s normalized
+  form, since `InMemoryCalendarEventRepository` (local runs/tests) keys
+  events by `new_id()`'s raw `uuid4().hex` (no dashes) - both forms parse
+  as valid UUIDs, but only the original preserves that repository's
+  exact-string lookup. A syntactically valid UUID that just doesn't match
+  any row still 404s, same as before.
 - `POST /api/v1/calendar/manual` - backend/tooling-only manual event entry,
   guarded by `X-Admin-Token`; never called from the Expo app.
 

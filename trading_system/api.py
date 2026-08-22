@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import secrets
+import uuid
 from dataclasses import asdict, replace
 from datetime import date
 from typing import Any, Protocol
@@ -152,6 +153,28 @@ def _calendar_event_payload(event: Any) -> dict[str, Any]:
     payload = asdict(event)
     payload["status"] = event.status.value
     return payload
+
+
+def _require_valid_calendar_event_id(calendar_event_id: str) -> str:
+    # calendar_events.id is a Postgres uuid column in production - an
+    # arbitrary/malformed path segment must never reach the
+    # transition_calendar_event_status RPC, where it would surface as an
+    # unhandled "invalid input syntax for type uuid" error (a 500), not a
+    # clean 4xx. Validated with uuid.UUID(), but the *original* string -
+    # not str(uuid.UUID(...)) - is what gets returned/used: uuid.UUID()
+    # accepts both the dashed canonical form and the raw 32-hex-digit form
+    # (e.g. trading_system.models.new_id()'s uuid4().hex, no dashes, used
+    # by InMemoryCalendarEventRepository for local runs/tests) but always
+    # *normalizes* str() output to the dashed form - reformatting would
+    # silently break that repository's exact-string dict lookup even
+    # though both forms are equally valid UUID syntax to Postgres itself.
+    try:
+        uuid.UUID(calendar_event_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail="calendar_event_id must be a valid UUID"
+        ) from exc
+    return calendar_event_id
 
 
 class ManualCalendarEventRequest(BaseModel):
@@ -574,6 +597,7 @@ def create_app(
         # EXPO_PUBLIC_* secret) - the mobile app already ships this
         # credential for the strategy-draft approve action.
         require_control(x_marketai_control_key)
+        calendar_event_id = _require_valid_calendar_event_id(calendar_event_id)
         try:
             updated = get_calendar_repository().track(calendar_event_id)
         except CalendarEventNotFound as exc:
@@ -590,6 +614,7 @@ def create_app(
         x_marketai_control_key: str | None = Header(default=None, alias="X-MarketAI-Control-Key"),
     ) -> dict[str, Any]:
         require_control(x_marketai_control_key)
+        calendar_event_id = _require_valid_calendar_event_id(calendar_event_id)
         try:
             updated = get_calendar_repository().untrack(calendar_event_id)
         except CalendarEventNotFound as exc:
