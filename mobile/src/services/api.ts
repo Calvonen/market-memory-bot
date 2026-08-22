@@ -182,6 +182,56 @@ export type StrategyDraftPreview = {
   warnings: string[];
 };
 
+// -- Earnings calendar / watchlist (candidate -> tracked, MVP-only) --------
+//
+// candidate and tracked calendar events never influence the trading worker
+// or the PAPER pipeline - see trading_system/calendar_repository.py. This
+// is a separate storage boundary from EventExpectation above.
+
+export type CalendarEvent = {
+  calendar_event_id: string;
+  company_name: string;
+  instrument: string;
+  market: string;
+  event_type: string;
+  // Disambiguates recurring occurrences of the same instrument/event_type/
+  // source (e.g. "2026Q3" vs "2026Q4") - opaque here, never parsed by the
+  // mobile app.
+  occurrence_key: string;
+  scheduled_date: string;
+  source: string;
+  status: 'candidate' | 'tracked' | 'research' | 'decision_to_prepare_strategy' | 'enrich_event_details' | 'preview' | 'approve';
+  created_at: string;
+  updated_at: string;
+};
+
+export function getUpcomingCalendarEvents(fromDate?: string, toDate?: string): Promise<CalendarEvent[]> {
+  const params = new URLSearchParams();
+  if (fromDate) params.set('from_date', fromDate);
+  if (toDate) params.set('to_date', toDate);
+  const query = params.toString();
+  return apiGet<CalendarEvent[]>(`/api/v1/calendar/upcoming${query ? `?${query}` : ''}`);
+}
+
+// Write auth for these two actions deliberately reuses the existing control
+// key (never the read key, never a new EXPO_PUBLIC_* secret) - the same
+// credential this file already ships for approveStrategyDraft().
+export function trackCalendarEvent(calendarEventId: string): Promise<CalendarEvent> {
+  return apiPost<CalendarEvent>(
+    `/api/v1/calendar/${encodeURIComponent(calendarEventId)}/track`,
+    undefined,
+    { 'X-MarketAI-Control-Key': CONTROL_API_KEY },
+  );
+}
+
+export function untrackCalendarEvent(calendarEventId: string): Promise<CalendarEvent> {
+  return apiPost<CalendarEvent>(
+    `/api/v1/calendar/${encodeURIComponent(calendarEventId)}/untrack`,
+    undefined,
+    { 'X-MarketAI-Control-Key': CONTROL_API_KEY },
+  );
+}
+
 // This POST never mutates anything server-side - the backend requires only
 // the same read-tier X-MarketAI-Key the rest of this file already uses, not
 // the control key. See docs/event_configuration_storage.md.

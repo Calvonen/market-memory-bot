@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -415,29 +416,535 @@ class MobileSourceTests(unittest.TestCase):
         ):
             self.assertIn(label, self.edit_source)
 
-    # -- upcoming/calendar foundation page: no fake data --------------------
+    # -- upcoming/calendar foundation page: real events + calendar data -----
 
-    def test_upcoming_screen_only_reads_the_real_events_endpoint(self) -> None:
+    def test_upcoming_screen_reads_both_the_events_and_calendar_endpoints(self) -> None:
         self.assertIn("getEvents", self.upcoming_source)
+        self.assertIn("getUpcomingCalendarEvents", self.upcoming_source)
+        self.assertIn("export function getUpcomingCalendarEvents(", self.api_source)
+        self.assertIn("/api/v1/calendar/upcoming", self.api_source)
         self.assertNotIn("fetch(", self.upcoming_source)
 
     def test_upcoming_screen_ignores_stale_overlapping_load_responses(self) -> None:
         # Same race as the home/detail screens: pull-to-refresh firing
-        # load() again while the first getEvents() is still pending must
-        # not let an older response replace an already-refreshed list or
-        # set an obsolete error over a successful refresh.
-        load_start = self.upcoming_source.index("const load = useCallback(async () => {")
-        load_end = self.upcoming_source.index("}, []);", load_start)
+        # load() again while the first requests are still pending must not
+        # let an older response replace an already-refreshed list or set an
+        # obsolete error over a successful refresh. Both getEvents() and
+        # getUpcomingCalendarEvents() are fetched independently (own
+        # .then()/.catch() chain each) so one failing/being slow never
+        # blocks the other's state update.
+        load_start = self.upcoming_source.index("const load = useCallback((currentRangeDays: number) => {")
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
         load_body = self.upcoming_source[load_start:load_end]
 
-        self.assertIn("const loadId = ++latestLoadId.current;", load_body)
+        # Separate generation counters - both still bumped together by
+        # load() itself, so two overlapping load() calls still invalidate
+        # each other's responses on both sources.
+        self.assertIn("const eventsLoadId = ++latestEventsLoadId.current;", load_body)
+        self.assertIn("const calendarLoadId = ++latestCalendarLoadId.current;", load_body)
         self.assertIn(
-            "if (loadId !== latestLoadId.current) return;\n      setEvents(list);", load_body
-        )
-        self.assertIn(
-            "if (loadId !== latestLoadId.current) return;\n      setError(err instanceof Error ? err.message : 'Tuntematon virhe');",
+            "if (eventsLoadId !== latestEventsLoadId.current) return;\n        setEvents(list);",
             load_body,
         )
+        self.assertIn(
+            "if (eventsLoadId !== latestEventsLoadId.current) return;\n        setError(err instanceof Error ? err.message : 'Tuntematon virhe');",
+            load_body,
+        )
+        # P2 regression: a track mutation must only ever protect its own
+        # row (see applyLocalCalendarOverrides()), never invalidate the
+        # whole calendar generation - so this handler still applies every
+        # response it receives (once the loadId guard passes), merged
+        # through applyLocalCalendarOverrides(), never a bare setCalendarEvents(list).
+        self.assertIn(
+            "if (calendarLoadId !== latestCalendarLoadId.current) return;\n"
+            "        setCalendarEvents(\n"
+            "          applyLocalCalendarOverrides(list, localCalendarOverrides.current, calendarVersionAtStart),\n"
+            "        );",
+            load_body,
+        )
+
+    def test_upcoming_screen_starts_both_requests_before_awaiting_either(self) -> None:
+        # P2 regression: getEvents() and getUpcomingCalendarEvents() must
+        # both be invoked (the actual request fired) up front, as two
+        # independent statements - never one nested inside the other's
+        # .then()/.catch() callback, which would make the second request
+        # wait for the first to settle before it even starts.
+        load_start = self.upcoming_source.index("const load = useCallback((currentRangeDays: number) => {")
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[load_start:load_end]
+
+        events_call_index = load_body.index("const eventsPromise = getEvents()")
+        calendar_call_index = load_body.index(
+            "const calendarPromise = getUpcomingCalendarEvents(fromDate, toDate)"
+        )
+        self.assertLess(events_call_index, calendar_call_index)
+
+        # calendarPromise's declaration is a sibling statement at the same
+        # indentation as eventsPromise's - not nested one level deeper
+        # inside eventsPromise's .then()/.catch() body.
+        self.assertIn(
+            "\n    const calendarPromise = getUpcomingCalendarEvents(fromDate, toDate)", load_body
+        )
+
+        # P2 regression: fromDate/toDate must be the device-local window,
+        # never a parameter-free call left to the backend host's own
+        # date.today().
+        self.assertIn("deviceLocalDateWindow(currentRangeDays)", load_body)
+
+        # load() itself never sequences one request's own await before
+        # creating the other's promise.
+        self.assertNotIn("await eventsPromise", load_body)
+        self.assertIn("return Promise.race([eventsPromise, calendarPromise]);", load_body)
+
+    def test_a_never_settling_get_events_does_not_block_calendar_data_from_rendering(
+        self,
+    ) -> None:
+        # Behavioral proof, not just structural: extract the real load()
+        # body, stub its React state setters/ref and the two API calls, and
+        # run it with node where getEvents() never resolves.
+        # getUpcomingCalendarEvents() resolving quickly must still update
+        # calendar state - proving the two requests are genuinely
+        # independent, not merely declared next to each other.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        load_start = self.upcoming_source.index("const load = useCallback((currentRangeDays: number) => {")
+        body_start = load_start + len("const load = useCallback((currentRangeDays: number) => {")
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[body_start:load_end]
+
+        date_helpers_js = self._extract_date_ordinal_fns_js()
+        script = f"""
+{date_helpers_js}
+
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
+const calls = [];
+function setEvents(v) {{ calls.push(['setEvents', v]); }}
+function setError(v) {{ calls.push(['setError', v]); }}
+function setCalendarEvents(v) {{ calls.push(['setCalendarEvents', v]); }}
+function setCalendarError() {{}}
+
+function getEvents() {{ return new Promise(() => {{}}); }}
+function getUpcomingCalendarEvents() {{ return Promise.resolve(['cal-1']); }}
+
+function load(currentRangeDays) {{
+{load_body}
+}}
+
+load(7);
+setTimeout(() => {{ console.log(JSON.stringify(calls)); }}, 50);
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = json.loads(result.stdout)
+        names = [c[0] for c in calls]
+
+        # The stalled getEvents() never settles, so setEvents may never
+        # fire and setError may only ever be the load()-start reset
+        # (setError(null)) - never an actual error message - but the fast
+        # getUpcomingCalendarEvents() must still update calendar state
+        # regardless.
+        self.assertNotIn("setEvents", names)
+        self.assertEqual([c[1] for c in calls if c[0] == "setError"], [None])
+        self.assertIn("setCalendarEvents", names)
+        calendar_call = next(c for c in calls if c[0] == "setCalendarEvents")
+        self.assertEqual(calendar_call[1], ["cal-1"])
+
+    def test_a_never_settling_calendar_request_does_not_block_tracked_events(self) -> None:
+        # Symmetric proof: a stalled getUpcomingCalendarEvents() must never
+        # hold back rendering the already-tracked EventExpectation list.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        load_start = self.upcoming_source.index("const load = useCallback((currentRangeDays: number) => {")
+        body_start = load_start + len("const load = useCallback((currentRangeDays: number) => {")
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[body_start:load_end]
+
+        date_helpers_js = self._extract_date_ordinal_fns_js()
+        script = f"""
+{date_helpers_js}
+
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
+const calls = [];
+function setEvents(v) {{ calls.push(['setEvents', v]); }}
+function setError(v) {{ calls.push(['setError', v]); }}
+function setCalendarEvents(v) {{ calls.push(['setCalendarEvents', v]); }}
+function setCalendarError() {{}}
+
+function getEvents() {{ return Promise.resolve(['event-1']); }}
+function getUpcomingCalendarEvents() {{ return new Promise(() => {{}}); }}
+
+function load(currentRangeDays) {{
+{load_body}
+}}
+
+load(7);
+setTimeout(() => {{ console.log(JSON.stringify(calls)); }}, 50);
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = json.loads(result.stdout)
+        names = [c[0] for c in calls]
+
+        self.assertNotIn("setCalendarEvents", names)
+        self.assertIn("setEvents", names)
+        events_call = next(c for c in calls if c[0] == "setEvents")
+        self.assertEqual(events_call[1], ["event-1"])
+
+    # -- calendar failure must not look like an empty calendar (P2) --------
+
+    def test_calendar_failure_never_flattens_to_an_empty_list(self) -> None:
+        # P2 regression: a failed calendar GET used to setCalendarEvents([]),
+        # which renders identically to a genuine "zero candidates in this
+        # window" response. calendarEvents must stay exactly as it was
+        # (null, on a first-ever failed load) - only calendarError changes.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        load_start = self.upcoming_source.index("const load = useCallback((currentRangeDays: number) => {")
+        body_start = load_start + len("const load = useCallback((currentRangeDays: number) => {")
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[body_start:load_end]
+
+        date_helpers_js = self._extract_date_ordinal_fns_js()
+        script = f"""
+{date_helpers_js}
+
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
+const calls = [];
+function setEvents(v) {{ calls.push(['setEvents', v]); }}
+function setError(v) {{ calls.push(['setError', v]); }}
+function setCalendarEvents(v) {{ calls.push(['setCalendarEvents', v]); }}
+function setCalendarError(v) {{ calls.push(['setCalendarError', v]); }}
+
+function getEvents() {{ return new Promise(() => {{}}); }}
+function getUpcomingCalendarEvents() {{ return Promise.reject(new Error('network down')); }}
+
+function load(currentRangeDays) {{
+{load_body}
+}}
+
+load(7);
+setTimeout(() => {{ console.log(JSON.stringify(calls)); }}, 50);
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = json.loads(result.stdout)
+        names = [c[0] for c in calls]
+
+        # setCalendarEvents must never be called at all here - not with the
+        # failed response's data, and not as some kind of reset. Only
+        # setCalendarError changes: once optimistically to null at load()'s
+        # start (the calendar-side equivalent of setError(null)), then
+        # again with the real failure once the rejection is handled.
+        self.assertNotIn("setCalendarEvents", names)
+        self.assertIn("setCalendarError", names)
+        error_calls = [c[1] for c in calls if c[0] == "setCalendarError"]
+        # First call is the optimistic setCalendarError(null) at load()'s
+        # start; the last one is the real failure - not null, and not an
+        # empty array in disguise.
+        self.assertEqual(error_calls[0], None)
+        self.assertIsNotNone(error_calls[-1])
+        self.assertNotEqual(error_calls[-1], [])
+
+    def test_calendar_failure_preserves_previously_loaded_calendar_data(self) -> None:
+        # A refresh whose calendar GET fails must leave the last
+        # successfully loaded calendar data exactly as it was - never
+        # wiped out by the failed attempt.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        load_start = self.upcoming_source.index("const load = useCallback((currentRangeDays: number) => {")
+        body_start = load_start + len("const load = useCallback((currentRangeDays: number) => {")
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[body_start:load_end]
+
+        date_helpers_js = self._extract_date_ordinal_fns_js()
+        script = f"""
+{date_helpers_js}
+
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
+let calendarEventsState = null;
+let calendarErrorState = null;
+function setEvents() {{}}
+function setError() {{}}
+function setCalendarEvents(updater) {{
+  calendarEventsState = typeof updater === 'function' ? updater(calendarEventsState) : updater;
+}}
+function setCalendarError(v) {{ calendarErrorState = v; }}
+
+// First load() call succeeds; the second (the "refresh") fails.
+let attempt = 0;
+function getEvents() {{ return new Promise(() => {{}}); }}
+function getUpcomingCalendarEvents() {{
+  attempt += 1;
+  if (attempt === 1) {{
+    return Promise.resolve([
+      {{ calendar_event_id: 'cal-1', instrument: 'AAPL', status: 'candidate' }},
+    ]);
+  }}
+  return Promise.reject(new Error('network down'));
+}}
+
+function load(currentRangeDays) {{
+{load_body}
+}}
+
+async function main() {{
+  load(7);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const afterFirstLoad = JSON.parse(JSON.stringify(calendarEventsState));
+
+  load(7);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  console.log(JSON.stringify({{
+    afterFirstLoad,
+    afterFailedRefresh: calendarEventsState,
+    calendarErrorAfterFailedRefresh: calendarErrorState,
+  }}));
+}}
+
+main();
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+
+        self.assertEqual(
+            outputs["afterFirstLoad"],
+            [{"calendar_event_id": "cal-1", "instrument": "AAPL", "status": "candidate"}],
+        )
+        # The failed refresh must leave the previously loaded data exactly
+        # as it was - not null, not [], not anything else.
+        self.assertEqual(outputs["afterFailedRefresh"], outputs["afterFirstLoad"])
+        self.assertIsNotNone(outputs["calendarErrorAfterFailedRefresh"])
+
+    def test_expectation_list_keeps_updating_when_calendar_fails(self) -> None:
+        # The expectation list (getEvents()/`events`/`error`) must keep
+        # working completely normally when only the calendar side fails -
+        # its own state is untouched by a calendar failure.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        load_start = self.upcoming_source.index("const load = useCallback((currentRangeDays: number) => {")
+        body_start = load_start + len("const load = useCallback((currentRangeDays: number) => {")
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[body_start:load_end]
+
+        date_helpers_js = self._extract_date_ordinal_fns_js()
+        script = f"""
+{date_helpers_js}
+
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
+const calls = [];
+function setEvents(v) {{ calls.push(['setEvents', v]); }}
+function setError(v) {{ calls.push(['setError', v]); }}
+function setCalendarEvents(v) {{ calls.push(['setCalendarEvents', v]); }}
+function setCalendarError(v) {{ calls.push(['setCalendarError', v]); }}
+
+function getEvents() {{ return Promise.resolve(['event-1']); }}
+function getUpcomingCalendarEvents() {{ return Promise.reject(new Error('network down')); }}
+
+function load(currentRangeDays) {{
+{load_body}
+}}
+
+load(7);
+setTimeout(() => {{ console.log(JSON.stringify(calls)); }}, 50);
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = json.loads(result.stdout)
+        names = [c[0] for c in calls]
+
+        self.assertIn("setEvents", names)
+        events_call = next(c for c in calls if c[0] == "setEvents")
+        self.assertEqual(events_call[1], ["event-1"])
+        # The calendar failure must never also report as an events/
+        # expectation-list error - the two sources' error states are
+        # completely independent.
+        self.assertNotIn("setError", [c[0] for c in calls if c[1] is not None])
+
+    def test_ui_distinguishes_calendar_error_from_a_successful_empty_result(self) -> None:
+        # Structural proof that the render logic actually branches on
+        # calendarError, not just that the state exists: the "Ei
+        # julkaisuja" empty state must be gated on !calendarError (never
+        # shown while a calendar failure is active), and a distinct
+        # calendar error/retry affordance must exist that re-triggers
+        # load().
+        empty_state_start = self.upcoming_source.index(
+            "{!loading && !calendarError && filtered.length === 0 ? ("
+        )
+        self.assertGreater(empty_state_start, -1)
+
+        calendar_error_block_start = self.upcoming_source.index("{calendarError ? (")
+        calendar_error_block_end = self.upcoming_source.index(") : null}", calendar_error_block_start)
+        calendar_error_block = self.upcoming_source[calendar_error_block_start:calendar_error_block_end]
+
+        # Retry re-invokes load() with the current range - not a dead end.
+        self.assertIn("onPress={() => void load(rangeDays)}", calendar_error_block)
+        # Distinct from the plain events-list error/empty-state text.
+        self.assertNotIn("Ei julkaisuja", calendar_error_block)
+
+    def test_loading_flag_clears_on_a_calendar_error_same_as_on_data_or_events_error(self) -> None:
+        # calendarError is a settled state, not "still loading" - the
+        # initial spinner must clear the moment it's set, same as it
+        # already does for `events`/`calendarEvents` having data or
+        # `error` being set.
+        loading_start = self.upcoming_source.index("const loading = ")
+        loading_end = self.upcoming_source.index(";", loading_start)
+        loading_expr = self.upcoming_source[loading_start:loading_end]
+        self.assertIn("!calendarError", loading_expr)
+
+    # -- pull-to-refresh (P2 regression): must never hang on one source ----
+
+    def test_load_races_rather_than_waits_for_both_sources_to_settle(self) -> None:
+        # Structural proof: load() itself must resolve as soon as the FIRST
+        # of the two requests settles (Promise.race), not once both do
+        # (Promise.all) - otherwise onRefresh() below, which awaits load(),
+        # would hang forever if either source never settles, even though
+        # the other one already has data to show.
+        load_start = self.upcoming_source.index("const load = useCallback((currentRangeDays: number) => {")
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[load_start:load_end]
+
+        self.assertIn("return Promise.race([eventsPromise, calendarPromise]);", load_body)
+        self.assertNotIn("Promise.all(", load_body)
+
+        on_refresh_start = self.upcoming_source.index("const onRefresh = useCallback(async () => {")
+        on_refresh_end = self.upcoming_source.index("}, [load, rangeDays]);", on_refresh_start)
+        on_refresh_body = self.upcoming_source[on_refresh_start:on_refresh_end]
+        self.assertIn("await load(rangeDays);", on_refresh_body)
+        self.assertIn("setRefreshing(false);", on_refresh_body)
+
+    def test_on_refresh_does_not_hang_when_one_source_never_settles(self) -> None:
+        # Behavioral proof: run the real load() body under node with
+        # getEvents() resolving quickly and getUpcomingCalendarEvents()
+        # stubbed to never settle (the reverse case is symmetric). The
+        # promise load() itself returns must still win a race against a
+        # 200ms timeout - if it were gated on both sources (Promise.all),
+        # it would never resolve at all and the timeout would always win,
+        # leaving onRefresh()'s `refreshing` state stuck true forever.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        load_start = self.upcoming_source.index("const load = useCallback((currentRangeDays: number) => {")
+        body_start = load_start + len("const load = useCallback((currentRangeDays: number) => {")
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[body_start:load_end]
+
+        date_helpers_js = self._extract_date_ordinal_fns_js()
+        script = f"""
+{date_helpers_js}
+
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
+function setEvents() {{}}
+function setError() {{}}
+function setCalendarEvents() {{}}
+function setCalendarError() {{}}
+
+function getEvents() {{ return Promise.resolve(['event-1']); }}
+function getUpcomingCalendarEvents() {{ return new Promise(() => {{}}); }}
+
+function load(currentRangeDays) {{
+{load_body}
+}}
+
+Promise.race([
+  load(7).then(() => 'load-settled'),
+  new Promise((resolve) => setTimeout(() => resolve('timeout'), 200)),
+]).then((winner) => {{ console.log(JSON.stringify({{ winner }})); }});
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outcome = json.loads(result.stdout)
+        self.assertEqual(outcome["winner"], "load-settled")
 
     def test_upcoming_screen_has_no_mocked_calendar_data(self) -> None:
         for forbidden in ("mock", "Mock", "MOCK", "fakeEvents", "dummy", "sampleEvents"):
@@ -507,37 +1014,312 @@ class MobileSourceTests(unittest.TestCase):
         self.assertEqual(outputs["AAPL"], "USA")
         self.assertEqual(outputs["HAS.L"], "Iso-Britannia")
 
-    def test_date_range_filter_excludes_past_events_but_kaikki_keeps_history(self) -> None:
-        # Behavioral proof for the date-range filter: extract the real
-        # filtered = useMemo(...) predicate from upcoming.tsx (plus the
-        # marketForInstrument() it calls), strip TS syntax, and run it with
-        # node against synthetic past/near/far events. A day-range filter
-        # (e.g. "7 pv") must exclude a released/past-dated event even though
-        # /api/v1/events intentionally still returns it (for Seurannassa);
-        # "Kaikki" (no range selected) must keep showing it.
+    def _extract_upcoming_function(self, signature: str, *, strip_types: bool = True) -> str:
+        start = self.upcoming_source.index(signature)
+        end = self.upcoming_source.index("\n}\n", start) + len("\n}")
+        source = self.upcoming_source[start:end]
+        if strip_types:
+            source = re.sub(r":\s*(EventExpectation|CalendarEvent|UpcomingRow)\[\]", "", source)
+            source = re.sub(r":\s*DeviceLocalDateWindow\b", "", source)
+            source = re.sub(r":\s*Map<string,\s*CalendarOverride>", "", source)
+            source = re.sub(r":\s*Date\b", "", source)
+            source = re.sub(r":\s*string\b", "", source)
+            source = re.sub(r":\s*number\s*\|\s*null\b", "", source)
+            source = re.sub(r":\s*number\b", "", source)
+        return source
+
+    def _extract_date_ordinal_fns_js(self) -> str:
+        # mergeUpcomingRows()'s sort, filterRows()'s cutoff, and load()'s
+        # network window all depend on these date-only helpers (P2
+        # regressions: noon/midnight timestamp comparisons made the range
+        # chips exclusive of the final day; a parameter-free calendar GET
+        # let the backend host's own date.today() decide the window
+        # instead of the device's local date) - any extracted-and-node-
+        # executed script that calls any of them must carry the full set
+        # along, including the MS_PER_DAY constant dateOnlyOrdinal()
+        # divides by. Also carries applyLocalCalendarOverrides() (P2
+        # regression: a track mutation must protect only its own row, not
+        # discard an entire pending calendar response) since load()'s body
+        # calls it too.
+        ms_per_day_start = self.upcoming_source.index("const MS_PER_DAY = ")
+        ms_per_day_end = self.upcoming_source.index(";", ms_per_day_start) + 1
+        ms_per_day_js = self.upcoming_source[ms_per_day_start:ms_per_day_end]
+        date_only_ordinal_js = self._extract_upcoming_function("function dateOnlyOrdinal(")
+        parse_date_only_ordinal_js = self._extract_upcoming_function("function parseDateOnlyOrdinal(")
+        format_date_only_js = self._extract_upcoming_function("function formatDateOnly(")
+        ordinal_to_date_only_js = self._extract_upcoming_function("function ordinalToDateOnly(")
+        device_local_date_window_js = self._extract_upcoming_function("function deviceLocalDateWindow(")
+        apply_local_calendar_overrides_js = self._extract_upcoming_function(
+            "function applyLocalCalendarOverrides("
+        )
+        return (
+            f"{ms_per_day_js}\n{date_only_ordinal_js}\n{parse_date_only_ordinal_js}\n"
+            f"{format_date_only_js}\n{ordinal_to_date_only_js}\n{device_local_date_window_js}\n"
+            f"{apply_local_calendar_overrides_js}"
+        )
+
+    def _run_merge_upcoming_rows(self, events_js: str, calendar_js: str) -> list[dict]:
         node = shutil.which("node")
         if node is None:
             self.skipTest("node is not available in this environment")
 
-        market_fn_start = self.upcoming_source.index("function marketForInstrument(")
-        market_fn_end = self.upcoming_source.index("\n}\n", market_fn_start) + len("\n}")
-        market_fn_js = re.sub(
-            r":\s*string\b", "", self.upcoming_source[market_fn_start:market_fn_end], count=2
+        market_fn_js = self._extract_upcoming_function("function marketForInstrument(")
+        date_ordinal_fns_js = self._extract_date_ordinal_fns_js()
+        merge_fn_js = self._extract_upcoming_function("export function mergeUpcomingRows(").replace(
+            "export function ", "function "
         )
-
-        filter_start = self.upcoming_source.index("const filtered = useMemo(() => {")
-        filter_body_start = filter_start + len("const filtered = useMemo(() => {")
-        filter_end = self.upcoming_source.index(
-            "}, [events, market, search, rangeDays]);", filter_start
-        )
-        filter_body = self.upcoming_source[filter_body_start:filter_end]
-        filter_fn_js = (
-            "function filterEvents(events, market, search, rangeDays) {" + filter_body + "}"
-        )
-        self.assertNotIn(": string", filter_fn_js)
+        for annotation in ("EventExpectation[]", "CalendarEvent[]", "UpcomingRow[]"):
+            self.assertNotIn(annotation, merge_fn_js)
 
         script = f"""
 {market_fn_js}
+{date_ordinal_fns_js}
+{merge_fn_js}
+
+const events = {events_js};
+const calendarEvents = {calendar_js};
+
+const rows = mergeUpcomingRows(events, calendarEvents);
+console.log(JSON.stringify(rows.map((r) => ({{
+  instrument: r.instrument, scheduledDate: r.scheduledDate, kind: r.kind, status: r.status,
+}}))));
+"""
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_dedupe_is_occurrence_specific_a_historical_expectation_never_hides_a_future_candidate(
+        self,
+    ) -> None:
+        # P1 regression: /api/v1/events intentionally keeps historical
+        # expectations forever. A past AAPL Q2 expectation must never hide
+        # AAPL's next, genuinely different, calendar candidate (Q3/Q4) -
+        # only a calendar row matching the SAME instrument+date is deduped.
+        rows = self._run_merge_upcoming_rows(
+            "[{ event_id: 'aapl-q2', instrument: 'AAPL', event_name: 'Apple Q2 2026', "
+            "scheduled_date: '2026-04-30' }]",
+            "[{ calendar_event_id: 'cal-1', company_name: 'Apple Inc', instrument: 'AAPL', "
+            "market: 'NASDAQ', event_type: 'earnings', scheduled_date: '2026-10-29', "
+            "source: 'finnhub', status: 'candidate', created_at: '', updated_at: '' }]",
+        )
+
+        aapl_rows = [r for r in rows if r["instrument"] == "AAPL"]
+        self.assertEqual(len(aapl_rows), 2)
+        future_row = next(r for r in aapl_rows if r["scheduledDate"] == "2026-10-29")
+        self.assertEqual(future_row["kind"], "calendar")
+        self.assertEqual(future_row["status"], "candidate")
+        past_row = next(r for r in aapl_rows if r["scheduledDate"] == "2026-04-30")
+        self.assertEqual(past_row["kind"], "expectation")
+
+    def test_dedupe_collapses_only_the_matching_same_ticker_same_date_occurrence(self) -> None:
+        # A tracked calendar occurrence must never duplicate alongside its
+        # own already-tracked expectation row (same instrument + same date).
+        rows = self._run_merge_upcoming_rows(
+            "[{ event_id: 'hays-fy2026-results', instrument: 'HAS.L', "
+            "event_name: 'Hays plc FY2026 results', scheduled_date: '2026-08-20' }]",
+            "[{ calendar_event_id: 'cal-2', company_name: 'Hays plc', instrument: 'has.l', "
+            "market: 'Iso-Britannia', event_type: 'earnings', scheduled_date: '2026-08-20', "
+            "source: 'finnhub', status: 'tracked', created_at: '', updated_at: '' }]",
+        )
+
+        has_rows = [r for r in rows if r["instrument"] == "HAS.L"]
+        self.assertEqual(len(has_rows), 1)
+        self.assertEqual(has_rows[0]["kind"], "expectation")
+        self.assertEqual(has_rows[0]["status"], "tracked")
+
+    def test_two_distinct_future_occurrences_of_the_same_ticker_both_survive(self) -> None:
+        # No expectation at all for this ticker yet - both a Q3 and a Q4
+        # calendar candidate for the same company must be kept, not
+        # collapsed into one another.
+        rows = self._run_merge_upcoming_rows(
+            "[]",
+            "[{ calendar_event_id: 'cal-3', company_name: 'Apple Inc', instrument: 'AAPL', "
+            "market: 'NASDAQ', event_type: 'earnings', scheduled_date: '2026-07-30', "
+            "source: 'finnhub', status: 'candidate', created_at: '', updated_at: '' }, "
+            "{ calendar_event_id: 'cal-4', company_name: 'Apple Inc', instrument: 'AAPL', "
+            "market: 'NASDAQ', event_type: 'earnings', scheduled_date: '2026-10-29', "
+            "source: 'finnhub', status: 'candidate', created_at: '', updated_at: '' }]",
+        )
+
+        aapl_rows = [r for r in rows if r["instrument"] == "AAPL"]
+        self.assertEqual(len(aapl_rows), 2)
+        self.assertEqual(
+            {r["scheduledDate"] for r in aapl_rows}, {"2026-07-30", "2026-10-29"}
+        )
+
+    def test_non_earnings_calendar_candidate_is_never_deduped_against_an_expectation(
+        self,
+    ) -> None:
+        # A manual non-earnings candidate (e.g. a production report) for the
+        # same instrument+date as an expectation is a different occurrence
+        # and must survive - EventExpectation only ever represents earnings.
+        rows = self._run_merge_upcoming_rows(
+            "[{ event_id: 'afagr-earnings', instrument: 'AFAGR.HE', "
+            "event_name: 'Afarak earnings', scheduled_date: '2026-10-15' }]",
+            "[{ calendar_event_id: 'cal-5', company_name: 'Afarak Group', "
+            "instrument: 'AFAGR.HE', market: 'Suomi', event_type: 'production_report', "
+            "scheduled_date: '2026-10-15', source: 'manual', status: 'candidate', "
+            "created_at: '', updated_at: '' }]",
+        )
+
+        afagr_rows = [r for r in rows if r["instrument"] == "AFAGR.HE"]
+        self.assertEqual(len(afagr_rows), 2)
+        self.assertEqual({r["kind"] for r in afagr_rows}, {"expectation", "calendar"})
+
+    # -- deterministic merged order (P2 regression): upcoming before history
+
+    def _run_merge_upcoming_rows_dynamic(self, body_js: str) -> list[dict]:
+        # Same technique as _run_merge_upcoming_rows(), but the caller
+        # builds `events`/`calendarEvents` itself using a `daysFromNow(n)`
+        # helper (matching the date-range-filter test below), so dates are
+        # always relative to node's own `new Date()` at run time - required
+        # here because mergeUpcomingRows()'s sort itself compares against
+        # "today".
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        market_fn_js = self._extract_upcoming_function("function marketForInstrument(")
+        date_ordinal_fns_js = self._extract_date_ordinal_fns_js()
+        merge_fn_js = self._extract_upcoming_function("export function mergeUpcomingRows(").replace(
+            "export function ", "function "
+        )
+
+        script = f"""
+{market_fn_js}
+{date_ordinal_fns_js}
+{merge_fn_js}
+
+function fmt(d) {{
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${{y}}-${{m}}-${{day}}`;
+}}
+function daysFromNow(n) {{
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return fmt(d);
+}}
+
+{body_js}
+
+const rows = mergeUpcomingRows(events, calendarEvents);
+console.log(JSON.stringify(rows.map((r) => ({{ key: r.key, instrument: r.instrument, scheduledDate: r.scheduledDate, kind: r.kind }}))));
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_sort_places_a_future_candidate_before_historical_expectations(self) -> None:
+        # A historical same-ticker (or any) expectation must never bury a
+        # future calendar candidate below it - concatenation order
+        # ("expectations then calendar rows") used to do exactly that.
+        rows = self._run_merge_upcoming_rows_dynamic(
+            """
+const events = [
+  { event_id: 'hist-1', instrument: 'AAPL', event_name: 'Old Apple release', scheduled_date: daysFromNow(-400) },
+];
+const calendarEvents = [
+  { calendar_event_id: 'cal-1', company_name: 'Msft Corp', instrument: 'MSFT', market: 'NASDAQ', event_type: 'earnings', scheduled_date: daysFromNow(10), source: 'finnhub', status: 'candidate', created_at: '', updated_at: '' },
+];
+"""
+        )
+
+        self.assertEqual([r["key"] for r in rows], ["calendar:cal-1", "expectation:hist-1"])
+
+    def test_sort_orders_multiple_future_events_chronologically(self) -> None:
+        # Soonest first, regardless of whether a row originated from the
+        # expectation list or the calendar candidates.
+        rows = self._run_merge_upcoming_rows_dynamic(
+            """
+const events = [
+  { event_id: 'exp-far', instrument: 'HAS.L', event_name: 'Hays far', scheduled_date: daysFromNow(60) },
+];
+const calendarEvents = [
+  { calendar_event_id: 'cal-near', company_name: 'Near Co', instrument: 'NEAR', market: 'NASDAQ', event_type: 'earnings', scheduled_date: daysFromNow(3), source: 'finnhub', status: 'candidate', created_at: '', updated_at: '' },
+  { calendar_event_id: 'cal-mid', company_name: 'Mid Co', instrument: 'MID', market: 'NASDAQ', event_type: 'earnings', scheduled_date: daysFromNow(20), source: 'finnhub', status: 'candidate', created_at: '', updated_at: '' },
+];
+"""
+        )
+
+        self.assertEqual(
+            [r["key"] for r in rows], ["calendar:cal-near", "calendar:cal-mid", "expectation:exp-far"]
+        )
+
+    def test_sort_places_past_events_after_future_events_most_recent_first(self) -> None:
+        rows = self._run_merge_upcoming_rows_dynamic(
+            """
+const events = [
+  { event_id: 'exp-old', instrument: 'HAS.L', event_name: 'Hays old', scheduled_date: daysFromNow(-100) },
+  { event_id: 'exp-recent-past', instrument: 'AAPL', event_name: 'Apple recent past', scheduled_date: daysFromNow(-5) },
+];
+const calendarEvents = [
+  { calendar_event_id: 'cal-future-1', company_name: 'Future One', instrument: 'FUT1', market: 'NASDAQ', event_type: 'earnings', scheduled_date: daysFromNow(2), source: 'finnhub', status: 'candidate', created_at: '', updated_at: '' },
+  { calendar_event_id: 'cal-future-2', company_name: 'Future Two', instrument: 'FUT2', market: 'NASDAQ', event_type: 'earnings', scheduled_date: daysFromNow(15), source: 'finnhub', status: 'candidate', created_at: '', updated_at: '' },
+];
+"""
+        )
+
+        keys = [r["key"] for r in rows]
+        # Both future rows come first (soonest first), then both past rows,
+        # most recently released first - never interleaved, and never
+        # decided by candidate/tracked/expectation origin.
+        self.assertEqual(
+            keys,
+            [
+                "calendar:cal-future-1",
+                "calendar:cal-future-2",
+                "expectation:exp-recent-past",
+                "expectation:exp-old",
+            ],
+        )
+
+    def _extract_filter_rows_js(self) -> str:
+        filter_start = self.upcoming_source.index("const filtered = useMemo(() => {")
+        filter_body_start = filter_start + len("const filtered = useMemo(() => {")
+        filter_end = self.upcoming_source.index(
+            "}, [rows, market, search, rangeDays]);", filter_start
+        )
+        filter_body = self.upcoming_source[filter_body_start:filter_end]
+        filter_fn_js = (
+            "function filterRows(rows, market, search, rangeDays) {" + filter_body + "}"
+        )
+        self.assertNotIn(": string", filter_fn_js)
+        return self._extract_date_ordinal_fns_js() + "\n" + filter_fn_js
+
+    def test_date_range_filter_7_and_30_days_exclude_past_and_far_future_events(self) -> None:
+        # Calendar range MVP: only 7pv/30pv exist now, no "Kaikki" range -
+        # every remaining option always excludes already-released/past
+        # rows, and each one's own cutoff excludes rows further out than it.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        filter_fn_js = self._extract_filter_rows_js()
+
+        script = f"""
 {filter_fn_js}
 
 function fmt(d) {{
@@ -552,16 +1334,15 @@ function daysFromNow(n) {{
   return fmt(d);
 }}
 
-const events = [
-  {{ event_id: 'past', instrument: 'HAS.L', event_name: 'Past event', scheduled_date: daysFromNow(-10) }},
-  {{ event_id: 'today', instrument: 'HAS.L', event_name: 'Today event', scheduled_date: daysFromNow(0) }},
-  {{ event_id: 'near', instrument: 'HAS.L', event_name: 'Near event', scheduled_date: daysFromNow(3) }},
-  {{ event_id: 'far', instrument: 'HAS.L', event_name: 'Far event', scheduled_date: daysFromNow(60) }},
-];
+function row(key, days) {{
+  return {{ key, companyName: 'X', instrument: 'HAS.L', market: 'Iso-Britannia', scheduledDate: daysFromNow(days) }};
+}}
 
-const sevenDayIds = filterEvents(events, 'Kaikki', '', 7).map((e) => e.event_id);
-const allIds = filterEvents(events, 'Kaikki', '', null).map((e) => e.event_id);
-console.log(JSON.stringify({{ sevenDayIds, allIds }}));
+const rows = [row('past', -10), row('today', 0), row('near', 3), row('mid', 20), row('far', 60)];
+
+const sevenDayIds = filterRows(rows, 'Kaikki', '', 7).map((r) => r.key);
+const thirtyDayIds = filterRows(rows, 'Kaikki', '', 30).map((r) => r.key);
+console.log(JSON.stringify({{ sevenDayIds, thirtyDayIds }}));
 """
 
         with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
@@ -578,23 +1359,746 @@ console.log(JSON.stringify({{ sevenDayIds, allIds }}));
         self.assertEqual(result.returncode, 0, result.stderr)
         outputs = json.loads(result.stdout)
 
-        # "7 pv" must exclude the past event and the far (60 days out) event,
-        # but keep today's and the near (3 days out) event.
-        self.assertNotIn("past", outputs["sevenDayIds"])
-        self.assertNotIn("far", outputs["sevenDayIds"])
-        self.assertIn("today", outputs["sevenDayIds"])
-        self.assertIn("near", outputs["sevenDayIds"])
+        # "7 pv": only today and the near (3 days out) row.
+        self.assertEqual(set(outputs["sevenDayIds"]), {"today", "near"})
+        # "30 pv": adds the mid (20 days out) row, still excludes past and
+        # far (60 days out, beyond even the 30-day max).
+        self.assertEqual(set(outputs["thirtyDayIds"]), {"today", "near", "mid"})
 
-        # "Kaikki" (no range) must still surface the full tracked history,
-        # including the already-released past event - this is the whole
-        # point of removing list_upcoming()'s status/date filter.
-        self.assertEqual(set(outputs["allIds"]), {"past", "today", "near", "far"})
+    def test_date_range_boundaries_are_inclusive_of_the_final_day(self) -> None:
+        # P2 regression: the range chips must include the final day itself
+        # - today+7 belongs in the 7pv view (day 8 does not), and today+30
+        # belongs in the 30pv view (day 31 does not). A noon-parsed date
+        # compared against a midnight cutoff used to exclude the cutoff day.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        filter_fn_js = self._extract_filter_rows_js()
+
+        script = f"""
+{filter_fn_js}
+
+function fmt(d) {{
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${{y}}-${{m}}-${{day}}`;
+}}
+function daysFromNow(n) {{
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return fmt(d);
+}}
+
+function row(key, days) {{
+  return {{ key, companyName: 'X', instrument: 'HAS.L', market: 'Iso-Britannia', scheduledDate: daysFromNow(days) }};
+}}
+
+const rows = [row('day7', 7), row('day8', 8), row('day30', 30), row('day31', 31)];
+
+const sevenDayIds = filterRows(rows, 'Kaikki', '', 7).map((r) => r.key);
+const thirtyDayIds = filterRows(rows, 'Kaikki', '', 30).map((r) => r.key);
+console.log(JSON.stringify({{ sevenDayIds, thirtyDayIds }}));
+"""
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+
+        # 7pv: day 7 included, day 8 excluded.
+        self.assertIn("day7", outputs["sevenDayIds"])
+        self.assertNotIn("day8", outputs["sevenDayIds"])
+        # 30pv: day 30 included, day 31 excluded.
+        self.assertIn("day30", outputs["thirtyDayIds"])
+        self.assertNotIn("day31", outputs["thirtyDayIds"])
+
+    def test_calendar_window_uses_the_devices_own_local_day_not_a_host_or_utc_day(self) -> None:
+        # P2 regression: the calendar GET's window must be derived from the
+        # *device's* own local calendar day (getFullYear/getMonth/getDate),
+        # never left to a parameter-free request that lets the backend
+        # host decide via its own date.today() - which can easily disagree
+        # with the device around midnight, especially across timezones.
+        # Proof: run deviceLocalDateWindow() under a real device clock (a
+        # fixed local wall-clock instant) in a timezone where the device's
+        # local calendar day and the UTC day of that same instant genuinely
+        # differ - fromDate/toDate must track the device's local day, not
+        # the UTC one (a stand-in for "whatever day a host in a different
+        # timezone would compute").
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        date_helpers_js = self._extract_date_ordinal_fns_js()
+
+        script = f"""
+{date_helpers_js}
+
+// Local wall-clock 2026-01-01T23:30 - under TZ=Pacific/Pago_Pago (UTC-11)
+// this instant is 2026-01-02T10:30Z, i.e. the device's local day (Jan 1)
+// and that same instant's UTC/"host" day (Jan 2) are genuinely different
+// calendar days.
+const referenceDate = new Date(2026, 0, 1, 23, 30);
+const utcDay = referenceDate.toISOString().slice(0, 10);
+
+const window = deviceLocalDateWindow(7, referenceDate);
+console.log(JSON.stringify({{ ...window, utcDay }}));
+"""
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env={**os.environ, "TZ": "Pacific/Pago_Pago"},
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+
+        # Sanity check the scenario itself actually crosses a day boundary -
+        # otherwise this test would prove nothing.
+        self.assertEqual(outputs["utcDay"], "2026-01-02")
+
+        # The device's own local day, not the UTC/host day.
+        self.assertEqual(outputs["fromDate"], "2026-01-01")
+        self.assertNotEqual(outputs["fromDate"], outputs["utcDay"])
+        self.assertEqual(outputs["toDate"], "2026-01-08")
+
+    def test_load_sends_the_device_local_window_as_explicit_query_params(self) -> None:
+        # P2 regression: getUpcomingCalendarEvents() must never be called
+        # parameter-free (which would leave the window to the backend
+        # host's own date.today()) - load() must always pass the explicit
+        # device-local fromDate/toDate it just computed.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        load_start = self.upcoming_source.index(
+            "const load = useCallback((currentRangeDays: number) => {"
+        )
+        body_start = load_start + len(
+            "const load = useCallback((currentRangeDays: number) => {"
+        )
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[body_start:load_end]
+
+        date_helpers_js = self._extract_date_ordinal_fns_js()
+        script = f"""
+{date_helpers_js}
+
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
+function setEvents() {{}}
+function setError() {{}}
+function setCalendarEvents() {{}}
+function setCalendarError() {{}}
+
+let capturedArgs = null;
+function getEvents() {{ return new Promise(() => {{}}); }}
+function getUpcomingCalendarEvents(fromDate, toDate) {{
+  capturedArgs = [fromDate, toDate];
+  return new Promise(() => {{}});
+}}
+
+function load(currentRangeDays) {{
+{load_body}
+}}
+
+load(30);
+console.log(JSON.stringify({{ capturedArgs }}));
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env={**os.environ, "TZ": "Pacific/Pago_Pago"},
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+
+        # load() computed its own window against the real `new Date()` (not
+        # the fixed referenceDate above), so we can't assert an exact date
+        # match here - but it must have called getUpcomingCalendarEvents
+        # with two non-empty, real fromDate/toDate strings, never omitted.
+        self.assertIsNotNone(outputs["capturedArgs"])
+        from_date, to_date = outputs["capturedArgs"]
+        self.assertRegex(from_date, r"^\d{4}-\d{2}-\d{2}$")
+        self.assertRegex(to_date, r"^\d{4}-\d{2}-\d{2}$")
+
+    def test_date_range_no_longer_offers_a_kaikki_or_90_180_day_option(self) -> None:
+        self.assertIn("{ label: '7 pv', days: 7 }", self.upcoming_source)
+        self.assertIn("{ label: '30 pv', days: 30 }", self.upcoming_source)
+        self.assertNotIn("90 pv", self.upcoming_source)
+        self.assertNotIn("180 pv", self.upcoming_source)
+
+        date_ranges_start = self.upcoming_source.index("const DATE_RANGES = [")
+        date_ranges_end = self.upcoming_source.index("] as const;", date_ranges_start)
+        date_ranges_body = self.upcoming_source[date_ranges_start:date_ranges_end]
+        self.assertNotIn("Kaikki", date_ranges_body)
+        self.assertNotIn("days: null", date_ranges_body)
+
+    def test_date_range_defaults_to_7_days(self) -> None:
+        self.assertIn("useState<number>(7)", self.upcoming_source)
+
+    # -- market/country filter: data-derived, independent of date range ----
+
+    def test_market_filter_options_are_derived_from_data_not_hardcoded(self) -> None:
+        markets_start = self.upcoming_source.index("const markets = useMemo(() => {")
+        markets_end = self.upcoming_source.index("}, [rows]);", markets_start)
+        markets_body = self.upcoming_source[markets_start:markets_end]
+
+        self.assertIn("rows.map((row) => row.market)", markets_body)
+        self.assertIn("'Kaikki'", markets_body)
+        # Never a hardcoded list of specific country names standing in for
+        # the real, data-derived set.
+        for hardcoded in ("Suomi", "Ruotsi", "Saksa", "Tanska", "Norja", "Iso-Britannia"):
+            self.assertNotIn(f"'{hardcoded}'", markets_body)
+
+        # And built from the unfiltered `rows`, not the already
+        # date-filtered `filtered` - so picking a date range never changes
+        # which market options are on offer.
+        self.assertNotIn("filtered", markets_body)
+
+    def test_market_and_date_filters_combine_independently(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        filter_fn_js = self._extract_filter_rows_js()
+
+        script = f"""
+{filter_fn_js}
+
+function fmt(d) {{
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${{y}}-${{m}}-${{day}}`;
+}}
+function daysFromNow(n) {{
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return fmt(d);
+}}
+
+function row(key, market, days) {{
+  return {{ key, companyName: 'X', instrument: 'X', market, scheduledDate: daysFromNow(days) }};
+}}
+
+const rows = [
+  row('nasdaq-near', 'NASDAQ', 3),
+  row('nasdaq-far', 'NASDAQ', 20),
+  row('suomi-near', 'Suomi', 3),
+  row('suomi-far', 'Suomi', 20),
+];
+
+// Changing the market filter alone must not change which dates are in
+// range, and changing the date range alone must not change which market
+// is selected - each is applied independently.
+const nasdaqSeven = filterRows(rows, 'NASDAQ', '', 7).map((r) => r.key);
+const nasdaqThirty = filterRows(rows, 'NASDAQ', '', 30).map((r) => r.key);
+const suomiSeven = filterRows(rows, 'Suomi', '', 7).map((r) => r.key);
+const kaikkiSeven = filterRows(rows, 'Kaikki', '', 7).map((r) => r.key);
+console.log(JSON.stringify({{ nasdaqSeven, nasdaqThirty, suomiSeven, kaikkiSeven }}));
+"""
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+
+        self.assertEqual(set(outputs["nasdaqSeven"]), {"nasdaq-near"})
+        self.assertEqual(set(outputs["nasdaqThirty"]), {"nasdaq-near", "nasdaq-far"})
+        self.assertEqual(set(outputs["suomiSeven"]), {"suomi-near"})
+        self.assertEqual(set(outputs["kaikkiSeven"]), {"nasdaq-near", "suomi-near"})
 
     def test_upcoming_screen_has_filter_and_tracking_ui(self) -> None:
         self.assertIn("Hae tickerillä", self.upcoming_source)
         self.assertIn("MARKKINA", self.upcoming_source)
         self.assertIn("JULKAISUPÄIVÄ", self.upcoming_source)
         self.assertIn("Seurannassa", self.upcoming_source)
+        self.assertIn("Lisää seurantaan", self.upcoming_source)
+
+    # -- P2 regression: virtualized results list, not an eager ScrollView ---
+
+    def test_results_list_is_virtualized_with_flatlist_not_a_plain_scrollview(self) -> None:
+        # A candidate/tracked calendar result set can run into the hundreds
+        # or thousands - a plain ScrollView mounts every card up front,
+        # regardless of what's actually visible. FlatList only ever mounts
+        # what's near the viewport.
+        react_native_import_block = self.upcoming_source[
+            self.upcoming_source.index("import {\n  ActivityIndicator"):
+            self.upcoming_source.index("} from 'react-native';") + len("} from 'react-native';")
+        ]
+        self.assertIn("FlatList", react_native_import_block)
+
+        # The big results list is FlatList's own `data`/`renderItem`, never
+        # a `.map()` over `filtered` producing hundreds of eagerly created
+        # elements as ScrollView children.
+        self.assertIn("data={filtered}", self.upcoming_source)
+        self.assertIn("renderItem={renderRow}", self.upcoming_source)
+        self.assertNotIn("filtered.map(", self.upcoming_source)
+
+        # ScrollView must not still be wrapping the results (a plain
+        # revert-to-ScrollView regression) - never imported or rendered as
+        # a component (a comment mentioning the old behavior is fine).
+        self.assertNotIn("ScrollView,", react_native_import_block)
+        self.assertNotIn("<ScrollView", self.upcoming_source)
+
+        # keyExtractor keyed on the same stable per-row key the cards
+        # always used (row.key, e.g. "calendar:<id>"/"expectation:<id>") -
+        # never array index, which would break React's reconciliation
+        # across filter/sort changes.
+        self.assertIn("keyExtractor={(row) => row.key}", self.upcoming_source)
+
+    def test_virtualized_list_preserves_pull_to_refresh(self) -> None:
+        # FlatList must still drive pull-to-refresh through the exact same
+        # onRefresh/refreshing wiring as before - not a regression to a
+        # non-refreshable list.
+        flatlist_start = self.upcoming_source.index("<FlatList")
+        flatlist_end = self.upcoming_source.index("\n    />", flatlist_start)
+        flatlist_props = self.upcoming_source[flatlist_start:flatlist_end]
+
+        self.assertIn("refreshControl={", flatlist_props)
+        self.assertIn(
+            "<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor=\"#8a96a8\" />",
+            flatlist_props,
+        )
+
+    def test_virtualized_list_header_still_carries_filters_search_and_empty_state(self) -> None:
+        # The filter/search UI and the loading/error/empty states move into
+        # ListHeaderComponent, not disappear - same content, new location.
+        flatlist_start = self.upcoming_source.index("<FlatList")
+        flatlist_end = self.upcoming_source.index("\n    />", flatlist_start)
+        flatlist_props = self.upcoming_source[flatlist_start:flatlist_end]
+        self.assertIn("ListHeaderComponent={listHeader}", flatlist_props)
+
+        header_start = self.upcoming_source.index("const listHeader = (")
+        header_end = self.upcoming_source.index("\n  );\n\n  return (", header_start)
+        header_body = self.upcoming_source[header_start:header_end]
+
+        self.assertIn("Hae tickerillä", header_body)
+        self.assertIn("MARKKINA", header_body)
+        self.assertIn("JULKAISUPÄIVÄ", header_body)
+        self.assertIn("markets.map((option)", header_body)
+        self.assertIn("DATE_RANGES.map((option)", header_body)
+        self.assertIn("ActivityIndicator", header_body)
+        self.assertIn("Ei julkaisuja valituilla suodattimilla.", header_body)
+
+    # -- calendar candidate -> tracked action --------------------------------
+
+    def test_track_action_calls_track_calendar_event_and_updates_local_state(self) -> None:
+        self.assertIn("trackCalendarEvent", self.upcoming_source)
+        self.assertIn("export function trackCalendarEvent(", self.api_source)
+
+        on_track_start = self.upcoming_source.index("const onTrack = useCallback(async (calendarEventId")
+        on_track_end = self.upcoming_source.index("}, []);", on_track_start)
+        on_track_body = self.upcoming_source[on_track_start:on_track_end]
+
+        self.assertIn("await trackCalendarEvent(calendarEventId)", on_track_body)
+        # The returned (server-confirmed) event replaces the matching local
+        # entry - never a locally-guessed status flip - so the card's
+        # tracked/candidate state always reflects what the backend actually
+        # persisted.
+        self.assertIn("event.calendar_event_id === calendarEventId ? updated : event", on_track_body)
+
+        finally_start = on_track_body.index("} finally {")
+        finally_body = on_track_body[finally_start:]
+        self.assertIn("next.delete(calendarEventId);", finally_body)
+
+    def test_track_action_never_calls_untrack_or_uses_admin_auth(self) -> None:
+        self.assertNotIn("untrackCalendarEvent", self.upcoming_source)
+        self.assertNotIn("X-Admin-Token", self.upcoming_source)
+        self.assertNotIn("MARKETAI_ADMIN_API_KEY", self.upcoming_source)
+
+    def test_track_button_is_disabled_while_its_own_request_is_in_flight(self) -> None:
+        self.assertIn("disabled={trackingIds.has(row.calendarEventId ?? '')}", self.upcoming_source)
+
+    # -- track mutation must beat a stale in-flight refresh (P2 regression) -
+
+    def test_track_success_records_a_row_scoped_override_not_a_generation_bump(self) -> None:
+        # P2 regression: onTrack() used to bump ++latestCalendarLoadId.
+        # current - a blunt "invalidate the whole calendar generation"
+        # that discarded an entire still-pending, genuinely newer calendar
+        # response (e.g. a wider-range 30 pv request already in flight)
+        # just to protect the one tracked row. It must instead record a
+        # row-scoped override via localCalendarOverrides/mutationVersion -
+        # never touch latestCalendarLoadId at all.
+        on_track_start = self.upcoming_source.index("const onTrack = useCallback(async (calendarEventId")
+        on_track_end = self.upcoming_source.index("}, []);", on_track_start)
+        on_track_body = self.upcoming_source[on_track_start:on_track_end]
+
+        set_events_index = on_track_body.index(
+            "event.calendar_event_id === calendarEventId ? updated : event"
+        )
+        version_index = on_track_body.index("const version = ++mutationVersion.current;")
+        override_index = on_track_body.index(
+            "localCalendarOverrides.current.set(calendarEventId, { event: updated, version });"
+        )
+        catch_index = on_track_body.index("} catch (err) {")
+        # The version/override must be recorded in the success path,
+        # before the local state update is applied - not in catch/finally.
+        self.assertLess(version_index, set_events_index)
+        self.assertLess(override_index, set_events_index)
+        self.assertLess(set_events_index, catch_index)
+
+        # Never touches either loadId generation counter directly - not
+        # the unrelated expectation-list generation (P2 regression: a
+        # track mutation must not invalidate an independent in-flight
+        # getEvents() response), and not the calendar generation either
+        # (this round's regression: that discarded an entire pending
+        # response, not just the tracked row).
+        self.assertNotIn("latestEventsLoadId.current", on_track_body)
+        self.assertNotIn("latestCalendarLoadId.current", on_track_body)
+
+    def test_wider_range_switch_response_survives_a_track_mutation_mid_flight(self) -> None:
+        # The exact scenario from the P2 report: 7 pv data is showing, the
+        # user switches to 30 pv (a wider request starts and is still
+        # pending), then tracks a candidate visible in the old 7 pv data.
+        # The eventual 30 pv response must NOT be discarded wholesale -
+        # every other row it brings must still apply - while the tracked
+        # row must keep its tracked status rather than reverting to the
+        # response's own pre-track snapshot of it.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        load_start = self.upcoming_source.index(
+            "const load = useCallback((currentRangeDays: number) => {"
+        )
+        load_body_start = load_start + len(
+            "const load = useCallback((currentRangeDays: number) => {"
+        )
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[load_body_start:load_end]
+
+        on_track_start = self.upcoming_source.index(
+            "const onTrack = useCallback(async (calendarEventId: string) => {"
+        )
+        on_track_body_start = on_track_start + len(
+            "const onTrack = useCallback(async (calendarEventId: string) => {"
+        )
+        on_track_end = self.upcoming_source.index("\n  }, []);", on_track_start)
+        on_track_body = self.upcoming_source[on_track_body_start:on_track_end]
+
+        date_helpers_js = self._extract_date_ordinal_fns_js()
+        script = f"""
+{date_helpers_js}
+
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
+let calendarEventsState = [
+  {{ calendar_event_id: 'cal-1', instrument: 'AAPL', status: 'candidate' }},
+];
+function setCalendarEvents(updater) {{
+  calendarEventsState = typeof updater === 'function' ? updater(calendarEventsState) : updater;
+}}
+function setCalendarError() {{}}
+function setEvents() {{}}
+function setError() {{}}
+function setTrackError() {{}}
+function setTrackingIds() {{}}
+
+let resolveWiderRangeGet;
+const widerRangeGetPromise = new Promise((resolve) => {{ resolveWiderRangeGet = resolve; }});
+
+function getEvents() {{ return new Promise(() => {{}}); }}
+function getUpcomingCalendarEvents() {{ return widerRangeGetPromise; }}
+function trackCalendarEvent(id) {{
+  return Promise.resolve({{ calendar_event_id: id, instrument: 'AAPL', status: 'tracked' }});
+}}
+
+function load(currentRangeDays) {{
+{load_body}
+}}
+
+async function onTrack(calendarEventId) {{
+{on_track_body}
+}}
+
+async function main() {{
+  // 1) 7 pv data is showing (calendarEventsState above). The user
+  // switches to 30 pv - a wider request starts and is deliberately left
+  // pending until step 3.
+  load(30);
+
+  // 2) The user tracks 'cal-1' (visible in the old 7 pv data) while the
+  // 30 pv request is still in flight.
+  await onTrack('cal-1');
+
+  // 3) The 30 pv response finally resolves - it reflects a pre-track
+  // snapshot of cal-1 (still 'candidate'), plus a brand-new 'cal-2' row
+  // that only exists in the wider 30-day window and was never in the
+  // 7 pv data at all.
+  resolveWiderRangeGet([
+    {{ calendar_event_id: 'cal-1', instrument: 'AAPL', status: 'candidate' }},
+    {{ calendar_event_id: 'cal-2', instrument: 'MSFT', status: 'candidate' }},
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  console.log(JSON.stringify(calendarEventsState));
+}}
+
+main();
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        final_state = json.loads(result.stdout)
+        by_id = {e["calendar_event_id"]: e for e in final_state}
+
+        # The tracked row keeps its tracked status - not reverted to the
+        # response's stale pre-track snapshot.
+        self.assertEqual(by_id["cal-1"]["status"], "tracked")
+        # The rest of the wider-range response was NOT discarded wholesale -
+        # the brand-new row it brought must still show up.
+        self.assertIn("cal-2", by_id)
+        self.assertEqual(by_id["cal-2"]["status"], "candidate")
+
+    def test_track_success_wins_over_a_stale_in_flight_refresh_response(self) -> None:
+        # Behavioral proof: a pull-to-refresh GET is already in flight when
+        # the user successfully tracks a candidate. The GET only resolves
+        # *after* the track completes, carrying a pre-track snapshot (the
+        # row still 'candidate') - that stale response must never revert
+        # the just-tracked row back to 'candidate'.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        load_start = self.upcoming_source.index("const load = useCallback((currentRangeDays: number) => {")
+        load_body_start = load_start + len("const load = useCallback((currentRangeDays: number) => {")
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[load_body_start:load_end]
+
+        on_track_start = self.upcoming_source.index(
+            "const onTrack = useCallback(async (calendarEventId: string) => {"
+        )
+        on_track_body_start = on_track_start + len(
+            "const onTrack = useCallback(async (calendarEventId: string) => {"
+        )
+        on_track_end = self.upcoming_source.index("\n  }, []);", on_track_start)
+        on_track_body = self.upcoming_source[on_track_body_start:on_track_end]
+
+        date_helpers_js = self._extract_date_ordinal_fns_js()
+        script = f"""
+{date_helpers_js}
+
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
+let calendarEventsState = [
+  {{ calendar_event_id: 'cal-1', instrument: 'AAPL', status: 'candidate' }},
+];
+function setCalendarEvents(updater) {{
+  calendarEventsState = typeof updater === 'function' ? updater(calendarEventsState) : updater;
+}}
+function setCalendarError() {{}}
+function setEvents() {{}}
+function setError() {{}}
+function setTrackError() {{}}
+function setTrackingIds() {{}}
+
+let resolveStaleGet;
+const staleGetPromise = new Promise((resolve) => {{ resolveStaleGet = resolve; }});
+
+function getEvents() {{ return Promise.resolve([]); }}
+function getUpcomingCalendarEvents() {{ return staleGetPromise; }}
+function trackCalendarEvent(id) {{
+  return Promise.resolve({{ calendar_event_id: id, instrument: 'AAPL', status: 'tracked' }});
+}}
+
+function load(currentRangeDays) {{
+{load_body}
+}}
+
+async function onTrack(calendarEventId) {{
+{on_track_body}
+}}
+
+async function main() {{
+  // 1) A pull-to-refresh GET starts and captures the current loadId - it
+  // deliberately never settles until step 3 below.
+  load(7);
+
+  // 2) The user successfully tracks the candidate while that GET is still
+  // pending.
+  await onTrack('cal-1');
+
+  // 3) The stale GET now resolves, with data reflecting the state from
+  // *before* the track (still 'candidate').
+  resolveStaleGet([{{ calendar_event_id: 'cal-1', instrument: 'AAPL', status: 'candidate' }}]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  console.log(JSON.stringify(calendarEventsState));
+}}
+
+main();
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        final_state = json.loads(result.stdout)
+        cal1 = next(e for e in final_state if e["calendar_event_id"] == "cal-1")
+        self.assertEqual(cal1["status"], "tracked")
+
+    def test_track_never_invalidates_an_independent_pending_events_request(self) -> None:
+        # Symmetric P2 regression: the calendar GET settles first, the
+        # events GET is still pending when the user tracks a candidate -
+        # the track's generation bump must only ever affect the calendar
+        # side. When the events GET finally resolves, it must still apply
+        # normally: `events` must never end up stuck null just because an
+        # unrelated calendar mutation happened while it was in flight.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        load_start = self.upcoming_source.index("const load = useCallback((currentRangeDays: number) => {")
+        load_body_start = load_start + len("const load = useCallback((currentRangeDays: number) => {")
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[load_body_start:load_end]
+
+        on_track_start = self.upcoming_source.index(
+            "const onTrack = useCallback(async (calendarEventId: string) => {"
+        )
+        on_track_body_start = on_track_start + len(
+            "const onTrack = useCallback(async (calendarEventId: string) => {"
+        )
+        on_track_end = self.upcoming_source.index("\n  }, []);", on_track_start)
+        on_track_body = self.upcoming_source[on_track_body_start:on_track_end]
+
+        date_helpers_js = self._extract_date_ordinal_fns_js()
+        script = f"""
+{date_helpers_js}
+
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
+let eventsState = null;
+function setEvents(v) {{ eventsState = v; }}
+function setError() {{}}
+function setCalendarEvents() {{}}
+function setCalendarError() {{}}
+function setTrackError() {{}}
+function setTrackingIds() {{}}
+
+let resolvePendingEvents;
+const pendingEventsPromise = new Promise((resolve) => {{ resolvePendingEvents = resolve; }});
+
+// 1) The calendar GET settles immediately.
+function getEvents() {{ return pendingEventsPromise; }}
+function getUpcomingCalendarEvents() {{
+  return Promise.resolve([
+    {{ calendar_event_id: 'cal-1', instrument: 'AAPL', status: 'candidate' }},
+  ]);
+}}
+function trackCalendarEvent(id) {{
+  return Promise.resolve({{ calendar_event_id: id, instrument: 'AAPL', status: 'tracked' }});
+}}
+
+function load(currentRangeDays) {{
+{load_body}
+}}
+
+async function onTrack(calendarEventId) {{
+{on_track_body}
+}}
+
+async function main() {{
+  // 1) Refresh starts - calendar GET settles right away, events GET is
+  // deliberately left pending.
+  load(7);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  // 2) The user tracks a candidate while the events GET is still pending.
+  await onTrack('cal-1');
+
+  // 3) The events GET finally resolves.
+  resolvePendingEvents([
+    {{ event_id: 'hays-fy2026-results', instrument: 'HAS.L', event_name: 'Hays plc FY2026 results' }},
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  console.log(JSON.stringify(eventsState));
+}}
+
+main();
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events_state = json.loads(result.stdout)
+        self.assertIsNotNone(events_state)
+        self.assertEqual(len(events_state), 1)
+        self.assertEqual(events_state[0]["event_id"], "hays-fy2026-results")
 
     # -- security boundary: admin key never present in the mobile app -------
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Pre-deploy Supabase schema gate for the strategy-draft approval flow.
+"""Pre-deploy Supabase schema gate for the strategy-draft approval flow and
+the calendar/watchlist candidate-tracking endpoints.
 
 This backend commit's strategy-draft endpoints
 (POST .../strategy-draft/approve, and the admin write endpoint's
@@ -8,10 +9,15 @@ supabase/migrations/20260821090000_event_strategy_approvals.sql,
 supabase/migrations/20260821140000_shared_expectation_version_lock.sql,
 supabase/migrations/20260822090000_verify_strategy_draft_schema.sql, and
 supabase/migrations/20260823090000_expectation_write_atomic_response_and_schema_version.sql.
-Those migrations are applied out-of-band, before merging, through a
-separate secure mechanism (the Supabase CLI/dashboard) - this script and
-the CI it runs in hold no Postgres-DDL-capable credential and apply no
-migrations themselves.
+The calendar/watchlist endpoints (GET/POST /api/v1/calendar/*) similarly
+depend on objects added by
+supabase/migrations/20260824090000_calendar_watchlist_events.sql and
+supabase/migrations/20260825090000_calendar_schema_gate.sql (the latter is
+what extends verify_strategy_draft_schema() itself with the calendar
+checks below). Those migrations are applied out-of-band, before merging,
+through a separate secure mechanism (the Supabase CLI/dashboard) - this
+script and the CI it runs in hold no Postgres-DDL-capable credential and
+apply no migrations themselves.
 
 Existence checks alone are not sufficient here: insert_next_expectation_
 version() has changed its actual behavior more than once while keeping the
@@ -60,6 +66,12 @@ REQUIRED_CHECKS: tuple[tuple[str, str], ...] = (
         "(strategy_draft_schema_version() mismatch or missing - a "
         "same-signature but outdated function body is deployed)",
     ),
+    ("calendar_events_table_exists", "calendar_events table"),
+    ("upsert_calendar_candidate_function_exists", "upsert_calendar_candidate() function"),
+    (
+        "transition_calendar_event_status_function_exists",
+        "transition_calendar_event_status() function",
+    ),
 )
 
 
@@ -93,8 +105,10 @@ def main() -> int:
             "almost always means the required Supabase migrations "
             "(supabase/migrations/20260821090000_event_strategy_approvals.sql, "
             "20260821140000_shared_expectation_version_lock.sql, "
-            "20260822090000_verify_strategy_draft_schema.sql, and "
-            "20260823090000_expectation_write_atomic_response_and_schema_version.sql) "
+            "20260822090000_verify_strategy_draft_schema.sql, "
+            "20260823090000_expectation_write_atomic_response_and_schema_version.sql, "
+            "20260824090000_calendar_watchlist_events.sql, and "
+            "20260825090000_calendar_schema_gate.sql) "
             f"have not been applied to this Supabase project yet. Underlying error: {exc}",
             file=sys.stderr,
         )
@@ -124,8 +138,9 @@ def main() -> int:
     print(
         "Supabase schema gate passed: event_strategy_approvals, "
         "approve_strategy_draft(), and insert_next_expectation_version() are all "
-        "present, and insert_next_expectation_version() is on the required "
-        "implementation version."
+        "present, insert_next_expectation_version() is on the required "
+        "implementation version, and calendar_events, upsert_calendar_candidate(), "
+        "and transition_calendar_event_status() are all present."
     )
     return 0
 
