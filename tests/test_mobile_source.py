@@ -1072,6 +1072,55 @@ Promise.race([
         # but the (fictional) explicit market here must win as 'Muu'.
         self.assertEqual(outputs[5], "Muu")  # Some New Exchange + AAPL
 
+    def test_normalize_market_recognizes_finnish_country_names(self) -> None:
+        # The calendar/provider side can send Finnish country names too
+        # (e.g. a manually entered "Suomi" candidate) - these must resolve
+        # as explicit alias hits, exactly like their English/ISO
+        # counterparts, never via the ticker-suffix fallback.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        js_function = self._extract_market_helpers_js()
+
+        cases = [
+            ("Suomi", "AAPL"),
+            ("Ruotsi", "AAPL"),
+            ("Saksa", "AAPL"),
+            ("Yhdysvallat", "HAS.L"),
+            ("Iso-Britannia", "AAPL"),
+        ]
+        script = (
+            js_function
+            + "\nconsole.log(JSON.stringify("
+            + json.dumps(cases)
+            + ".map(([market, instrument]) => normalizeMarket(market, instrument))));\n"
+        )
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+
+        # Each case's instrument suffix deliberately disagrees with the
+        # expected market (AAPL has no suffix -> would guess 'US'; HAS.L's
+        # suffix would guess 'UK') - proving the Finnish name wins as an
+        # explicit alias, not as a suffix guess that happens to match.
+        self.assertEqual(outputs[0], "FI")  # Suomi + AAPL
+        self.assertEqual(outputs[1], "SE")  # Ruotsi + AAPL
+        self.assertEqual(outputs[2], "DE")  # Saksa + AAPL
+        self.assertEqual(outputs[3], "US")  # Yhdysvallat + HAS.L
+        self.assertEqual(outputs[4], "UK")  # Iso-Britannia + AAPL
+
     def _extract_upcoming_function(self, signature: str, *, strip_types: bool = True) -> str:
         start = self.upcoming_source.index(signature)
         end = self.upcoming_source.index("\n}\n", start) + len("\n}")

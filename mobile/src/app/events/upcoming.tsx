@@ -133,15 +133,19 @@ const MARKET_ALIASES: Record<string, MarketCode> = {
   USA: 'US',
   NYSE: 'US',
   NASDAQ: 'US',
+  YHDYSVALLAT: 'US',
   UK: 'UK',
   GB: 'UK',
   'ISO-BRITANNIA': 'UK',
   FI: 'FI',
   FINLAND: 'FI',
+  SUOMI: 'FI',
   SE: 'SE',
   SWEDEN: 'SE',
+  RUOTSI: 'SE',
   DE: 'DE',
   GERMANY: 'DE',
+  SAKSA: 'DE',
 };
 
 // Ticker suffix -> market code, used whenever the market itself is
