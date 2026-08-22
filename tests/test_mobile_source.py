@@ -743,7 +743,23 @@ Promise.race([
         if strip_types:
             source = re.sub(r":\s*(EventExpectation|CalendarEvent|UpcomingRow)\[\]", "", source)
             source = re.sub(r":\s*string\b", "", source)
+            source = re.sub(r":\s*number\s*\|\s*null\b", "", source)
+            source = re.sub(r":\s*number\b", "", source)
         return source
+
+    def _extract_date_ordinal_fns_js(self) -> str:
+        # mergeUpcomingRows()'s sort and filterRows()'s cutoff both depend
+        # on these date-only helpers (P2 regression: noon/midnight
+        # timestamp comparisons made the range chips exclusive of the
+        # final day) - any extracted-and-node-executed script that calls
+        # either function must carry these along too, including the
+        # MS_PER_DAY constant dateOnlyOrdinal() divides by.
+        ms_per_day_start = self.upcoming_source.index("const MS_PER_DAY = ")
+        ms_per_day_end = self.upcoming_source.index(";", ms_per_day_start) + 1
+        ms_per_day_js = self.upcoming_source[ms_per_day_start:ms_per_day_end]
+        date_only_ordinal_js = self._extract_upcoming_function("function dateOnlyOrdinal(")
+        parse_date_only_ordinal_js = self._extract_upcoming_function("function parseDateOnlyOrdinal(")
+        return f"{ms_per_day_js}\n{date_only_ordinal_js}\n{parse_date_only_ordinal_js}"
 
     def _run_merge_upcoming_rows(self, events_js: str, calendar_js: str) -> list[dict]:
         node = shutil.which("node")
@@ -751,6 +767,7 @@ Promise.race([
             self.skipTest("node is not available in this environment")
 
         market_fn_js = self._extract_upcoming_function("function marketForInstrument(")
+        date_ordinal_fns_js = self._extract_date_ordinal_fns_js()
         merge_fn_js = self._extract_upcoming_function("export function mergeUpcomingRows(").replace(
             "export function ", "function "
         )
@@ -759,6 +776,7 @@ Promise.race([
 
         script = f"""
 {market_fn_js}
+{date_ordinal_fns_js}
 {merge_fn_js}
 
 const events = {events_js};
@@ -876,12 +894,14 @@ console.log(JSON.stringify(rows.map((r) => ({{
             self.skipTest("node is not available in this environment")
 
         market_fn_js = self._extract_upcoming_function("function marketForInstrument(")
+        date_ordinal_fns_js = self._extract_date_ordinal_fns_js()
         merge_fn_js = self._extract_upcoming_function("export function mergeUpcomingRows(").replace(
             "export function ", "function "
         )
 
         script = f"""
 {market_fn_js}
+{date_ordinal_fns_js}
 {merge_fn_js}
 
 function fmt(d) {{
@@ -990,7 +1010,7 @@ const calendarEvents = [
             "function filterRows(rows, market, search, rangeDays) {" + filter_body + "}"
         )
         self.assertNotIn(": string", filter_fn_js)
-        return filter_fn_js
+        return self._extract_date_ordinal_fns_js() + "\n" + filter_fn_js
 
     def test_date_range_filter_7_and_30_days_exclude_past_and_far_future_events(self) -> None:
         # Calendar range MVP: only 7pv/30pv exist now, no "Kaikki" range -
@@ -1047,6 +1067,64 @@ console.log(JSON.stringify({{ sevenDayIds, thirtyDayIds }}));
         # "30 pv": adds the mid (20 days out) row, still excludes past and
         # far (60 days out, beyond even the 30-day max).
         self.assertEqual(set(outputs["thirtyDayIds"]), {"today", "near", "mid"})
+
+    def test_date_range_boundaries_are_inclusive_of_the_final_day(self) -> None:
+        # P2 regression: the range chips must include the final day itself
+        # - today+7 belongs in the 7pv view (day 8 does not), and today+30
+        # belongs in the 30pv view (day 31 does not). A noon-parsed date
+        # compared against a midnight cutoff used to exclude the cutoff day.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        filter_fn_js = self._extract_filter_rows_js()
+
+        script = f"""
+{filter_fn_js}
+
+function fmt(d) {{
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${{y}}-${{m}}-${{day}}`;
+}}
+function daysFromNow(n) {{
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return fmt(d);
+}}
+
+function row(key, days) {{
+  return {{ key, companyName: 'X', instrument: 'HAS.L', market: 'Iso-Britannia', scheduledDate: daysFromNow(days) }};
+}}
+
+const rows = [row('day7', 7), row('day8', 8), row('day30', 30), row('day31', 31)];
+
+const sevenDayIds = filterRows(rows, 'Kaikki', '', 7).map((r) => r.key);
+const thirtyDayIds = filterRows(rows, 'Kaikki', '', 30).map((r) => r.key);
+console.log(JSON.stringify({{ sevenDayIds, thirtyDayIds }}));
+"""
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+
+        # 7pv: day 7 included, day 8 excluded.
+        self.assertIn("day7", outputs["sevenDayIds"])
+        self.assertNotIn("day8", outputs["sevenDayIds"])
+        # 30pv: day 30 included, day 31 excluded.
+        self.assertIn("day30", outputs["thirtyDayIds"])
+        self.assertNotIn("day31", outputs["thirtyDayIds"])
 
     def test_date_range_no_longer_offers_a_kaikki_or_90_180_day_option(self) -> None:
         self.assertIn("{ label: '7 pv', days: 7 }", self.upcoming_source)

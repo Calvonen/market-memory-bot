@@ -203,18 +203,30 @@ class InMemoryCalendarEventRepository:
                 candidate.instrument, candidate.event_type, candidate.source, candidate.occurrence_key
             )
             if existing is not None:
-                # Matches SupabaseCalendarEventRepository.add_manual_event():
-                # a request for the same identity that now asks for
-                # status=TRACKED must still apply that transition to an
-                # existing candidate, not just return it unchanged -
-                # otherwise this in-memory repository (used for local runs
-                # and tests) would silently diverge from production
-                # behavior for this exact request.
-                if status == CalendarEventStatus.TRACKED and existing.status == CalendarEventStatus.CANDIDATE:
-                    updated = replace(existing, status=CalendarEventStatus.TRACKED, updated_at=utc_now())
-                    self.events[existing.calendar_event_id] = updated
-                    return updated
-                return existing
+                # Matches SupabaseCalendarEventRepository.add_manual_event(),
+                # which always upserts company_name/market/scheduled_date
+                # onto a still-candidate row via upsert_calendar_candidate()
+                # before separately applying a requested candidate->tracked
+                # transition. A resubmission that corrects those fields AND
+                # asks for status=TRACKED must apply both - merging the
+                # fields first, then promoting - not just promote the row
+                # with its stale data still attached. Once a row is tracked
+                # (or later), it's locked: neither its fields nor its status
+                # can move backward, mirroring the Supabase RPC's
+                # `where status = 'candidate'` guard.
+                current = existing
+                if current.status == CalendarEventStatus.CANDIDATE:
+                    current = replace(
+                        current,
+                        company_name=candidate.company_name,
+                        market=candidate.market,
+                        scheduled_date=candidate.scheduled_date,
+                        updated_at=utc_now(),
+                    )
+                if status == CalendarEventStatus.TRACKED and current.status == CalendarEventStatus.CANDIDATE:
+                    current = replace(current, status=CalendarEventStatus.TRACKED, updated_at=utc_now())
+                self.events[existing.calendar_event_id] = current
+                return current
             event = CalendarEvent(
                 calendar_event_id=new_id(),
                 company_name=candidate.company_name,

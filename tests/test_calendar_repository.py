@@ -315,6 +315,69 @@ class CalendarRepositorySyncTests(unittest.TestCase):
         self.assertEqual(second.calendar_event_id, first.calendar_event_id)
         self.assertEqual(second.status, CalendarEventStatus.TRACKED)
 
+    def test_manual_event_merges_corrected_fields_before_promoting_to_tracked(self) -> None:
+        # P2 regression: SupabaseCalendarEventRepository.add_manual_event()
+        # always upserts company_name/market/scheduled_date onto a
+        # still-candidate row (via upsert_calendar_candidate()) before
+        # separately applying a requested candidate->tracked transition. A
+        # resubmission of the same occurrence with corrected fields AND
+        # status=TRACKED must apply both - not promote the row while
+        # leaving its stale company_name/market/scheduled_date attached.
+        repo = InMemoryCalendarEventRepository()
+        candidate = _candidate(
+            company_name="Afarak Group",
+            instrument="AFAGR.HE",
+            market="Suomi",
+            event_type="production_report",
+            scheduled_date=date(2026, 10, 15),
+            source="manual",
+        )
+        first = repo.add_manual_event(candidate)
+        self.assertEqual(first.status, CalendarEventStatus.CANDIDATE)
+
+        corrected = _candidate(
+            company_name="Afarak Group Oyj",
+            instrument="AFAGR.HE",
+            market="Suomi",
+            event_type="production_report",
+            scheduled_date=date(2026, 10, 22),
+            source="manual",
+        )
+        second = repo.add_manual_event(corrected, status=CalendarEventStatus.TRACKED)
+
+        self.assertEqual(second.calendar_event_id, first.calendar_event_id)
+        self.assertEqual(second.status, CalendarEventStatus.TRACKED)
+        self.assertEqual(second.company_name, "Afarak Group Oyj")
+        self.assertEqual(second.scheduled_date, date(2026, 10, 22))
+        stored = repo.get(first.calendar_event_id)
+        self.assertEqual(stored.status, CalendarEventStatus.TRACKED)
+        self.assertEqual(stored.company_name, "Afarak Group Oyj")
+        self.assertEqual(stored.scheduled_date, date(2026, 10, 22))
+
+    def test_manual_event_never_overwrites_an_already_tracked_rows_fields(self) -> None:
+        # The merge-before-promote fix must still respect the same "tracked
+        # is locked" invariant as sync_candidates(): once a row is tracked,
+        # neither a later resubmission's fields nor its status can move it.
+        repo = InMemoryCalendarEventRepository()
+        candidate = _candidate(instrument="AFAGR.HE", event_type="production_report", source="manual")
+        first = repo.add_manual_event(candidate, status=CalendarEventStatus.TRACKED)
+
+        resubmitted = _candidate(
+            company_name="Wrong Name",
+            instrument="AFAGR.HE",
+            market="Ruotsi",
+            event_type="production_report",
+            scheduled_date=date(2030, 1, 1),
+            source="manual",
+        )
+        second = repo.add_manual_event(resubmitted, status=CalendarEventStatus.TRACKED)
+
+        self.assertEqual(second.calendar_event_id, first.calendar_event_id)
+        self.assertEqual(second.company_name, first.company_name)
+        self.assertEqual(second.market, first.market)
+        self.assertEqual(second.scheduled_date, first.scheduled_date)
+        self.assertEqual(second.status, CalendarEventStatus.TRACKED)
+
     # -- concurrency regression (P2): first-insert race ---------------------
 
     def test_concurrent_first_syncs_of_the_same_new_candidate_never_duplicate_or_error(self) -> None:

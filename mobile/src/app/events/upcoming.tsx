@@ -37,6 +37,29 @@ const DATE_RANGES = [
   { label: '30 pv', days: 30 },
 ] as const;
 
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+// Calendar dates in this MVP carry no time-of-day (see the minimal-schema
+// note in docs/calendar_watchlist.md) - every comparison must work purely
+// on the Y/M/D calendar date, never on a noon/midnight timestamp. Parsing
+// a date at noon and comparing it against a midnight cutoff silently
+// excludes the cutoff day itself (an event exactly N days out sorts after
+// a midnight-of-day-N cutoff), which is exactly what made the range chips
+// exclusive instead of inclusive. Date.UTC() here is only a stable
+// arithmetic base for turning Y/M/D into a comparable integer "day
+// number" - the Y/M/D components themselves already come from local
+// values, so this never reinterprets a date in UTC calendar terms.
+function dateOnlyOrdinal(year: number, monthIndex: number, day: number): number {
+  return Date.UTC(year, monthIndex, day) / MS_PER_DAY;
+}
+
+function parseDateOnlyOrdinal(dateStr: string): number | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+  if (!match) return null;
+  const [, year, month, day] = match;
+  return dateOnlyOrdinal(Number(year), Number(month) - 1, Number(day));
+}
+
 function marketForInstrument(instrument: string): string {
   // No suffix is the actual USA convention on this backend (e.g. "AAPL").
   // An unrecognized suffix (".PA", ".AS", ".SW", ...) must not be guessed
@@ -146,15 +169,17 @@ export function mergeUpcomingRows(
   // Candidate/tracked origin never decides order - only scheduled_date
   // does.
   const now = new Date();
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const todayOrdinal = dateOnlyOrdinal(now.getFullYear(), now.getMonth(), now.getDate());
 
   return [...expectationRows, ...calendarRows].sort((a, b) => {
-    const aTime = new Date(`${a.scheduledDate}T12:00:00`).getTime();
-    const bTime = new Date(`${b.scheduledDate}T12:00:00`).getTime();
-    const aPast = Number.isNaN(aTime) || aTime < startOfToday;
-    const bPast = Number.isNaN(bTime) || bTime < startOfToday;
+    const aOrdinal = parseDateOnlyOrdinal(a.scheduledDate);
+    const bOrdinal = parseDateOnlyOrdinal(b.scheduledDate);
+    const aPast = aOrdinal === null || aOrdinal < todayOrdinal;
+    const bPast = bOrdinal === null || bOrdinal < todayOrdinal;
     if (aPast !== bPast) return aPast ? 1 : -1;
-    return aPast ? bTime - aTime : aTime - bTime;
+    const aSort = aOrdinal ?? 0;
+    const bSort = bOrdinal ?? 0;
+    return aPast ? bSort - aSort : aSort - bSort;
   });
 }
 
@@ -298,10 +323,14 @@ export default function UpcomingEventsScreen() {
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
     const now = new Date();
-    // Start-of-today, so the day-range filter means "the next N days" and
-    // excludes already-released events.
-    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    const cutoff = startOfToday + rangeDays * 24 * 60 * 60 * 1000;
+    // Date-only ordinals throughout - see dateOnlyOrdinal()/
+    // parseDateOnlyOrdinal() above. cutoffOrdinal is today + rangeDays
+    // *inclusive*: an event exactly rangeDays out (e.g. day 7 of the "7 pv"
+    // chip, matching the backend's own inclusive lte("scheduled_date", ...)
+    // window) must still be included, not excluded by a day-level
+    // off-by-one.
+    const todayOrdinal = dateOnlyOrdinal(now.getFullYear(), now.getMonth(), now.getDate());
+    const cutoffOrdinal = todayOrdinal + rangeDays;
 
     // Market and date range apply independently - each is its own `if`
     // against the unfiltered row, neither one's outcome depends on the
@@ -317,8 +346,12 @@ export default function UpcomingEventsScreen() {
       ) {
         return false;
       }
-      const scheduled = new Date(`${row.scheduledDate}T12:00:00`).getTime();
-      if (Number.isNaN(scheduled) || scheduled < startOfToday || scheduled > cutoff) {
+      const scheduledOrdinal = parseDateOnlyOrdinal(row.scheduledDate);
+      if (
+        scheduledOrdinal === null ||
+        scheduledOrdinal < todayOrdinal ||
+        scheduledOrdinal > cutoffOrdinal
+      ) {
         return false;
       }
       return true;
