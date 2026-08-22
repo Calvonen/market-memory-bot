@@ -120,37 +120,70 @@ function deviceLocalDateWindow(
   };
 }
 
-function marketForInstrument(instrument: string): string {
-  // No suffix is the actual USA convention on this backend (e.g. "AAPL").
-  // An unrecognized suffix (".PA", ".AS", ".SW", ...) must not be guessed
-  // as USA - it gets its own bucket instead of a wrong market label.
+// Short, on-screen market codes only - long country names and raw
+// calendar/provider values never reach the UI, so a market column fits on
+// one line.
+type MarketCode = 'FI' | 'SE' | 'DE' | 'US' | 'UK';
+
+// Calendar/provider market values arrive in inconsistent shapes (ISO-ish
+// codes, English country names, "Unknown"). This collapses every known
+// variant down to its short code.
+const MARKET_ALIASES: Record<string, MarketCode> = {
+  US: 'US',
+  USA: 'US',
+  UK: 'UK',
+  GB: 'UK',
+  FI: 'FI',
+  FINLAND: 'FI',
+  SE: 'SE',
+  SWEDEN: 'SE',
+  DE: 'DE',
+  GERMANY: 'DE',
+};
+
+// Ticker suffix -> market code, used whenever the market itself is
+// missing or unrecognized (e.g. calendar/provider "Unknown"). No suffix is
+// the actual USA convention on this backend (e.g. "AAPL"); an unrecognized
+// suffix (".PA", ".AS", ".SW", ...) must not be guessed - it falls back to
+// 'Muu' instead of a wrong market code.
+function marketFromInstrumentSuffix(instrument: string): MarketCode | 'Muu' {
   if (!instrument.includes('.')) {
-    return 'USA';
+    return 'US';
   }
-  const suffix = instrument.split('.').pop() ?? '';
-  switch (suffix.toUpperCase()) {
-    case 'L':
-      return 'Iso-Britannia';
+  const suffix = instrument.split('.').pop()?.toUpperCase() ?? '';
+  switch (suffix) {
     case 'HE':
-      return 'Suomi';
+      return 'FI';
     case 'ST':
-      return 'Ruotsi';
+      return 'SE';
     case 'DE':
-      return 'Saksa';
-    case 'CO':
-      return 'Tanska';
-    case 'OL':
-      return 'Norja';
+      return 'DE';
+    case 'L':
+      return 'UK';
     default:
-      return `Muu (.${suffix.toUpperCase()})`;
+      return 'Muu';
   }
+}
+
+function marketForInstrument(instrument: string): MarketCode | 'Muu' {
+  return marketFromInstrumentSuffix(instrument);
+}
+
+// Normalizes a calendar/provider market value to one of the short
+// user-facing codes. Falls back to the instrument's ticker suffix whenever
+// the market itself is missing, "Unknown", or otherwise unrecognized (e.g.
+// "Iso-Britannia") - GB, USA, "Iso-Britannia" and "Unknown" must never
+// reach the user when the value can be normalized by the rules above.
+function normalizeMarket(rawMarket: string, instrument: string): MarketCode | 'Muu' {
+  const known = MARKET_ALIASES[rawMarket.trim().toUpperCase()];
+  return known ?? marketFromInstrumentSuffix(instrument);
 }
 
 export type UpcomingRow = {
   key: string;
   companyName: string;
   instrument: string;
-  market: string;
+  market: MarketCode | 'Muu';
   eventType: string;
   scheduledDate: string;
   // 'expectation' rows are always already tracked via the real trading
@@ -209,7 +242,7 @@ export function mergeUpcomingRows(
       key: `calendar:${event.calendar_event_id}`,
       companyName: event.company_name,
       instrument: event.instrument,
-      market: event.market,
+      market: normalizeMarket(event.market, event.instrument),
       eventType: event.event_type,
       scheduledDate: event.scheduled_date,
       kind: 'calendar',
