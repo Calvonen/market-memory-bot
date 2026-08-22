@@ -32,6 +32,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS_DIR = REPO_ROOT / "supabase" / "migrations"
 CALENDAR_MIGRATION = MIGRATIONS_DIR / "20260824090000_calendar_watchlist_events.sql"
 CALENDAR_SCHEMA_GATE_MIGRATION = MIGRATIONS_DIR / "20260825090000_calendar_schema_gate.sql"
+METADATA_PRESERVATION_MIGRATION = (
+    MIGRATIONS_DIR / "20260826090000_preserve_calendar_candidate_metadata.sql"
+)
+CALENDAR_UPSERT_VERSION_GATE_MIGRATION = (
+    MIGRATIONS_DIR / "20260827090000_calendar_candidate_upsert_version_gate.sql"
+)
 EVENT_STRATEGY_APPROVALS_MIGRATION = MIGRATIONS_DIR / "20260821090000_event_strategy_approvals.sql"
 SHARED_LOCK_MIGRATION = MIGRATIONS_DIR / "20260821140000_shared_expectation_version_lock.sql"
 VERIFY_MIGRATION = MIGRATIONS_DIR / "20260822090000_verify_strategy_draft_schema.sql"
@@ -297,6 +303,7 @@ class CalendarSchemaGateSqlTests(unittest.TestCase):
             "calendar_events_table_exists",
             "upsert_calendar_candidate_function_exists",
             "transition_calendar_event_status_function_exists",
+            "calendar_candidate_upsert_version_matches",
         )
         result = subprocess.run(
             ["psql", self.database_url, "-F,", "-tAc",
@@ -315,6 +322,8 @@ class CalendarSchemaGateSqlTests(unittest.TestCase):
         self._apply_strategy_draft_chain()
         result = self._run_sql_file(CALENDAR_SCHEMA_GATE_MIGRATION)
         self.assertEqual(result.returncode, 0, f"gate migration failed: {result.stderr}")
+        result = self._run_sql_file(CALENDAR_UPSERT_VERSION_GATE_MIGRATION)
+        self.assertEqual(result.returncode, 0, f"version gate migration failed: {result.stderr}")
 
         row = self._verify_row()
 
@@ -329,10 +338,16 @@ class CalendarSchemaGateSqlTests(unittest.TestCase):
         self.assertFalse(row["calendar_events_table_exists"])
         self.assertFalse(row["upsert_calendar_candidate_function_exists"])
         self.assertFalse(row["transition_calendar_event_status_function_exists"])
+        self.assertTrue(row["calendar_candidate_upsert_version_matches"])
 
     def test_gate_passes_once_both_calendar_migrations_are_applied(self) -> None:
         self._apply_strategy_draft_chain()
-        for migration in (CALENDAR_MIGRATION, CALENDAR_SCHEMA_GATE_MIGRATION):
+        for migration in (
+            CALENDAR_MIGRATION,
+            CALENDAR_SCHEMA_GATE_MIGRATION,
+            METADATA_PRESERVATION_MIGRATION,
+            CALENDAR_UPSERT_VERSION_GATE_MIGRATION,
+        ):
             result = self._run_sql_file(migration)
             self.assertEqual(result.returncode, 0, f"{migration.name} failed: {result.stderr}")
 
