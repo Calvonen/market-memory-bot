@@ -11,9 +11,11 @@ import {
 } from 'react-native';
 
 import {
+  CalendarEvent,
   EventExpectation,
   getEvents,
   getPaperStatus,
+  getUpcomingCalendarEvents,
   PaperRun,
 } from '@/services/api';
 
@@ -22,6 +24,12 @@ type EventStatus = { run: PaperRun | null; statusError: boolean };
 export default function HomeScreen() {
   const [events, setEvents] = useState<EventExpectation[] | null>(null);
   const [statuses, setStatuses] = useState<Record<string, EventStatus>>({});
+  // Tracked calendar_events rows (status = 'tracked'), shown alongside the
+  // EventExpectation cards above in the same Seurannassa section - a
+  // separate store from EventExpectation, see
+  // trading_system/calendar_repository.py. Fetched independently so a
+  // failure here never blocks the EventExpectation cards.
+  const [trackedCalendarEvents, setTrackedCalendarEvents] = useState<CalendarEvent[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const latestLoadId = useRef(0);
@@ -61,6 +69,21 @@ export default function HomeScreen() {
       if (loadId !== latestLoadId.current) return;
       setError(err instanceof Error ? err.message : 'Tuntematon virhe');
     }
+
+    // Independent of the EventExpectation fetch above (own try/catch, own
+    // loadId check) - a slow or failing calendar fetch must never hold up
+    // or clear the Hays/EventExpectation cards, and vice versa.
+    getUpcomingCalendarEvents()
+      .then((list) => {
+        if (loadId !== latestLoadId.current) return;
+        setTrackedCalendarEvents(list.filter((event) => event.status === 'tracked'));
+      })
+      .catch(() => {
+        if (loadId !== latestLoadId.current) return;
+        // Leave the previous list (or null) in place rather than clearing
+        // it to [] - a failed fetch must not render identically to "no
+        // tracked calendar events".
+      });
   }, []);
 
   useEffect(() => {
@@ -110,7 +133,7 @@ export default function HomeScreen() {
 
       {error ? <Text style={styles.errorText}>{error}</Text> : null}
 
-      {events && events.length === 0 ? (
+      {events && events.length === 0 && trackedCalendarEvents && trackedCalendarEvents.length === 0 ? (
         <View style={styles.emptyCard}>
           <Text style={styles.emptyText}>
             Ei vielä seurattavia tulosjulkaisuja.
@@ -120,6 +143,10 @@ export default function HomeScreen() {
 
       {events?.map((event) => (
         <EventCard key={event.event_id} event={event} status={statuses[event.event_id]} />
+      ))}
+
+      {trackedCalendarEvents?.map((event) => (
+        <CalendarEventCard key={event.calendar_event_id} event={event} />
       ))}
 
       <Pressable
@@ -178,6 +205,37 @@ function EventCard({ event, status }: { event: EventExpectation; status?: EventS
         </View>
       </Pressable>
     </Link>
+  );
+}
+
+// Tracked calendar_events row - a separate store from EventExpectation (see
+// trading_system/calendar_repository.py). This card is deliberately
+// read-only and only ever shows the fixed "Seurannassa" status text, never
+// an EventExpectation-style status (e.g. "Analysoitu", "Odottaa
+// vahvistusta") - a calendar_events row has no paper-run/strategy state of
+// its own to describe.
+function CalendarEventCard({ event }: { event: CalendarEvent }) {
+  const scheduled = new Date(`${event.scheduled_date}T12:00:00`);
+  const dateText = Number.isNaN(scheduled.getTime())
+    ? event.scheduled_date
+    : scheduled.toLocaleDateString('fi-FI');
+
+  return (
+    <View style={styles.eventCard}>
+      <View style={styles.rowBetween}>
+        <View style={styles.eventCardTitleBlock}>
+          <Text style={styles.company} numberOfLines={1}>
+            {event.company_name}
+          </Text>
+          <Text style={styles.symbol}>{event.instrument}</Text>
+        </View>
+        <Text style={styles.dateText}>{dateText}</Text>
+      </View>
+
+      <View style={styles.trackedBadge}>
+        <Text style={styles.trackedBadgeText}>Seurannassa</Text>
+      </View>
+    </View>
   );
 }
 
@@ -328,6 +386,21 @@ const styles = StyleSheet.create({
     color: '#72b8db',
     fontSize: 13,
     fontWeight: '700',
+  },
+  trackedBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#172219',
+    borderWidth: 1,
+    borderColor: '#28492f',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    marginTop: 12,
+  },
+  trackedBadgeText: {
+    color: '#72db8b',
+    fontSize: 11,
+    fontWeight: '800',
   },
   upcomingButton: {
     flexDirection: 'row',
