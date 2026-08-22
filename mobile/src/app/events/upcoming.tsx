@@ -18,6 +18,7 @@ import {
   getEvents,
   getUpcomingCalendarEvents,
   trackCalendarEvent,
+  untrackCalendarEvent,
 } from '@/services/api';
 
 // Merges the real MarketAI tracking store (GET /api/v1/events) with the
@@ -447,6 +448,30 @@ export default function UpcomingEventsScreen() {
     }
   }, []);
 
+  const onUntrack = useCallback(async (calendarEventId: string) => {
+    setTrackError(null);
+    setTrackingIds((prev) => new Set(prev).add(calendarEventId));
+    try {
+      const updated = await untrackCalendarEvent(calendarEventId);
+      // Same row-scoped override/mutationVersion mechanism as onTrack()
+      // above - see the P2 regression note there for why this must never
+      // be a blunt calendar-generation bump.
+      const version = ++mutationVersion.current;
+      localCalendarOverrides.current.set(calendarEventId, { event: updated, version });
+      setCalendarEvents((prev) =>
+        (prev ?? []).map((event) => (event.calendar_event_id === calendarEventId ? updated : event)),
+      );
+    } catch (err) {
+      setTrackError(err instanceof Error ? err.message : 'Seurannan poisto epäonnistui');
+    } finally {
+      setTrackingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(calendarEventId);
+        return next;
+      });
+    }
+  }, []);
+
   const rows = useMemo(
     () => mergeUpcomingRows(events ?? [], calendarEvents ?? []),
     [events, calendarEvents],
@@ -527,7 +552,17 @@ export default function UpcomingEventsScreen() {
             </View>
             <Text style={styles.dateText}>{row.scheduledDate}</Text>
           </View>
-          {row.status === 'tracked' ? (
+          {row.status === 'tracked' && row.kind === 'calendar' ? (
+            <Pressable
+              style={styles.trackButton}
+              disabled={trackingIds.has(row.calendarEventId ?? '')}
+              onPress={() => row.calendarEventId && void onUntrack(row.calendarEventId)}
+            >
+              <Text style={styles.trackButtonText}>
+                {trackingIds.has(row.calendarEventId ?? '') ? 'Poistetaan…' : 'Poista seurannasta'}
+              </Text>
+            </Pressable>
+          ) : row.status === 'tracked' ? (
             <View style={styles.trackedBadge}>
               <Text style={styles.trackedBadgeText}>Seurannassa</Text>
             </View>
@@ -558,7 +593,7 @@ export default function UpcomingEventsScreen() {
 
       return <View style={styles.eventCard}>{cardBody}</View>;
     },
-    [onTrack, trackingIds],
+    [onTrack, onUntrack, trackingIds],
   );
 
   const listHeader = (
