@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import unittest
 from datetime import UTC, datetime
 from decimal import Decimal
