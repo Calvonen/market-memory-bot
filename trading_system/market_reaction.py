@@ -61,8 +61,8 @@ class MarketReactionEngine:
     ) -> MarketReactionSnapshot:
         if not reference_price.is_finite() or reference_price <= 0:
             raise ValueError("reference_price must be finite and positive")
-        if not candle.close.is_finite():
-            raise ValueError("candle close must be finite")
+        if not candle.close.is_finite() or candle.close <= 0:
+            raise ValueError("candle close must be finite and positive")
         if candle.interval_minutes <= 0:
             raise ValueError("candle interval must be positive")
         if candle.source_minutes < 1 or candle.source_minutes > candle.interval_minutes:

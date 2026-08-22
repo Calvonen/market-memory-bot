@@ -90,6 +90,14 @@ class MarketReactionEngineTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     engine.analyze(_candle(), reference_price=reference)
 
+    def test_invalid_close_prices_fail_closed(self) -> None:
+        engine = MarketReactionEngine()
+
+        for close in ("0", "-1"):
+            with self.subTest(close=close):
+                with self.assertRaises(ValueError):
+                    engine.analyze(_candle(close=close), reference_price=Decimal("100"))
+
     def test_invalid_threshold_and_source_minute_metadata_fail_closed(self) -> None:
         for threshold in (Decimal("-0.1"), Decimal("NaN"), Decimal("Infinity")):
             with self.subTest(threshold=threshold):
