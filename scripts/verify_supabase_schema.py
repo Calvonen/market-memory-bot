@@ -14,7 +14,11 @@ depend on objects added by
 supabase/migrations/20260824090000_calendar_watchlist_events.sql and
 supabase/migrations/20260825090000_calendar_schema_gate.sql (the latter is
 what extends verify_strategy_draft_schema() itself with the calendar
-checks below). Those migrations are applied out-of-band, before merging,
+checks below), and
+supabase/migrations/20260829090000_distinct_atomic_calendar_candidate_upsert_version.sql,
+which atomically installs and version-gates the placeholder-preserving
+candidate upsert body without depending on the two earlier follow-ups. Those
+migrations are applied out-of-band, before merging,
 through a separate secure mechanism (the Supabase CLI/dashboard) - this
 script and the CI it runs in hold no Postgres-DDL-capable credential and
 apply no migrations themselves.
@@ -69,10 +73,16 @@ REQUIRED_CHECKS: tuple[tuple[str, str], ...] = (
     ("calendar_events_table_exists", "calendar_events table"),
     ("upsert_calendar_candidate_function_exists", "upsert_calendar_candidate() function"),
     (
+        "calendar_candidate_upsert_version_matches",
+        "upsert_calendar_candidate() placeholder-preserving implementation version",
+    ),
+    (
         "transition_calendar_event_status_function_exists",
         "transition_calendar_event_status() function",
     ),
 )
+
+REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 2
 
 
 def main() -> int:
@@ -108,7 +118,8 @@ def main() -> int:
             "20260822090000_verify_strategy_draft_schema.sql, "
             "20260823090000_expectation_write_atomic_response_and_schema_version.sql, "
             "20260824090000_calendar_watchlist_events.sql, and "
-            "20260825090000_calendar_schema_gate.sql) "
+            "20260825090000_calendar_schema_gate.sql, and "
+            "20260829090000_distinct_atomic_calendar_candidate_upsert_version.sql) "
             f"have not been applied to this Supabase project yet. Underlying error: {exc}",
             file=sys.stderr,
         )
@@ -125,6 +136,14 @@ def main() -> int:
     row: dict[str, Any] = rows[0]
     missing = [label for key_name, label in REQUIRED_CHECKS if not row.get(key_name)]
 
+    deployed_upsert_version = row.get("calendar_candidate_upsert_implementation_version")
+    if deployed_upsert_version != REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION:
+        missing.append(
+            "upsert_calendar_candidate() atomic implementation version "
+            f"{REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION} "
+            f"(deployed: {deployed_upsert_version!r})"
+        )
+
     if missing:
         print(
             "SCHEMA GATE FAILED: the following required Supabase objects are missing: "
@@ -139,8 +158,9 @@ def main() -> int:
         "Supabase schema gate passed: event_strategy_approvals, "
         "approve_strategy_draft(), and insert_next_expectation_version() are all "
         "present, insert_next_expectation_version() is on the required "
-        "implementation version, and calendar_events, upsert_calendar_candidate(), "
-        "and transition_calendar_event_status() are all present."
+        "implementation version, calendar_events and calendar RPCs are present, "
+        "and upsert_calendar_candidate() has the required placeholder-preserving "
+        "implementation version."
     )
     return 0
 

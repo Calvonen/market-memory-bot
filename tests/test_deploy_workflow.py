@@ -35,6 +35,9 @@ CALENDAR_MIGRATION = Path("supabase/migrations/20260824090000_calendar_watchlist
 CALENDAR_SCHEMA_GATE_MIGRATION = Path(
     "supabase/migrations/20260825090000_calendar_schema_gate.sql"
 )
+CALENDAR_UPSERT_VERSION_GATE_MIGRATION = Path(
+    "supabase/migrations/20260829090000_distinct_atomic_calendar_candidate_upsert_version.sql"
+)
 VERIFY_SCRIPT = Path("scripts/verify_supabase_schema.py")
 
 
@@ -137,7 +140,9 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
         cls.shared_lock_source = SHARED_LOCK_MIGRATION.read_text(encoding="utf-8")
         cls.write_v2_source = EXPECTATION_WRITE_V2_MIGRATION.read_text(encoding="utf-8")
         cls.calendar_source = CALENDAR_MIGRATION.read_text(encoding="utf-8")
-        cls.calendar_gate_source = CALENDAR_SCHEMA_GATE_MIGRATION.read_text(encoding="utf-8")
+        cls.calendar_gate_source = CALENDAR_UPSERT_VERSION_GATE_MIGRATION.read_text(
+            encoding="utf-8"
+        )
         # The live verify_strategy_draft_schema() is the one (re)declared by
         # CALENDAR_SCHEMA_GATE_MIGRATION, not the one in
         # EXPECTATION_WRITE_V2_MIGRATION - it's the newest of the two
@@ -284,9 +289,31 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
             "calendar_events_table_exists",
             "upsert_calendar_candidate_function_exists",
             "transition_calendar_event_status_function_exists",
+            "calendar_candidate_upsert_version_matches",
         ):
             self.assertIn(key, self.verify_script_source)
             self.assertIn(key, self.verify_source)
+
+    def test_calendar_upsert_marker_version_is_required_explicitly(self) -> None:
+        marker = re.search(
+            r"create or replace function public\.calendar_candidate_upsert_version\(\).*?"
+            r"select\s+(\d+)\s*;",
+            self.calendar_gate_source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(marker)
+        version = marker.group(1)
+        self.assertIn(
+            f"public.calendar_candidate_upsert_version() = {version}",
+            self.verify_source,
+        )
+        self.assertIn("immutable", marker.group(0))
+        self.assertIn(
+            f"REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = {version}",
+            self.verify_script_source,
+        )
+        self.assertIn("calendar_candidate_upsert_implementation_version", self.verify_source)
+        self.assertIn("calendar_candidate_upsert_implementation_version", self.verify_script_source)
 
     # -- implementation-version marker: same signature, different body ----
 
