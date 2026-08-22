@@ -113,6 +113,48 @@ class OneMinuteCandleBuilderTests(unittest.TestCase):
         assert candle is not None
         self.assertEqual(candle.start, datetime(2026, 8, 24, 7, 0, tzinfo=timezone.utc))
 
+    def test_out_of_order_same_minute_updates_set_close_by_timestamp_not_arrival(self) -> None:
+        builder = OneMinuteCandleBuilder(2619)
+        builder.add(_update("2026-08-24T07:00:10Z", last="71.10"))
+        builder.add(_update("2026-08-24T07:00:50Z", last="71.50"))
+        # Arrives last but its event timestamp (:30) is earlier than the :50 update above.
+        builder.add(_update("2026-08-24T07:00:30Z", last="71.30"))
+
+        candle = builder.add(_update("2026-08-24T07:01:00Z", last="72.00"))[0]
+
+        self.assertEqual(candle.open, Decimal("71.10"))
+        self.assertEqual(candle.high, Decimal("71.50"))
+        self.assertEqual(candle.low, Decimal("71.10"))
+        self.assertEqual(candle.close, Decimal("71.50"))
+
+    def test_earlier_same_minute_update_arriving_late_corrects_open(self) -> None:
+        builder = OneMinuteCandleBuilder(2619)
+        builder.add(_update("2026-08-24T07:00:30Z", last="71.30"))
+        # Arrives second but its event timestamp (:10) is earlier, so it should become open.
+        builder.add(_update("2026-08-24T07:00:10Z", last="71.10"))
+
+        candle = builder.add(_update("2026-08-24T07:01:00Z", last="72.00"))[0]
+
+        self.assertEqual(candle.open, Decimal("71.10"))
+        self.assertEqual(candle.close, Decimal("71.30"))
+        self.assertEqual(candle.high, Decimal("71.30"))
+        self.assertEqual(candle.low, Decimal("71.10"))
+
+    def test_non_finite_prices_are_ignored_without_crashing(self) -> None:
+        builder = OneMinuteCandleBuilder(2619)
+        self.assertEqual(builder.add(_update("2026-08-24T07:00:05Z", last="71.20")), ())
+        self.assertEqual(builder.add(_update("2026-08-24T07:00:10Z", last="NaN")), ())
+        self.assertEqual(builder.add(_update("2026-08-24T07:00:15Z", last="Infinity")), ())
+        self.assertEqual(builder.add(_update("2026-08-24T07:00:20Z", last="-Infinity")), ())
+        self.assertEqual(builder.add(_update("2026-08-24T07:00:25Z", last="71.40")), ())
+
+        candle = builder.add(_update("2026-08-24T07:01:00Z", last="71.50"))[0]
+
+        self.assertEqual(candle.open, Decimal("71.20"))
+        self.assertEqual(candle.high, Decimal("71.40"))
+        self.assertEqual(candle.low, Decimal("71.20"))
+        self.assertEqual(candle.close, Decimal("71.40"))
+
 
 if __name__ == "__main__":
     unittest.main()
