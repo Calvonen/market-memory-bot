@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import Enum
 
 from trading_system.market_reaction import MarketReactionSnapshot, ReactionDirection
@@ -22,8 +23,8 @@ class MarketReactionEvolutionSnapshot:
 
     snapshot: MarketReactionSnapshot
     evolution: ReactionEvolution
-    previous_return_pct: object | None
-    delta_pct_points: object | None
+    previous_return_pct: Decimal | None
+    delta_pct_points: Decimal | None
 
 
 @dataclass
@@ -31,7 +32,7 @@ class _ReactionSequenceState:
     instrument: str
     market: str
     etoro_instrument_id: int
-    reference_price: object
+    reference_price: Decimal
     last_snapshot: MarketReactionSnapshot
 
 
