@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 
@@ -25,7 +26,7 @@ class MarketReactionSnapshot:
     market: str
     etoro_instrument_id: int
     interval_minutes: int
-    candle_start: object
+    candle_start: datetime
     reference_price: Decimal
     close_price: Decimal
     return_pct: Decimal
