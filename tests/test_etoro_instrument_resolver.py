@@ -110,7 +110,7 @@ class EtoroInstrumentResolverTests(unittest.TestCase):
         assert resolved is not None
         self.assertEqual(resolved.instrument_id, 2001)
 
-    def test_ambiguous_base_symbol_fails_closed(self) -> None:
+    def test_ambiguous_base_symbol_fails_closed_without_exact_name(self) -> None:
         candidates = (
             EtoroInstrumentCandidate(1, "ABC", "ABC One", "US"),
             EtoroInstrumentCandidate(2, "ABC.L", "ABC Two", "London"),
@@ -121,6 +121,20 @@ class EtoroInstrumentResolverTests(unittest.TestCase):
         resolved = resolver.resolve(InstrumentResolutionRequest("ABC.DE", "ABC AG", "DE"))
 
         self.assertIsNone(resolved)
+
+    def test_exact_company_name_can_disambiguate_base_symbol_collision(self) -> None:
+        candidates = (
+            EtoroInstrumentCandidate(1, "ABC", "ABC Holdings Inc", "US"),
+            EtoroInstrumentCandidate(2, "ABC.L", "ABC PLC", "London"),
+        )
+        stub = _SearchStub({"ABC.DE": candidates, "ABC PLC": candidates})
+        resolver = EtoroInstrumentResolver(stub)
+
+        resolved = resolver.resolve(InstrumentResolutionRequest("ABC.DE", "ABC PLC", "UK"))
+
+        self.assertIsNotNone(resolved)
+        assert resolved is not None
+        self.assertEqual(resolved.instrument_id, 2)
 
     def test_unique_exact_company_name_is_safe_fallback(self) -> None:
         hays = EtoroInstrumentCandidate(2619, None, "Hays PLC", "London Stock Exchange")
@@ -137,7 +151,7 @@ class EtoroInstrumentResolverTests(unittest.TestCase):
     def test_partial_or_fuzzy_name_is_not_guessed(self) -> None:
         stub = _SearchStub(
             {
-                "XYZ": (EtoroInstrumentCandidate(10, "XYZ", "XYZ Holdings PLC", "London"),),
+                "NOPE": (),
                 "XYZ Group": (EtoroInstrumentCandidate(10, "XYZ", "XYZ Holdings PLC", "London"),),
             }
         )
