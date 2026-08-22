@@ -952,38 +952,36 @@ Promise.race([
 
     def test_upcoming_screen_does_not_guess_unknown_exchange_suffixes_as_usa(self) -> None:
         # Only the no-suffix case (the actual USA convention on this
-        # backend, e.g. "AAPL") may resolve to 'USA'. An unrecognized
-        # suffix such as ".PA" must not silently fall through to 'USA' too.
-        function_start = self.upcoming_source.index("function marketForInstrument(")
+        # backend, e.g. "AAPL") may resolve to 'US'. An unrecognized suffix
+        # such as ".PA" must not silently fall through to 'US' too. The
+        # suffix->code classification itself now lives in
+        # marketFromInstrumentSuffix() (marketForInstrument() just forwards
+        # to it), so that's the function this checks.
+        function_start = self.upcoming_source.index("function marketFromInstrumentSuffix(")
         function_end = self.upcoming_source.index("\n}\n", function_start)
         function_body = self.upcoming_source[function_start:function_end]
 
         no_suffix_guard = function_body.index("if (!instrument.includes('.')) {")
-        no_suffix_return = function_body.index("return 'USA';", no_suffix_guard)
+        no_suffix_return = function_body.index("return 'US';", no_suffix_guard)
         switch_start = function_body.index("switch (")
         self.assertLess(no_suffix_return, switch_start)
 
         default_case = function_body.index("default:")
         default_body = function_body[default_case:]
-        self.assertNotIn("'USA'", default_body)
+        self.assertNotIn("'US'", default_body)
 
     def test_market_for_instrument_actually_classifies_unknown_european_suffixes(self) -> None:
         # Behavioral proof, not just a structural string check: extract the
-        # real marketForInstrument() body from upcoming.tsx, strip its (tiny,
-        # type-annotation-only) TypeScript syntax, and execute it with node
-        # for a handful of unmapped European suffixes (.PA Paris, .AS
-        # Amsterdam, .SW Swiss) plus the mapped/no-suffix baselines.
+        # real marketForInstrument()/marketFromInstrumentSuffix() functions
+        # from upcoming.tsx, strip their (tiny, type-annotation-only)
+        # TypeScript syntax, and execute them with node for a handful of
+        # unmapped European suffixes (.PA Paris, .AS Amsterdam, .SW Swiss)
+        # plus the mapped/no-suffix baselines.
         node = shutil.which("node")
         if node is None:
             self.skipTest("node is not available in this environment")
 
-        function_start = self.upcoming_source.index("function marketForInstrument(")
-        function_end = self.upcoming_source.index("\n}\n", function_start) + len("\n}")
-        function_source = self.upcoming_source[function_start:function_end]
-
-        # Strip the parameter/return type annotations - the only
-        # TypeScript-specific syntax in this otherwise-plain-JS function.
-        js_function = re.sub(r":\s*string\b", "", function_source, count=2)
+        js_function = self._extract_market_helpers_js()
         self.assertNotIn(": string", js_function)
 
         cases = ["BNPP.PA", "ASML.AS", "NOVN.SW", "AAPL", "HAS.L"]
@@ -1008,11 +1006,209 @@ Promise.race([
         self.assertEqual(result.returncode, 0, result.stderr)
         outputs = dict(zip(cases, json.loads(result.stdout)))
 
+        # Unmapped suffixes fall back to 'Muu' now, never a guessed code.
         for suffix_case in ("BNPP.PA", "ASML.AS", "NOVN.SW"):
-            self.assertNotEqual(outputs[suffix_case], "USA", outputs)
+            self.assertEqual(outputs[suffix_case], "Muu", outputs)
 
-        self.assertEqual(outputs["AAPL"], "USA")
-        self.assertEqual(outputs["HAS.L"], "Iso-Britannia")
+        self.assertEqual(outputs["AAPL"], "US")
+        self.assertEqual(outputs["HAS.L"], "UK")
+
+    def test_normalize_market_only_guesses_from_the_ticker_when_the_market_is_missing_or_unknown(
+        self,
+    ) -> None:
+        # P2 regression: normalizeMarket() used to fall back to the ticker
+        # suffix for ANY unrecognized market value, not just a genuinely
+        # missing/"Unknown" one - so an explicit-but-unmapped provider value
+        # could silently be overridden by a suffix guess that might
+        # contradict it. Behavioral proof: extract the real
+        # normalizeMarket()/marketFromInstrumentSuffix()/MARKET_ALIASES from
+        # upcoming.tsx and execute them with node.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        js_function = self._extract_market_helpers_js()
+
+        cases = [
+            ("Iso-Britannia", "HAS"),
+            ("NYSE", "BRK.B"),
+            ("Unknown", "NOKIA.HE"),
+            ("Unknown", "AAPL"),
+            ("", "NOKIA.HE"),
+            ("Some New Exchange", "AAPL"),
+        ]
+        script = (
+            js_function
+            + "\nconsole.log(JSON.stringify("
+            + json.dumps(cases)
+            + ".map(([market, instrument]) => normalizeMarket(market, instrument))));\n"
+        )
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+
+        # Explicit alias mappings win outright - no suffix guessing involved.
+        self.assertEqual(outputs[0], "UK")  # Iso-Britannia + HAS
+        self.assertEqual(outputs[1], "US")  # NYSE + BRK.B
+
+        # Missing/"Unknown" market values fall back to the ticker suffix.
+        self.assertEqual(outputs[2], "FI")  # Unknown + NOKIA.HE
+        self.assertEqual(outputs[3], "US")  # Unknown + no-suffix AAPL
+        self.assertEqual(outputs[4], "FI")  # '' + NOKIA.HE
+
+        # An explicit, non-empty, unrecognized market value must never be
+        # guessed from the ticker - AAPL's own suffix rule would say 'US',
+        # but the (fictional) explicit market here must win as 'Muu'.
+        self.assertEqual(outputs[5], "Muu")  # Some New Exchange + AAPL
+
+    def test_normalize_market_recognizes_finnish_country_names(self) -> None:
+        # The calendar/provider side can send Finnish country names too
+        # (e.g. a manually entered "Suomi" candidate) - these must resolve
+        # as explicit alias hits, exactly like their English/ISO
+        # counterparts, never via the ticker-suffix fallback.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        js_function = self._extract_market_helpers_js()
+
+        cases = [
+            ("Suomi", "AAPL"),
+            ("Ruotsi", "AAPL"),
+            ("Saksa", "AAPL"),
+            ("Yhdysvallat", "HAS.L"),
+            ("Iso-Britannia", "AAPL"),
+        ]
+        script = (
+            js_function
+            + "\nconsole.log(JSON.stringify("
+            + json.dumps(cases)
+            + ".map(([market, instrument]) => normalizeMarket(market, instrument))));\n"
+        )
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+
+        # Each case's instrument suffix deliberately disagrees with the
+        # expected market (AAPL has no suffix -> would guess 'US'; HAS.L's
+        # suffix would guess 'UK') - proving the Finnish name wins as an
+        # explicit alias, not as a suffix guess that happens to match.
+        self.assertEqual(outputs[0], "FI")  # Suomi + AAPL
+        self.assertEqual(outputs[1], "SE")  # Ruotsi + AAPL
+        self.assertEqual(outputs[2], "DE")  # Saksa + AAPL
+        self.assertEqual(outputs[3], "US")  # Yhdysvallat + HAS.L
+        self.assertEqual(outputs[4], "UK")  # Iso-Britannia + AAPL
+
+    def test_market_from_suffix_classifies_denmark_and_norway_tickers(self) -> None:
+        # DK/NO were previously supported and must resolve correctly again,
+        # both directly via marketForInstrument() (ticker only) and via
+        # normalizeMarket() when the provider market is missing/"Unknown".
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        js_function = self._extract_market_helpers_js()
+
+        cases = [
+            ("Unknown", "CARL-B.CO"),
+            ("Unknown", "EQNR.OL"),
+            ("", "CARL-B.CO"),
+            ("", "EQNR.OL"),
+        ]
+        script = (
+            js_function
+            + "\nconsole.log(JSON.stringify({"
+            + "viaMarketForInstrument: ['CARL-B.CO', 'EQNR.OL'].map(marketForInstrument),"
+            + "viaNormalizeMarket: "
+            + json.dumps(cases)
+            + ".map(([market, instrument]) => normalizeMarket(market, instrument)),"
+            + "}));\n"
+        )
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+
+        self.assertEqual(outputs["viaMarketForInstrument"], ["DK", "NO"])
+        self.assertEqual(
+            outputs["viaNormalizeMarket"],
+            ["DK", "NO", "DK", "NO"],
+        )
+
+    def test_normalize_market_recognizes_danish_and_norwegian_country_names(self) -> None:
+        # Same explicit-alias-wins-over-suffix proof as the Finnish country
+        # names above, for the reinstated Danish/Norwegian markets.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        js_function = self._extract_market_helpers_js()
+
+        cases = [
+            ("Tanska", "AAPL"),
+            ("Norja", "AAPL"),
+            ("Denmark", "AAPL"),
+            ("Norway", "AAPL"),
+        ]
+        script = (
+            js_function
+            + "\nconsole.log(JSON.stringify("
+            + json.dumps(cases)
+            + ".map(([market, instrument]) => normalizeMarket(market, instrument))));\n"
+        )
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+
+        # AAPL has no suffix (would guess 'US') - proving each country name
+        # wins as an explicit alias, not a suffix guess.
+        self.assertEqual(outputs[0], "DK")  # Tanska + AAPL
+        self.assertEqual(outputs[1], "NO")  # Norja + AAPL
+        self.assertEqual(outputs[2], "DK")  # Denmark + AAPL
+        self.assertEqual(outputs[3], "NO")  # Norway + AAPL
 
     def _extract_upcoming_function(self, signature: str, *, strip_types: bool = True) -> str:
         start = self.upcoming_source.index(signature)
@@ -1022,11 +1218,34 @@ Promise.race([
             source = re.sub(r":\s*(EventExpectation|CalendarEvent|UpcomingRow)\[\]", "", source)
             source = re.sub(r":\s*DeviceLocalDateWindow\b", "", source)
             source = re.sub(r":\s*Map<string,\s*CalendarOverride>", "", source)
+            source = re.sub(r":\s*MarketCode\s*\|\s*'Muu'", "", source)
             source = re.sub(r":\s*Date\b", "", source)
             source = re.sub(r":\s*string\b", "", source)
             source = re.sub(r":\s*number\s*\|\s*null\b", "", source)
             source = re.sub(r":\s*number\b", "", source)
         return source
+
+    def _extract_market_helpers_js(self) -> str:
+        # marketForInstrument() (expectation rows) and normalizeMarket()
+        # (calendar rows, see mergeUpcomingRows()) both fall back to the
+        # same ticker-suffix classification via marketFromInstrumentSuffix()
+        # - and normalizeMarket() also keys into the MARKET_ALIASES lookup
+        # table above it. Any extracted-and-node-executed script exercising
+        # marketForInstrument(), normalizeMarket(), or mergeUpcomingRows()
+        # itself must carry all of these along together, not just whichever
+        # one function it means to call.
+        aliases_start = self.upcoming_source.index("const MARKET_ALIASES")
+        aliases_end = self.upcoming_source.index("};", aliases_start) + len("};")
+        aliases_js = self.upcoming_source[aliases_start:aliases_end]
+        aliases_js = re.sub(r":\s*Record<string,\s*MarketCode>", "", aliases_js)
+
+        suffix_fn_js = self._extract_upcoming_function("function marketFromInstrumentSuffix(")
+        market_for_instrument_js = self._extract_upcoming_function("function marketForInstrument(")
+        normalize_market_js = self._extract_upcoming_function("function normalizeMarket(")
+
+        combined = f"{aliases_js}\n{suffix_fn_js}\n{market_for_instrument_js}\n{normalize_market_js}"
+        self.assertNotIn("MarketCode", combined)
+        return combined
 
     def _extract_date_ordinal_fns_js(self) -> str:
         # mergeUpcomingRows()'s sort, filterRows()'s cutoff, and load()'s
@@ -1063,7 +1282,7 @@ Promise.race([
         if node is None:
             self.skipTest("node is not available in this environment")
 
-        market_fn_js = self._extract_upcoming_function("function marketForInstrument(")
+        market_helpers_js = self._extract_market_helpers_js()
         date_ordinal_fns_js = self._extract_date_ordinal_fns_js()
         merge_fn_js = self._extract_upcoming_function("export function mergeUpcomingRows(").replace(
             "export function ", "function "
@@ -1072,7 +1291,7 @@ Promise.race([
             self.assertNotIn(annotation, merge_fn_js)
 
         script = f"""
-{market_fn_js}
+{market_helpers_js}
 {date_ordinal_fns_js}
 {merge_fn_js}
 
@@ -1190,14 +1409,14 @@ console.log(JSON.stringify(rows.map((r) => ({{
         if node is None:
             self.skipTest("node is not available in this environment")
 
-        market_fn_js = self._extract_upcoming_function("function marketForInstrument(")
+        market_helpers_js = self._extract_market_helpers_js()
         date_ordinal_fns_js = self._extract_date_ordinal_fns_js()
         merge_fn_js = self._extract_upcoming_function("export function mergeUpcomingRows(").replace(
             "export function ", "function "
         )
 
         script = f"""
-{market_fn_js}
+{market_helpers_js}
 {date_ordinal_fns_js}
 {merge_fn_js}
 
