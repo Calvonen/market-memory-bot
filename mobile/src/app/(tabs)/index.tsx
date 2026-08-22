@@ -1,5 +1,5 @@
-import { Link, router } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link, router, useFocusEffect } from 'expo-router';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -11,65 +11,164 @@ import {
 } from 'react-native';
 
 import {
+  CalendarEvent,
   EventExpectation,
   getEvents,
   getPaperStatus,
+  getUpcomingCalendarEvents,
   PaperRun,
 } from '@/services/api';
 
 type EventStatus = { run: PaperRun | null; statusError: boolean };
 
+// Mirrors MAX_CALENDAR_LOOKAHEAD_DAYS in trading_system/api.py - the widest
+// window the backend accepts, and what an omitted from_date/to_date used to
+// resolve to server-side. Sending it explicitly (below) keeps that window
+// anchored to the device's own local day instead of the backend host's.
+const CALENDAR_WINDOW_DAYS = 30;
+
+// Same principle as events/upcoming.tsx's deviceLocalDateWindow(): "today"
+// must come from the device's own local calendar day (getFullYear/
+// getMonth/getDate), never toISOString() (UTC) - a device whose local day
+// has already rolled over relative to UTC would otherwise get a window
+// computed against the wrong day.
+function formatLocalDate(date: Date): string {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function deviceLocalCalendarWindow(): { fromDate: string; toDate: string } {
+  const now = new Date();
+  const to = new Date(now.getFullYear(), now.getMonth(), now.getDate() + CALENDAR_WINDOW_DAYS);
+  return { fromDate: formatLocalDate(now), toDate: formatLocalDate(to) };
+}
+
 export default function HomeScreen() {
   const [events, setEvents] = useState<EventExpectation[] | null>(null);
   const [statuses, setStatuses] = useState<Record<string, EventStatus>>({});
+  // Raw tracked-or-not calendar_events rows for the current window - a
+  // separate store from EventExpectation, see
+  // trading_system/calendar_repository.py. Filtered/deduped for display via
+  // the trackedCalendarEvents memo below, not here, since that filtering
+  // depends on `events` too and the two fetches now resolve independently
+  // of each other (see loadEvents()).
+  const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[] | null>(null);
+  // Separate from `error` (EventExpectation-only) - a calendar failure must
+  // never be conflated with an EventExpectation failure, or silently
+  // swallowed. calendarEvents itself is left untouched on failure (see the
+  // calendar .catch below), so any previously loaded tracked calendar cards
+  // stay on screen (stale-but-real data) while this drives the visible
+  // error/retry UI instead. Same split as events/upcoming.tsx's
+  // error/calendarError.
+  const [calendarError, setCalendarError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const latestLoadId = useRef(0);
 
-  const loadEvents = useCallback(async () => {
+  // Not async/await - both requests are started here, before either is
+  // awaited, and each is its own independent .then/.catch chain (never a
+  // sequential await), same as events/upcoming.tsx's load(). A slow or
+  // failing getEvents() must never delay getUpcomingCalendarEvents() from
+  // even starting, and vice versa.
+  const loadEvents = useCallback(() => {
     const loadId = ++latestLoadId.current;
-    try {
-      setError(null);
-      const list = await getEvents();
-      if (loadId !== latestLoadId.current) return;
-      setEvents(list);
-      setStatuses({});
+    setError(null);
+    setCalendarError(null);
 
-      // The card list renders immediately from `list` above. Each event's
-      // paper-status is then fetched independently, not combined into one
-      // batched wait, so one slow or failing request can't hold up every
-      // other card - each card updates for itself as its own status
-      // arrives, instead of the whole screen waiting on the slowest of N.
-      list.forEach((event) => {
-        getPaperStatus(event.event_id)
-          .then((status) => {
-            if (loadId !== latestLoadId.current) return;
-            setStatuses((prev) => ({
-              ...prev,
-              [event.event_id]: { run: status.paper_run, statusError: false },
-            }));
-          })
-          .catch(() => {
-            if (loadId !== latestLoadId.current) return;
-            setStatuses((prev) => ({
-              ...prev,
-              [event.event_id]: { run: null, statusError: true },
-            }));
-          });
+    const eventsPromise = getEvents()
+      .then((list) => {
+        if (loadId !== latestLoadId.current) return;
+        setEvents(list);
+        setStatuses({});
+
+        // The card list renders immediately from `list` above. Each event's
+        // paper-status is then fetched independently, not combined into one
+        // batched wait, so one slow or failing request can't hold up every
+        // other card - each card updates for itself as its own status
+        // arrives, instead of the whole screen waiting on the slowest of N.
+        list.forEach((event) => {
+          getPaperStatus(event.event_id)
+            .then((status) => {
+              if (loadId !== latestLoadId.current) return;
+              setStatuses((prev) => ({
+                ...prev,
+                [event.event_id]: { run: status.paper_run, statusError: false },
+              }));
+            })
+            .catch(() => {
+              if (loadId !== latestLoadId.current) return;
+              setStatuses((prev) => ({
+                ...prev,
+                [event.event_id]: { run: null, statusError: true },
+              }));
+            });
+        });
+      })
+      .catch((err) => {
+        if (loadId !== latestLoadId.current) return;
+        setError(err instanceof Error ? err.message : 'Tuntematon virhe');
       });
-    } catch (err) {
-      if (loadId !== latestLoadId.current) return;
-      setError(err instanceof Error ? err.message : 'Tuntematon virhe');
-    }
+
+    const { fromDate, toDate } = deviceLocalCalendarWindow();
+    const calendarPromise = getUpcomingCalendarEvents(fromDate, toDate)
+      .then((list) => {
+        if (loadId !== latestLoadId.current) return;
+        setCalendarEvents(list);
+      })
+      .catch((err) => {
+        if (loadId !== latestLoadId.current) return;
+        // calendarEvents is deliberately left untouched here - a failed
+        // fetch must not render identically to "no tracked calendar
+        // events"; whatever was last successfully loaded (or `null`, if
+        // this is the very first attempt) stays exactly as it was.
+        setCalendarError(
+          err instanceof Error ? err.message : 'Kalenteritietoja ei juuri nyt saatu haettua.',
+        );
+      });
+
+    // onRefresh() below awaits this to know when to stop spinning. The
+    // "first source to settle wins" policy matches events/upcoming.tsx's
+    // load(): if one request hangs, the refresh indicator must still clear
+    // as soon as the *other* one settles rather than waiting indefinitely -
+    // the hung source's own .then()/.catch() above still updates its state
+    // normally whenever (if ever) it does settle.
+    return Promise.race([eventsPromise, calendarPromise]);
   }, []);
 
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      void loadEvents();
-    }, 0);
+  // Tracked calendar rows for display: status = 'tracked' only, and never
+  // an occurrence already tracked through the real trading system - same
+  // de-dupe as events/upcoming.tsx's mergeUpcomingRows(), keyed on
+  // instrument + scheduled_date and scoped to 'earnings' calendar rows only
+  // (EventExpectation has no explicit event_type of its own, so a
+  // non-earnings candidate for the same instrument/date is a different
+  // occurrence and must never be dropped by this).
+  const trackedCalendarEvents = useMemo(() => {
+    if (!calendarEvents) return null;
+    const trackedEarningsOccurrences = new Set(
+      (events ?? []).map((event) => `${event.instrument.toUpperCase()}|${event.scheduled_date}`),
+    );
+    return calendarEvents.filter((event) => {
+      if (event.status !== 'tracked') return false;
+      if (event.event_type !== 'earnings') return true;
+      const key = `${event.instrument.toUpperCase()}|${event.scheduled_date}`;
+      return !trackedEarningsOccurrences.has(key);
+    });
+  }, [calendarEvents, events]);
 
-    return () => clearTimeout(timer);
-  }, [loadEvents]);
+  // Refires on every focus, not just mount - so returning to Home after
+  // tracking a candidate on /events/upcoming picks up the newly tracked
+  // calendar row without needing an explicit pull-to-refresh.
+  useFocusEffect(
+    useCallback(() => {
+      const timer = setTimeout(() => {
+        void loadEvents();
+      }, 0);
+
+      return () => clearTimeout(timer);
+    }, [loadEvents]),
+  );
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -110,7 +209,26 @@ export default function HomeScreen() {
 
       {error ? <Text style={styles.errorText}>{error}</Text> : null}
 
-      {events && events.length === 0 ? (
+      {calendarError ? (
+        <View style={styles.calendarErrorCard}>
+          <Text style={styles.errorText}>{calendarError}</Text>
+          <Text style={styles.calendarErrorHint}>
+            Seuratut MarketAI-eventit yllä toimivat silti normaalisti.
+          </Text>
+          <Pressable style={styles.retryButton} onPress={() => void loadEvents()}>
+            <Text style={styles.retryButtonText}>Yritä uudelleen</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      {/* Must never show while a calendar fetch has actually failed
+          (calendarError) - "Ei vielä..." reads as a successful, genuinely
+          empty response, which a failed request is not. */}
+      {events &&
+      events.length === 0 &&
+      trackedCalendarEvents &&
+      trackedCalendarEvents.length === 0 &&
+      !calendarError ? (
         <View style={styles.emptyCard}>
           <Text style={styles.emptyText}>
             Ei vielä seurattavia tulosjulkaisuja.
@@ -120,6 +238,10 @@ export default function HomeScreen() {
 
       {events?.map((event) => (
         <EventCard key={event.event_id} event={event} status={statuses[event.event_id]} />
+      ))}
+
+      {trackedCalendarEvents?.map((event) => (
+        <CalendarEventCard key={event.calendar_event_id} event={event} />
       ))}
 
       <Pressable
@@ -178,6 +300,37 @@ function EventCard({ event, status }: { event: EventExpectation; status?: EventS
         </View>
       </Pressable>
     </Link>
+  );
+}
+
+// Tracked calendar_events row - a separate store from EventExpectation (see
+// trading_system/calendar_repository.py). This card is deliberately
+// read-only and only ever shows the fixed "Seurannassa" status text, never
+// an EventExpectation-style status (e.g. "Analysoitu", "Odottaa
+// vahvistusta") - a calendar_events row has no paper-run/strategy state of
+// its own to describe.
+function CalendarEventCard({ event }: { event: CalendarEvent }) {
+  const scheduled = new Date(`${event.scheduled_date}T12:00:00`);
+  const dateText = Number.isNaN(scheduled.getTime())
+    ? event.scheduled_date
+    : scheduled.toLocaleDateString('fi-FI');
+
+  return (
+    <View style={styles.eventCard}>
+      <View style={styles.rowBetween}>
+        <View style={styles.eventCardTitleBlock}>
+          <Text style={styles.company} numberOfLines={1}>
+            {event.company_name}
+          </Text>
+          <Text style={styles.symbol}>{event.instrument}</Text>
+        </View>
+        <Text style={styles.dateText}>{dateText}</Text>
+      </View>
+
+      <View style={styles.trackedBadge}>
+        <Text style={styles.trackedBadgeText}>Seurannassa</Text>
+      </View>
+    </View>
   );
 }
 
@@ -269,6 +422,34 @@ const styles = StyleSheet.create({
     fontSize: 13,
     marginBottom: 16,
   },
+  calendarErrorCard: {
+    backgroundColor: '#1c1417',
+    borderWidth: 1,
+    borderColor: '#3a2226',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+  },
+  calendarErrorHint: {
+    color: '#8994a6',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  retryButton: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#2a1b1e',
+    borderWidth: 1,
+    borderColor: '#4a2b30',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    marginTop: 12,
+  },
+  retryButtonText: {
+    color: '#e17878',
+    fontSize: 12,
+    fontWeight: '800',
+  },
   emptyCard: {
     backgroundColor: '#131821',
     borderWidth: 1,
@@ -328,6 +509,21 @@ const styles = StyleSheet.create({
     color: '#72b8db',
     fontSize: 13,
     fontWeight: '700',
+  },
+  trackedBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#172219',
+    borderWidth: 1,
+    borderColor: '#28492f',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    marginTop: 12,
+  },
+  trackedBadgeText: {
+    color: '#72db8b',
+    fontSize: 11,
+    fontWeight: '800',
   },
   upcomingButton: {
     flexDirection: 'row',
