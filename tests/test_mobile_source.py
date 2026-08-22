@@ -1013,6 +1013,65 @@ Promise.race([
         self.assertEqual(outputs["AAPL"], "US")
         self.assertEqual(outputs["HAS.L"], "UK")
 
+    def test_normalize_market_only_guesses_from_the_ticker_when_the_market_is_missing_or_unknown(
+        self,
+    ) -> None:
+        # P2 regression: normalizeMarket() used to fall back to the ticker
+        # suffix for ANY unrecognized market value, not just a genuinely
+        # missing/"Unknown" one - so an explicit-but-unmapped provider value
+        # could silently be overridden by a suffix guess that might
+        # contradict it. Behavioral proof: extract the real
+        # normalizeMarket()/marketFromInstrumentSuffix()/MARKET_ALIASES from
+        # upcoming.tsx and execute them with node.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        js_function = self._extract_market_helpers_js()
+
+        cases = [
+            ("Iso-Britannia", "HAS"),
+            ("NYSE", "BRK.B"),
+            ("Unknown", "NOKIA.HE"),
+            ("Unknown", "AAPL"),
+            ("", "NOKIA.HE"),
+            ("Some New Exchange", "AAPL"),
+        ]
+        script = (
+            js_function
+            + "\nconsole.log(JSON.stringify("
+            + json.dumps(cases)
+            + ".map(([market, instrument]) => normalizeMarket(market, instrument))));\n"
+        )
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+
+        # Explicit alias mappings win outright - no suffix guessing involved.
+        self.assertEqual(outputs[0], "UK")  # Iso-Britannia + HAS
+        self.assertEqual(outputs[1], "US")  # NYSE + BRK.B
+
+        # Missing/"Unknown" market values fall back to the ticker suffix.
+        self.assertEqual(outputs[2], "FI")  # Unknown + NOKIA.HE
+        self.assertEqual(outputs[3], "US")  # Unknown + no-suffix AAPL
+        self.assertEqual(outputs[4], "FI")  # '' + NOKIA.HE
+
+        # An explicit, non-empty, unrecognized market value must never be
+        # guessed from the ticker - AAPL's own suffix rule would say 'US',
+        # but the (fictional) explicit market here must win as 'Muu'.
+        self.assertEqual(outputs[5], "Muu")  # Some New Exchange + AAPL
+
     def _extract_upcoming_function(self, signature: str, *, strip_types: bool = True) -> str:
         start = self.upcoming_source.index(signature)
         end = self.upcoming_source.index("\n}\n", start) + len("\n}")

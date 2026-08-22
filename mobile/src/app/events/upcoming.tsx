@@ -126,13 +126,16 @@ function deviceLocalDateWindow(
 type MarketCode = 'FI' | 'SE' | 'DE' | 'US' | 'UK';
 
 // Calendar/provider market values arrive in inconsistent shapes (ISO-ish
-// codes, English country names, "Unknown"). This collapses every known
-// variant down to its short code.
+// codes, exchange names, English/Finnish country names). This collapses
+// every known variant down to its short code.
 const MARKET_ALIASES: Record<string, MarketCode> = {
   US: 'US',
   USA: 'US',
+  NYSE: 'US',
+  NASDAQ: 'US',
   UK: 'UK',
   GB: 'UK',
+  'ISO-BRITANNIA': 'UK',
   FI: 'FI',
   FINLAND: 'FI',
   SE: 'SE',
@@ -170,13 +173,20 @@ function marketForInstrument(instrument: string): MarketCode | 'Muu' {
 }
 
 // Normalizes a calendar/provider market value to one of the short
-// user-facing codes. Falls back to the instrument's ticker suffix whenever
-// the market itself is missing, "Unknown", or otherwise unrecognized (e.g.
-// "Iso-Britannia") - GB, USA, "Iso-Britannia" and "Unknown" must never
-// reach the user when the value can be normalized by the rules above.
+// user-facing codes. The ticker-suffix fallback (marketFromInstrumentSuffix)
+// is only ever used when the market itself is missing/empty or "Unknown" -
+// an explicit but unrecognized market value (e.g. a new exchange name this
+// table doesn't know yet) must never be guessed from the ticker, it becomes
+// 'Muu' instead - guessing from the ticker there could contradict a real,
+// just-unmapped market value the provider actually sent.
 function normalizeMarket(rawMarket: string, instrument: string): MarketCode | 'Muu' {
-  const known = MARKET_ALIASES[rawMarket.trim().toUpperCase()];
-  return known ?? marketFromInstrumentSuffix(instrument);
+  const normalized = rawMarket.trim().toUpperCase();
+  const known = MARKET_ALIASES[normalized];
+  if (known) return known;
+  if (normalized === '' || normalized === 'UNKNOWN') {
+    return marketFromInstrumentSuffix(instrument);
+  }
+  return 'Muu';
 }
 
 export type UpcomingRow = {
