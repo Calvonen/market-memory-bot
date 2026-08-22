@@ -1,8 +1,10 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from trading_system.tracked_instruments import (
+    TrackedInstrument,
     TrackedInstrumentSource,
     add_tracking_source,
     create_tracked_instrument,
@@ -133,3 +135,57 @@ def test_blank_instrument_fails_closed() -> None:
             instrument="   ",
             source=TrackedInstrumentSource.MANUAL,
         )
+
+
+def test_direct_construction_normalises_instrument_and_market() -> None:
+    tracked = TrackedInstrument(instrument=" aapl ", market=" nasdaq ")
+
+    assert tracked.instrument == "AAPL"
+    assert tracked.market == "nasdaq"
+
+
+def test_direct_construction_with_blank_instrument_fails_closed() -> None:
+    with pytest.raises(ValueError, match="instrument is required"):
+        TrackedInstrument(instrument="   ")
+
+
+def test_replace_with_blank_instrument_fails_closed() -> None:
+    tracked = create_tracked_instrument(
+        instrument="AAPL",
+        source=TrackedInstrumentSource.MANUAL,
+    )
+
+    with pytest.raises(ValueError, match="instrument is required"):
+        replace(tracked, instrument="   ")
+
+
+def test_replace_normalises_instrument_through_post_init() -> None:
+    tracked = create_tracked_instrument(
+        instrument="AAPL",
+        source=TrackedInstrumentSource.MANUAL,
+    )
+
+    renamed = replace(tracked, instrument=" msft ")
+
+    assert renamed.instrument == "MSFT"
+
+
+def test_add_tracking_source_reactivates_without_duplicating_existing_source() -> None:
+    now = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
+    tracked = create_tracked_instrument(
+        instrument="MSFT",
+        source=TrackedInstrumentSource.MANUAL,
+        now=now,
+    )
+    inactive = set_tracking_active(tracked, False, now=now + timedelta(minutes=1))
+
+    reactivated = add_tracking_source(
+        inactive,
+        TrackedInstrumentSource.MANUAL,
+        now=now + timedelta(minutes=2),
+    )
+
+    assert reactivated.active is True
+    assert reactivated.sources == (TrackedInstrumentSource.MANUAL,)
+    assert reactivated.tracked_instrument_id == tracked.tracked_instrument_id
+    assert reactivated.created_at == tracked.created_at

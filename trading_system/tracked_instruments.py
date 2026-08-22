@@ -43,6 +43,14 @@ class TrackedInstrument:
     created_at: datetime = field(default_factory=_utc_now)
     updated_at: datetime = field(default_factory=_utc_now)
 
+    def __post_init__(self) -> None:
+        """Enforce identity invariants for every construction path (factory, direct, replace)."""
+        symbol = _normalise_symbol(self.instrument)
+        if not symbol:
+            raise ValueError("instrument is required")
+        object.__setattr__(self, "instrument", symbol)
+        object.__setattr__(self, "market", self.market.strip())
+
     @property
     def key(self) -> tuple[str, str]:
         """Stable identity key without guessing across different markets."""
@@ -57,15 +65,11 @@ def create_tracked_instrument(
     source: TrackedInstrumentSource,
     now: datetime | None = None,
 ) -> TrackedInstrument:
-    symbol = _normalise_symbol(instrument)
-    if not symbol:
-        raise ValueError("instrument is required")
-
     timestamp = now or _utc_now()
     return TrackedInstrument(
-        instrument=symbol,
+        instrument=instrument,
         company_name=company_name.strip(),
-        market=market.strip(),
+        market=market,
         sources=(source,),
         created_at=timestamp,
         updated_at=timestamp,
