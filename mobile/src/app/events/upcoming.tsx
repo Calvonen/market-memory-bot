@@ -123,7 +123,7 @@ function deviceLocalDateWindow(
 // Short, on-screen market codes only - long country names and raw
 // calendar/provider values never reach the UI, so a market column fits on
 // one line.
-type MarketCode = 'FI' | 'SE' | 'DE' | 'US' | 'UK';
+type MarketCode = 'FI' | 'SE' | 'DE' | 'US' | 'UK' | 'DK' | 'NO';
 
 // Calendar/provider market values arrive in inconsistent shapes (ISO-ish
 // codes, exchange names, English/Finnish country names). This collapses
@@ -146,6 +146,12 @@ const MARKET_ALIASES: Record<string, MarketCode> = {
   DE: 'DE',
   GERMANY: 'DE',
   SAKSA: 'DE',
+  DK: 'DK',
+  DENMARK: 'DK',
+  TANSKA: 'DK',
+  NO: 'NO',
+  NORWAY: 'NO',
+  NORJA: 'NO',
 };
 
 // Ticker suffix -> market code, used whenever the market itself is
@@ -167,6 +173,10 @@ function marketFromInstrumentSuffix(instrument: string): MarketCode | 'Muu' {
       return 'DE';
     case 'L':
       return 'UK';
+    case 'CO':
+      return 'DK';
+    case 'OL':
+      return 'NO';
     default:
       return 'Muu';
   }

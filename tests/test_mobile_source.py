@@ -1121,6 +1121,95 @@ Promise.race([
         self.assertEqual(outputs[3], "US")  # Yhdysvallat + HAS.L
         self.assertEqual(outputs[4], "UK")  # Iso-Britannia + AAPL
 
+    def test_market_from_suffix_classifies_denmark_and_norway_tickers(self) -> None:
+        # DK/NO were previously supported and must resolve correctly again,
+        # both directly via marketForInstrument() (ticker only) and via
+        # normalizeMarket() when the provider market is missing/"Unknown".
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        js_function = self._extract_market_helpers_js()
+
+        cases = [
+            ("Unknown", "CARL-B.CO"),
+            ("Unknown", "EQNR.OL"),
+            ("", "CARL-B.CO"),
+            ("", "EQNR.OL"),
+        ]
+        script = (
+            js_function
+            + "\nconsole.log(JSON.stringify({"
+            + "viaMarketForInstrument: ['CARL-B.CO', 'EQNR.OL'].map(marketForInstrument),"
+            + "viaNormalizeMarket: "
+            + json.dumps(cases)
+            + ".map(([market, instrument]) => normalizeMarket(market, instrument)),"
+            + "}));\n"
+        )
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+
+        self.assertEqual(outputs["viaMarketForInstrument"], ["DK", "NO"])
+        self.assertEqual(
+            outputs["viaNormalizeMarket"],
+            ["DK", "NO", "DK", "NO"],
+        )
+
+    def test_normalize_market_recognizes_danish_and_norwegian_country_names(self) -> None:
+        # Same explicit-alias-wins-over-suffix proof as the Finnish country
+        # names above, for the reinstated Danish/Norwegian markets.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        js_function = self._extract_market_helpers_js()
+
+        cases = [
+            ("Tanska", "AAPL"),
+            ("Norja", "AAPL"),
+            ("Denmark", "AAPL"),
+            ("Norway", "AAPL"),
+        ]
+        script = (
+            js_function
+            + "\nconsole.log(JSON.stringify("
+            + json.dumps(cases)
+            + ".map(([market, instrument]) => normalizeMarket(market, instrument))));\n"
+        )
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+
+        # AAPL has no suffix (would guess 'US') - proving each country name
+        # wins as an explicit alias, not a suffix guess.
+        self.assertEqual(outputs[0], "DK")  # Tanska + AAPL
+        self.assertEqual(outputs[1], "NO")  # Norja + AAPL
+        self.assertEqual(outputs[2], "DK")  # Denmark + AAPL
+        self.assertEqual(outputs[3], "NO")  # Norway + AAPL
+
     def _extract_upcoming_function(self, signature: str, *, strip_types: bool = True) -> str:
         start = self.upcoming_source.index(signature)
         end = self.upcoming_source.index("\n}\n", start) + len("\n}")
