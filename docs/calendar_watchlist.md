@@ -96,11 +96,19 @@ calendar product eventually might:
   clamped, not honored, so a misconfigured environment can never make the
   worker populate rows further out than the API will ever serve.
 
-Since the mobile UI's date-range filter runs client-side over whatever the
-API returned (same pattern as the `EventExpectation` list), the API's
-default window is exactly the UI's max (30 days) - so switching from `7 pv`
-to `30 pv` never needs a second request; the full 30-day window is already
-in hand.
+The mobile UI computes its own date-only window from the *device's* local
+clock - `deviceLocalDateWindow()` in `upcoming.tsx`, built on the same
+`dateOnlyOrdinal()`/`parseDateOnlyOrdinal()` helpers the range chips
+already used - and sends it explicitly as `GET
+/api/v1/calendar/upcoming?from_date=...&to_date=...`. The GET is
+deliberately never called parameter-free: that would leave the window to
+the *backend host's* own `date.today()`, which can disagree with the
+device's own calendar day around midnight, especially across timezones.
+Switching the `7 pv`/`30 pv` chip re-derives this window and re-fetches -
+the API's own `MAX_CALENDAR_LOOKAHEAD_DAYS` cap is still enforced
+independently on every request regardless of what the client sends, so a
+client bug asking for a wider window is still rejected outright, not
+silently trusted or clamped.
 
 ## API
 
@@ -134,6 +142,15 @@ upcoming (today or later) first, soonest first; history after, most
 recently released first - mirroring the backend's own `list_upcoming()`
 ordering. Candidate/tracked/expectation origin never decides order, only
 `scheduled_date` does.
+
+The results themselves render through a `FlatList` (`data={filtered}`,
+`renderItem`, `keyExtractor={(row) => row.key}`), not a `ScrollView`
+eagerly mapping every row into a `View` - a candidate/tracked result set
+can run into the hundreds, and only the cards actually near the viewport
+are ever mounted. The search box, market/date filter chips, and the
+loading/error/empty states move into `ListHeaderComponent`; pull-to-refresh
+is unchanged, still `RefreshControl`-driven off the same `refreshing`/
+`onRefresh` state.
 
 A track mutation always wins over an older, still-in-flight refresh GET:
 `onTrack()` bumps the same `latestLoadId` generation counter `load()` uses

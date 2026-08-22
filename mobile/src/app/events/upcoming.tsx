@@ -2,9 +2,9 @@ import { Link } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  FlatList,
   Pressable,
   RefreshControl,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -58,6 +58,65 @@ function parseDateOnlyOrdinal(dateStr: string): number | null {
   if (!match) return null;
   const [, year, month, day] = match;
   return dateOnlyOrdinal(Number(year), Number(month) - 1, Number(day));
+}
+
+function formatDateOnly(year: number, monthIndex: number, day: number): string {
+  const mm = String(monthIndex + 1).padStart(2, '0');
+  const dd = String(day).padStart(2, '0');
+  return `${year}-${mm}-${dd}`;
+}
+
+function ordinalToDateOnly(ordinal: number): string {
+  // Date.UTC()/MS_PER_DAY produced this ordinal (see dateOnlyOrdinal()
+  // above), so the exact inverse reads it back with the UTC getters, not
+  // the local ones - this never depends on, or reintroduces, the device's
+  // own UTC offset.
+  const asDate = new Date(ordinal * MS_PER_DAY);
+  return formatDateOnly(asDate.getUTCFullYear(), asDate.getUTCMonth(), asDate.getUTCDate());
+}
+
+type DeviceLocalDateWindow = {
+  fromDate: string;
+  toDate: string;
+  todayOrdinal: number;
+  toOrdinal: number;
+};
+
+// P2 regression: GET /api/v1/calendar/upcoming must never be called
+// parameter-free and left to default to the *backend host's* own
+// date.today() - a device whose local calendar day has already rolled
+// over (or hasn't yet) relative to the host's clock/timezone would then
+// have its window computed against the wrong day. This is the single
+// place "today" and the range window are derived from the device's own
+// clock (getFullYear/getMonth/getDate - never toISOString(), which is
+// UTC) - load() sends the result as explicit fromDate/toDate query
+// params, and the filtered useMemo below reuses the exact same
+// todayOrdinal/toOrdinal for its 7/30 pv cutoff, so the network window
+// and the client-side window can never disagree with each other, only
+// (correctly) drift from the backend host's own clock, which still
+// independently enforces its own MAX_CALENDAR_LOOKAHEAD_DAYS cap
+// regardless of what a client sends (trading_system/api.py) - this is
+// about which *day* the window starts from, not a trust boundary.
+function deviceLocalDateWindow(
+  rangeDays: number,
+  referenceDate: Date = new Date(),
+): DeviceLocalDateWindow {
+  const todayOrdinal = dateOnlyOrdinal(
+    referenceDate.getFullYear(),
+    referenceDate.getMonth(),
+    referenceDate.getDate(),
+  );
+  const toOrdinal = todayOrdinal + rangeDays;
+  return {
+    fromDate: formatDateOnly(
+      referenceDate.getFullYear(),
+      referenceDate.getMonth(),
+      referenceDate.getDate(),
+    ),
+    toDate: ordinalToDateOnly(toOrdinal),
+    todayOrdinal,
+    toOrdinal,
+  };
 }
 
 function marketForInstrument(instrument: string): string {
@@ -206,7 +265,7 @@ export default function UpcomingEventsScreen() {
   const latestEventsLoadId = useRef(0);
   const latestCalendarLoadId = useRef(0);
 
-  const load = useCallback(() => {
+  const load = useCallback((currentRangeDays: number) => {
     // Guard against overlapping load() calls (e.g. pull-to-refresh fired
     // again while the first requests are still pending): an older response
     // resolving after a newer one must never replace the already refreshed
@@ -217,6 +276,14 @@ export default function UpcomingEventsScreen() {
     const eventsLoadId = ++latestEventsLoadId.current;
     const calendarLoadId = ++latestCalendarLoadId.current;
     setError(null);
+
+    // Device-local window (see deviceLocalDateWindow() above) sent
+    // explicitly - never a parameter-free GET left to the backend host's
+    // own date.today(). currentRangeDays is passed in rather than closed
+    // over so this callback's identity stays stable across re-renders;
+    // the mount effect below re-invokes it with the latest rangeDays
+    // whenever the 7/30 pv chip changes.
+    const { fromDate, toDate } = deviceLocalDateWindow(currentRangeDays);
 
     // Both requests are started here, before either is awaited - a
     // slow/never-settling getEvents() must never delay
@@ -237,7 +304,7 @@ export default function UpcomingEventsScreen() {
         setError(err instanceof Error ? err.message : 'Tuntematon virhe');
       });
 
-    const calendarPromise = getUpcomingCalendarEvents()
+    const calendarPromise = getUpcomingCalendarEvents(fromDate, toDate)
       .then((list) => {
         if (calendarLoadId !== latestCalendarLoadId.current) return;
         setCalendarEvents(list);
@@ -260,17 +327,21 @@ export default function UpcomingEventsScreen() {
   }, []);
 
   useEffect(() => {
+    // Re-fires whenever the 7/30 pv chip changes, not just on mount - the
+    // calendar GET's window depends on rangeDays (see load() above), so a
+    // chip change must re-request the calendar list with the new window,
+    // not just re-filter client-side over data limited to the old one.
     const timer = setTimeout(() => {
-      void load();
+      void load(rangeDays);
     }, 0);
     return () => clearTimeout(timer);
-  }, [load]);
+  }, [load, rangeDays]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await load();
+    await load(rangeDays);
     setRefreshing(false);
-  }, [load]);
+  }, [load, rangeDays]);
 
   const onTrack = useCallback(async (calendarEventId: string) => {
     setTrackError(null);
@@ -322,15 +393,13 @@ export default function UpcomingEventsScreen() {
 
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
-    const now = new Date();
-    // Date-only ordinals throughout - see dateOnlyOrdinal()/
-    // parseDateOnlyOrdinal() above. cutoffOrdinal is today + rangeDays
-    // *inclusive*: an event exactly rangeDays out (e.g. day 7 of the "7 pv"
-    // chip, matching the backend's own inclusive lte("scheduled_date", ...)
-    // window) must still be included, not excluded by a day-level
-    // off-by-one.
-    const todayOrdinal = dateOnlyOrdinal(now.getFullYear(), now.getMonth(), now.getDate());
-    const cutoffOrdinal = todayOrdinal + rangeDays;
+    // Same deviceLocalDateWindow() the calendar GET in load() uses above -
+    // not a second, independently-derived "today". cutoffOrdinal (toOrdinal)
+    // is today + rangeDays *inclusive*: an event exactly rangeDays out
+    // (e.g. day 7 of the "7 pv" chip, matching the backend's own inclusive
+    // lte("scheduled_date", ...) window) must still be included, not
+    // excluded by a day-level off-by-one.
+    const { todayOrdinal, toOrdinal: cutoffOrdinal } = deviceLocalDateWindow(rangeDays);
 
     // Market and date range apply independently - each is its own `if`
     // against the unfiltered row, neither one's outcome depends on the
@@ -360,15 +429,63 @@ export default function UpcomingEventsScreen() {
 
   const loading = !events && !calendarEvents && !error;
 
-  return (
-    <ScrollView
-      style={styles.screen}
-      contentContainerStyle={styles.content}
-      showsVerticalScrollIndicator={false}
-      refreshControl={
-        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#8a96a8" />
+  // P2 regression: a candidate/tracked calendar result set can run into
+  // the hundreds - eagerly rendering every card via a plain ScrollView
+  // (as this used to) mounts and lays out all of them up front, even the
+  // ones scrolled far out of view. FlatList only ever mounts what's near
+  // the viewport, mounting/unmounting cards as the list scrolls, however
+  // large `filtered` grows.
+  const renderRow = useCallback(
+    ({ item: row }: { item: UpcomingRow }) => {
+      const cardBody = (
+        <>
+          <View style={styles.rowBetween}>
+            <View style={styles.eventCardTitleBlock}>
+              <Text style={styles.company} numberOfLines={1}>
+                {row.companyName}
+              </Text>
+              <Text style={styles.symbol}>
+                {row.instrument} · {row.market}
+              </Text>
+            </View>
+            <Text style={styles.dateText}>{row.scheduledDate}</Text>
+          </View>
+          {row.status === 'tracked' ? (
+            <View style={styles.trackedBadge}>
+              <Text style={styles.trackedBadgeText}>Seurannassa</Text>
+            </View>
+          ) : (
+            <Pressable
+              style={styles.trackButton}
+              disabled={trackingIds.has(row.calendarEventId ?? '')}
+              onPress={() => row.calendarEventId && void onTrack(row.calendarEventId)}
+            >
+              <Text style={styles.trackButtonText}>
+                {trackingIds.has(row.calendarEventId ?? '') ? 'Lisätään…' : 'Lisää seurantaan'}
+              </Text>
+            </Pressable>
+          )}
+        </>
+      );
+
+      if (row.kind === 'expectation' && row.eventId) {
+        return (
+          <Link
+            href={{ pathname: '/events/[eventId]', params: { eventId: row.eventId } }}
+            asChild
+          >
+            <Pressable style={styles.eventCard}>{cardBody}</Pressable>
+          </Link>
+        );
       }
-    >
+
+      return <View style={styles.eventCard}>{cardBody}</View>;
+    },
+    [onTrack, trackingIds],
+  );
+
+  const listHeader = (
+    <>
       <BackButton label="Etusivulle" />
 
       <Text style={styles.title}>Kaikki tulevat julkaisut</Text>
@@ -427,58 +544,22 @@ export default function UpcomingEventsScreen() {
           <Text style={styles.emptyText}>Ei julkaisuja valituilla suodattimilla.</Text>
         </View>
       ) : null}
+    </>
+  );
 
-      {filtered.map((row) => {
-        const cardBody = (
-          <>
-            <View style={styles.rowBetween}>
-              <View style={styles.eventCardTitleBlock}>
-                <Text style={styles.company} numberOfLines={1}>
-                  {row.companyName}
-                </Text>
-                <Text style={styles.symbol}>
-                  {row.instrument} · {row.market}
-                </Text>
-              </View>
-              <Text style={styles.dateText}>{row.scheduledDate}</Text>
-            </View>
-            {row.status === 'tracked' ? (
-              <View style={styles.trackedBadge}>
-                <Text style={styles.trackedBadgeText}>Seurannassa</Text>
-              </View>
-            ) : (
-              <Pressable
-                style={styles.trackButton}
-                disabled={trackingIds.has(row.calendarEventId ?? '')}
-                onPress={() => row.calendarEventId && void onTrack(row.calendarEventId)}
-              >
-                <Text style={styles.trackButtonText}>
-                  {trackingIds.has(row.calendarEventId ?? '') ? 'Lisätään…' : 'Lisää seurantaan'}
-                </Text>
-              </Pressable>
-            )}
-          </>
-        );
-
-        if (row.kind === 'expectation' && row.eventId) {
-          return (
-            <Link
-              key={row.key}
-              href={{ pathname: '/events/[eventId]', params: { eventId: row.eventId } }}
-              asChild
-            >
-              <Pressable style={styles.eventCard}>{cardBody}</Pressable>
-            </Link>
-          );
-        }
-
-        return (
-          <View key={row.key} style={styles.eventCard}>
-            {cardBody}
-          </View>
-        );
-      })}
-    </ScrollView>
+  return (
+    <FlatList
+      style={styles.screen}
+      contentContainerStyle={styles.content}
+      showsVerticalScrollIndicator={false}
+      refreshControl={
+        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#8a96a8" />
+      }
+      data={filtered}
+      keyExtractor={(row) => row.key}
+      renderItem={renderRow}
+      ListHeaderComponent={listHeader}
+    />
   );
 }
 
