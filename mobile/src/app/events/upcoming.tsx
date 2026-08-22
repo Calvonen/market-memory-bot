@@ -131,7 +131,27 @@ export function mergeUpcomingRows(
       calendarEventId: event.calendar_event_id,
     }));
 
-  return [...expectationRows, ...calendarRows];
+  // Deterministic order: upcoming (today or later) first, soonest first;
+  // history after, most recently released first - mirroring the backend's
+  // own list_upcoming() ordering
+  // (SupabaseEventExpectationRepository._list_upcoming_sort_key). Sorted
+  // here, on the combined array, not left as "expectations then calendar
+  // rows" concatenation order: /api/v1/events deliberately returns every
+  // historical expectation, so without this sort every upcoming calendar
+  // candidate would render below the *entire* accumulated history.
+  // Candidate/tracked origin never decides order - only scheduled_date
+  // does.
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+
+  return [...expectationRows, ...calendarRows].sort((a, b) => {
+    const aTime = new Date(`${a.scheduledDate}T12:00:00`).getTime();
+    const bTime = new Date(`${b.scheduledDate}T12:00:00`).getTime();
+    const aPast = Number.isNaN(aTime) || aTime < startOfToday;
+    const bPast = Number.isNaN(bTime) || bTime < startOfToday;
+    if (aPast !== bPast) return aPast ? 1 : -1;
+    return aPast ? bTime - aTime : aTime - bTime;
+  });
 }
 
 export default function UpcomingEventsScreen() {
@@ -145,14 +165,25 @@ export default function UpcomingEventsScreen() {
   const [search, setSearch] = useState('');
   const [market, setMarket] = useState<string>('Kaikki');
   const [rangeDays, setRangeDays] = useState<number | null>(null);
-  const latestLoadId = useRef(0);
+  // Separate generation counters for the two independent sources - never a
+  // single shared one. A track mutation only ever needs to invalidate a
+  // stale in-flight *calendar* response (see onTrack() below); it must
+  // never also invalidate an unrelated, still-pending getEvents() response,
+  // or that response would be discarded on arrival and leave `events`
+  // stuck null until another refresh.
+  const latestEventsLoadId = useRef(0);
+  const latestCalendarLoadId = useRef(0);
 
   const load = useCallback(() => {
     // Guard against overlapping load() calls (e.g. pull-to-refresh fired
     // again while the first requests are still pending): an older response
     // resolving after a newer one must never replace the already refreshed
-    // lists, or set an obsolete error over a successful refresh.
-    const loadId = ++latestLoadId.current;
+    // lists, or set an obsolete error over a successful refresh. Both
+    // generations are bumped together here, so two overlapping load()
+    // calls still invalidate each other's responses on both sources, same
+    // as before this split.
+    const eventsLoadId = ++latestEventsLoadId.current;
+    const calendarLoadId = ++latestCalendarLoadId.current;
     setError(null);
 
     // Both requests are started here, before either is awaited - a
@@ -166,21 +197,21 @@ export default function UpcomingEventsScreen() {
     // either source has data/an error) hostage, and vice versa.
     const eventsPromise = getEvents()
       .then((list) => {
-        if (loadId !== latestLoadId.current) return;
+        if (eventsLoadId !== latestEventsLoadId.current) return;
         setEvents(list);
       })
       .catch((err) => {
-        if (loadId !== latestLoadId.current) return;
+        if (eventsLoadId !== latestEventsLoadId.current) return;
         setError(err instanceof Error ? err.message : 'Tuntematon virhe');
       });
 
     const calendarPromise = getUpcomingCalendarEvents()
       .then((list) => {
-        if (loadId !== latestLoadId.current) return;
+        if (calendarLoadId !== latestCalendarLoadId.current) return;
         setCalendarEvents(list);
       })
       .catch(() => {
-        if (loadId !== latestLoadId.current) return;
+        if (calendarLoadId !== latestCalendarLoadId.current) return;
         setCalendarEvents([]);
       });
 
@@ -217,16 +248,19 @@ export default function UpcomingEventsScreen() {
       setCalendarEvents((prev) =>
         (prev ?? []).map((event) => (event.calendar_event_id === calendarEventId ? updated : event)),
       );
-      // Invalidates any load() still in flight (e.g. a pull-to-refresh GET
-      // started before this track request resolved): that GET's captured
-      // loadId can never match latestLoadId.current again, so its
-      // eventual setCalendarEvents(list) - built from a snapshot taken
-      // before this track mutation happened - is rejected by the same
-      // staleness guard load() already uses, instead of silently
-      // reverting this row back to 'candidate'. A load() started *after*
-      // this point captures a fresh loadId from the bumped counter and is
-      // unaffected.
-      ++latestLoadId.current;
+      // Invalidates only a calendar response still in flight (e.g. a
+      // pull-to-refresh GET started before this track request resolved):
+      // that GET's captured calendarLoadId can never match
+      // latestCalendarLoadId.current again, so its eventual
+      // setCalendarEvents(list) - built from a snapshot taken before this
+      // track mutation happened - is rejected by the same staleness guard
+      // load() already uses, instead of silently reverting this row back
+      // to 'candidate'. Deliberately never bumps latestEventsLoadId - an
+      // independent, still-pending getEvents() response for the unrelated
+      // expectation list must still apply normally when it arrives. A
+      // load() started *after* this point captures a fresh
+      // calendarLoadId from the bumped counter and is unaffected.
+      ++latestCalendarLoadId.current;
     } catch (err) {
       setTrackError(err instanceof Error ? err.message : 'Seurannan aloitus epäonnistui');
     } finally {

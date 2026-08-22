@@ -436,16 +436,24 @@ class MobileSourceTests(unittest.TestCase):
         load_end = self.upcoming_source.index("\n  }, []);", load_start)
         load_body = self.upcoming_source[load_start:load_end]
 
-        self.assertIn("const loadId = ++latestLoadId.current;", load_body)
+        # Separate generation counters (P2 regression: a track mutation
+        # must only ever invalidate the calendar generation - see below) -
+        # both still bumped together by load() itself, so two overlapping
+        # load() calls still invalidate each other's responses on both
+        # sources.
+        self.assertIn("const eventsLoadId = ++latestEventsLoadId.current;", load_body)
+        self.assertIn("const calendarLoadId = ++latestCalendarLoadId.current;", load_body)
         self.assertIn(
-            "if (loadId !== latestLoadId.current) return;\n        setEvents(list);", load_body
-        )
-        self.assertIn(
-            "if (loadId !== latestLoadId.current) return;\n        setError(err instanceof Error ? err.message : 'Tuntematon virhe');",
+            "if (eventsLoadId !== latestEventsLoadId.current) return;\n        setEvents(list);",
             load_body,
         )
         self.assertIn(
-            "if (loadId !== latestLoadId.current) return;\n        setCalendarEvents(list);", load_body
+            "if (eventsLoadId !== latestEventsLoadId.current) return;\n        setError(err instanceof Error ? err.message : 'Tuntematon virhe');",
+            load_body,
+        )
+        self.assertIn(
+            "if (calendarLoadId !== latestCalendarLoadId.current) return;\n        setCalendarEvents(list);",
+            load_body,
         )
 
     def test_upcoming_screen_starts_both_requests_before_awaiting_either(self) -> None:
@@ -495,7 +503,8 @@ class MobileSourceTests(unittest.TestCase):
         load_body = self.upcoming_source[body_start:load_end]
 
         script = f"""
-let latestLoadId = {{ current: 0 }};
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
 const calls = [];
 function setEvents(v) {{ calls.push(['setEvents', v]); }}
 function setError(v) {{ calls.push(['setError', v]); }}
@@ -550,7 +559,8 @@ setTimeout(() => {{ console.log(JSON.stringify(calls)); }}, 50);
         load_body = self.upcoming_source[body_start:load_end]
 
         script = f"""
-let latestLoadId = {{ current: 0 }};
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
 const calls = [];
 function setEvents(v) {{ calls.push(['setEvents', v]); }}
 function setError(v) {{ calls.push(['setError', v]); }}
@@ -625,7 +635,8 @@ setTimeout(() => {{ console.log(JSON.stringify(calls)); }}, 50);
         load_body = self.upcoming_source[body_start:load_end]
 
         script = f"""
-let latestLoadId = {{ current: 0 }};
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
 function setEvents() {{}}
 function setError() {{}}
 function setCalendarEvents() {{}}
@@ -851,6 +862,123 @@ console.log(JSON.stringify(rows.map((r) => ({{
         self.assertEqual(len(afagr_rows), 2)
         self.assertEqual({r["kind"] for r in afagr_rows}, {"expectation", "calendar"})
 
+    # -- deterministic merged order (P2 regression): upcoming before history
+
+    def _run_merge_upcoming_rows_dynamic(self, body_js: str) -> list[dict]:
+        # Same technique as _run_merge_upcoming_rows(), but the caller
+        # builds `events`/`calendarEvents` itself using a `daysFromNow(n)`
+        # helper (matching the date-range-filter test below), so dates are
+        # always relative to node's own `new Date()` at run time - required
+        # here because mergeUpcomingRows()'s sort itself compares against
+        # "today".
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        market_fn_js = self._extract_upcoming_function("function marketForInstrument(")
+        merge_fn_js = self._extract_upcoming_function("export function mergeUpcomingRows(").replace(
+            "export function ", "function "
+        )
+
+        script = f"""
+{market_fn_js}
+{merge_fn_js}
+
+function fmt(d) {{
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${{y}}-${{m}}-${{day}}`;
+}}
+function daysFromNow(n) {{
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return fmt(d);
+}}
+
+{body_js}
+
+const rows = mergeUpcomingRows(events, calendarEvents);
+console.log(JSON.stringify(rows.map((r) => ({{ key: r.key, instrument: r.instrument, scheduledDate: r.scheduledDate, kind: r.kind }}))));
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_sort_places_a_future_candidate_before_historical_expectations(self) -> None:
+        # A historical same-ticker (or any) expectation must never bury a
+        # future calendar candidate below it - concatenation order
+        # ("expectations then calendar rows") used to do exactly that.
+        rows = self._run_merge_upcoming_rows_dynamic(
+            """
+const events = [
+  { event_id: 'hist-1', instrument: 'AAPL', event_name: 'Old Apple release', scheduled_date: daysFromNow(-400) },
+];
+const calendarEvents = [
+  { calendar_event_id: 'cal-1', company_name: 'Msft Corp', instrument: 'MSFT', market: 'NASDAQ', event_type: 'earnings', scheduled_date: daysFromNow(10), source: 'finnhub', status: 'candidate', created_at: '', updated_at: '' },
+];
+"""
+        )
+
+        self.assertEqual([r["key"] for r in rows], ["calendar:cal-1", "expectation:hist-1"])
+
+    def test_sort_orders_multiple_future_events_chronologically(self) -> None:
+        # Soonest first, regardless of whether a row originated from the
+        # expectation list or the calendar candidates.
+        rows = self._run_merge_upcoming_rows_dynamic(
+            """
+const events = [
+  { event_id: 'exp-far', instrument: 'HAS.L', event_name: 'Hays far', scheduled_date: daysFromNow(60) },
+];
+const calendarEvents = [
+  { calendar_event_id: 'cal-near', company_name: 'Near Co', instrument: 'NEAR', market: 'NASDAQ', event_type: 'earnings', scheduled_date: daysFromNow(3), source: 'finnhub', status: 'candidate', created_at: '', updated_at: '' },
+  { calendar_event_id: 'cal-mid', company_name: 'Mid Co', instrument: 'MID', market: 'NASDAQ', event_type: 'earnings', scheduled_date: daysFromNow(20), source: 'finnhub', status: 'candidate', created_at: '', updated_at: '' },
+];
+"""
+        )
+
+        self.assertEqual(
+            [r["key"] for r in rows], ["calendar:cal-near", "calendar:cal-mid", "expectation:exp-far"]
+        )
+
+    def test_sort_places_past_events_after_future_events_most_recent_first(self) -> None:
+        rows = self._run_merge_upcoming_rows_dynamic(
+            """
+const events = [
+  { event_id: 'exp-old', instrument: 'HAS.L', event_name: 'Hays old', scheduled_date: daysFromNow(-100) },
+  { event_id: 'exp-recent-past', instrument: 'AAPL', event_name: 'Apple recent past', scheduled_date: daysFromNow(-5) },
+];
+const calendarEvents = [
+  { calendar_event_id: 'cal-future-1', company_name: 'Future One', instrument: 'FUT1', market: 'NASDAQ', event_type: 'earnings', scheduled_date: daysFromNow(2), source: 'finnhub', status: 'candidate', created_at: '', updated_at: '' },
+  { calendar_event_id: 'cal-future-2', company_name: 'Future Two', instrument: 'FUT2', market: 'NASDAQ', event_type: 'earnings', scheduled_date: daysFromNow(15), source: 'finnhub', status: 'candidate', created_at: '', updated_at: '' },
+];
+"""
+        )
+
+        keys = [r["key"] for r in rows]
+        # Both future rows come first (soonest first), then both past rows,
+        # most recently released first - never interleaved, and never
+        # decided by candidate/tracked/expectation origin.
+        self.assertEqual(
+            keys,
+            [
+                "calendar:cal-future-1",
+                "calendar:cal-future-2",
+                "expectation:exp-recent-past",
+                "expectation:exp-old",
+            ],
+        )
+
     def test_date_range_filter_excludes_past_events_but_kaikki_keeps_history(self) -> None:
         # Behavioral proof for the date-range filter: extract the real
         # filtered = useMemo(...) predicate from upcoming.tsx, strip TS
@@ -970,12 +1098,17 @@ console.log(JSON.stringify({{ sevenDayIds, allIds }}));
         set_events_index = on_track_body.index(
             "event.calendar_event_id === calendarEventId ? updated : event"
         )
-        bump_index = on_track_body.index("++latestLoadId.current;")
+        bump_index = on_track_body.index("++latestCalendarLoadId.current;")
         catch_index = on_track_body.index("} catch (err) {")
         # The bump must happen in the success path, after the local state
         # is updated - not in catch/finally, and not before the update.
         self.assertLess(set_events_index, bump_index)
         self.assertLess(bump_index, catch_index)
+        # And it must only ever be the calendar generation - never the
+        # unrelated expectation-list generation (P2 regression: a track
+        # mutation must not invalidate an independent in-flight
+        # getEvents() response).
+        self.assertNotIn("latestEventsLoadId.current", on_track_body)
 
     def test_track_success_wins_over_a_stale_in_flight_refresh_response(self) -> None:
         # Behavioral proof: a pull-to-refresh GET is already in flight when
@@ -1002,7 +1135,8 @@ console.log(JSON.stringify({{ sevenDayIds, allIds }}));
         on_track_body = self.upcoming_source[on_track_body_start:on_track_end]
 
         script = f"""
-let latestLoadId = {{ current: 0 }};
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
 let calendarEventsState = [
   {{ calendar_event_id: 'cal-1', instrument: 'AAPL', status: 'candidate' }},
 ];
@@ -1065,6 +1199,100 @@ main();
         final_state = json.loads(result.stdout)
         cal1 = next(e for e in final_state if e["calendar_event_id"] == "cal-1")
         self.assertEqual(cal1["status"], "tracked")
+
+    def test_track_never_invalidates_an_independent_pending_events_request(self) -> None:
+        # Symmetric P2 regression: the calendar GET settles first, the
+        # events GET is still pending when the user tracks a candidate -
+        # the track's generation bump must only ever affect the calendar
+        # side. When the events GET finally resolves, it must still apply
+        # normally: `events` must never end up stuck null just because an
+        # unrelated calendar mutation happened while it was in flight.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        load_start = self.upcoming_source.index("const load = useCallback(() => {")
+        load_body_start = load_start + len("const load = useCallback(() => {")
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[load_body_start:load_end]
+
+        on_track_start = self.upcoming_source.index(
+            "const onTrack = useCallback(async (calendarEventId: string) => {"
+        )
+        on_track_body_start = on_track_start + len(
+            "const onTrack = useCallback(async (calendarEventId: string) => {"
+        )
+        on_track_end = self.upcoming_source.index("\n  }, []);", on_track_start)
+        on_track_body = self.upcoming_source[on_track_body_start:on_track_end]
+
+        script = f"""
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
+let eventsState = null;
+function setEvents(v) {{ eventsState = v; }}
+function setError() {{}}
+function setCalendarEvents() {{}}
+function setTrackError() {{}}
+function setTrackingIds() {{}}
+
+let resolvePendingEvents;
+const pendingEventsPromise = new Promise((resolve) => {{ resolvePendingEvents = resolve; }});
+
+// 1) The calendar GET settles immediately.
+function getEvents() {{ return pendingEventsPromise; }}
+function getUpcomingCalendarEvents() {{
+  return Promise.resolve([
+    {{ calendar_event_id: 'cal-1', instrument: 'AAPL', status: 'candidate' }},
+  ]);
+}}
+function trackCalendarEvent(id) {{
+  return Promise.resolve({{ calendar_event_id: id, instrument: 'AAPL', status: 'tracked' }});
+}}
+
+function load() {{
+{load_body}
+}}
+
+async function onTrack(calendarEventId) {{
+{on_track_body}
+}}
+
+async function main() {{
+  // 1) Refresh starts - calendar GET settles right away, events GET is
+  // deliberately left pending.
+  load();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  // 2) The user tracks a candidate while the events GET is still pending.
+  await onTrack('cal-1');
+
+  // 3) The events GET finally resolves.
+  resolvePendingEvents([
+    {{ event_id: 'hays-fy2026-results', instrument: 'HAS.L', event_name: 'Hays plc FY2026 results' }},
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  console.log(JSON.stringify(eventsState));
+}}
+
+main();
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events_state = json.loads(result.stdout)
+        self.assertIsNotNone(events_state)
+        self.assertEqual(len(events_state), 1)
+        self.assertEqual(events_state[0]["event_id"], "hays-fy2026-results")
 
     # -- security boundary: admin key never present in the mobile app -------
 
