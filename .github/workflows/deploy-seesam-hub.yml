@@ -103,7 +103,22 @@ jobs:
             sleep 1
           done
           cat /tmp/marketai-health.json
-          /usr/bin/systemctl is-active --quiet marketai-hays-release.service
+
+          # The Hays worker intentionally exits 0 once the event has reached a
+          # terminal paper state. In that case systemd reports the unit as
+          # inactive and `is-active --quiet` returns exit code 3 even though
+          # the worker completed successfully. Accept either a still-active
+          # monitor or a clean terminal exit; fail closed for actual unit
+          # failures/crashes and print diagnostics.
+          if ! /usr/bin/systemctl is-active --quiet marketai-hays-release.service; then
+            HAYS_RESULT="$(/usr/bin/systemctl show marketai-hays-release.service --property=Result --value)"
+            if [ "$HAYS_RESULT" != "success" ]; then
+              echo "::error::marketai-hays-release.service is not active and last result is '${HAYS_RESULT:-<empty>}'"
+              sudo /usr/bin/systemctl status marketai-hays-release.service --no-pager -l || true
+              exit 1
+            fi
+            echo "marketai-hays-release.service exited cleanly after terminal event state; continuing deploy"
+          fi
 
           STATE_DIR="/home/marko/marketai-deploy-state"
           mkdir -p "$STATE_DIR"
