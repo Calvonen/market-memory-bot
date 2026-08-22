@@ -1,5 +1,5 @@
 import { Link, router } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -21,23 +21,66 @@ import {
 
 type EventStatus = { run: PaperRun | null; statusError: boolean };
 
+// Mirrors MAX_CALENDAR_LOOKAHEAD_DAYS in trading_system/api.py - the widest
+// window the backend accepts, and what an omitted from_date/to_date used to
+// resolve to server-side. Sending it explicitly (below) keeps that window
+// anchored to the device's own local day instead of the backend host's.
+const CALENDAR_WINDOW_DAYS = 30;
+
+// Same principle as events/upcoming.tsx's deviceLocalDateWindow(): "today"
+// must come from the device's own local calendar day (getFullYear/
+// getMonth/getDate), never toISOString() (UTC) - a device whose local day
+// has already rolled over relative to UTC would otherwise get a window
+// computed against the wrong day.
+function formatLocalDate(date: Date): string {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function deviceLocalCalendarWindow(): { fromDate: string; toDate: string } {
+  const now = new Date();
+  const to = new Date(now.getFullYear(), now.getMonth(), now.getDate() + CALENDAR_WINDOW_DAYS);
+  return { fromDate: formatLocalDate(now), toDate: formatLocalDate(to) };
+}
+
 export default function HomeScreen() {
   const [events, setEvents] = useState<EventExpectation[] | null>(null);
   const [statuses, setStatuses] = useState<Record<string, EventStatus>>({});
-  // Tracked calendar_events rows (status = 'tracked'), shown alongside the
-  // EventExpectation cards above in the same Seurannassa section - a
+  // Raw tracked-or-not calendar_events rows for the current window - a
   // separate store from EventExpectation, see
-  // trading_system/calendar_repository.py. Fetched independently so a
-  // failure here never blocks the EventExpectation cards.
-  const [trackedCalendarEvents, setTrackedCalendarEvents] = useState<CalendarEvent[] | null>(null);
+  // trading_system/calendar_repository.py. Filtered/deduped for display via
+  // the trackedCalendarEvents memo below, not here, since that filtering
+  // depends on `events` too and the two fetches now resolve independently
+  // of each other (see loadEvents()).
+  const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const latestLoadId = useRef(0);
 
   const loadEvents = useCallback(async () => {
     const loadId = ++latestLoadId.current;
+    setError(null);
+
+    // Started here, before getEvents() is awaited below - a slow or
+    // failing getEvents() must never delay getUpcomingCalendarEvents() from
+    // even starting, and vice versa. Same principle as events/upcoming.tsx's
+    // load(), which fires both requests before awaiting either.
+    const { fromDate, toDate } = deviceLocalCalendarWindow();
+    const calendarPromise = getUpcomingCalendarEvents(fromDate, toDate)
+      .then((list) => {
+        if (loadId !== latestLoadId.current) return;
+        setCalendarEvents(list);
+      })
+      .catch(() => {
+        if (loadId !== latestLoadId.current) return;
+        // Leave the previous list (or null) in place rather than clearing
+        // it to [] - a failed fetch must not render identically to "no
+        // tracked calendar events".
+      });
+
     try {
-      setError(null);
       const list = await getEvents();
       if (loadId !== latestLoadId.current) return;
       setEvents(list);
@@ -70,21 +113,28 @@ export default function HomeScreen() {
       setError(err instanceof Error ? err.message : 'Tuntematon virhe');
     }
 
-    // Independent of the EventExpectation fetch above (own try/catch, own
-    // loadId check) - a slow or failing calendar fetch must never hold up
-    // or clear the Hays/EventExpectation cards, and vice versa.
-    getUpcomingCalendarEvents()
-      .then((list) => {
-        if (loadId !== latestLoadId.current) return;
-        setTrackedCalendarEvents(list.filter((event) => event.status === 'tracked'));
-      })
-      .catch(() => {
-        if (loadId !== latestLoadId.current) return;
-        // Leave the previous list (or null) in place rather than clearing
-        // it to [] - a failed fetch must not render identically to "no
-        // tracked calendar events".
-      });
+    await calendarPromise;
   }, []);
+
+  // Tracked calendar rows for display: status = 'tracked' only, and never
+  // an occurrence already tracked through the real trading system - same
+  // de-dupe as events/upcoming.tsx's mergeUpcomingRows(), keyed on
+  // instrument + scheduled_date and scoped to 'earnings' calendar rows only
+  // (EventExpectation has no explicit event_type of its own, so a
+  // non-earnings candidate for the same instrument/date is a different
+  // occurrence and must never be dropped by this).
+  const trackedCalendarEvents = useMemo(() => {
+    if (!calendarEvents) return null;
+    const trackedEarningsOccurrences = new Set(
+      (events ?? []).map((event) => `${event.instrument.toUpperCase()}|${event.scheduled_date}`),
+    );
+    return calendarEvents.filter((event) => {
+      if (event.status !== 'tracked') return false;
+      if (event.event_type !== 'earnings') return true;
+      const key = `${event.instrument.toUpperCase()}|${event.scheduled_date}`;
+      return !trackedEarningsOccurrences.has(key);
+    });
+  }, [calendarEvents, events]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
