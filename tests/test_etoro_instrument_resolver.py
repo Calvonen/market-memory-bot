@@ -161,6 +161,48 @@ class EtoroInstrumentResolverTests(unittest.TestCase):
 
         self.assertIsNone(resolved)
 
+    def test_exact_symbol_match_fails_closed_when_company_name_conflicts(self) -> None:
+        stub = _SearchStub(
+            {
+                "AAPL": (EtoroInstrumentCandidate(1001, "AAPL", "Apple Inc", "NASDAQ"),),
+                "Totally Different Corp": (),
+            }
+        )
+        resolver = EtoroInstrumentResolver(stub)
+
+        resolved = resolver.resolve(InstrumentResolutionRequest("AAPL", "Totally Different Corp", "US"))
+
+        self.assertIsNone(resolved)
+
+    def test_base_symbol_match_fails_closed_when_exchange_suffix_conflicts(self) -> None:
+        stub = _SearchStub(
+            {
+                "ABC.L": (EtoroInstrumentCandidate(5, "ABC.DE", "ABC AG", "Frankfurt Stock Exchange"),),
+            }
+        )
+        resolver = EtoroInstrumentResolver(stub)
+
+        resolved = resolver.resolve(InstrumentResolutionRequest("ABC.L", "", "UK"))
+
+        self.assertIsNone(resolved)
+
+    def test_base_symbol_match_resolves_when_company_and_market_agree(self) -> None:
+        stub = _SearchStub(
+            {
+                "RMV.L": (
+                    EtoroInstrumentCandidate(777, "RMV", "Rightmove Group PLC", "London Stock Exchange"),
+                ),
+                "Rightmove Group PLC": (),
+            }
+        )
+        resolver = EtoroInstrumentResolver(stub)
+
+        resolved = resolver.resolve(InstrumentResolutionRequest("RMV.L", "Rightmove Group PLC", "UK"))
+
+        self.assertIsNotNone(resolved)
+        assert resolved is not None
+        self.assertEqual(resolved.instrument_id, 777)
+
 
 if __name__ == "__main__":
     unittest.main()
