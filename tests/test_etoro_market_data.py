@@ -241,6 +241,39 @@ class EtoroMarketDataProviderAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempts, 2)
         self.assertEqual(sleeps, [0.25])
 
+    async def test_stream_buffers_heartbeat_and_out_of_order_snapshot_before_subscribe_ack(self) -> None:
+        websocket = _FakeWebSocket([])
+
+        def connect(_url):
+            return _FakeConnection(websocket)
+
+        provider = EtoroMarketDataProvider(
+            api_key="api-secret",
+            user_key="user-secret",
+            websocket_connect=connect,
+        )
+
+        original_send = websocket.send
+
+        async def send_and_queue_ack(raw: str) -> None:
+            await original_send(raw)
+            request = websocket.sent[-1]
+            if request["operation"] == "Authenticate":
+                websocket.responses.append(_ack(request["operation"], request["id"]))
+            else:
+                # Server sends a heartbeat and the snapshot before the Subscribe ack.
+                websocket.responses.append(b"\x00")
+                websocket.responses.append(_market_message())
+                websocket.responses.append(_ack(request["operation"], request["id"]))
+
+        websocket.send = send_and_queue_ack
+
+        updates = [update async for update in provider.stream_instrument(2619, reconnect=False)]
+
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0].instrument_id, 2619)
+        self.assertEqual([message["operation"] for message in websocket.sent], ["Authenticate", "Subscribe"])
+
 
 if __name__ == "__main__":
     unittest.main()
