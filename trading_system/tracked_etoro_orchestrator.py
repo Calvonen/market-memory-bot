@@ -11,12 +11,15 @@ from trading_system.tracked_etoro_live import (
 )
 from trading_system.tracked_instrument_etoro import TrackedEtoroInstrument
 
+DEFAULT_QUEUE_MAXSIZE = 32
+
 
 async def stream_tracked_etoro_instruments(
     tracked_instruments: Iterable[TrackedEtoroInstrument],
     provider: EtoroInstrumentStream,
     *,
     reconnect: bool = True,
+    queue_maxsize: int = DEFAULT_QUEUE_MAXSIZE,
 ) -> AsyncIterator[TrackedEtoroMarketUpdate]:
     """Merge live updates for multiple resolved tracked instruments.
 
@@ -29,6 +32,15 @@ async def stream_tracked_etoro_instruments(
     Duplicate tracked identities or duplicate resolved eToro IDs fail closed
     before any stream is started. If any worker fails, the exception is
     propagated and all sibling workers are cancelled.
+
+    The merge queue is bounded by ``queue_maxsize`` so a slow consumer
+    applies backpressure to producers instead of letting unread updates
+    accumulate in memory without limit. Each worker's own final "done" (and
+    any "error") signal is still delivered even against a full queue: once
+    the merge loop stops draining the queue it cancels every worker, and
+    ``asyncio.Queue.put`` is cancellation-safe, so a worker blocked on a
+    full queue is unblocked by that cancellation rather than left waiting
+    forever.
     """
     instruments = tuple(tracked_instruments)
     if not instruments:
@@ -42,7 +54,7 @@ async def stream_tracked_etoro_instruments(
     if len(set(etoro_ids)) != len(etoro_ids):
         raise ValueError("duplicate etoro_instrument_id")
 
-    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=queue_maxsize)
 
     async def worker(item: TrackedEtoroInstrument) -> None:
         try:
