@@ -95,6 +95,11 @@ calendar product eventually might:
   (30) - a larger `--lookahead-days`/`MARKETAI_CALENDAR_LOOKAHEAD_DAYS` is
   clamped, not honored, so a misconfigured environment can never make the
   worker populate rows further out than the API will ever serve.
+- The worker ingests `INGESTION_LOOKAHEAD_PADDING_DAYS` (1) further than
+  that - `host_today -> host_today + 31` for the default/max case - purely
+  an internal ingestion-window detail to absorb device/host calendar-day
+  skew (see below); the UI's chips and the API's own 30-day cap are both
+  unaffected.
 
 The mobile UI computes its own date-only window from the *device's* local
 clock - `deviceLocalDateWindow()` in `upcoming.tsx`, built on the same
@@ -109,6 +114,17 @@ the API's own `MAX_CALENDAR_LOOKAHEAD_DAYS` cap is still enforced
 independently on every request regardless of what the client sends, so a
 client bug asking for a wider window is still rejected outright, not
 silently trusted or clamped.
+
+A device whose local calendar day is *ahead* of this host's can still
+legitimately ask for a day the API would otherwise have never had data
+for: its widest (`30 pv`) request is `device_today -> device_today + 30`,
+which in host-local terms can be `host_today + 1 -> host_today + 31`. The
+worker's own `INGESTION_LOOKAHEAD_PADDING_DAYS` pad (see "Range MVP"
+above) is what keeps that day already ingested by the time such a request
+arrives - the API's own cap still rejects any single request spanning more
+than 30 days, so this only ever helps a legitimately-windowed request find
+data that's already there, never widens what a client can ask for in one
+call.
 
 ## API
 

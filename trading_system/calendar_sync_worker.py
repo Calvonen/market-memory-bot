@@ -16,6 +16,22 @@ from trading_system.supabase_calendar_repository import SupabaseCalendarEventRep
 MAX_LOOKAHEAD_DAYS = 30
 DEFAULT_LOOKAHEAD_DAYS = 30
 
+# Device/host calendar-day skew guard (P2 regression): the mobile UI
+# derives its own device-local [today, today+rangeDays] window
+# (deviceLocalDateWindow() in mobile/src/app/events/upcoming.tsx) and
+# GET /api/v1/calendar/upcoming enforces its own MAX_CALENDAR_LOOKAHEAD_
+# DAYS span independently - but this worker's "today" is always *this
+# host's*, not any given device's. A device whose local calendar day is
+# ahead of the host's can legitimately request through
+# device_today + 30, which in host-local terms is host_today + 31 - one
+# day beyond what MAX_LOOKAHEAD_DAYS alone would ever ingest. A small,
+# explicit forward-only pad absorbs that skew. This is purely an
+# internal ingestion-window detail: the UI's 7/30 pv chips and the API's
+# own 30-day cap are both unchanged - a request for more than
+# MAX_CALENDAR_LOOKAHEAD_DAYS is still rejected outright, never served
+# from this extra ingested slack.
+INGESTION_LOOKAHEAD_PADDING_DAYS = 1
+
 
 def run_sync(
     *,
@@ -63,7 +79,7 @@ def main() -> None:
         provider=provider,
         repository=repository,
         from_date=today,
-        to_date=today + timedelta(days=lookahead_days),
+        to_date=today + timedelta(days=lookahead_days + INGESTION_LOOKAHEAD_PADDING_DAYS),
     )
 
     print(

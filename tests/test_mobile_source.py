@@ -437,11 +437,9 @@ class MobileSourceTests(unittest.TestCase):
         load_end = self.upcoming_source.index("\n  }, []);", load_start)
         load_body = self.upcoming_source[load_start:load_end]
 
-        # Separate generation counters (P2 regression: a track mutation
-        # must only ever invalidate the calendar generation - see below) -
-        # both still bumped together by load() itself, so two overlapping
-        # load() calls still invalidate each other's responses on both
-        # sources.
+        # Separate generation counters - both still bumped together by
+        # load() itself, so two overlapping load() calls still invalidate
+        # each other's responses on both sources.
         self.assertIn("const eventsLoadId = ++latestEventsLoadId.current;", load_body)
         self.assertIn("const calendarLoadId = ++latestCalendarLoadId.current;", load_body)
         self.assertIn(
@@ -452,8 +450,16 @@ class MobileSourceTests(unittest.TestCase):
             "if (eventsLoadId !== latestEventsLoadId.current) return;\n        setError(err instanceof Error ? err.message : 'Tuntematon virhe');",
             load_body,
         )
+        # P2 regression: a track mutation must only ever protect its own
+        # row (see applyLocalCalendarOverrides()), never invalidate the
+        # whole calendar generation - so this handler still applies every
+        # response it receives (once the loadId guard passes), merged
+        # through applyLocalCalendarOverrides(), never a bare setCalendarEvents(list).
         self.assertIn(
-            "if (calendarLoadId !== latestCalendarLoadId.current) return;\n        setCalendarEvents(list);",
+            "if (calendarLoadId !== latestCalendarLoadId.current) return;\n"
+            "        setCalendarEvents(\n"
+            "          applyLocalCalendarOverrides(list, localCalendarOverrides.current, calendarVersionAtStart),\n"
+            "        );",
             load_body,
         )
 
@@ -514,6 +520,8 @@ class MobileSourceTests(unittest.TestCase):
 
 let latestEventsLoadId = {{ current: 0 }};
 let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
 const calls = [];
 function setEvents(v) {{ calls.push(['setEvents', v]); }}
 function setError(v) {{ calls.push(['setError', v]); }}
@@ -573,6 +581,8 @@ setTimeout(() => {{ console.log(JSON.stringify(calls)); }}, 50);
 
 let latestEventsLoadId = {{ current: 0 }};
 let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
 const calls = [];
 function setEvents(v) {{ calls.push(['setEvents', v]); }}
 function setError(v) {{ calls.push(['setError', v]); }}
@@ -652,6 +662,8 @@ setTimeout(() => {{ console.log(JSON.stringify(calls)); }}, 50);
 
 let latestEventsLoadId = {{ current: 0 }};
 let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
 function setEvents() {{}}
 function setError() {{}}
 function setCalendarEvents() {{}}
@@ -758,6 +770,7 @@ Promise.race([
         if strip_types:
             source = re.sub(r":\s*(EventExpectation|CalendarEvent|UpcomingRow)\[\]", "", source)
             source = re.sub(r":\s*DeviceLocalDateWindow\b", "", source)
+            source = re.sub(r":\s*Map<string,\s*CalendarOverride>", "", source)
             source = re.sub(r":\s*Date\b", "", source)
             source = re.sub(r":\s*string\b", "", source)
             source = re.sub(r":\s*number\s*\|\s*null\b", "", source)
@@ -773,7 +786,10 @@ Promise.race([
         # instead of the device's local date) - any extracted-and-node-
         # executed script that calls any of them must carry the full set
         # along, including the MS_PER_DAY constant dateOnlyOrdinal()
-        # divides by.
+        # divides by. Also carries applyLocalCalendarOverrides() (P2
+        # regression: a track mutation must protect only its own row, not
+        # discard an entire pending calendar response) since load()'s body
+        # calls it too.
         ms_per_day_start = self.upcoming_source.index("const MS_PER_DAY = ")
         ms_per_day_end = self.upcoming_source.index(";", ms_per_day_start) + 1
         ms_per_day_js = self.upcoming_source[ms_per_day_start:ms_per_day_end]
@@ -782,9 +798,13 @@ Promise.race([
         format_date_only_js = self._extract_upcoming_function("function formatDateOnly(")
         ordinal_to_date_only_js = self._extract_upcoming_function("function ordinalToDateOnly(")
         device_local_date_window_js = self._extract_upcoming_function("function deviceLocalDateWindow(")
+        apply_local_calendar_overrides_js = self._extract_upcoming_function(
+            "function applyLocalCalendarOverrides("
+        )
         return (
             f"{ms_per_day_js}\n{date_only_ordinal_js}\n{parse_date_only_ordinal_js}\n"
-            f"{format_date_only_js}\n{ordinal_to_date_only_js}\n{device_local_date_window_js}"
+            f"{format_date_only_js}\n{ordinal_to_date_only_js}\n{device_local_date_window_js}\n"
+            f"{apply_local_calendar_overrides_js}"
         )
 
     def _run_merge_upcoming_rows(self, events_js: str, calendar_js: str) -> list[dict]:
@@ -1235,6 +1255,8 @@ console.log(JSON.stringify({{ ...window, utcDay }}));
 
 let latestEventsLoadId = {{ current: 0 }};
 let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
 function setEvents() {{}}
 function setError() {{}}
 function setCalendarEvents() {{}}
@@ -1480,7 +1502,14 @@ console.log(JSON.stringify({{ nasdaqSeven, nasdaqThirty, suomiSeven, kaikkiSeven
 
     # -- track mutation must beat a stale in-flight refresh (P2 regression) -
 
-    def test_track_success_bumps_the_load_generation_after_updating_state(self) -> None:
+    def test_track_success_records_a_row_scoped_override_not_a_generation_bump(self) -> None:
+        # P2 regression: onTrack() used to bump ++latestCalendarLoadId.
+        # current - a blunt "invalidate the whole calendar generation"
+        # that discarded an entire still-pending, genuinely newer calendar
+        # response (e.g. a wider-range 30 pv request already in flight)
+        # just to protect the one tracked row. It must instead record a
+        # row-scoped override via localCalendarOverrides/mutationVersion -
+        # never touch latestCalendarLoadId at all.
         on_track_start = self.upcoming_source.index("const onTrack = useCallback(async (calendarEventId")
         on_track_end = self.upcoming_source.index("}, []);", on_track_start)
         on_track_body = self.upcoming_source[on_track_start:on_track_end]
@@ -1488,17 +1517,139 @@ console.log(JSON.stringify({{ nasdaqSeven, nasdaqThirty, suomiSeven, kaikkiSeven
         set_events_index = on_track_body.index(
             "event.calendar_event_id === calendarEventId ? updated : event"
         )
-        bump_index = on_track_body.index("++latestCalendarLoadId.current;")
+        version_index = on_track_body.index("const version = ++mutationVersion.current;")
+        override_index = on_track_body.index(
+            "localCalendarOverrides.current.set(calendarEventId, { event: updated, version });"
+        )
         catch_index = on_track_body.index("} catch (err) {")
-        # The bump must happen in the success path, after the local state
-        # is updated - not in catch/finally, and not before the update.
-        self.assertLess(set_events_index, bump_index)
-        self.assertLess(bump_index, catch_index)
-        # And it must only ever be the calendar generation - never the
-        # unrelated expectation-list generation (P2 regression: a track
-        # mutation must not invalidate an independent in-flight
-        # getEvents() response).
+        # The version/override must be recorded in the success path,
+        # before the local state update is applied - not in catch/finally.
+        self.assertLess(version_index, set_events_index)
+        self.assertLess(override_index, set_events_index)
+        self.assertLess(set_events_index, catch_index)
+
+        # Never touches either loadId generation counter directly - not
+        # the unrelated expectation-list generation (P2 regression: a
+        # track mutation must not invalidate an independent in-flight
+        # getEvents() response), and not the calendar generation either
+        # (this round's regression: that discarded an entire pending
+        # response, not just the tracked row).
         self.assertNotIn("latestEventsLoadId.current", on_track_body)
+        self.assertNotIn("latestCalendarLoadId.current", on_track_body)
+
+    def test_wider_range_switch_response_survives_a_track_mutation_mid_flight(self) -> None:
+        # The exact scenario from the P2 report: 7 pv data is showing, the
+        # user switches to 30 pv (a wider request starts and is still
+        # pending), then tracks a candidate visible in the old 7 pv data.
+        # The eventual 30 pv response must NOT be discarded wholesale -
+        # every other row it brings must still apply - while the tracked
+        # row must keep its tracked status rather than reverting to the
+        # response's own pre-track snapshot of it.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        load_start = self.upcoming_source.index(
+            "const load = useCallback((currentRangeDays: number) => {"
+        )
+        load_body_start = load_start + len(
+            "const load = useCallback((currentRangeDays: number) => {"
+        )
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[load_body_start:load_end]
+
+        on_track_start = self.upcoming_source.index(
+            "const onTrack = useCallback(async (calendarEventId: string) => {"
+        )
+        on_track_body_start = on_track_start + len(
+            "const onTrack = useCallback(async (calendarEventId: string) => {"
+        )
+        on_track_end = self.upcoming_source.index("\n  }, []);", on_track_start)
+        on_track_body = self.upcoming_source[on_track_body_start:on_track_end]
+
+        date_helpers_js = self._extract_date_ordinal_fns_js()
+        script = f"""
+{date_helpers_js}
+
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
+let calendarEventsState = [
+  {{ calendar_event_id: 'cal-1', instrument: 'AAPL', status: 'candidate' }},
+];
+function setCalendarEvents(updater) {{
+  calendarEventsState = typeof updater === 'function' ? updater(calendarEventsState) : updater;
+}}
+function setEvents() {{}}
+function setError() {{}}
+function setTrackError() {{}}
+function setTrackingIds() {{}}
+
+let resolveWiderRangeGet;
+const widerRangeGetPromise = new Promise((resolve) => {{ resolveWiderRangeGet = resolve; }});
+
+function getEvents() {{ return new Promise(() => {{}}); }}
+function getUpcomingCalendarEvents() {{ return widerRangeGetPromise; }}
+function trackCalendarEvent(id) {{
+  return Promise.resolve({{ calendar_event_id: id, instrument: 'AAPL', status: 'tracked' }});
+}}
+
+function load(currentRangeDays) {{
+{load_body}
+}}
+
+async function onTrack(calendarEventId) {{
+{on_track_body}
+}}
+
+async function main() {{
+  // 1) 7 pv data is showing (calendarEventsState above). The user
+  // switches to 30 pv - a wider request starts and is deliberately left
+  // pending until step 3.
+  load(30);
+
+  // 2) The user tracks 'cal-1' (visible in the old 7 pv data) while the
+  // 30 pv request is still in flight.
+  await onTrack('cal-1');
+
+  // 3) The 30 pv response finally resolves - it reflects a pre-track
+  // snapshot of cal-1 (still 'candidate'), plus a brand-new 'cal-2' row
+  // that only exists in the wider 30-day window and was never in the
+  // 7 pv data at all.
+  resolveWiderRangeGet([
+    {{ calendar_event_id: 'cal-1', instrument: 'AAPL', status: 'candidate' }},
+    {{ calendar_event_id: 'cal-2', instrument: 'MSFT', status: 'candidate' }},
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  console.log(JSON.stringify(calendarEventsState));
+}}
+
+main();
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        final_state = json.loads(result.stdout)
+        by_id = {e["calendar_event_id"]: e for e in final_state}
+
+        # The tracked row keeps its tracked status - not reverted to the
+        # response's stale pre-track snapshot.
+        self.assertEqual(by_id["cal-1"]["status"], "tracked")
+        # The rest of the wider-range response was NOT discarded wholesale -
+        # the brand-new row it brought must still show up.
+        self.assertIn("cal-2", by_id)
+        self.assertEqual(by_id["cal-2"]["status"], "candidate")
 
     def test_track_success_wins_over_a_stale_in_flight_refresh_response(self) -> None:
         # Behavioral proof: a pull-to-refresh GET is already in flight when
@@ -1530,6 +1681,8 @@ console.log(JSON.stringify({{ nasdaqSeven, nasdaqThirty, suomiSeven, kaikkiSeven
 
 let latestEventsLoadId = {{ current: 0 }};
 let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
 let calendarEventsState = [
   {{ calendar_event_id: 'cal-1', instrument: 'AAPL', status: 'candidate' }},
 ];
@@ -1624,6 +1777,8 @@ main();
 
 let latestEventsLoadId = {{ current: 0 }};
 let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
 let eventsState = null;
 function setEvents(v) {{ eventsState = v; }}
 function setError() {{}}

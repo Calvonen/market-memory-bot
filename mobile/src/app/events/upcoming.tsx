@@ -242,6 +242,34 @@ export function mergeUpcomingRows(
   });
 }
 
+type CalendarOverride = { event: CalendarEvent; version: number };
+
+// P2 regression: onTrack() used to bump the same generation counter
+// load() uses for its own overlap guard, so tracking one candidate
+// discarded an *entire* still-pending calendar response wholesale - e.g.
+// switch the "7 pv" chip to "30 pv" (a wider, still-in-flight request),
+// track a candidate visible in the old 7 pv data, and every row the 30 pv
+// response was about to bring in got silently dropped, not just the
+// tracked row protected. Row-scoped versioning fixes this: each
+// successful track records only its own row's override, tagged with a
+// monotonically increasing version; a calendar response - whichever
+// request it came from - merges those overrides back in only for
+// mutations that happened *after* that particular request started, so a
+// pending response is never thrown away wholesale.
+function applyLocalCalendarOverrides(
+  list: CalendarEvent[],
+  overrides: Map<string, CalendarOverride>,
+  versionAtRequestStart: number,
+): CalendarEvent[] {
+  return list.map((event) => {
+    const override = overrides.get(event.calendar_event_id);
+    if (override && override.version > versionAtRequestStart) {
+      return override.event;
+    }
+    return event;
+  });
+}
+
 export default function UpcomingEventsScreen() {
   const [events, setEvents] = useState<EventExpectation[] | null>(null);
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[] | null>(null);
@@ -257,13 +285,26 @@ export default function UpcomingEventsScreen() {
   const [market, setMarket] = useState<string>('Kaikki');
   const [rangeDays, setRangeDays] = useState<number>(7);
   // Separate generation counters for the two independent sources - never a
-  // single shared one. A track mutation only ever needs to invalidate a
-  // stale in-flight *calendar* response (see onTrack() below); it must
-  // never also invalidate an unrelated, still-pending getEvents() response,
-  // or that response would be discarded on arrival and leave `events`
-  // stuck null until another refresh.
+  // single shared one. These still guard purely against *overlapping
+  // load() calls* on the same source (e.g. a quick double pull-to-refresh,
+  // or a range-chip change firing a new calendar request before the
+  // previous one settled) - an older response losing to a newer one is
+  // correct there, since the newer request supersedes it entirely. A
+  // single-row track mutation is a different kind of "newer" - see
+  // localCalendarOverrides/mutationVersion below - and must never trigger
+  // that same wholesale discard of an otherwise-current pending response.
   const latestEventsLoadId = useRef(0);
   const latestCalendarLoadId = useRef(0);
+  // Row-scoped track-mutation protection (see applyLocalCalendarOverrides()
+  // above) - never a blunt "invalidate the whole calendar generation"
+  // bump. mutationVersion increments once per successful track; each
+  // override records the version it was made at, so any calendar request
+  // that started before that point (and therefore can still arrive with a
+  // pre-track snapshot of that one row) knows to keep the override instead
+  // of reverting it, without discarding anything else that response
+  // brings.
+  const localCalendarOverrides = useRef<Map<string, CalendarOverride>>(new Map());
+  const mutationVersion = useRef(0);
 
   const load = useCallback((currentRangeDays: number) => {
     // Guard against overlapping load() calls (e.g. pull-to-refresh fired
@@ -275,6 +316,11 @@ export default function UpcomingEventsScreen() {
     // as before this split.
     const eventsLoadId = ++latestEventsLoadId.current;
     const calendarLoadId = ++latestCalendarLoadId.current;
+    // Snapshot of the mutation version at the moment this request started -
+    // any track that completes *after* this point (while this request is
+    // still in flight) must win over whatever this response eventually
+    // brings back for that one row; see applyLocalCalendarOverrides() above.
+    const calendarVersionAtStart = mutationVersion.current;
     setError(null);
 
     // Device-local window (see deviceLocalDateWindow() above) sent
@@ -307,7 +353,9 @@ export default function UpcomingEventsScreen() {
     const calendarPromise = getUpcomingCalendarEvents(fromDate, toDate)
       .then((list) => {
         if (calendarLoadId !== latestCalendarLoadId.current) return;
-        setCalendarEvents(list);
+        setCalendarEvents(
+          applyLocalCalendarOverrides(list, localCalendarOverrides.current, calendarVersionAtStart),
+        );
       })
       .catch(() => {
         if (calendarLoadId !== latestCalendarLoadId.current) return;
@@ -348,22 +396,21 @@ export default function UpcomingEventsScreen() {
     setTrackingIds((prev) => new Set(prev).add(calendarEventId));
     try {
       const updated = await trackCalendarEvent(calendarEventId);
+      // Records only this one row's override (P2 regression: this used to
+      // be a blunt bump of the calendar generation counter, which discarded an
+      // entire still-pending calendar response - e.g. a wider-range 30 pv
+      // request already in flight when the user tracked a candidate
+      // visible in the old 7 pv data - instead of protecting just this
+      // row). Any calendar response whose own request started before this
+      // version is recorded will apply it via applyLocalCalendarOverrides()
+      // in load() above instead of reverting this row back to 'candidate';
+      // a response for a request that started *after* this point already
+      // reflects the tracked state itself and simply wins normally.
+      const version = ++mutationVersion.current;
+      localCalendarOverrides.current.set(calendarEventId, { event: updated, version });
       setCalendarEvents((prev) =>
         (prev ?? []).map((event) => (event.calendar_event_id === calendarEventId ? updated : event)),
       );
-      // Invalidates only a calendar response still in flight (e.g. a
-      // pull-to-refresh GET started before this track request resolved):
-      // that GET's captured calendarLoadId can never match
-      // latestCalendarLoadId.current again, so its eventual
-      // setCalendarEvents(list) - built from a snapshot taken before this
-      // track mutation happened - is rejected by the same staleness guard
-      // load() already uses, instead of silently reverting this row back
-      // to 'candidate'. Deliberately never bumps latestEventsLoadId - an
-      // independent, still-pending getEvents() response for the unrelated
-      // expectation list must still apply normally when it arrives. A
-      // load() started *after* this point captures a fresh
-      // calendarLoadId from the bumped counter and is unaffected.
-      ++latestCalendarLoadId.current;
     } catch (err) {
       setTrackError(err instanceof Error ? err.message : 'Seurannan aloitus epäonnistui');
     } finally {
