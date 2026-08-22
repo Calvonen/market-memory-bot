@@ -36,7 +36,7 @@ CALENDAR_SCHEMA_GATE_MIGRATION = Path(
     "supabase/migrations/20260825090000_calendar_schema_gate.sql"
 )
 CALENDAR_UPSERT_VERSION_GATE_MIGRATION = Path(
-    "supabase/migrations/20260827090000_calendar_candidate_upsert_version_gate.sql"
+    "supabase/migrations/20260828090000_atomic_calendar_candidate_upsert_version_gate.sql"
 )
 VERIFY_SCRIPT = Path("scripts/verify_supabase_schema.py")
 

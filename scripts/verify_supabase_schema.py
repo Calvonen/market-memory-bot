@@ -14,11 +14,11 @@ depend on objects added by
 supabase/migrations/20260824090000_calendar_watchlist_events.sql and
 supabase/migrations/20260825090000_calendar_schema_gate.sql (the latter is
 what extends verify_strategy_draft_schema() itself with the calendar
-checks below),
-supabase/migrations/20260826090000_preserve_calendar_candidate_metadata.sql,
-and
-supabase/migrations/20260827090000_calendar_candidate_upsert_version_gate.sql,
-which version-gates the placeholder-preserving candidate upsert body. Those migrations are applied out-of-band, before merging,
+checks below), and
+supabase/migrations/20260828090000_atomic_calendar_candidate_upsert_version_gate.sql,
+which atomically installs and version-gates the placeholder-preserving
+candidate upsert body without depending on the two earlier follow-ups. Those
+migrations are applied out-of-band, before merging,
 through a separate secure mechanism (the Supabase CLI/dashboard) - this
 script and the CI it runs in hold no Postgres-DDL-capable credential and
 apply no migrations themselves.
@@ -117,8 +117,7 @@ def main() -> int:
             "20260823090000_expectation_write_atomic_response_and_schema_version.sql, "
             "20260824090000_calendar_watchlist_events.sql, and "
             "20260825090000_calendar_schema_gate.sql, and "
-            "20260826090000_preserve_calendar_candidate_metadata.sql, and "
-            "20260827090000_calendar_candidate_upsert_version_gate.sql) "
+            "20260828090000_atomic_calendar_candidate_upsert_version_gate.sql) "
             f"have not been applied to this Supabase project yet. Underlying error: {exc}",
             file=sys.stderr,
         )

@@ -32,11 +32,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS_DIR = REPO_ROOT / "supabase" / "migrations"
 CALENDAR_MIGRATION = MIGRATIONS_DIR / "20260824090000_calendar_watchlist_events.sql"
 CALENDAR_SCHEMA_GATE_MIGRATION = MIGRATIONS_DIR / "20260825090000_calendar_schema_gate.sql"
-METADATA_PRESERVATION_MIGRATION = (
-    MIGRATIONS_DIR / "20260826090000_preserve_calendar_candidate_metadata.sql"
-)
 CALENDAR_UPSERT_VERSION_GATE_MIGRATION = (
-    MIGRATIONS_DIR / "20260827090000_calendar_candidate_upsert_version_gate.sql"
+    MIGRATIONS_DIR / "20260828090000_atomic_calendar_candidate_upsert_version_gate.sql"
 )
 EVENT_STRATEGY_APPROVALS_MIGRATION = MIGRATIONS_DIR / "20260821090000_event_strategy_approvals.sql"
 SHARED_LOCK_MIGRATION = MIGRATIONS_DIR / "20260821140000_shared_expectation_version_lock.sql"
@@ -323,29 +320,18 @@ class CalendarSchemaGateSqlTests(unittest.TestCase):
         result = self._run_sql_file(CALENDAR_SCHEMA_GATE_MIGRATION)
         self.assertEqual(result.returncode, 0, f"gate migration failed: {result.stderr}")
         result = self._run_sql_file(CALENDAR_UPSERT_VERSION_GATE_MIGRATION)
-        self.assertEqual(result.returncode, 0, f"version gate migration failed: {result.stderr}")
-
-        row = self._verify_row()
-
-        # The pre-existing strategy-draft checks are unaffected...
-        self.assertTrue(row["event_strategy_approvals_table_exists"])
-        self.assertTrue(row["approve_strategy_draft_function_exists"])
-        self.assertTrue(row["insert_next_expectation_version_function_exists"])
-        self.assertTrue(row["schema_version_matches"])
-        # ...but every calendar check must report missing, which is what
-        # makes scripts/verify_supabase_schema.py exit non-zero and stop
-        # the deploy workflow before either systemctl restart line.
-        self.assertFalse(row["calendar_events_table_exists"])
-        self.assertFalse(row["upsert_calendar_candidate_function_exists"])
-        self.assertFalse(row["transition_calendar_event_status_function_exists"])
-        self.assertTrue(row["calendar_candidate_upsert_version_matches"])
+        # The atomic follow-up cannot attest to an implementation when the
+        # calendar table required by that implementation is absent. Its
+        # transaction therefore fails closed without publishing the marker.
+        self.assertNotEqual(result.returncode, 0)
+        marker = self._scalar("select to_regprocedure('public.calendar_candidate_upsert_version()')")
+        self.assertEqual(marker, "")
 
     def test_gate_passes_once_both_calendar_migrations_are_applied(self) -> None:
         self._apply_strategy_draft_chain()
         for migration in (
             CALENDAR_MIGRATION,
             CALENDAR_SCHEMA_GATE_MIGRATION,
-            METADATA_PRESERVATION_MIGRATION,
             CALENDAR_UPSERT_VERSION_GATE_MIGRATION,
         ):
             result = self._run_sql_file(migration)
@@ -353,6 +339,27 @@ class CalendarSchemaGateSqlTests(unittest.TestCase):
 
         row = self._verify_row()
         self.assertTrue(all(row.values()), row)
+
+        # Deliberately skip 20260826090000 above. The version-gate migration
+        # must install the behavior its marker attests to, rather than merely
+        # letting the unchanged signature of the old body pass verification.
+        enriched = self._run_sql(
+            "select * from public.upsert_calendar_candidate("
+            "'Apple Inc', 'AAPL', 'NASDAQ', 'earnings', '2026Q4', "
+            "'2026-10-29', 'finnhub')"
+        )
+        self.assertEqual(enriched.returncode, 0, enriched.stderr)
+        placeholder = self._run_sql(
+            "select * from public.upsert_calendar_candidate("
+            "'AAPL', 'AAPL', 'Unknown', 'earnings', '2026Q4', "
+            "'2026-10-30', 'finnhub')"
+        )
+        self.assertEqual(placeholder.returncode, 0, placeholder.stderr)
+        metadata = self._scalar(
+            "select company_name || ',' || market from public.calendar_events "
+            "where instrument = 'AAPL' and occurrence_key = '2026Q4'"
+        )
+        self.assertEqual(metadata, "Apple Inc,NASDAQ")
 
 
 if __name__ == "__main__":
