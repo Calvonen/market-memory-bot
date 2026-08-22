@@ -286,6 +286,35 @@ class CalendarRepositorySyncTests(unittest.TestCase):
 
         self.assertEqual(first.calendar_event_id, second.calendar_event_id)
 
+    def test_manual_event_promotes_an_existing_candidate_to_tracked(self) -> None:
+        # Regression: SupabaseCalendarEventRepository.add_manual_event()
+        # explicitly calls track() when an existing candidate's identity is
+        # resubmitted with status=TRACKED - the in-memory repository must
+        # apply the same transition, not just return the untouched
+        # existing candidate, or local runs/tests using this repository
+        # would silently diverge from production behavior.
+        repo = InMemoryCalendarEventRepository()
+        candidate = _candidate(instrument="AFAGR.HE", event_type="production_report", source="manual")
+
+        first = repo.add_manual_event(candidate)
+        self.assertEqual(first.status, CalendarEventStatus.CANDIDATE)
+
+        second = repo.add_manual_event(candidate, status=CalendarEventStatus.TRACKED)
+
+        self.assertEqual(second.calendar_event_id, first.calendar_event_id)
+        self.assertEqual(second.status, CalendarEventStatus.TRACKED)
+        self.assertEqual(repo.get(first.calendar_event_id).status, CalendarEventStatus.TRACKED)
+
+    def test_manual_event_leaves_an_already_tracked_row_alone(self) -> None:
+        repo = InMemoryCalendarEventRepository()
+        candidate = _candidate(instrument="AFAGR.HE", event_type="production_report", source="manual")
+        first = repo.add_manual_event(candidate, status=CalendarEventStatus.TRACKED)
+
+        second = repo.add_manual_event(candidate, status=CalendarEventStatus.TRACKED)
+
+        self.assertEqual(second.calendar_event_id, first.calendar_event_id)
+        self.assertEqual(second.status, CalendarEventStatus.TRACKED)
+
     # -- concurrency regression (P2): first-insert race ---------------------
 
     def test_concurrent_first_syncs_of_the_same_new_candidate_never_duplicate_or_error(self) -> None:

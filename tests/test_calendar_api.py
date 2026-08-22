@@ -1,9 +1,9 @@
 import unittest
-from datetime import date
+from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
 
-from trading_system.api import create_app
+from trading_system.api import create_app, MAX_CALENDAR_LOOKAHEAD_DAYS
 from trading_system.calendar_provider import CalendarCandidate
 from trading_system.calendar_repository import InMemoryCalendarEventRepository
 from trading_system.event_repository import InMemoryEventExpectationRepository
@@ -15,7 +15,10 @@ def _candidate(**overrides) -> CalendarCandidate:
         instrument="AAPL",
         market="NASDAQ",
         event_type="earnings",
-        scheduled_date=date(2026, 10, 29),
+        # Relative to today, and well inside the API's default/max 30-day
+        # lookahead window - GET /api/v1/calendar/upcoming with no explicit
+        # from_date/to_date must still find this candidate.
+        scheduled_date=date.today() + timedelta(days=10),
         source="finnhub",
         occurrence_key="2026Q4",
     )
@@ -70,6 +73,57 @@ class CalendarApiTests(unittest.TestCase):
         self.assertEqual(len(body), 1)
         self.assertEqual(body[0]["instrument"], "AAPL")
         self.assertEqual(body[0]["status"], "candidate")
+
+    # -- calendar range MVP: default/max 30-day lookahead --------------------
+
+    def test_upcoming_default_window_does_not_reach_beyond_30_days(self) -> None:
+        # No explicit from_date/to_date: the default window must be capped
+        # at MAX_CALENDAR_LOOKAHEAD_DAYS, not the old 180-day default - a
+        # candidate further out must not appear.
+        self.calendar_repo.sync_candidates(
+            [_candidate(scheduled_date=date.today() + timedelta(days=MAX_CALENDAR_LOOKAHEAD_DAYS + 5))],
+            source="finnhub",
+        )
+
+        response = self.client.get("/api/v1/calendar/upcoming", headers=self._read_headers())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+
+    def test_upcoming_default_window_includes_exactly_30_days_out(self) -> None:
+        self.calendar_repo.sync_candidates(
+            [_candidate(scheduled_date=date.today() + timedelta(days=MAX_CALENDAR_LOOKAHEAD_DAYS))],
+            source="finnhub",
+        )
+
+        response = self.client.get("/api/v1/calendar/upcoming", headers=self._read_headers())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()), 1)
+
+    def test_upcoming_rejects_an_explicit_lookahead_beyond_30_days(self) -> None:
+        response = self.client.get(
+            "/api/v1/calendar/upcoming",
+            params={
+                "from_date": date.today().isoformat(),
+                "to_date": (date.today() + timedelta(days=MAX_CALENDAR_LOOKAHEAD_DAYS + 1)).isoformat(),
+            },
+            headers=self._read_headers(),
+        )
+
+        self.assertEqual(response.status_code, 422)
+
+    def test_upcoming_accepts_an_explicit_lookahead_of_exactly_30_days(self) -> None:
+        response = self.client.get(
+            "/api/v1/calendar/upcoming",
+            params={
+                "from_date": date.today().isoformat(),
+                "to_date": (date.today() + timedelta(days=MAX_CALENDAR_LOOKAHEAD_DAYS)).isoformat(),
+            },
+            headers=self._read_headers(),
+        )
+
+        self.assertEqual(response.status_code, 200)
 
     def test_upcoming_never_accepts_the_admin_token_as_read_auth(self) -> None:
         response = self.client.get(
@@ -172,6 +226,8 @@ class CalendarApiTests(unittest.TestCase):
     def test_manual_event_works_without_a_fiscal_quarter_occurrence_key(self) -> None:
         # A one-off production report has no notion of fiscal year/quarter -
         # the request must not need to supply occurrence_key at all.
+        first_date = (date.today() + timedelta(days=5)).isoformat()
+        second_date = (date.today() + timedelta(days=20)).isoformat()
         response = self.client.post(
             "/api/v1/calendar/manual",
             json={
@@ -179,7 +235,7 @@ class CalendarApiTests(unittest.TestCase):
                 "instrument": "AFAGR.HE",
                 "market": "Suomi",
                 "event_type": "production_report",
-                "scheduled_date": "2026-10-15",
+                "scheduled_date": first_date,
                 "source": "manual",
             },
             headers={"X-Admin-Token": self.ADMIN_KEY},
@@ -197,7 +253,7 @@ class CalendarApiTests(unittest.TestCase):
                 "instrument": "AFAGR.HE",
                 "market": "Suomi",
                 "event_type": "production_report",
-                "scheduled_date": "2026-11-01",
+                "scheduled_date": second_date,
                 "source": "manual",
             },
             headers={"X-Admin-Token": self.ADMIN_KEY},
@@ -206,7 +262,10 @@ class CalendarApiTests(unittest.TestCase):
 
         upcoming = self.client.get(
             "/api/v1/calendar/upcoming",
-            params={"from_date": "2026-01-01", "to_date": "2026-12-31"},
+            params={
+                "from_date": date.today().isoformat(),
+                "to_date": (date.today() + timedelta(days=MAX_CALENDAR_LOOKAHEAD_DAYS)).isoformat(),
+            },
             headers=self._read_headers(),
         ).json()
         self.assertEqual(len([e for e in upcoming if e["instrument"] == "AFAGR.HE"]), 1)
@@ -215,19 +274,22 @@ class CalendarApiTests(unittest.TestCase):
 
     def test_tracked_q3_does_not_prevent_q4_candidate_from_appearing_in_upcoming(self) -> None:
         q3_id = self.calendar_repo.sync_candidates(
-            [_candidate(scheduled_date=date(2026, 7, 30), occurrence_key="2026Q3")],
+            [_candidate(scheduled_date=date.today() + timedelta(days=5), occurrence_key="2026Q3")],
             source="finnhub",
         ).inserted[0]
         self.calendar_repo.track(q3_id)
 
         self.calendar_repo.sync_candidates(
-            [_candidate(scheduled_date=date(2026, 10, 29), occurrence_key="2026Q4")],
+            [_candidate(scheduled_date=date.today() + timedelta(days=25), occurrence_key="2026Q4")],
             source="finnhub",
         )
 
         response = self.client.get(
             "/api/v1/calendar/upcoming",
-            params={"from_date": "2026-01-01", "to_date": "2026-12-31"},
+            params={
+                "from_date": date.today().isoformat(),
+                "to_date": (date.today() + timedelta(days=MAX_CALENDAR_LOOKAHEAD_DAYS)).isoformat(),
+            },
             headers=self._read_headers(),
         )
 

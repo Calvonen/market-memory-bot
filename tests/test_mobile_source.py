@@ -979,17 +979,7 @@ const calendarEvents = [
             ],
         )
 
-    def test_date_range_filter_excludes_past_events_but_kaikki_keeps_history(self) -> None:
-        # Behavioral proof for the date-range filter: extract the real
-        # filtered = useMemo(...) predicate from upcoming.tsx, strip TS
-        # syntax, and run it with node against synthetic past/near/far rows.
-        # A day-range filter (e.g. "7 pv") must exclude a released/past-dated
-        # row even though calendar/tracked rows can be older than today;
-        # "Kaikki" (no range selected) must keep showing it.
-        node = shutil.which("node")
-        if node is None:
-            self.skipTest("node is not available in this environment")
-
+    def _extract_filter_rows_js(self) -> str:
         filter_start = self.upcoming_source.index("const filtered = useMemo(() => {")
         filter_body_start = filter_start + len("const filtered = useMemo(() => {")
         filter_end = self.upcoming_source.index(
@@ -1000,6 +990,17 @@ const calendarEvents = [
             "function filterRows(rows, market, search, rangeDays) {" + filter_body + "}"
         )
         self.assertNotIn(": string", filter_fn_js)
+        return filter_fn_js
+
+    def test_date_range_filter_7_and_30_days_exclude_past_and_far_future_events(self) -> None:
+        # Calendar range MVP: only 7pv/30pv exist now, no "Kaikki" range -
+        # every remaining option always excludes already-released/past
+        # rows, and each one's own cutoff excludes rows further out than it.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        filter_fn_js = self._extract_filter_rows_js()
 
         script = f"""
 {filter_fn_js}
@@ -1020,11 +1021,11 @@ function row(key, days) {{
   return {{ key, companyName: 'X', instrument: 'HAS.L', market: 'Iso-Britannia', scheduledDate: daysFromNow(days) }};
 }}
 
-const rows = [row('past', -10), row('today', 0), row('near', 3), row('far', 60)];
+const rows = [row('past', -10), row('today', 0), row('near', 3), row('mid', 20), row('far', 60)];
 
 const sevenDayIds = filterRows(rows, 'Kaikki', '', 7).map((r) => r.key);
-const allIds = filterRows(rows, 'Kaikki', '', null).map((r) => r.key);
-console.log(JSON.stringify({{ sevenDayIds, allIds }}));
+const thirtyDayIds = filterRows(rows, 'Kaikki', '', 30).map((r) => r.key);
+console.log(JSON.stringify({{ sevenDayIds, thirtyDayIds }}));
 """
 
         with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
@@ -1041,16 +1042,107 @@ console.log(JSON.stringify({{ sevenDayIds, allIds }}));
         self.assertEqual(result.returncode, 0, result.stderr)
         outputs = json.loads(result.stdout)
 
-        # "7 pv" must exclude the past row and the far (60 days out) row,
-        # but keep today's and the near (3 days out) row.
-        self.assertNotIn("past", outputs["sevenDayIds"])
-        self.assertNotIn("far", outputs["sevenDayIds"])
-        self.assertIn("today", outputs["sevenDayIds"])
-        self.assertIn("near", outputs["sevenDayIds"])
+        # "7 pv": only today and the near (3 days out) row.
+        self.assertEqual(set(outputs["sevenDayIds"]), {"today", "near"})
+        # "30 pv": adds the mid (20 days out) row, still excludes past and
+        # far (60 days out, beyond even the 30-day max).
+        self.assertEqual(set(outputs["thirtyDayIds"]), {"today", "near", "mid"})
 
-        # "Kaikki" (no range) must still surface the full tracked history,
-        # including the already-released past row.
-        self.assertEqual(set(outputs["allIds"]), {"past", "today", "near", "far"})
+    def test_date_range_no_longer_offers_a_kaikki_or_90_180_day_option(self) -> None:
+        self.assertIn("{ label: '7 pv', days: 7 }", self.upcoming_source)
+        self.assertIn("{ label: '30 pv', days: 30 }", self.upcoming_source)
+        self.assertNotIn("90 pv", self.upcoming_source)
+        self.assertNotIn("180 pv", self.upcoming_source)
+
+        date_ranges_start = self.upcoming_source.index("const DATE_RANGES = [")
+        date_ranges_end = self.upcoming_source.index("] as const;", date_ranges_start)
+        date_ranges_body = self.upcoming_source[date_ranges_start:date_ranges_end]
+        self.assertNotIn("Kaikki", date_ranges_body)
+        self.assertNotIn("days: null", date_ranges_body)
+
+    def test_date_range_defaults_to_7_days(self) -> None:
+        self.assertIn("useState<number>(7)", self.upcoming_source)
+
+    # -- market/country filter: data-derived, independent of date range ----
+
+    def test_market_filter_options_are_derived_from_data_not_hardcoded(self) -> None:
+        markets_start = self.upcoming_source.index("const markets = useMemo(() => {")
+        markets_end = self.upcoming_source.index("}, [rows]);", markets_start)
+        markets_body = self.upcoming_source[markets_start:markets_end]
+
+        self.assertIn("rows.map((row) => row.market)", markets_body)
+        self.assertIn("'Kaikki'", markets_body)
+        # Never a hardcoded list of specific country names standing in for
+        # the real, data-derived set.
+        for hardcoded in ("Suomi", "Ruotsi", "Saksa", "Tanska", "Norja", "Iso-Britannia"):
+            self.assertNotIn(f"'{hardcoded}'", markets_body)
+
+        # And built from the unfiltered `rows`, not the already
+        # date-filtered `filtered` - so picking a date range never changes
+        # which market options are on offer.
+        self.assertNotIn("filtered", markets_body)
+
+    def test_market_and_date_filters_combine_independently(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        filter_fn_js = self._extract_filter_rows_js()
+
+        script = f"""
+{filter_fn_js}
+
+function fmt(d) {{
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${{y}}-${{m}}-${{day}}`;
+}}
+function daysFromNow(n) {{
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return fmt(d);
+}}
+
+function row(key, market, days) {{
+  return {{ key, companyName: 'X', instrument: 'X', market, scheduledDate: daysFromNow(days) }};
+}}
+
+const rows = [
+  row('nasdaq-near', 'NASDAQ', 3),
+  row('nasdaq-far', 'NASDAQ', 20),
+  row('suomi-near', 'Suomi', 3),
+  row('suomi-far', 'Suomi', 20),
+];
+
+// Changing the market filter alone must not change which dates are in
+// range, and changing the date range alone must not change which market
+// is selected - each is applied independently.
+const nasdaqSeven = filterRows(rows, 'NASDAQ', '', 7).map((r) => r.key);
+const nasdaqThirty = filterRows(rows, 'NASDAQ', '', 30).map((r) => r.key);
+const suomiSeven = filterRows(rows, 'Suomi', '', 7).map((r) => r.key);
+const kaikkiSeven = filterRows(rows, 'Kaikki', '', 7).map((r) => r.key);
+console.log(JSON.stringify({{ nasdaqSeven, nasdaqThirty, suomiSeven, kaikkiSeven }}));
+"""
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+
+        self.assertEqual(set(outputs["nasdaqSeven"]), {"nasdaq-near"})
+        self.assertEqual(set(outputs["nasdaqThirty"]), {"nasdaq-near", "nasdaq-far"})
+        self.assertEqual(set(outputs["suomiSeven"]), {"suomi-near"})
+        self.assertEqual(set(outputs["kaikkiSeven"]), {"nasdaq-near", "suomi-near"})
 
     def test_upcoming_screen_has_filter_and_tracking_ui(self) -> None:
         self.assertIn("Hae tickerillä", self.upcoming_source)

@@ -46,6 +46,12 @@ from trading_system.strategy_draft_repository import (
 from trading_system.supabase_calendar_repository import SupabaseCalendarEventRepository
 from trading_system.supabase_event_repository import SupabaseEventExpectationRepository
 
+# Calendar range MVP: the mobile UI only ever offers 7/30-day chips and the
+# calendar sync worker never fetches further out than this (see
+# docs/calendar_watchlist.md) - GET /api/v1/calendar/upcoming enforces the
+# same cap so a caller can never silently request/receive more.
+MAX_CALENDAR_LOOKAHEAD_DAYS = 30
+
 
 class PaperStatusRepository(Protocol):
     def get_latest_for_event(self, event_id: str) -> dict[str, Any] | None: ...
@@ -541,7 +547,17 @@ def create_app(
     ) -> list[dict[str, Any]]:
         require_read(x_marketai_key)
         range_start = from_date or date.today()
-        range_end = to_date or date.fromordinal(range_start.toordinal() + 180)
+        range_end = to_date or date.fromordinal(range_start.toordinal() + MAX_CALENDAR_LOOKAHEAD_DAYS)
+        # MVP range cap: the mobile UI only ever offers 7/30-day chips (see
+        # mobile/src/app/events/upcoming.tsx), and the calendar sync worker
+        # itself never fetches further out than this - a caller requesting
+        # more must be rejected outright, not silently clamped, so a bug
+        # elsewhere asking for a wider window is never hidden.
+        if (range_end.toordinal() - range_start.toordinal()) > MAX_CALENDAR_LOOKAHEAD_DAYS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"calendar lookahead cannot exceed {MAX_CALENDAR_LOOKAHEAD_DAYS} days",
+            )
         try:
             events = get_calendar_repository().list_upcoming(range_start, range_end)
         except RuntimeError as exc:

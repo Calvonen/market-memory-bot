@@ -13,6 +13,13 @@ from trading_system.calendar_repository import (
     InvalidCalendarEventTransition,
 )
 
+# Supabase's Data API (PostgREST) caps a single response at this many rows
+# by default (`db-max-rows`). list_upcoming() must never assume one
+# response holds the whole result set - a date window with more rows than
+# this would otherwise be silently truncated, and later events would
+# disappear from the mobile calendar even though they exist in the table.
+_LIST_UPCOMING_PAGE_SIZE = 1000
+
 
 class SupabaseCalendarEventRepository:
     """CalendarEventRepository backed by Supabase Data API.
@@ -50,16 +57,38 @@ class SupabaseCalendarEventRepository:
         return self._row_to_event(rows[0])
 
     def list_upcoming(self, from_date: date, to_date: date) -> tuple[CalendarEvent, ...]:
-        response = (
-            self.client.table("calendar_events")
-            .select("*")
-            .in_("status", [CalendarEventStatus.CANDIDATE.value, CalendarEventStatus.TRACKED.value])
-            .gte("scheduled_date", from_date.isoformat())
-            .lte("scheduled_date", to_date.isoformat())
-            .order("scheduled_date")
-            .execute()
-        )
-        return tuple(self._row_to_event(row) for row in (response.data or []))
+        # Pages through the complete result set via PostgREST's .range()
+        # rather than trusting a single request to return everything.
+        # `.order("scheduled_date").order("id")` is a fully deterministic
+        # total order (id is the table's unique primary key) - without a
+        # unique tie-break, rows sharing the same scheduled_date could sort
+        # differently across two page requests, risking a row appearing on
+        # both pages (a duplicate) or neither (a silent drop) at the
+        # boundary. A page shorter than the page size is what ends the
+        # loop - the standard, unambiguous "that was the last page" signal.
+        events: list[CalendarEvent] = []
+        offset = 0
+        while True:
+            response = (
+                self.client.table("calendar_events")
+                .select("*")
+                .in_(
+                    "status",
+                    [CalendarEventStatus.CANDIDATE.value, CalendarEventStatus.TRACKED.value],
+                )
+                .gte("scheduled_date", from_date.isoformat())
+                .lte("scheduled_date", to_date.isoformat())
+                .order("scheduled_date")
+                .order("id")
+                .range(offset, offset + _LIST_UPCOMING_PAGE_SIZE - 1)
+                .execute()
+            )
+            rows = response.data or []
+            events.extend(self._row_to_event(row) for row in rows)
+            if len(rows) < _LIST_UPCOMING_PAGE_SIZE:
+                break
+            offset += _LIST_UPCOMING_PAGE_SIZE
+        return tuple(events)
 
     def _upsert_candidate(self, candidate: CalendarCandidate, *, source: str) -> tuple[CalendarEvent, str]:
         response = self.client.rpc(

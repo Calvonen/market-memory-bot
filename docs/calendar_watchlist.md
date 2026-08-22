@@ -78,10 +78,35 @@ an application-level check-then-act:
   "already tracked -> never silently overwritten" atomic against a
   concurrent sync or `track()`/`untrack()` call.
 
+## Range MVP: 7/30 days
+
+This MVP deliberately only ever looks a short way ahead - candidate/tracked
+data is not something that needs a long lookahead the way a full earnings
+calendar product eventually might:
+
+- Mobile date-range chips are `7 pv` / `30 pv` only (default `7 pv`, max
+  `30 pv`) - no `90 pv`/`180 pv`/`Kaikki` option for the date filter (the
+  market/country filter's own `Kaikki` option is unrelated - see "Mobile"
+  below).
+- `GET /api/v1/calendar/upcoming` defaults to, and rejects any request for,
+  more than `MAX_CALENDAR_LOOKAHEAD_DAYS` (30, `trading_system/api.py`) -
+  `422` if `to_date - from_date` exceeds it.
+- `trading_system/calendar_sync_worker.py` fetches at most `MAX_LOOKAHEAD_DAYS`
+  (30) - a larger `--lookahead-days`/`MARKETAI_CALENDAR_LOOKAHEAD_DAYS` is
+  clamped, not honored, so a misconfigured environment can never make the
+  worker populate rows further out than the API will ever serve.
+
+Since the mobile UI's date-range filter runs client-side over whatever the
+API returned (same pattern as the `EventExpectation` list), the API's
+default window is exactly the UI's max (30 days) - so switching from `7 pv`
+to `30 pv` never needs a second request; the full 30-day window is already
+in hand.
+
 ## API
 
 - `GET /api/v1/calendar/upcoming` - read auth (`X-MarketAI-Key`, same
-  credential as the rest of the read API).
+  credential as the rest of the read API). `from_date`/`to_date` are
+  optional; see "Range MVP" above for the default/max window.
 - `POST /api/v1/calendar/{id}/track` / `.../untrack` - write auth reuses the
   existing `X-MarketAI-Control-Key` (never the read key, and no new
   `EXPO_PUBLIC_*` secret was added).
@@ -94,8 +119,21 @@ an application-level check-then-act:
 `EventExpectation` list with calendar candidates/tracked rows. An instrument
 already tracked through `EventExpectation` (e.g. Hays) is filtered out of
 the calendar candidates so it never renders as a duplicate untracked card
-(`mergeUpcomingRows()`). Each candidate card has a "Lisää seurantaan" action
-that calls `trackCalendarEvent()`.
+(`mergeUpcomingRows()`, which also sorts the merged rows upcoming-first -
+see below). Each candidate card has a "Lisää seurantaan" action that calls
+`trackCalendarEvent()`.
+
+The market/country filter (`Kaikki` plus whatever markets are actually
+present in `rows`) is derived entirely from the data, never a hardcoded
+country list, and applies independently of the date-range filter - the two
+combine as a plain AND in `filtered`'s predicate, neither one affecting
+which options the other offers.
+
+`mergeUpcomingRows()` sorts its combined output deterministically -
+upcoming (today or later) first, soonest first; history after, most
+recently released first - mirroring the backend's own `list_upcoming()`
+ordering. Candidate/tracked/expectation origin never decides order, only
+`scheduled_date` does.
 
 A track mutation always wins over an older, still-in-flight refresh GET:
 `onTrack()` bumps the same `latestLoadId` generation counter `load()` uses

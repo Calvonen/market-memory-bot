@@ -203,6 +203,17 @@ class InMemoryCalendarEventRepository:
                 candidate.instrument, candidate.event_type, candidate.source, candidate.occurrence_key
             )
             if existing is not None:
+                # Matches SupabaseCalendarEventRepository.add_manual_event():
+                # a request for the same identity that now asks for
+                # status=TRACKED must still apply that transition to an
+                # existing candidate, not just return it unchanged -
+                # otherwise this in-memory repository (used for local runs
+                # and tests) would silently diverge from production
+                # behavior for this exact request.
+                if status == CalendarEventStatus.TRACKED and existing.status == CalendarEventStatus.CANDIDATE:
+                    updated = replace(existing, status=CalendarEventStatus.TRACKED, updated_at=utc_now())
+                    self.events[existing.calendar_event_id] = updated
+                    return updated
                 return existing
             event = CalendarEvent(
                 calendar_event_id=new_id(),

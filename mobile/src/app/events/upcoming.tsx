@@ -26,11 +26,15 @@ import {
 // trading_system/calendar_repository.py - it only ever adds "things worth
 // noticing", with an explicit "Lisää seurantaan" action per card.
 
+// Calendar range MVP: 7/30 days only, default 7 - no 90/180-day or "Kaikki"
+// option. The backend mirrors this exactly: GET /api/v1/calendar/upcoming
+// defaults to and rejects anything beyond 30 days
+// (MAX_CALENDAR_LOOKAHEAD_DAYS in trading_system/api.py), which is also
+// why load() below never needs to pass an explicit to_date - the API's
+// default window already covers the widest chip here.
 const DATE_RANGES = [
   { label: '7 pv', days: 7 },
   { label: '30 pv', days: 30 },
-  { label: '90 pv', days: 90 },
-  { label: 'Kaikki', days: null },
 ] as const;
 
 function marketForInstrument(instrument: string): string {
@@ -163,8 +167,11 @@ export default function UpcomingEventsScreen() {
   const [trackError, setTrackError] = useState<string | null>(null);
 
   const [search, setSearch] = useState('');
+  // 'Kaikki' here is the market/country filter's own option (data-derived,
+  // see `markets` below) - unrelated to, and independent of, the date
+  // range below, which deliberately has no "Kaikki" of its own.
   const [market, setMarket] = useState<string>('Kaikki');
-  const [rangeDays, setRangeDays] = useState<number | null>(null);
+  const [rangeDays, setRangeDays] = useState<number>(7);
   // Separate generation counters for the two independent sources - never a
   // single shared one. A track mutation only ever needs to invalidate a
   // stale in-flight *calendar* response (see onTrack() below); it must
@@ -277,6 +284,12 @@ export default function UpcomingEventsScreen() {
     [events, calendarEvents],
   );
 
+  // Data-derived, never a hardcoded country list: whatever markets are
+  // actually present across today's rows (expectation rows via
+  // marketForInstrument(), calendar rows via their own explicit `market`
+  // field), plus 'Kaikki'. Independent of the date-range filter below -
+  // this list is built from the unfiltered `rows`, not `filtered`, so
+  // picking a date range never changes which market options are offered.
   const markets = useMemo(() => {
     const unique = new Set(rows.map((row) => row.market));
     return ['Kaikki', ...Array.from(unique).sort()];
@@ -285,12 +298,14 @@ export default function UpcomingEventsScreen() {
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
     const now = new Date();
-    // Start-of-today, so a day-range filter means "the next N days" and
-    // excludes already-released events - "Kaikki" (rangeDays === null) is
-    // unaffected and still shows the full tracked history.
+    // Start-of-today, so the day-range filter means "the next N days" and
+    // excludes already-released events.
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    const cutoff = rangeDays !== null ? startOfToday + rangeDays * 24 * 60 * 60 * 1000 : null;
+    const cutoff = startOfToday + rangeDays * 24 * 60 * 60 * 1000;
 
+    // Market and date range apply independently - each is its own `if`
+    // against the unfiltered row, neither one's outcome depends on the
+    // other's current value.
     return rows.filter((row) => {
       if (market !== 'Kaikki' && row.market !== market) {
         return false;
@@ -302,11 +317,9 @@ export default function UpcomingEventsScreen() {
       ) {
         return false;
       }
-      if (cutoff !== null) {
-        const scheduled = new Date(`${row.scheduledDate}T12:00:00`).getTime();
-        if (Number.isNaN(scheduled) || scheduled < startOfToday || scheduled > cutoff) {
-          return false;
-        }
+      const scheduled = new Date(`${row.scheduledDate}T12:00:00`).getTime();
+      if (Number.isNaN(scheduled) || scheduled < startOfToday || scheduled > cutoff) {
+        return false;
       }
       return true;
     });

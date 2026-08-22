@@ -8,7 +8,13 @@ from trading_system.calendar_provider import EarningsCalendarProvider, FinnhubEa
 from trading_system.calendar_repository import CalendarEventRepository, CalendarSyncResult
 from trading_system.supabase_calendar_repository import SupabaseCalendarEventRepository
 
-DEFAULT_LOOKAHEAD_DAYS = 90
+# Calendar range MVP: the mobile UI only ever offers 7/30-day chips and
+# GET /api/v1/calendar/upcoming rejects any lookahead beyond this (see
+# MAX_CALENDAR_LOOKAHEAD_DAYS in trading_system/api.py and
+# docs/calendar_watchlist.md) - the worker must never fetch, and therefore
+# never store, more than that either.
+MAX_LOOKAHEAD_DAYS = 30
+DEFAULT_LOOKAHEAD_DAYS = 30
 
 
 def run_sync(
@@ -37,6 +43,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Hard cap, not just a default - a misconfigured MARKETAI_CALENDAR_
+    # LOOKAHEAD_DAYS or --lookahead-days must never let this worker fetch
+    # (and store) further out than the API itself will ever serve.
+    lookahead_days = args.lookahead_days
+    if lookahead_days > MAX_LOOKAHEAD_DAYS:
+        print(
+            f"--lookahead-days={lookahead_days} exceeds the {MAX_LOOKAHEAD_DAYS}-day cap; "
+            f"clamping to {MAX_LOOKAHEAD_DAYS}.",
+            flush=True,
+        )
+        lookahead_days = MAX_LOOKAHEAD_DAYS
+
     provider = FinnhubEarningsCalendarProvider.from_env()
     repository = SupabaseCalendarEventRepository.from_env()
 
@@ -45,7 +63,7 @@ def main() -> None:
         provider=provider,
         repository=repository,
         from_date=today,
-        to_date=today + timedelta(days=args.lookahead_days),
+        to_date=today + timedelta(days=lookahead_days),
     )
 
     print(
