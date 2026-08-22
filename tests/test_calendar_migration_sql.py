@@ -33,7 +33,10 @@ MIGRATIONS_DIR = REPO_ROOT / "supabase" / "migrations"
 CALENDAR_MIGRATION = MIGRATIONS_DIR / "20260824090000_calendar_watchlist_events.sql"
 CALENDAR_SCHEMA_GATE_MIGRATION = MIGRATIONS_DIR / "20260825090000_calendar_schema_gate.sql"
 CALENDAR_UPSERT_VERSION_GATE_MIGRATION = (
-    MIGRATIONS_DIR / "20260828090000_atomic_calendar_candidate_upsert_version_gate.sql"
+    MIGRATIONS_DIR / "20260829090000_distinct_atomic_calendar_candidate_upsert_version.sql"
+)
+OLDER_CALENDAR_UPSERT_VERSION_GATE_MIGRATION = (
+    MIGRATIONS_DIR / "20260827090000_calendar_candidate_upsert_version_gate.sql"
 )
 EVENT_STRATEGY_APPROVALS_MIGRATION = MIGRATIONS_DIR / "20260821090000_event_strategy_approvals.sql"
 SHARED_LOCK_MIGRATION = MIGRATIONS_DIR / "20260821140000_shared_expectation_version_lock.sql"
@@ -301,6 +304,7 @@ class CalendarSchemaGateSqlTests(unittest.TestCase):
             "upsert_calendar_candidate_function_exists",
             "transition_calendar_event_status_function_exists",
             "calendar_candidate_upsert_version_matches",
+            "calendar_candidate_upsert_implementation_version",
         )
         result = subprocess.run(
             ["psql", self.database_url, "-F,", "-tAc",
@@ -309,7 +313,34 @@ class CalendarSchemaGateSqlTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         values = result.stdout.strip().split(",")
-        return dict(zip(columns, [v == "t" for v in values]))
+        row = dict(zip(columns[:-1], [v == "t" for v in values[:-1]]))
+        row[columns[-1]] = int(values[-1])
+        return row
+
+    def test_older_version_gate_is_distinguishable_from_latest_atomic_migration(self) -> None:
+        self._apply_strategy_draft_chain()
+        for migration in (
+            CALENDAR_MIGRATION,
+            CALENDAR_SCHEMA_GATE_MIGRATION,
+            OLDER_CALENDAR_UPSERT_VERSION_GATE_MIGRATION,
+        ):
+            result = self._run_sql_file(migration)
+            self.assertEqual(result.returncode, 0, f"{migration.name} failed: {result.stderr}")
+
+        self.assertEqual(self._scalar("select public.calendar_candidate_upsert_version()"), "1")
+        # The verifier installed by 20260827090000 predates the explicit
+        # implementation-version result required by the deploy script.
+        result = self._run_sql(
+            "select calendar_candidate_upsert_implementation_version "
+            "from public.verify_strategy_draft_schema()"
+        )
+        self.assertNotEqual(result.returncode, 0)
+
+        result = self._run_sql_file(CALENDAR_UPSERT_VERSION_GATE_MIGRATION)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = self._verify_row()
+        self.assertEqual(row["calendar_candidate_upsert_implementation_version"], 2)
+        self.assertTrue(all(value is True or value == 2 for value in row.values()), row)
 
     def test_gate_fails_closed_when_the_calendar_migration_was_never_applied(self) -> None:
         # The deploy-gate migration (20260825090000) is applied on top of

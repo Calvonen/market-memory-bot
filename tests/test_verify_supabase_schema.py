@@ -36,6 +36,7 @@ ALL_PRESENT_ROW = {
     "upsert_calendar_candidate_function_exists": True,
     "transition_calendar_event_status_function_exists": True,
     "calendar_candidate_upsert_version_matches": True,
+    "calendar_candidate_upsert_implementation_version": 2,
 }
 
 
@@ -204,6 +205,25 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertIn("placeholder-preserving implementation version", err)
+
+    def test_fails_closed_on_the_older_atomic_upsert_marker_version(self) -> None:
+        row = dict(ALL_PRESENT_ROW, calendar_candidate_upsert_implementation_version=1)
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(SimpleNamespace(data=[row]))
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("atomic implementation version 2", err)
+
+    def test_fails_closed_when_explicit_upsert_version_is_absent(self) -> None:
+        row = dict(ALL_PRESENT_ROW)
+        del row["calendar_candidate_upsert_implementation_version"]
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(SimpleNamespace(data=[row]))
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("deployed: None", err)
 
     def test_fails_closed_when_the_calendar_schema_keys_are_absent_entirely(self) -> None:
         # A Supabase project still on the pre-calendar verify_strategy_draft_

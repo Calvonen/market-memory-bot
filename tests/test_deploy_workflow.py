@@ -36,7 +36,7 @@ CALENDAR_SCHEMA_GATE_MIGRATION = Path(
     "supabase/migrations/20260825090000_calendar_schema_gate.sql"
 )
 CALENDAR_UPSERT_VERSION_GATE_MIGRATION = Path(
-    "supabase/migrations/20260828090000_atomic_calendar_candidate_upsert_version_gate.sql"
+    "supabase/migrations/20260829090000_distinct_atomic_calendar_candidate_upsert_version.sql"
 )
 VERIFY_SCRIPT = Path("scripts/verify_supabase_schema.py")
 
@@ -308,6 +308,12 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
             self.verify_source,
         )
         self.assertIn("immutable", marker.group(0))
+        self.assertIn(
+            f"REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = {version}",
+            self.verify_script_source,
+        )
+        self.assertIn("calendar_candidate_upsert_implementation_version", self.verify_source)
+        self.assertIn("calendar_candidate_upsert_implementation_version", self.verify_script_source)
 
     # -- implementation-version marker: same signature, different body ----
 
