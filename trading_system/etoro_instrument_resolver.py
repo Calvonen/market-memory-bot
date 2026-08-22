@@ -42,7 +42,7 @@ class EtoroInstrumentResolver:
 
     Resolution is deliberately conservative: an exact symbol wins, then a
     unique base-symbol match, then a unique exact company-name match. Any
-    ambiguity or lack of an exact match returns ``None``.
+    remaining ambiguity or lack of an exact match returns ``None``.
     """
 
     def __init__(self, search: EtoroInstrumentSearch) -> None:
@@ -86,8 +86,6 @@ class EtoroInstrumentResolver:
             resolved = self._unique(base_matches)
             if resolved is not None:
                 return resolved
-            if len(base_matches) > 1:
-                return None
 
         requested_name = _normalise_text(request.company_name)
         if requested_name:
