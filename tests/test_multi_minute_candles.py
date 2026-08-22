@@ -90,6 +90,39 @@ class MultiMinuteCandleBuilderTests(unittest.TestCase):
         self.assertEqual(candle.low, Decimal("9.7"))
         self.assertEqual(candle.source_minutes, 3)
 
+    def test_duplicate_minute_does_not_inflate_source_minutes_or_change_ohlc(self) -> None:
+        builder = MultiMinuteCandleBuilder(2619, 5)
+        builder.add(_candle(0, open_="10.0", high="10.2", low="9.9", close="10.1"))
+        builder.add(_candle(4, open_="10.1", high="10.4", low="10.0", close="10.3"))
+
+        duplicate_result = builder.add(
+            _candle(0, open_="999", high="999", low="0.01", close="999")
+        )
+
+        candle = builder.add(_candle(5))[0]
+
+        self.assertEqual(duplicate_result, ())
+        # Only minutes 0 and 4 are real; the redelivered minute 0 must not be
+        # counted, and must not make a sparse (gappy) bucket look complete.
+        self.assertEqual(candle.source_minutes, 2)
+        self.assertEqual(candle.open, Decimal("10.0"))
+        self.assertEqual(candle.high, Decimal("10.4"))
+        self.assertEqual(candle.low, Decimal("9.9"))
+        self.assertEqual(candle.close, Decimal("10.3"))
+
+    def test_flush_clears_deduplication_state(self) -> None:
+        builder = MultiMinuteCandleBuilder(2619, 5)
+        builder.add(_candle(0))
+        builder.flush()
+
+        result = builder.add(_candle(0))
+
+        self.assertEqual(result, ())
+        current = builder.flush()
+        self.assertIsNotNone(current)
+        assert current is not None
+        self.assertEqual(current.source_minutes, 1)
+
     def test_late_prior_bucket_and_wrong_instrument_are_ignored(self) -> None:
         builder = MultiMinuteCandleBuilder(2619, 5)
         builder.add(_candle(5))

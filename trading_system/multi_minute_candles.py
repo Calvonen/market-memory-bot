@@ -26,9 +26,11 @@ class MultiMinuteCandleBuilder:
     """Aggregate closed 1-minute candles into aligned 5m/15m OHLC candles.
 
     Only real 1-minute candles are consumed; missing minutes are not synthesized.
-    `source_minutes` therefore records how many actual 1-minute candles contributed
-    to each aggregate so downstream logic can distinguish complete from sparse
-    windows.
+    `source_minutes` therefore records how many distinct actual 1-minute candles
+    contributed to each aggregate so downstream logic can distinguish complete
+    from sparse windows. A 1-minute candle whose start timestamp has already been
+    seen in the current bucket (e.g. a redelivered/replayed update) is ignored:
+    it does not increment `source_minutes` and does not affect open/high/low/close.
     """
 
     def __init__(self, instrument_id: int, interval_minutes: int) -> None:
@@ -44,6 +46,7 @@ class MultiMinuteCandleBuilder:
         self._earliest_minute: datetime | None = None
         self._latest_minute: datetime | None = None
         self._source_minutes = 0
+        self._seen_minutes: set[datetime] = set()
 
     @staticmethod
     def _to_utc(timestamp: datetime) -> datetime:
@@ -65,6 +68,7 @@ class MultiMinuteCandleBuilder:
         self._earliest_minute = minute_start
         self._latest_minute = minute_start
         self._source_minutes = 1
+        self._seen_minutes = {minute_start}
 
     def _closed_candle(self) -> MultiMinuteCandle:
         assert self._current_start is not None
@@ -98,8 +102,11 @@ class MultiMinuteCandleBuilder:
             return ()
 
         if bucket_start == self._current_start:
+            if minute_start in self._seen_minutes:
+                return ()
             assert self._high is not None and self._low is not None
             assert self._earliest_minute is not None and self._latest_minute is not None
+            self._seen_minutes.add(minute_start)
             self._high = max(self._high, candle.high)
             self._low = min(self._low, candle.low)
             self._source_minutes += 1
@@ -116,7 +123,18 @@ class MultiMinuteCandleBuilder:
         return (closed,)
 
     def flush(self) -> MultiMinuteCandle | None:
-        """Return the current partial aggregate and clear the builder."""
+        """Return the current partial aggregate and clear the builder.
+
+        Intended for controlled shutdown/tests. Runtime callers should normally
+        persist/use only candles returned by `add`, which are closed by a later
+        1-minute candle. Calling `flush` mid-bucket and then continuing to call
+        `add` for the same still-open bucket is not supported: this discards all
+        accumulated state (open/high/low/close, source_minutes, and the
+        deduplication of already-seen minutes), so any further minutes for that
+        bucket would be treated as if they were the first minute seen, silently
+        producing a wrong aggregate. Do not use `flush` as a peek/mid-stream
+        reporting operation.
+        """
         if self._current_start is None:
             return None
         candle = self._closed_candle()
@@ -124,4 +142,5 @@ class MultiMinuteCandleBuilder:
         self._open = self._high = self._low = self._close = None
         self._earliest_minute = self._latest_minute = None
         self._source_minutes = 0
+        self._seen_minutes = set()
         return candle
