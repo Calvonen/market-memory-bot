@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator, Iterable
 from typing import Any, cast
 
 from trading_system.tracked_etoro_live import (
-    EtoroLiveStreamProvider,
+    EtoroInstrumentStream,
     TrackedEtoroMarketUpdate,
     stream_tracked_etoro_instrument,
 )
@@ -14,7 +14,7 @@ from trading_system.tracked_instrument_etoro import TrackedEtoroInstrument
 
 async def stream_tracked_etoro_instruments(
     tracked_instruments: Iterable[TrackedEtoroInstrument],
-    provider: EtoroLiveStreamProvider,
+    provider: EtoroInstrumentStream,
     *,
     reconnect: bool = True,
 ) -> AsyncIterator[TrackedEtoroMarketUpdate]:
