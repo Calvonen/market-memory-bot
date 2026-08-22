@@ -67,7 +67,7 @@ class TrackedMarketReactionPipelineTests(unittest.TestCase):
             pipeline.add(_candle(5, "97"), reference_price=Decimal("101"))
 
         result = pipeline.add(_candle(5, "97"), reference_price=Decimal("100"))
-        self.assertEqual(result.evolution.evolution, ReactionEvolution.RETRACING)
+        self.assertEqual(result.evolution.evolution, ReactionEvolution.EXTENDING)
         self.assertEqual(result.evolution.previous_return_pct, Decimal("-2.00"))
 
     def test_state_is_isolated_by_interval(self) -> None:
