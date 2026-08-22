@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio
+import unittest
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -45,56 +45,60 @@ def _update(instrument_id: int, price: str = "10.5") -> EtoroMarketUpdate:
     )
 
 
-def _collect(tracked: TrackedEtoroInstrument, provider: StubStreamProvider, *, reconnect: bool = True):
-    async def collect():
-        return [
-            item
-            async for item in stream_tracked_etoro_instrument(
-                tracked,
-                provider,
-                reconnect=reconnect,
-            )
-        ]
-
-    return asyncio.run(collect())
-
-
-def test_stream_subscribes_with_resolved_etoro_id_and_reconnect_flag() -> None:
-    provider = StubStreamProvider((_update(4242),))
-
-    items = _collect(_tracked(), provider, reconnect=False)
-
-    assert provider.calls == [(4242, False)]
-    assert len(items) == 1
+async def _collect(
+    tracked: TrackedEtoroInstrument,
+    provider: StubStreamProvider,
+    *,
+    reconnect: bool = True,
+):
+    return [
+        item
+        async for item in stream_tracked_etoro_instrument(
+            tracked,
+            provider,
+            reconnect=reconnect,
+        )
+    ]
 
 
-def test_stream_preserves_tracked_identity_around_market_update() -> None:
-    update = _update(4242)
-    provider = StubStreamProvider((update,))
+class TrackedEtoroLiveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stream_subscribes_with_resolved_etoro_id_and_reconnect_flag(self) -> None:
+        provider = StubStreamProvider((_update(4242),))
 
-    [item] = _collect(_tracked(), provider)
+        items = await _collect(_tracked(), provider, reconnect=False)
 
-    assert item.tracked_instrument_id == "tracked-1"
-    assert item.instrument == "NOKIA.HE"
-    assert item.market == "Helsinki"
-    assert item.etoro_instrument_id == 4242
-    assert item.update is update
+        self.assertEqual(provider.calls, [(4242, False)])
+        self.assertEqual(len(items), 1)
+
+    async def test_stream_preserves_tracked_identity_around_market_update(self) -> None:
+        update = _update(4242)
+        provider = StubStreamProvider((update,))
+
+        [item] = await _collect(_tracked(), provider)
+
+        self.assertEqual(item.tracked_instrument_id, "tracked-1")
+        self.assertEqual(item.instrument, "NOKIA.HE")
+        self.assertEqual(item.market, "Helsinki")
+        self.assertEqual(item.etoro_instrument_id, 4242)
+        self.assertIs(item.update, update)
+
+    async def test_stream_ignores_unexpected_instrument_updates_fail_closed(self) -> None:
+        expected = _update(4242, "10.5")
+        unexpected = _update(9999, "99")
+        provider = StubStreamProvider((unexpected, expected))
+
+        items = await _collect(_tracked(), provider)
+
+        self.assertEqual([item.update for item in items], [expected])
+
+    async def test_empty_provider_stream_yields_no_tracked_updates(self) -> None:
+        provider = StubStreamProvider(())
+
+        items = await _collect(_tracked(), provider)
+
+        self.assertEqual(items, [])
+        self.assertEqual(provider.calls, [(4242, True)])
 
 
-def test_stream_ignores_unexpected_instrument_updates_fail_closed() -> None:
-    expected = _update(4242, "10.5")
-    unexpected = _update(9999, "99")
-    provider = StubStreamProvider((unexpected, expected))
-
-    items = _collect(_tracked(), provider)
-
-    assert [item.update for item in items] == [expected]
-
-
-def test_empty_provider_stream_yields_no_tracked_updates() -> None:
-    provider = StubStreamProvider(())
-
-    items = _collect(_tracked(), provider)
-
-    assert items == []
-    assert provider.calls == [(4242, True)]
+if __name__ == "__main__":
+    unittest.main()
