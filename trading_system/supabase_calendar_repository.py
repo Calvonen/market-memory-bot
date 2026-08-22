@@ -57,19 +57,35 @@ class SupabaseCalendarEventRepository:
         return self._row_to_event(rows[0])
 
     def list_upcoming(self, from_date: date, to_date: date) -> tuple[CalendarEvent, ...]:
-        # Pages through the complete result set via PostgREST's .range()
-        # rather than trusting a single request to return everything.
+        # Pages through the complete result set via keyset (cursor)
+        # pagination, not PostgREST's .range() (offset-based). Offset
+        # pagination re-derives each page from a numeric position that a
+        # concurrent insert/update elsewhere in the ordered set silently
+        # shifts: a row landing ahead of the current offset boundary pushes
+        # every later row one position further out, so the next
+        # `.range(offset, ...)` request - still anchored to the old offset -
+        # either re-returns a row already seen (duplicate) or, more
+        # insidiously, skips exactly the row that used to sit at that
+        # boundary (never returned by either page). Keyset pagination has
+        # no numeric offset to shift: each page's WHERE clause is anchored
+        # to the actual `(scheduled_date, id)` of the last row the
+        # *previous* page returned, so a concurrent change anywhere else in
+        # the table can never move that anchor.
+        #
         # `.order("scheduled_date").order("id")` is a fully deterministic
         # total order (id is the table's unique primary key) - without a
         # unique tie-break, rows sharing the same scheduled_date could sort
-        # differently across two page requests, risking a row appearing on
-        # both pages (a duplicate) or neither (a silent drop) at the
-        # boundary. A page shorter than the page size is what ends the
-        # loop - the standard, unambiguous "that was the last page" signal.
+        # differently across two page requests, risking a duplicate or a
+        # drop at the boundary independent of the pagination strategy
+        # itself. A page shorter than the page size is what ends the loop -
+        # the standard, unambiguous "that was the last page" signal, and
+        # still deterministic: the loop always terminates in exactly
+        # ceil(row_count / page_size) requests, regardless of concurrent
+        # writes elsewhere in the table.
         events: list[CalendarEvent] = []
-        offset = 0
+        cursor: tuple[str, str] | None = None
         while True:
-            response = (
+            query = (
                 self.client.table("calendar_events")
                 .select("*")
                 .in_(
@@ -78,16 +94,26 @@ class SupabaseCalendarEventRepository:
                 )
                 .gte("scheduled_date", from_date.isoformat())
                 .lte("scheduled_date", to_date.isoformat())
-                .order("scheduled_date")
-                .order("id")
-                .range(offset, offset + _LIST_UPCOMING_PAGE_SIZE - 1)
-                .execute()
+            )
+            if cursor is not None:
+                cursor_date, cursor_id = cursor
+                # (scheduled_date, id) > (cursor_date, cursor_id) in
+                # lexicographic tuple order, expressed as the two cases
+                # PostgREST's or() understands: either scheduled_date is
+                # strictly later, or it's tied and id breaks the tie.
+                query = query.or_(
+                    f"scheduled_date.gt.{cursor_date},"
+                    f"and(scheduled_date.eq.{cursor_date},id.gt.{cursor_id})"
+                )
+            response = (
+                query.order("scheduled_date").order("id").limit(_LIST_UPCOMING_PAGE_SIZE).execute()
             )
             rows = response.data or []
             events.extend(self._row_to_event(row) for row in rows)
             if len(rows) < _LIST_UPCOMING_PAGE_SIZE:
                 break
-            offset += _LIST_UPCOMING_PAGE_SIZE
+            last_row = rows[-1]
+            cursor = (last_row["scheduled_date"], last_row["id"])
         return tuple(events)
 
     def _upsert_candidate(self, candidate: CalendarCandidate, *, source: str) -> tuple[CalendarEvent, str]:

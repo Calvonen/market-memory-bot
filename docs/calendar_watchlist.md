@@ -137,6 +137,18 @@ call.
 - `POST /api/v1/calendar/manual` - backend/tooling-only manual event entry,
   guarded by `X-Admin-Token`; never called from the Expo app.
 
+`SupabaseCalendarEventRepository.list_upcoming()` pages through a result
+set wider than one Data API response (`_LIST_UPCOMING_PAGE_SIZE`, matching
+PostgREST's default `db-max-rows`) using keyset (cursor) pagination on
+`(scheduled_date, id)`, not offset-based `.range()`. Each page's `WHERE`
+clause is anchored to the literal `(scheduled_date, id)` of the *previous*
+page's actual last row - never a numeric offset, which a concurrent
+insert/update elsewhere in the ordered set can silently shift, causing the
+next fixed-offset page to either re-return an already-seen row or skip the
+row that used to sit at that boundary. A page shorter than the page size
+still ends the loop, so pagination always terminates deterministically
+regardless of concurrent writes.
+
 ## Mobile
 
 `mobile/src/app/events/upcoming.tsx` merges the real tracked
@@ -168,15 +180,33 @@ loading/error/empty states move into `ListHeaderComponent`; pull-to-refresh
 is unchanged, still `RefreshControl`-driven off the same `refreshing`/
 `onRefresh` state.
 
-A track mutation always wins over an older, still-in-flight refresh GET:
-`onTrack()` bumps the same `latestLoadId` generation counter `load()` uses
-for its own staleness guard, right after applying the tracked result. Any
-`getUpcomingCalendarEvents()` response that was already in flight before
-the track completed - and therefore reflects a pre-track snapshot - carries
-the now-stale `loadId` it captured at request time, so `load()`'s existing
-`if (loadId !== latestLoadId.current) return;` guard discards it instead of
-reverting the row back to `candidate`. A refresh started *after* the track
-captures a fresh `loadId` and is unaffected.
+A track mutation always wins over an older, still-in-flight refresh GET -
+but only for the one row it actually touched. `onTrack()` records a
+row-scoped override (`localCalendarOverrides`, keyed by
+`calendar_event_id`) tagged with a monotonically increasing
+`mutationVersion`, rather than bumping the same generation counter
+`load()` uses for its own overlap guard (`latestCalendarLoadId`/
+`latestEventsLoadId` still exist, but only ever guard against two
+*overlapping* `load()` calls on the same source - e.g. a quick double
+pull-to-refresh, or a range-chip change firing a new request before the
+previous one settled). Every calendar response, via
+`applyLocalCalendarOverrides()`, re-applies any override whose version is
+newer than the mutation-version snapshot taken when *that* response's own
+request started - so a still-pending, genuinely newer response (e.g. a
+wider-range 30 pv request in flight when a 7 pv candidate gets tracked) is
+never discarded wholesale just to protect one row.
+
+A failed calendar GET is never flattened into an empty result. `load()`
+keeps `calendarEvents` and `calendarError` in two entirely separate
+pieces of state: success clears `calendarError` and replaces
+`calendarEvents`; failure sets `calendarError` and leaves `calendarEvents`
+completely untouched, so whatever was last successfully loaded (or
+`null`, on a first-ever failed load) stays exactly as it was. The UI
+renders a dedicated error/retry card (never the "Ei julkaisuja" empty
+state, which is reserved for a genuine, successful empty result) and its
+retry button just calls `load(rangeDays)` again. The `events`/
+`EventExpectation` side has its own independent `error` state and keeps
+working normally regardless of what the calendar side is doing.
 
 ## Production scheduling
 

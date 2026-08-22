@@ -526,6 +526,7 @@ const calls = [];
 function setEvents(v) {{ calls.push(['setEvents', v]); }}
 function setError(v) {{ calls.push(['setError', v]); }}
 function setCalendarEvents(v) {{ calls.push(['setCalendarEvents', v]); }}
+function setCalendarError() {{}}
 
 function getEvents() {{ return new Promise(() => {{}}); }}
 function getUpcomingCalendarEvents() {{ return Promise.resolve(['cal-1']); }}
@@ -587,6 +588,7 @@ const calls = [];
 function setEvents(v) {{ calls.push(['setEvents', v]); }}
 function setError(v) {{ calls.push(['setError', v]); }}
 function setCalendarEvents(v) {{ calls.push(['setCalendarEvents', v]); }}
+function setCalendarError() {{}}
 
 function getEvents() {{ return Promise.resolve(['event-1']); }}
 function getUpcomingCalendarEvents() {{ return new Promise(() => {{}}); }}
@@ -617,6 +619,254 @@ setTimeout(() => {{ console.log(JSON.stringify(calls)); }}, 50);
         self.assertIn("setEvents", names)
         events_call = next(c for c in calls if c[0] == "setEvents")
         self.assertEqual(events_call[1], ["event-1"])
+
+    # -- calendar failure must not look like an empty calendar (P2) --------
+
+    def test_calendar_failure_never_flattens_to_an_empty_list(self) -> None:
+        # P2 regression: a failed calendar GET used to setCalendarEvents([]),
+        # which renders identically to a genuine "zero candidates in this
+        # window" response. calendarEvents must stay exactly as it was
+        # (null, on a first-ever failed load) - only calendarError changes.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        load_start = self.upcoming_source.index("const load = useCallback((currentRangeDays: number) => {")
+        body_start = load_start + len("const load = useCallback((currentRangeDays: number) => {")
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[body_start:load_end]
+
+        date_helpers_js = self._extract_date_ordinal_fns_js()
+        script = f"""
+{date_helpers_js}
+
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
+const calls = [];
+function setEvents(v) {{ calls.push(['setEvents', v]); }}
+function setError(v) {{ calls.push(['setError', v]); }}
+function setCalendarEvents(v) {{ calls.push(['setCalendarEvents', v]); }}
+function setCalendarError(v) {{ calls.push(['setCalendarError', v]); }}
+
+function getEvents() {{ return new Promise(() => {{}}); }}
+function getUpcomingCalendarEvents() {{ return Promise.reject(new Error('network down')); }}
+
+function load(currentRangeDays) {{
+{load_body}
+}}
+
+load(7);
+setTimeout(() => {{ console.log(JSON.stringify(calls)); }}, 50);
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = json.loads(result.stdout)
+        names = [c[0] for c in calls]
+
+        # setCalendarEvents must never be called at all here - not with the
+        # failed response's data, and not as some kind of reset. Only
+        # setCalendarError changes: once optimistically to null at load()'s
+        # start (the calendar-side equivalent of setError(null)), then
+        # again with the real failure once the rejection is handled.
+        self.assertNotIn("setCalendarEvents", names)
+        self.assertIn("setCalendarError", names)
+        error_calls = [c[1] for c in calls if c[0] == "setCalendarError"]
+        # First call is the optimistic setCalendarError(null) at load()'s
+        # start; the last one is the real failure - not null, and not an
+        # empty array in disguise.
+        self.assertEqual(error_calls[0], None)
+        self.assertIsNotNone(error_calls[-1])
+        self.assertNotEqual(error_calls[-1], [])
+
+    def test_calendar_failure_preserves_previously_loaded_calendar_data(self) -> None:
+        # A refresh whose calendar GET fails must leave the last
+        # successfully loaded calendar data exactly as it was - never
+        # wiped out by the failed attempt.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        load_start = self.upcoming_source.index("const load = useCallback((currentRangeDays: number) => {")
+        body_start = load_start + len("const load = useCallback((currentRangeDays: number) => {")
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[body_start:load_end]
+
+        date_helpers_js = self._extract_date_ordinal_fns_js()
+        script = f"""
+{date_helpers_js}
+
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
+let calendarEventsState = null;
+let calendarErrorState = null;
+function setEvents() {{}}
+function setError() {{}}
+function setCalendarEvents(updater) {{
+  calendarEventsState = typeof updater === 'function' ? updater(calendarEventsState) : updater;
+}}
+function setCalendarError(v) {{ calendarErrorState = v; }}
+
+// First load() call succeeds; the second (the "refresh") fails.
+let attempt = 0;
+function getEvents() {{ return new Promise(() => {{}}); }}
+function getUpcomingCalendarEvents() {{
+  attempt += 1;
+  if (attempt === 1) {{
+    return Promise.resolve([
+      {{ calendar_event_id: 'cal-1', instrument: 'AAPL', status: 'candidate' }},
+    ]);
+  }}
+  return Promise.reject(new Error('network down'));
+}}
+
+function load(currentRangeDays) {{
+{load_body}
+}}
+
+async function main() {{
+  load(7);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const afterFirstLoad = JSON.parse(JSON.stringify(calendarEventsState));
+
+  load(7);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  console.log(JSON.stringify({{
+    afterFirstLoad,
+    afterFailedRefresh: calendarEventsState,
+    calendarErrorAfterFailedRefresh: calendarErrorState,
+  }}));
+}}
+
+main();
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+
+        self.assertEqual(
+            outputs["afterFirstLoad"],
+            [{"calendar_event_id": "cal-1", "instrument": "AAPL", "status": "candidate"}],
+        )
+        # The failed refresh must leave the previously loaded data exactly
+        # as it was - not null, not [], not anything else.
+        self.assertEqual(outputs["afterFailedRefresh"], outputs["afterFirstLoad"])
+        self.assertIsNotNone(outputs["calendarErrorAfterFailedRefresh"])
+
+    def test_expectation_list_keeps_updating_when_calendar_fails(self) -> None:
+        # The expectation list (getEvents()/`events`/`error`) must keep
+        # working completely normally when only the calendar side fails -
+        # its own state is untouched by a calendar failure.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        load_start = self.upcoming_source.index("const load = useCallback((currentRangeDays: number) => {")
+        body_start = load_start + len("const load = useCallback((currentRangeDays: number) => {")
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[body_start:load_end]
+
+        date_helpers_js = self._extract_date_ordinal_fns_js()
+        script = f"""
+{date_helpers_js}
+
+let latestEventsLoadId = {{ current: 0 }};
+let latestCalendarLoadId = {{ current: 0 }};
+let localCalendarOverrides = {{ current: new Map() }};
+let mutationVersion = {{ current: 0 }};
+const calls = [];
+function setEvents(v) {{ calls.push(['setEvents', v]); }}
+function setError(v) {{ calls.push(['setError', v]); }}
+function setCalendarEvents(v) {{ calls.push(['setCalendarEvents', v]); }}
+function setCalendarError(v) {{ calls.push(['setCalendarError', v]); }}
+
+function getEvents() {{ return Promise.resolve(['event-1']); }}
+function getUpcomingCalendarEvents() {{ return Promise.reject(new Error('network down')); }}
+
+function load(currentRangeDays) {{
+{load_body}
+}}
+
+load(7);
+setTimeout(() => {{ console.log(JSON.stringify(calls)); }}, 50);
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = json.loads(result.stdout)
+        names = [c[0] for c in calls]
+
+        self.assertIn("setEvents", names)
+        events_call = next(c for c in calls if c[0] == "setEvents")
+        self.assertEqual(events_call[1], ["event-1"])
+        # The calendar failure must never also report as an events/
+        # expectation-list error - the two sources' error states are
+        # completely independent.
+        self.assertNotIn("setError", [c[0] for c in calls if c[1] is not None])
+
+    def test_ui_distinguishes_calendar_error_from_a_successful_empty_result(self) -> None:
+        # Structural proof that the render logic actually branches on
+        # calendarError, not just that the state exists: the "Ei
+        # julkaisuja" empty state must be gated on !calendarError (never
+        # shown while a calendar failure is active), and a distinct
+        # calendar error/retry affordance must exist that re-triggers
+        # load().
+        empty_state_start = self.upcoming_source.index(
+            "{!loading && !calendarError && filtered.length === 0 ? ("
+        )
+        self.assertGreater(empty_state_start, -1)
+
+        calendar_error_block_start = self.upcoming_source.index("{calendarError ? (")
+        calendar_error_block_end = self.upcoming_source.index(") : null}", calendar_error_block_start)
+        calendar_error_block = self.upcoming_source[calendar_error_block_start:calendar_error_block_end]
+
+        # Retry re-invokes load() with the current range - not a dead end.
+        self.assertIn("onPress={() => void load(rangeDays)}", calendar_error_block)
+        # Distinct from the plain events-list error/empty-state text.
+        self.assertNotIn("Ei julkaisuja", calendar_error_block)
+
+    def test_loading_flag_clears_on_a_calendar_error_same_as_on_data_or_events_error(self) -> None:
+        # calendarError is a settled state, not "still loading" - the
+        # initial spinner must clear the moment it's set, same as it
+        # already does for `events`/`calendarEvents` having data or
+        # `error` being set.
+        loading_start = self.upcoming_source.index("const loading = ")
+        loading_end = self.upcoming_source.index(";", loading_start)
+        loading_expr = self.upcoming_source[loading_start:loading_end]
+        self.assertIn("!calendarError", loading_expr)
 
     # -- pull-to-refresh (P2 regression): must never hang on one source ----
 
@@ -667,6 +917,7 @@ let mutationVersion = {{ current: 0 }};
 function setEvents() {{}}
 function setError() {{}}
 function setCalendarEvents() {{}}
+function setCalendarError() {{}}
 
 function getEvents() {{ return Promise.resolve(['event-1']); }}
 function getUpcomingCalendarEvents() {{ return new Promise(() => {{}}); }}
@@ -1260,6 +1511,7 @@ let mutationVersion = {{ current: 0 }};
 function setEvents() {{}}
 function setError() {{}}
 function setCalendarEvents() {{}}
+function setCalendarError() {{}}
 
 let capturedArgs = null;
 function getEvents() {{ return new Promise(() => {{}}); }}
@@ -1581,6 +1833,7 @@ let calendarEventsState = [
 function setCalendarEvents(updater) {{
   calendarEventsState = typeof updater === 'function' ? updater(calendarEventsState) : updater;
 }}
+function setCalendarError() {{}}
 function setEvents() {{}}
 function setError() {{}}
 function setTrackError() {{}}
@@ -1689,6 +1942,7 @@ let calendarEventsState = [
 function setCalendarEvents(updater) {{
   calendarEventsState = typeof updater === 'function' ? updater(calendarEventsState) : updater;
 }}
+function setCalendarError() {{}}
 function setEvents() {{}}
 function setError() {{}}
 function setTrackError() {{}}
@@ -1783,6 +2037,7 @@ let eventsState = null;
 function setEvents(v) {{ eventsState = v; }}
 function setError() {{}}
 function setCalendarEvents() {{}}
+function setCalendarError() {{}}
 function setTrackError() {{}}
 function setTrackingIds() {{}}
 

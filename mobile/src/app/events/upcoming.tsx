@@ -274,6 +274,15 @@ export default function UpcomingEventsScreen() {
   const [events, setEvents] = useState<EventExpectation[] | null>(null);
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // P2 regression: a failed calendar GET must never be flattened into
+  // setCalendarEvents([]) - that renders identically to a genuine
+  // "zero candidates in range" response, so a real outage silently looks
+  // like "Ei julkaisuja" instead of a visible error. calendarError is its
+  // own state, entirely separate from `error` (which is events/
+  // expectation-only) - a calendar failure never touches `calendarEvents`
+  // itself, so whatever was last successfully loaded stays on screen
+  // (stale-but-real data) instead of being wiped by the failure.
+  const [calendarError, setCalendarError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [trackingIds, setTrackingIds] = useState<Set<string>>(new Set());
   const [trackError, setTrackError] = useState<string | null>(null);
@@ -322,6 +331,12 @@ export default function UpcomingEventsScreen() {
     // brings back for that one row; see applyLocalCalendarOverrides() above.
     const calendarVersionAtStart = mutationVersion.current;
     setError(null);
+    // Optimistically cleared here too, same as setError(null) above - a
+    // retry (pull-to-refresh, or the effect below re-firing on a range
+    // change) must not keep showing a stale error banner while the new
+    // attempt is in flight; it's set again below if this attempt also
+    // fails.
+    setCalendarError(null);
 
     // Device-local window (see deviceLocalDateWindow() above) sent
     // explicitly - never a parameter-free GET left to the backend host's
@@ -357,9 +372,19 @@ export default function UpcomingEventsScreen() {
           applyLocalCalendarOverrides(list, localCalendarOverrides.current, calendarVersionAtStart),
         );
       })
-      .catch(() => {
+      .catch((err) => {
         if (calendarLoadId !== latestCalendarLoadId.current) return;
-        setCalendarEvents([]);
+        // P2 regression: never setCalendarEvents([]) here - that would
+        // render identically to a genuine "zero candidates in this
+        // window" response, silently passing an outage off as an empty
+        // calendar. calendarEvents is deliberately left untouched, so
+        // whatever was last successfully loaded (or `null`, if this is
+        // the very first attempt) stays exactly as it was; only the
+        // error state changes, driving the calendar-specific error/retry
+        // UI below instead of the plain "Ei julkaisuja" empty state.
+        setCalendarError(
+          err instanceof Error ? err.message : 'Kalenteritietoja ei juuri nyt saatu haettua.',
+        );
       });
 
     // onRefresh() below awaits load() to know when to stop spinning - it
@@ -474,7 +499,12 @@ export default function UpcomingEventsScreen() {
     });
   }, [rows, market, search, rangeDays]);
 
-  const loading = !events && !calendarEvents && !error;
+  // Clears the moment either source has settled - with data OR an error -
+  // same "first source to settle wins" policy as everywhere else on this
+  // screen (see load() above). A calendar failure is a settled state, not
+  // a still-loading one, so calendarError must clear this exactly like
+  // calendarEvents having data would.
+  const loading = !events && !calendarEvents && !error && !calendarError;
 
   // P2 regression: a candidate/tracked calendar result set can run into
   // the hundreds - eagerly rendering every card via a plain ScrollView
@@ -586,7 +616,25 @@ export default function UpcomingEventsScreen() {
       {error ? <Text style={styles.errorText}>{error}</Text> : null}
       {trackError ? <Text style={styles.errorText}>{trackError}</Text> : null}
 
-      {!loading && filtered.length === 0 ? (
+      {calendarError ? (
+        <View style={styles.calendarErrorCard}>
+          <Text style={styles.errorText}>{calendarError}</Text>
+          <Text style={styles.calendarErrorHint}>
+            Seuratut MarketAI-eventit yllä toimivat silti normaalisti.
+          </Text>
+          <Pressable style={styles.retryButton} onPress={() => void load(rangeDays)}>
+            <Text style={styles.retryButtonText}>Yritä uudelleen</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      {/* P2 regression: this must never show while a calendar fetch has
+          actually failed (calendarError) - "Ei julkaisuja" reads as a
+          successful, genuinely empty response, which a failed request is
+          not. The calendarErrorCard above is what a calendar failure gets
+          instead; this empty state is reserved for a real, successful
+          empty result. */}
+      {!loading && !calendarError && filtered.length === 0 ? (
         <View style={styles.emptyCard}>
           <Text style={styles.emptyText}>Ei julkaisuja valituilla suodattimilla.</Text>
         </View>
@@ -700,6 +748,34 @@ const styles = StyleSheet.create({
   emptyText: {
     color: '#8994a6',
     fontSize: 14,
+  },
+  calendarErrorCard: {
+    backgroundColor: '#1c1417',
+    borderWidth: 1,
+    borderColor: '#3a2226',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+  },
+  calendarErrorHint: {
+    color: '#8994a6',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  retryButton: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#2a1b1e',
+    borderWidth: 1,
+    borderColor: '#4a2b30',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    marginTop: 12,
+  },
+  retryButtonText: {
+    color: '#e17878',
+    fontSize: 12,
+    fontWeight: '800',
   },
   eventCard: {
     backgroundColor: '#131821',
