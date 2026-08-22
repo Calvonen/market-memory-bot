@@ -1744,10 +1744,64 @@ console.log(JSON.stringify({{ nasdaqSeven, nasdaqThirty, suomiSeven, kaikkiSeven
         finally_body = on_track_body[finally_start:]
         self.assertIn("next.delete(calendarEventId);", finally_body)
 
-    def test_track_action_never_calls_untrack_or_uses_admin_auth(self) -> None:
-        self.assertNotIn("untrackCalendarEvent", self.upcoming_source)
+    def test_untrack_action_calls_untrack_calendar_event_and_updates_local_state(self) -> None:
+        # The upcoming screen intentionally supports untrackCalendarEvent()
+        # now (tracked calendar row -> back to 'candidate') - this
+        # supersedes the old assertion that the identifier must never
+        # appear at all.
+        self.assertIn("untrackCalendarEvent", self.upcoming_source)
+        self.assertIn("export function untrackCalendarEvent(", self.api_source)
+
+        on_untrack_start = self.upcoming_source.index(
+            "const onUntrack = useCallback(async (calendarEventId"
+        )
+        on_untrack_end = self.upcoming_source.index("}, []);", on_untrack_start)
+        on_untrack_body = self.upcoming_source[on_untrack_start:on_untrack_end]
+
+        self.assertIn("await untrackCalendarEvent(calendarEventId)", on_untrack_body)
+        # Same row-scoped override mechanism as onTrack(): the
+        # server-confirmed returned event replaces the matching local
+        # entry, never a locally-guessed status flip.
+        self.assertIn(
+            "event.calendar_event_id === calendarEventId ? updated : event", on_untrack_body
+        )
+        self.assertIn("const version = ++mutationVersion.current;", on_untrack_body)
+        self.assertIn(
+            "localCalendarOverrides.current.set(calendarEventId, { event: updated, version });",
+            on_untrack_body,
+        )
+
+        finally_start = on_untrack_body.index("} finally {")
+        finally_body = on_untrack_body[finally_start:]
+        self.assertIn("next.delete(calendarEventId);", finally_body)
+
+    def test_untrack_action_never_uses_admin_auth(self) -> None:
         self.assertNotIn("X-Admin-Token", self.upcoming_source)
         self.assertNotIn("MARKETAI_ADMIN_API_KEY", self.upcoming_source)
+
+    def test_untrack_button_only_wired_for_tracked_calendar_rows_not_expectations(self) -> None:
+        # The untrack action must only ever be reachable for calendar rows
+        # (kind === 'calendar') whose status is 'tracked' - never for
+        # EventExpectation rows (kind === 'expectation'), which must keep
+        # rendering the plain, non-destructive "Seurannassa" badge.
+        untrack_branch_start = self.upcoming_source.index(
+            "row.status === 'tracked' && row.kind === 'calendar' ? ("
+        )
+        untrack_branch_end = self.upcoming_source.index(
+            ") : row.status === 'tracked' ? (", untrack_branch_start
+        )
+        untrack_branch = self.upcoming_source[untrack_branch_start:untrack_branch_end]
+        self.assertIn("void onUntrack(row.calendarEventId)", untrack_branch)
+        self.assertIn("Poista seurannasta", untrack_branch)
+
+        badge_branch_start = untrack_branch_end
+        badge_branch_end = self.upcoming_source.index(") : (", badge_branch_start)
+        badge_branch = self.upcoming_source[badge_branch_start:badge_branch_end]
+        self.assertIn("Seurannassa", badge_branch)
+        # The expectation-row badge branch must never itself call onUntrack
+        # or offer a removal action.
+        self.assertNotIn("onUntrack", badge_branch)
+        self.assertNotIn("Pressable", badge_branch)
 
     def test_track_button_is_disabled_while_its_own_request_is_in_flight(self) -> None:
         self.assertIn("disabled={trackingIds.has(row.calendarEventId ?? '')}", self.upcoming_source)
