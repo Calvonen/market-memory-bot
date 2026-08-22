@@ -24,6 +24,14 @@ class EtoroQuote:
 
 
 @dataclass(frozen=True)
+class EtoroInstrumentCandidate:
+    instrument_id: int
+    symbol: str | None
+    display_name: str
+    market: str | None = None
+
+
+@dataclass(frozen=True)
 class EtoroMarketUpdate:
     instrument_id: int
     bid: Decimal | None
@@ -69,12 +77,7 @@ def _bool(value: Any) -> bool | None:
 
 
 def parse_etoro_stream_message(raw: str | bytes) -> tuple[EtoroMarketUpdate, ...]:
-    """Parse one eToro WebSocket frame into zero or more market updates.
-
-    eToro sends a binary NUL heartbeat (`b"\\x00"`) between JSON frames. It is
-    intentionally ignored here. Malformed/non-market frames are also ignored;
-    authentication/subscription acknowledgements are handled by the provider.
-    """
+    """Parse one eToro WebSocket frame into zero or more market updates."""
     if raw in (b"\x00", "\x00"):
         return ()
     if isinstance(raw, bytes):
@@ -126,12 +129,7 @@ def parse_etoro_stream_message(raw: str | bytes) -> tuple[EtoroMarketUpdate, ...
 
 
 class EtoroMarketDataProvider:
-    """Backend-only eToro quote/WebSocket adapter.
-
-    This provider is intentionally not wired into Strategy, Risk, PaperBroker,
-    Market Memory, or the scanner in this PR. It only establishes a small,
-    testable transport boundary for later market-reaction work.
-    """
+    """Backend-only eToro search, quote and WebSocket adapter."""
 
     def __init__(
         self,
@@ -169,6 +167,63 @@ class EtoroMarketDataProvider:
             "x-user-key": self.user_key,
             "x-request-id": str(uuid.uuid4()),
         }
+
+    def search_instruments(self, term: str) -> tuple[EtoroInstrumentCandidate, ...]:
+        """Search eToro instruments by symbol/name using the documented search parameter."""
+        search_term = term.strip()
+        if not search_term:
+            return ()
+        try:
+            response = self._http_get(
+                f"{self.base_url}/search",
+                params={"search": search_term},
+                headers=self._headers(),
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(f"eToro instrument search failed: {exc}") from exc
+
+        if not response.ok:
+            raise RuntimeError(f"eToro instrument search HTTP {response.status_code}: {response.text[:500]}")
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise RuntimeError("eToro instrument search returned invalid JSON") from exc
+
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            raise RuntimeError("eToro instrument search response is missing data")
+
+        candidates: list[EtoroInstrumentCandidate] = []
+        seen: set[int] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_id = row.get("instrumentId", row.get("instrumentID"))
+            try:
+                instrument_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if instrument_id in seen:
+                continue
+            symbol_raw = row.get("symbol")
+            symbol = str(symbol_raw).strip() if symbol_raw not in (None, "") else None
+            name_raw = row.get("displayName", row.get("instrumentDisplayName", row.get("name")))
+            display_name = str(name_raw or symbol or "").strip()
+            if not display_name:
+                continue
+            market_raw = row.get("market", row.get("exchangeName", row.get("exchange")))
+            market = str(market_raw).strip() if market_raw not in (None, "") else None
+            candidates.append(
+                EtoroInstrumentCandidate(
+                    instrument_id=instrument_id,
+                    symbol=symbol,
+                    display_name=display_name,
+                    market=market,
+                )
+            )
+            seen.add(instrument_id)
+        return tuple(candidates)
 
     def fetch_quote(self, instrument_id: int) -> EtoroQuote:
         try:
@@ -273,12 +328,7 @@ class EtoroMarketDataProvider:
         *,
         reconnect: bool = True,
     ) -> AsyncIterator[EtoroMarketUpdate]:
-        """Yield eToro snapshot/update frames for one instrument.
-
-        Connection loss is retried with a short delay by default. Each retry
-        authenticates and subscribes again with `snapshot=True`, so consumers
-        re-enter from a fresh provider snapshot instead of assuming continuity.
-        """
+        """Yield eToro snapshot/update frames for one instrument."""
         while True:
             try:
                 async with self._websocket_connect(self.websocket_url) as websocket:
