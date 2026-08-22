@@ -1,5 +1,5 @@
-import { Link, router } from 'expo-router';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, router, useFocusEffect } from 'expo-router';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -55,65 +55,86 @@ export default function HomeScreen() {
   // depends on `events` too and the two fetches now resolve independently
   // of each other (see loadEvents()).
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[] | null>(null);
+  // Separate from `error` (EventExpectation-only) - a calendar failure must
+  // never be conflated with an EventExpectation failure, or silently
+  // swallowed. calendarEvents itself is left untouched on failure (see the
+  // calendar .catch below), so any previously loaded tracked calendar cards
+  // stay on screen (stale-but-real data) while this drives the visible
+  // error/retry UI instead. Same split as events/upcoming.tsx's
+  // error/calendarError.
+  const [calendarError, setCalendarError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const latestLoadId = useRef(0);
 
-  const loadEvents = useCallback(async () => {
+  // Not async/await - both requests are started here, before either is
+  // awaited, and each is its own independent .then/.catch chain (never a
+  // sequential await), same as events/upcoming.tsx's load(). A slow or
+  // failing getEvents() must never delay getUpcomingCalendarEvents() from
+  // even starting, and vice versa.
+  const loadEvents = useCallback(() => {
     const loadId = ++latestLoadId.current;
     setError(null);
+    setCalendarError(null);
 
-    // Started here, before getEvents() is awaited below - a slow or
-    // failing getEvents() must never delay getUpcomingCalendarEvents() from
-    // even starting, and vice versa. Same principle as events/upcoming.tsx's
-    // load(), which fires both requests before awaiting either.
+    const eventsPromise = getEvents()
+      .then((list) => {
+        if (loadId !== latestLoadId.current) return;
+        setEvents(list);
+        setStatuses({});
+
+        // The card list renders immediately from `list` above. Each event's
+        // paper-status is then fetched independently, not combined into one
+        // batched wait, so one slow or failing request can't hold up every
+        // other card - each card updates for itself as its own status
+        // arrives, instead of the whole screen waiting on the slowest of N.
+        list.forEach((event) => {
+          getPaperStatus(event.event_id)
+            .then((status) => {
+              if (loadId !== latestLoadId.current) return;
+              setStatuses((prev) => ({
+                ...prev,
+                [event.event_id]: { run: status.paper_run, statusError: false },
+              }));
+            })
+            .catch(() => {
+              if (loadId !== latestLoadId.current) return;
+              setStatuses((prev) => ({
+                ...prev,
+                [event.event_id]: { run: null, statusError: true },
+              }));
+            });
+        });
+      })
+      .catch((err) => {
+        if (loadId !== latestLoadId.current) return;
+        setError(err instanceof Error ? err.message : 'Tuntematon virhe');
+      });
+
     const { fromDate, toDate } = deviceLocalCalendarWindow();
     const calendarPromise = getUpcomingCalendarEvents(fromDate, toDate)
       .then((list) => {
         if (loadId !== latestLoadId.current) return;
         setCalendarEvents(list);
       })
-      .catch(() => {
+      .catch((err) => {
         if (loadId !== latestLoadId.current) return;
-        // Leave the previous list (or null) in place rather than clearing
-        // it to [] - a failed fetch must not render identically to "no
-        // tracked calendar events".
+        // calendarEvents is deliberately left untouched here - a failed
+        // fetch must not render identically to "no tracked calendar
+        // events"; whatever was last successfully loaded (or `null`, if
+        // this is the very first attempt) stays exactly as it was.
+        setCalendarError(
+          err instanceof Error ? err.message : 'Kalenteritietoja ei juuri nyt saatu haettua.',
+        );
       });
 
-    try {
-      const list = await getEvents();
-      if (loadId !== latestLoadId.current) return;
-      setEvents(list);
-      setStatuses({});
-
-      // The card list renders immediately from `list` above. Each event's
-      // paper-status is then fetched independently, not combined into one
-      // batched wait, so one slow or failing request can't hold up every
-      // other card - each card updates for itself as its own status
-      // arrives, instead of the whole screen waiting on the slowest of N.
-      list.forEach((event) => {
-        getPaperStatus(event.event_id)
-          .then((status) => {
-            if (loadId !== latestLoadId.current) return;
-            setStatuses((prev) => ({
-              ...prev,
-              [event.event_id]: { run: status.paper_run, statusError: false },
-            }));
-          })
-          .catch(() => {
-            if (loadId !== latestLoadId.current) return;
-            setStatuses((prev) => ({
-              ...prev,
-              [event.event_id]: { run: null, statusError: true },
-            }));
-          });
-      });
-    } catch (err) {
-      if (loadId !== latestLoadId.current) return;
-      setError(err instanceof Error ? err.message : 'Tuntematon virhe');
-    }
-
-    await calendarPromise;
+    // onRefresh() below awaits this to know when to stop spinning. The
+    // "first source to settle wins" policy matches events/upcoming.tsx's
+    // load(): if one request hangs, the refresh indicator must still clear
+    // as soon as the *other* one settles rather than waiting indefinitely -
+    // the hung source's own .then()/.catch() above still updates its state
+    // normally whenever (if ever) it does settle.
+    return Promise.race([eventsPromise, calendarPromise]);
   }, []);
 
   // Tracked calendar rows for display: status = 'tracked' only, and never
@@ -136,13 +157,18 @@ export default function HomeScreen() {
     });
   }, [calendarEvents, events]);
 
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      void loadEvents();
-    }, 0);
+  // Refires on every focus, not just mount - so returning to Home after
+  // tracking a candidate on /events/upcoming picks up the newly tracked
+  // calendar row without needing an explicit pull-to-refresh.
+  useFocusEffect(
+    useCallback(() => {
+      const timer = setTimeout(() => {
+        void loadEvents();
+      }, 0);
 
-    return () => clearTimeout(timer);
-  }, [loadEvents]);
+      return () => clearTimeout(timer);
+    }, [loadEvents]),
+  );
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -183,7 +209,26 @@ export default function HomeScreen() {
 
       {error ? <Text style={styles.errorText}>{error}</Text> : null}
 
-      {events && events.length === 0 && trackedCalendarEvents && trackedCalendarEvents.length === 0 ? (
+      {calendarError ? (
+        <View style={styles.calendarErrorCard}>
+          <Text style={styles.errorText}>{calendarError}</Text>
+          <Text style={styles.calendarErrorHint}>
+            Seuratut MarketAI-eventit yllä toimivat silti normaalisti.
+          </Text>
+          <Pressable style={styles.retryButton} onPress={() => void loadEvents()}>
+            <Text style={styles.retryButtonText}>Yritä uudelleen</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      {/* Must never show while a calendar fetch has actually failed
+          (calendarError) - "Ei vielä..." reads as a successful, genuinely
+          empty response, which a failed request is not. */}
+      {events &&
+      events.length === 0 &&
+      trackedCalendarEvents &&
+      trackedCalendarEvents.length === 0 &&
+      !calendarError ? (
         <View style={styles.emptyCard}>
           <Text style={styles.emptyText}>
             Ei vielä seurattavia tulosjulkaisuja.
@@ -376,6 +421,34 @@ const styles = StyleSheet.create({
     color: '#e17878',
     fontSize: 13,
     marginBottom: 16,
+  },
+  calendarErrorCard: {
+    backgroundColor: '#1c1417',
+    borderWidth: 1,
+    borderColor: '#3a2226',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+  },
+  calendarErrorHint: {
+    color: '#8994a6',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  retryButton: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#2a1b1e',
+    borderWidth: 1,
+    borderColor: '#4a2b30',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    marginTop: 12,
+  },
+  retryButtonText: {
+    color: '#e17878',
+    fontSize: 12,
+    fontWeight: '800',
   },
   emptyCard: {
     backgroundColor: '#131821',
