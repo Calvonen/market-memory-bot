@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import Enum
 from typing import Iterable, Protocol
+from uuid import UUID
 
 from trading_system.calendar_provider import CalendarCandidate
 from trading_system.models import new_id, utc_now
@@ -36,6 +38,29 @@ class CalendarEventStatus(str, Enum):
 # accept. A future phase can extend CalendarEventStatus without touching this
 # set until the corresponding transitions actually exist.
 _LOCKED_FROM_SYNC_OVERWRITE = frozenset(CalendarEventStatus) - {CalendarEventStatus.CANDIDATE}
+
+_UUID_DASHED_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_UUID_DASHLESS_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+
+
+def _canonical_uuid_text(value: str) -> str | None:
+    """Return canonical UUID text only for API-supported UUID spellings.
+
+    Keep this deliberately narrower than ``uuid.UUID(value)``: Python also
+    accepts URN/braced spellings that the calendar API rejects before a
+    repository call. The in-memory repository only needs to bridge the two
+    supported spellings (canonical dashed and 32-character dashless) so its
+    behavior matches production without widening accepted input forms.
+    """
+
+    if not (_UUID_DASHED_RE.fullmatch(value) or _UUID_DASHLESS_RE.fullmatch(value)):
+        return None
+    try:
+        return str(UUID(value))
+    except ValueError:
+        return None
 
 
 class CalendarEventNotFound(Exception):
@@ -142,6 +167,21 @@ class InMemoryCalendarEventRepository:
                 return event
         return None
 
+    def _resolve_event_key(self, calendar_event_id: str) -> str | None:
+        """Resolve dashed/dashless UUID aliases without changing stored keys."""
+
+        if calendar_event_id in self.events:
+            return calendar_event_id
+
+        canonical = _canonical_uuid_text(calendar_event_id)
+        if canonical is None:
+            return None
+
+        for stored_key in self.events:
+            if _canonical_uuid_text(stored_key) == canonical:
+                return stored_key
+        return None
+
     def sync_candidates(
         self, candidates: Iterable[CalendarCandidate], *, source: str
     ) -> CalendarSyncResult:
@@ -243,9 +283,10 @@ class InMemoryCalendarEventRepository:
 
     def track(self, calendar_event_id: str) -> CalendarEvent:
         with self.lock:
-            existing = self.events.get(calendar_event_id)
-            if existing is None:
+            stored_key = self._resolve_event_key(calendar_event_id)
+            if stored_key is None:
                 raise CalendarEventNotFound(calendar_event_id)
+            existing = self.events[stored_key]
             if existing.status == CalendarEventStatus.TRACKED:
                 return existing
             if existing.status != CalendarEventStatus.CANDIDATE:
@@ -253,14 +294,15 @@ class InMemoryCalendarEventRepository:
                     f"cannot track a calendar event with status {existing.status.value!r}"
                 )
             updated = replace(existing, status=CalendarEventStatus.TRACKED, updated_at=utc_now())
-            self.events[calendar_event_id] = updated
+            self.events[stored_key] = updated
             return updated
 
     def untrack(self, calendar_event_id: str) -> CalendarEvent:
         with self.lock:
-            existing = self.events.get(calendar_event_id)
-            if existing is None:
+            stored_key = self._resolve_event_key(calendar_event_id)
+            if stored_key is None:
                 raise CalendarEventNotFound(calendar_event_id)
+            existing = self.events[stored_key]
             if existing.status == CalendarEventStatus.CANDIDATE:
                 return existing
             if existing.status != CalendarEventStatus.TRACKED:
@@ -268,5 +310,5 @@ class InMemoryCalendarEventRepository:
                     f"cannot untrack a calendar event with status {existing.status.value!r}"
                 )
             updated = replace(existing, status=CalendarEventStatus.CANDIDATE, updated_at=utc_now())
-            self.events[calendar_event_id] = updated
+            self.events[stored_key] = updated
             return updated
