@@ -32,6 +32,19 @@ DEFAULT_LOOKAHEAD_DAYS = 30
 # from this extra ingested slack.
 INGESTION_LOOKAHEAD_PADDING_DAYS = 1
 
+# Symmetric guard for a device *behind* the host: such a device's own
+# "today" is host_today - 1, so its widest (30 pv) request is
+# device_today -> device_today + 30, i.e. host_today - 1 -> host_today +
+# 29 in host-local terms - a day earlier than this worker would otherwise
+# ever ingest. Padding `from_date` backward by this amount covers that
+# case the same way INGESTION_LOOKAHEAD_PADDING_DAYS covers a device
+# ahead of the host. GET /api/v1/calendar/upcoming happily accepts an
+# explicit from_date before its own idea of "today" - it only ever caps
+# the *span* between from_date and to_date, never rejects a from_date in
+# the recent past - so this only ever helps such a request find data
+# that's already there, same as the forward pad.
+INGESTION_LOOKBEHIND_PADDING_DAYS = 1
+
 
 def run_sync(
     *,
@@ -78,7 +91,7 @@ def main() -> None:
     result = run_sync(
         provider=provider,
         repository=repository,
-        from_date=today,
+        from_date=today - timedelta(days=INGESTION_LOOKBEHIND_PADDING_DAYS),
         to_date=today + timedelta(days=lookahead_days + INGESTION_LOOKAHEAD_PADDING_DAYS),
     )
 

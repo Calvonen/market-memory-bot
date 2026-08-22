@@ -66,24 +66,29 @@ class SupabaseCalendarEventRepository:
         # `.range(offset, ...)` request - still anchored to the old offset -
         # either re-returns a row already seen (duplicate) or, more
         # insidiously, skips exactly the row that used to sit at that
-        # boundary (never returned by either page). Keyset pagination has
-        # no numeric offset to shift: each page's WHERE clause is anchored
-        # to the actual `(scheduled_date, id)` of the last row the
-        # *previous* page returned, so a concurrent change anywhere else in
-        # the table can never move that anchor.
+        # boundary (never returned by either page).
         #
-        # `.order("scheduled_date").order("id")` is a fully deterministic
-        # total order (id is the table's unique primary key) - without a
-        # unique tie-break, rows sharing the same scheduled_date could sort
-        # differently across two page requests, risking a duplicate or a
-        # drop at the boundary independent of the pagination strategy
-        # itself. A page shorter than the page size is what ends the loop -
-        # the standard, unambiguous "that was the last page" signal, and
-        # still deterministic: the loop always terminates in exactly
-        # ceil(row_count / page_size) requests, regardless of concurrent
-        # writes elsewhere in the table.
+        # The cursor is `id` alone, never `scheduled_date` - `id` is the
+        # table's immutable primary key (never changes once a row exists),
+        # while `scheduled_date` is explicitly *not* immutable: a
+        # still-candidate row's date can move on a later sync (see
+        # "Idempotent sync" in docs/calendar_watchlist.md). A cursor built
+        # from a mutable column can drift out from under an in-flight walk:
+        # if a not-yet-fetched row's date moves to sort *behind* the
+        # cursor, a (scheduled_date, id)-keyed cursor would silently skip
+        # it forever; if an already-fetched row's date moves to sort
+        # *ahead* of the cursor, it could be re-fetched as a duplicate.
+        # Paginating on `id` alone is immune to both: which page a row
+        # lands on depends only on a value that can never change after the
+        # row is created, so a concurrent scheduled_date update - on any
+        # row, already-fetched or not - can never move it across a page
+        # boundary mid-walk. A page shorter than the page size is what
+        # ends the loop - the standard, unambiguous "that was the last
+        # page" signal, and still deterministic: the loop always
+        # terminates in exactly ceil(row_count / page_size) requests,
+        # regardless of concurrent writes elsewhere in the table.
         events: list[CalendarEvent] = []
-        cursor: tuple[str, str] | None = None
+        cursor_id: str | None = None
         while True:
             query = (
                 self.client.table("calendar_events")
@@ -95,25 +100,21 @@ class SupabaseCalendarEventRepository:
                 .gte("scheduled_date", from_date.isoformat())
                 .lte("scheduled_date", to_date.isoformat())
             )
-            if cursor is not None:
-                cursor_date, cursor_id = cursor
-                # (scheduled_date, id) > (cursor_date, cursor_id) in
-                # lexicographic tuple order, expressed as the two cases
-                # PostgREST's or() understands: either scheduled_date is
-                # strictly later, or it's tied and id breaks the tie.
-                query = query.or_(
-                    f"scheduled_date.gt.{cursor_date},"
-                    f"and(scheduled_date.eq.{cursor_date},id.gt.{cursor_id})"
-                )
-            response = (
-                query.order("scheduled_date").order("id").limit(_LIST_UPCOMING_PAGE_SIZE).execute()
-            )
+            if cursor_id is not None:
+                query = query.gt("id", cursor_id)
+            response = query.order("id").limit(_LIST_UPCOMING_PAGE_SIZE).execute()
             rows = response.data or []
             events.extend(self._row_to_event(row) for row in rows)
             if len(rows) < _LIST_UPCOMING_PAGE_SIZE:
                 break
-            last_row = rows[-1]
-            cursor = (last_row["scheduled_date"], last_row["id"])
+            cursor_id = rows[-1]["id"]
+        # The pagination walk itself is ordered by `id` alone (see above) -
+        # the caller-facing order (upcoming-soonest-first, matching the
+        # mobile sort in mergeUpcomingRows()) is applied once, here, on the
+        # complete accumulated result set, entirely independent of however
+        # the rows were paginated in. `id` as the tie-break keeps this
+        # deterministic for rows sharing the same scheduled_date.
+        events.sort(key=lambda event: (event.scheduled_date, event.calendar_event_id))
         return tuple(events)
 
     def _upsert_candidate(self, candidate: CalendarCandidate, *, source: str) -> tuple[CalendarEvent, str]:

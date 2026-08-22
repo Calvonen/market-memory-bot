@@ -95,11 +95,13 @@ calendar product eventually might:
   (30) - a larger `--lookahead-days`/`MARKETAI_CALENDAR_LOOKAHEAD_DAYS` is
   clamped, not honored, so a misconfigured environment can never make the
   worker populate rows further out than the API will ever serve.
-- The worker ingests `INGESTION_LOOKAHEAD_PADDING_DAYS` (1) further than
-  that - `host_today -> host_today + 31` for the default/max case - purely
-  an internal ingestion-window detail to absorb device/host calendar-day
-  skew (see below); the UI's chips and the API's own 30-day cap are both
-  unaffected.
+- The worker ingests beyond that in both directions - forward by
+  `INGESTION_LOOKAHEAD_PADDING_DAYS` (1) and backward by
+  `INGESTION_LOOKBEHIND_PADDING_DAYS` (1), so `host_today - 1 ->
+  host_today + 31` for the default/max case - purely an internal
+  ingestion-window detail to absorb device/host calendar-day skew in
+  either direction (see below); the UI's chips and the API's own 30-day
+  cap are both unaffected.
 
 The mobile UI computes its own date-only window from the *device's* local
 clock - `deviceLocalDateWindow()` in `upcoming.tsx`, built on the same
@@ -115,16 +117,22 @@ independently on every request regardless of what the client sends, so a
 client bug asking for a wider window is still rejected outright, not
 silently trusted or clamped.
 
-A device whose local calendar day is *ahead* of this host's can still
-legitimately ask for a day the API would otherwise have never had data
-for: its widest (`30 pv`) request is `device_today -> device_today + 30`,
-which in host-local terms can be `host_today + 1 -> host_today + 31`. The
-worker's own `INGESTION_LOOKAHEAD_PADDING_DAYS` pad (see "Range MVP"
-above) is what keeps that day already ingested by the time such a request
-arrives - the API's own cap still rejects any single request spanning more
-than 30 days, so this only ever helps a legitimately-windowed request find
-data that's already there, never widens what a client can ask for in one
-call.
+A device whose local calendar day differs from this host's - in either
+direction - can still legitimately ask for a day the API would otherwise
+have never had data for. Ahead of the host: its widest (`30 pv`) request
+is `device_today -> device_today + 30`, which in host-local terms can be
+`host_today + 1 -> host_today + 31`. Behind the host: the same request is
+`device_today -> device_today + 30`, i.e. `host_today - 1 -> host_today +
+29`. The worker's `INGESTION_LOOKAHEAD_PADDING_DAYS`/
+`INGESTION_LOOKBEHIND_PADDING_DAYS` pads (see "Range MVP" above) are what
+keep both boundaries already ingested by the time such a request arrives,
+from a single sync run - the worker doesn't know in advance which
+direction, if any, a given device is skewed. The API's own cap still
+rejects any single request spanning more than 30 days, and happily
+accepts a `from_date` before its own idea of "today" (it only ever caps
+the *span*, never rejects a recent-past `from_date`), so this only ever
+helps a legitimately-windowed request find data that's already there,
+never widens what a client can ask for in one call.
 
 ## API
 
@@ -140,12 +148,20 @@ call.
 `SupabaseCalendarEventRepository.list_upcoming()` pages through a result
 set wider than one Data API response (`_LIST_UPCOMING_PAGE_SIZE`, matching
 PostgREST's default `db-max-rows`) using keyset (cursor) pagination on
-`(scheduled_date, id)`, not offset-based `.range()`. Each page's `WHERE`
-clause is anchored to the literal `(scheduled_date, id)` of the *previous*
-page's actual last row - never a numeric offset, which a concurrent
-insert/update elsewhere in the ordered set can silently shift, causing the
-next fixed-offset page to either re-return an already-seen row or skip the
-row that used to sit at that boundary. A page shorter than the page size
+`id` alone, not offset-based `.range()`. Each page's `WHERE` clause is
+anchored to the literal `id` of the *previous* page's actual last row -
+never a numeric offset, which a concurrent insert/update elsewhere in the
+ordered set can silently shift, causing the next fixed-offset page to
+either re-return an already-seen row or skip the row that used to sit at
+that boundary. The cursor is deliberately `id` and never `scheduled_date`,
+even though `scheduled_date` is the caller-facing sort order: `id` is the
+table's immutable primary key, while `scheduled_date` is explicitly *not*
+immutable (see "Idempotent sync" above - a still-candidate row's date can
+move on a later sync), so a cursor built from it could drift out from
+under an in-flight walk and skip or duplicate a row whose date happens to
+move mid-pagination. The complete, already-paginated result set is sorted
+by `(scheduled_date, id)` exactly once, at the end - entirely independent
+of however the rows were paginated in. A page shorter than the page size
 still ends the loop, so pagination always terminates deterministically
 regardless of concurrent writes.
 
