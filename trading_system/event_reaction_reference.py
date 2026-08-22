@@ -51,12 +51,6 @@ def select_event_reaction_reference(
 
     eligible: list[TrackedMarketCandle] = []
     for candle in candles:
-        if not _is_aware(candle.start):
-            raise ValueError("candle start must be timezone-aware")
-        if candle.interval_minutes != interval_minutes:
-            continue
-        if candle.source_minutes != candle.interval_minutes:
-            continue
         if (
             candle.tracked_instrument_id != tracked.tracked_instrument_id
             or candle.instrument != tracked.instrument
@@ -64,12 +58,21 @@ def select_event_reaction_reference(
             or candle.etoro_instrument_id != tracked.etoro_instrument_id
         ):
             continue
+        if candle.interval_minutes != interval_minutes:
+            continue
+        if candle.source_minutes != candle.interval_minutes:
+            continue
+        if not _is_aware(candle.start):
+            raise ValueError("candle start must be timezone-aware")
+
+        candle_end = candle.start + timedelta(minutes=candle.interval_minutes)
+        if candle_end > event_at:
+            continue
+
         if not candle.close.is_finite() or candle.close <= 0:
             raise ValueError("eligible candle close must be finite and positive")
 
-        candle_end = candle.start + timedelta(minutes=candle.interval_minutes)
-        if candle_end <= event_at:
-            eligible.append(candle)
+        eligible.append(candle)
 
     if not eligible:
         return None

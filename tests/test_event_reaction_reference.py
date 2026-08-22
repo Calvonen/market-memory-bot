@@ -28,6 +28,7 @@ def _candle(
     instrument: str = "TEST",
     market: str = "LSE",
     etoro_id: int = 123,
+    tzinfo: timezone | None = timezone.utc,
 ) -> TrackedMarketCandle:
     price = Decimal(close)
     return TrackedMarketCandle(
@@ -36,7 +37,7 @@ def _candle(
         market=market,
         etoro_instrument_id=etoro_id,
         interval_minutes=interval,
-        start=datetime(2026, 8, 24, 7, minute, tzinfo=timezone.utc),
+        start=datetime(2026, 8, 24, 7, minute, tzinfo=tzinfo),
         open=price,
         high=price,
         low=price,
@@ -143,6 +144,42 @@ class EventReactionReferenceSelectionTests(unittest.TestCase):
                     _candle(4, "100"),
                 ),
             )
+
+    def test_unrelated_naive_timestamp_candle_does_not_block_valid_baseline(self) -> None:
+        event_at = datetime(2026, 8, 24, 7, 5, tzinfo=timezone.utc)
+
+        result = select_event_reaction_reference(
+            event_id="event-1",
+            event_at=event_at,
+            tracked=_tracked(),
+            candles=(
+                _candle(4, "99"),
+                _candle(1, "50", tracked_id="other", instrument="OTHER", tzinfo=None),
+            ),
+        )
+
+        assert result is not None
+        self.assertEqual(result.source_candle_start.minute, 4)
+        self.assertEqual(result.baseline.reference_price, Decimal("99"))
+
+    def test_matching_post_event_candle_with_invalid_close_does_not_block_valid_baseline(
+        self,
+    ) -> None:
+        event_at = datetime(2026, 8, 24, 7, 5, tzinfo=timezone.utc)
+
+        result = select_event_reaction_reference(
+            event_id="event-1",
+            event_at=event_at,
+            tracked=_tracked(),
+            candles=(
+                _candle(4, "99"),
+                _candle(10, "0"),
+            ),
+        )
+
+        assert result is not None
+        self.assertEqual(result.source_candle_start.minute, 4)
+        self.assertEqual(result.baseline.reference_price, Decimal("99"))
 
     def test_invalid_metadata_and_eligible_price_fail_closed(self) -> None:
         aware_event = datetime(2026, 8, 24, 7, 5, tzinfo=timezone.utc)
