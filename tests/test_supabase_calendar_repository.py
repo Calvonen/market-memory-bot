@@ -308,6 +308,7 @@ class SupabaseCalendarRepositoryPaginationTests(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)), "duplicate rows after a scheduled_date shift")
         self.assertEqual(ids.count(already_read_id), 1)
         self.assertEqual(len(ids), total_rows, "row count changed even though nothing left the date window")
+
         # The returned event reflects the snapshot page 1 actually
         # observed (its date at that moment), not the later mutation -
         # ordinary read-consistency, not a pagination bug.
@@ -348,6 +349,37 @@ class SupabaseCalendarRepositoryPaginationTests(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)), "duplicate rows after a scheduled_date shift")
         self.assertIn(unread_id, ids, "row was silently dropped after its date moved earlier")
         self.assertEqual(len(ids), total_rows, "row count changed even though nothing left the date window")
+
+
+class SupabaseCalendarRepositoryUuidNormalizationTests(unittest.TestCase):
+    def test_track_and_untrack_send_canonical_uuid_text_to_rpc(self) -> None:
+        class RpcClient:
+            def __init__(self) -> None:
+                self.payloads: list[dict[str, str]] = []
+
+            def rpc(self, name: str, payload: dict[str, str]):
+                self.assert_rpc_name = name
+                self.payloads.append(payload)
+                return self
+
+            def execute(self) -> SimpleNamespace:
+                return SimpleNamespace(data=[])
+
+        dashless = "550e8400e29b41d4a716446655440000"
+        canonical = "550e8400-e29b-41d4-a716-446655440000"
+        client = RpcClient()
+        repo = SupabaseCalendarEventRepository(client)
+
+        for transition in (repo.track, repo.untrack):
+            with self.subTest(transition=transition.__name__):
+                with self.assertRaises(RuntimeError):
+                    transition(dashless)
+
+        self.assertEqual(client.assert_rpc_name, "transition_calendar_event_status")
+        self.assertEqual(
+            [payload["input_calendar_event_id"] for payload in client.payloads],
+            [canonical, canonical],
+        )
 
 
 if __name__ == "__main__":

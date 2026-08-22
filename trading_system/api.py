@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import secrets
-import uuid
 from dataclasses import asdict, replace
 from datetime import date
 from typing import Any, Protocol
@@ -155,25 +155,27 @@ def _calendar_event_payload(event: Any) -> dict[str, Any]:
     return payload
 
 
+_POSTGRES_UUID_TEXT = re.compile(
+    r"(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+)
+
+
 def _require_valid_calendar_event_id(calendar_event_id: str) -> str:
     # calendar_events.id is a Postgres uuid column in production - an
     # arbitrary/malformed path segment must never reach the
     # transition_calendar_event_status RPC, where it would surface as an
     # unhandled "invalid input syntax for type uuid" error (a 500), not a
-    # clean 4xx. Validated with uuid.UUID(), but the *original* string -
-    # not str(uuid.UUID(...)) - is what gets returned/used: uuid.UUID()
-    # accepts both the dashed canonical form and the raw 32-hex-digit form
-    # (e.g. trading_system.models.new_id()'s uuid4().hex, no dashes, used
-    # by InMemoryCalendarEventRepository for local runs/tests) but always
-    # *normalizes* str() output to the dashed form - reformatting would
-    # silently break that repository's exact-string dict lookup even
-    # though both forms are equally valid UUID syntax to Postgres itself.
-    try:
-        uuid.UUID(calendar_event_id)
-    except ValueError as exc:
+    # clean 4xx. uuid.UUID() alone is deliberately insufficient here: it
+    # also accepts URNs and brace-wrapped values that are not suitable RPC
+    # parameter text. Keep accepting canonical and raw 32-hex forms, but
+    # return the original representation so the in-memory repository's
+    # dashless exact-string keys continue to work. The Supabase repository
+    # separately canonicalizes this validated value at its storage boundary.
+    if _POSTGRES_UUID_TEXT.fullmatch(calendar_event_id) is None:
         raise HTTPException(
             status_code=400, detail="calendar_event_id must be a valid UUID"
-        ) from exc
+        )
     return calendar_event_id
 
 

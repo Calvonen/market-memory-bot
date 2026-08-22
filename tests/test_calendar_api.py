@@ -205,6 +205,43 @@ class CalendarApiTests(unittest.TestCase):
         )
         self.assertEqual(track_response.status_code, untrack_response.status_code)
 
+    def test_track_and_untrack_reject_non_postgres_uuid_wrappers(self) -> None:
+        canonical = "550e8400-e29b-41d4-a716-446655440000"
+        for value in (f"urn:uuid:{canonical}", "{" + canonical + "}"):
+            with self.subTest(value=value):
+                for action in ("track", "untrack"):
+                    response = self.client.post(
+                        f"/api/v1/calendar/{value}/{action}",
+                        headers=self._control_headers(),
+                    )
+                    self.assertEqual(response.status_code, 400)
+
+    def test_canonical_uuid_is_accepted_by_track_and_untrack_validation(self) -> None:
+        canonical = "550e8400-e29b-41d4-a716-446655440000"
+        for action in ("track", "untrack"):
+            with self.subTest(action=action):
+                response = self.client.post(
+                    f"/api/v1/calendar/{canonical}/{action}",
+                    headers=self._control_headers(),
+                )
+                self.assertEqual(response.status_code, 404)
+
+    def test_dashless_in_memory_id_still_works_for_track_and_untrack(self) -> None:
+        inserted = self.calendar_repo.sync_candidates([_candidate()], source="finnhub").inserted[0]
+        self.assertNotIn("-", inserted)
+
+        tracked = self.client.post(
+            f"/api/v1/calendar/{inserted}/track", headers=self._control_headers()
+        )
+        untracked = self.client.post(
+            f"/api/v1/calendar/{inserted}/untrack", headers=self._control_headers()
+        )
+
+        self.assertEqual(tracked.status_code, 200)
+        self.assertEqual(tracked.json()["status"], "tracked")
+        self.assertEqual(untracked.status_code, 200)
+        self.assertEqual(untracked.json()["status"], "candidate")
+
     def test_track_with_a_malformed_uuid_never_reaches_the_repository(self) -> None:
         # Behavioral proof, not just a status-code check: the repository's
         # track() must never even be called for a malformed id - a broken

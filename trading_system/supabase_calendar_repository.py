@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import UTC, date, datetime
 from typing import Any, Iterable
 
@@ -170,11 +171,15 @@ class SupabaseCalendarEventRepository:
     def _transition(
         self, calendar_event_id: str, *, from_status: CalendarEventStatus, to_status: CalendarEventStatus
     ) -> CalendarEvent:
+        # Keep API/in-memory lookup representation concerns outside this
+        # production storage boundary. PostgreSQL always receives canonical
+        # UUID text, including when the API was given a valid dashless UUID.
+        canonical_calendar_event_id = str(uuid.UUID(calendar_event_id))
         try:
             response = self.client.rpc(
                 "transition_calendar_event_status",
                 {
-                    "input_calendar_event_id": calendar_event_id,
+                    "input_calendar_event_id": canonical_calendar_event_id,
                     "input_from_status": from_status.value,
                     "input_to_status": to_status.value,
                 },
