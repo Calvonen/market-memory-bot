@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any, Callable, Protocol
 
@@ -109,6 +109,30 @@ def _map_finnhub_row(row: dict[str, Any]) -> CalendarCandidate | None:
     )
 
 
+def _us_symbol_metadata(rows: Any) -> dict[str, tuple[str, str]]:
+    """Build a symbol -> (company name, market) map from Finnhub /stock/symbol.
+
+    The earnings-calendar response commonly gives only a ticker. One bulk
+    /stock/symbol?exchange=US request is much cheaper and more reliable than
+    making a profile/search request for every calendar row. Enrichment is
+    deliberately best-effort: calendar discovery must continue to work even
+    if this optional metadata endpoint is unavailable or changes shape.
+    """
+    if not isinstance(rows, list):
+        return {}
+
+    metadata: dict[str, tuple[str, str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol") or row.get("displaySymbol") or "").strip()
+        description = str(row.get("description") or "").strip()
+        if not symbol or not description:
+            continue
+        metadata[symbol.upper()] = (description, "USA")
+    return metadata
+
+
 class FinnhubEarningsCalendarProvider:
     """First EarningsCalendarProvider adapter, backed by Finnhub.
 
@@ -140,6 +164,48 @@ class FinnhubEarningsCalendarProvider:
     def from_env(cls) -> "FinnhubEarningsCalendarProvider":
         return cls()
 
+    def _enrich_us_company_names(
+        self, candidates: list[CalendarCandidate]
+    ) -> list[CalendarCandidate]:
+        needs_enrichment = {
+            candidate.instrument.upper()
+            for candidate in candidates
+            if candidate.company_name == candidate.instrument and "." not in candidate.instrument
+        }
+        if not needs_enrichment:
+            return candidates
+
+        try:
+            response = self._http_get(
+                f"{self.base_url}/stock/symbol",
+                params={"exchange": "US", "token": self.api_key},
+                timeout=self.timeout_seconds,
+            )
+            if not response.ok:
+                return candidates
+            metadata = _us_symbol_metadata(response.json())
+        except (requests.RequestException, ValueError):
+            return candidates
+
+        if not metadata:
+            return candidates
+
+        enriched: list[CalendarCandidate] = []
+        for candidate in candidates:
+            details = metadata.get(candidate.instrument.upper())
+            if details is None or candidate.company_name != candidate.instrument:
+                enriched.append(candidate)
+                continue
+            company_name, market = details
+            enriched.append(
+                replace(
+                    candidate,
+                    company_name=company_name,
+                    market=market if candidate.market == "Unknown" else candidate.market,
+                )
+            )
+        return enriched
+
     def fetch_upcoming(self, from_date: date, to_date: date) -> tuple[CalendarCandidate, ...]:
         try:
             response = self._http_get(
@@ -163,4 +229,4 @@ class FinnhubEarningsCalendarProvider:
 
         rows = data.get("earningsCalendar") or [] if isinstance(data, dict) else []
         candidates = [mapped for row in rows if (mapped := _map_finnhub_row(row)) is not None]
-        return tuple(candidates)
+        return tuple(self._enrich_us_company_names(candidates))
