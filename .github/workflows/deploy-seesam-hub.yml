@@ -74,6 +74,20 @@ jobs:
           set +a
           /home/marko/marketai-repo/.venv/bin/python scripts/verify_supabase_schema.py
 
+          # Calendar/watchlist candidate sync (Finnhub) is a scheduled
+          # one-shot job, not a long-running worker - see
+          # docs/calendar_watchlist.md. Installed/updated on every deploy so
+          # a unit file change in this repo actually takes effect, and
+          # `enable --now` is idempotent (safe to run on a deploy where
+          # nothing about the timer changed). Placed after the schema gate,
+          # like the two systemctl restarts below, so a missing calendar
+          # migration stops this too, not just the API/release-worker
+          # restarts.
+          sudo /usr/bin/install -m 0644 deploy/systemd/marketai-calendar-sync.service /etc/systemd/system/marketai-calendar-sync.service
+          sudo /usr/bin/install -m 0644 deploy/systemd/marketai-calendar-sync.timer /etc/systemd/system/marketai-calendar-sync.timer
+          sudo /usr/bin/systemctl daemon-reload
+          sudo /usr/bin/systemctl enable --now marketai-calendar-sync.timer
+
           sudo /usr/bin/systemctl restart marketai-api.service
           sudo /usr/bin/systemctl restart marketai-hays-release.service
 

@@ -1,4 +1,6 @@
 import re
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -444,6 +446,130 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
             "create or replace function public.strategy_draft_schema_version()"
         )
         self.assertLess(insert_index, marker_index)
+
+
+CALENDAR_SYNC_SERVICE_UNIT = Path("deploy/systemd/marketai-calendar-sync.service")
+CALENDAR_SYNC_TIMER_UNIT = Path("deploy/systemd/marketai-calendar-sync.timer")
+
+
+class CalendarSyncSchedulingTests(unittest.TestCase):
+    """Regression coverage for "the calendar worker must never end up
+    without a schedule": trading_system/calendar_sync_worker.py only ever
+    populates public.calendar_events if something actually invokes it in
+    production - nothing does that unless a timer is both defined and
+    wired into the deploy workflow. See docs/calendar_watchlist.md,
+    "Production scheduling"."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.workflow_source = WORKFLOW.read_text(encoding="utf-8")
+        cls.service_source = CALENDAR_SYNC_SERVICE_UNIT.read_text(encoding="utf-8")
+        cls.timer_source = CALENDAR_SYNC_TIMER_UNIT.read_text(encoding="utf-8")
+
+    def _deploy_step_body(self) -> str:
+        start = self.workflow_source.index("Deploy backend to seesam-hub (locked)")
+        next_step = self.workflow_source.index("\n  publish-ota:", start)
+        return self.workflow_source[start:next_step]
+
+    # -- the unit files themselves: one-shot + timer, never a long-lived loop
+
+    def test_service_unit_is_a_one_shot_not_a_long_running_worker(self) -> None:
+        self.assertIn("Type=oneshot", self.service_source)
+        # A long-lived worker would use Type=simple/notify/forking, or
+        # restart itself indefinitely - neither belongs on a scheduled
+        # sync job that is supposed to run once and exit.
+        for forbidden in ("Type=simple", "Type=notify", "Type=forking", "Restart=always"):
+            self.assertNotIn(forbidden, self.service_source)
+
+    def test_service_unit_invokes_the_real_calendar_sync_worker_module(self) -> None:
+        self.assertIn(
+            "ExecStart=/home/marko/marketai-repo/.venv/bin/python -m trading_system.calendar_sync_worker",
+            self.service_source,
+        )
+        self.assertIn("WorkingDirectory=/home/marko/marketai-repo", self.service_source)
+        self.assertIn("EnvironmentFile=/home/marko/marketai/.env", self.service_source)
+
+    def test_timer_unit_fires_on_a_schedule_and_survives_downtime(self) -> None:
+        self.assertIn("OnCalendar=", self.timer_source)
+        self.assertIn("Persistent=true", self.timer_source)
+        self.assertIn("WantedBy=timers.target", self.timer_source)
+
+    def test_timer_fires_at_most_a_few_times_a_day(self) -> None:
+        # "1-2 times a day is enough for this MVP" - a plain source check
+        # that the schedule isn't something far more frequent (e.g. every
+        # few minutes), which candidate/tracked calendar data has no need
+        # for and would just add load for no benefit.
+        match = re.search(r"OnCalendar=(.+)", self.timer_source)
+        assert match is not None
+        schedule = match.group(1).strip()
+        self.assertNotIn("/", schedule, f"schedule {schedule!r} looks like a sub-daily repeat")
+        # Exactly the two times documented in docs/calendar_watchlist.md.
+        self.assertIn("06", schedule)
+        self.assertIn("18", schedule)
+
+    def test_timer_schedule_is_syntactically_valid(self) -> None:
+        systemd_analyze = shutil.which("systemd-analyze")
+        if systemd_analyze is None:
+            self.skipTest("systemd-analyze is not available in this environment")
+        match = re.search(r"OnCalendar=(.+)", self.timer_source)
+        assert match is not None
+        result = subprocess.run(
+            [systemd_analyze, "calendar", match.group(1).strip()],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Next elapse", result.stdout)
+
+    # -- the deploy workflow must actually install + enable the timer -------
+
+    def test_deploy_step_installs_and_enables_the_calendar_sync_timer(self) -> None:
+        body = self._deploy_step_body()
+
+        self.assertIn(
+            "install -m 0644 deploy/systemd/marketai-calendar-sync.service "
+            "/etc/systemd/system/marketai-calendar-sync.service",
+            body,
+        )
+        self.assertIn(
+            "install -m 0644 deploy/systemd/marketai-calendar-sync.timer "
+            "/etc/systemd/system/marketai-calendar-sync.timer",
+            body,
+        )
+        self.assertIn("systemctl daemon-reload", body)
+        self.assertIn("systemctl enable --now marketai-calendar-sync.timer", body)
+
+        # Only the timer is enabled directly - enabling the one-shot
+        # service itself would start it at boot outside the timer's own
+        # schedule, defeating the point of using a timer at all.
+        self.assertNotIn("enable --now marketai-calendar-sync.service", body)
+        self.assertNotIn("enable marketai-calendar-sync.service", body)
+
+    def test_calendar_sync_wiring_runs_after_the_schema_gate_and_before_restarts(self) -> None:
+        # Same fail-closed ordering as the two systemctl restarts: a
+        # missing calendar migration must stop this too, not just the
+        # API/release-worker restarts.
+        body = self._deploy_step_body()
+
+        gate_index = body.index("scripts/verify_supabase_schema.py")
+        install_index = body.index("systemctl daemon-reload")
+        enable_index = body.index("systemctl enable --now marketai-calendar-sync.timer")
+        api_restart_index = body.index("systemctl restart marketai-api.service")
+
+        self.assertLess(gate_index, install_index)
+        self.assertLess(install_index, enable_index)
+        self.assertLess(enable_index, api_restart_index)
+
+    def test_calendar_sync_wiring_is_not_silently_ignorable_on_failure(self) -> None:
+        # Same fail-closed guarantee as the schema gate itself - no local
+        # `set +e` or `|| true` around any of these commands.
+        body = self._deploy_step_body()
+        install_index = body.index("systemctl daemon-reload")
+        enable_index = body.index("systemctl enable --now marketai-calendar-sync.timer")
+        segment = body[install_index : enable_index + len("systemctl enable --now marketai-calendar-sync.timer")]
+        self.assertNotIn("|| true", segment)
+        self.assertNotIn("set +e", segment)
 
 
 if __name__ == "__main__":

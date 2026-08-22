@@ -1,0 +1,21 @@
+[Unit]
+Description=MarketAI earnings-calendar candidate sync (Finnhub)
+Documentation=file:///home/marko/marketai-repo/docs/calendar_watchlist.md
+# One-shot, triggered by marketai-calendar-sync.timer - this unit is never
+# started directly by the deploy workflow and never enabled on its own
+# (only the timer is). It runs trading_system/calendar_sync_worker.py,
+# which only ever writes candidate/tracked rows to public.calendar_events -
+# it never touches EventExpectationRepository, the release worker, or the
+# PAPER pipeline (see docs/calendar_watchlist.md).
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/marko/marketai-repo
+EnvironmentFile=/home/marko/marketai/.env
+ExecStart=/home/marko/marketai-repo/.venv/bin/python -m trading_system.calendar_sync_worker
+# A single failed sync is not an incident worth systemd retrying
+# aggressively - the next scheduled run (see the timer's OnCalendar/
+# Persistent settings) tries again on its own.
+Restart=no

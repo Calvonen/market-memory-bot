@@ -217,6 +217,16 @@ export default function UpcomingEventsScreen() {
       setCalendarEvents((prev) =>
         (prev ?? []).map((event) => (event.calendar_event_id === calendarEventId ? updated : event)),
       );
+      // Invalidates any load() still in flight (e.g. a pull-to-refresh GET
+      // started before this track request resolved): that GET's captured
+      // loadId can never match latestLoadId.current again, so its
+      // eventual setCalendarEvents(list) - built from a snapshot taken
+      // before this track mutation happened - is rejected by the same
+      // staleness guard load() already uses, instead of silently
+      // reverting this row back to 'candidate'. A load() started *after*
+      // this point captures a fresh loadId from the bumped counter and is
+      // unaffected.
+      ++latestLoadId.current;
     } catch (err) {
       setTrackError(err instanceof Error ? err.message : 'Seurannan aloitus epäonnistui');
     } finally {

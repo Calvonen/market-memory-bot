@@ -96,3 +96,48 @@ already tracked through `EventExpectation` (e.g. Hays) is filtered out of
 the calendar candidates so it never renders as a duplicate untracked card
 (`mergeUpcomingRows()`). Each candidate card has a "Lisää seurantaan" action
 that calls `trackCalendarEvent()`.
+
+A track mutation always wins over an older, still-in-flight refresh GET:
+`onTrack()` bumps the same `latestLoadId` generation counter `load()` uses
+for its own staleness guard, right after applying the tracked result. Any
+`getUpcomingCalendarEvents()` response that was already in flight before
+the track completed - and therefore reflects a pre-track snapshot - carries
+the now-stale `loadId` it captured at request time, so `load()`'s existing
+`if (loadId !== latestLoadId.current) return;` guard discards it instead of
+reverting the row back to `candidate`. A refresh started *after* the track
+captures a fresh `loadId` and is unaffected.
+
+## Production scheduling
+
+`trading_system/calendar_sync_worker.py` runs one sync pass and exits - it
+is not a long-running worker (deliberately: candidate/tracked rows aren't
+time-sensitive the way live trading state is, so a scheduled one-shot job
+is enough for this MVP). Production scheduling is
+`deploy/systemd/marketai-calendar-sync.service` (`Type=oneshot`) plus
+`deploy/systemd/marketai-calendar-sync.timer` (`OnCalendar=*-*-* 06,18:00:00`,
+i.e. twice a day, with `RandomizedDelaySec` jitter and `Persistent=true` so
+a run missed while the host was down still fires once after boot instead of
+silently waiting for the next scheduled time).
+
+`.github/workflows/deploy-seesam-hub.yml`'s "Deploy backend to seesam-hub
+(locked)" step installs/updates both unit files, runs `systemctl
+daemon-reload`, and `systemctl enable --now` the timer - after the Supabase
+schema gate (`scripts/verify_supabase_schema.py`) and before the
+`marketai-api.service`/`marketai-hays-release.service` restarts, so a
+missing calendar migration stops this too, the same fail-closed story as
+the rest of that step. `enable --now` only arms the *timer* (starts it
+counting toward its next `OnCalendar` fire); it does not run the sync
+immediately, so this is safe to re-run on every deploy even when nothing
+about the timer changed.
+
+**This needs one out-of-band host change, the same category as applying
+Supabase migrations (see "Deploy gate: Supabase schema verification" in
+`docs/event_configuration_storage.md`):** the deploy runner's sudoers entry
+on seesam-hub must additionally permit, without a password, the exact
+commands above -
+`/usr/bin/install -m 0644 deploy/systemd/marketai-calendar-sync.service /etc/systemd/system/marketai-calendar-sync.service`,
+the equivalent for `.timer`, `/usr/bin/systemctl daemon-reload`, and
+`/usr/bin/systemctl enable --now marketai-calendar-sync.timer` - before
+this deploy step can succeed on a real run. Grant that (`visudo` /
+`/etc/sudoers.d/`) using your own access to the host; this repo and its CI
+hold no credential that could do it.

@@ -1,0 +1,18 @@
+[Unit]
+Description=Run MarketAI earnings-calendar candidate sync twice daily
+Documentation=file:///home/marko/marketai-repo/docs/calendar_watchlist.md
+
+[Timer]
+# Candidate/tracked calendar rows are not time-sensitive the way live
+# trading state is - twice a day is enough for this MVP (see
+# docs/calendar_watchlist.md). RandomizedDelaySec spreads the actual fire
+# time so this doesn't land on the dot alongside other scheduled load on
+# the host. Persistent=true means a run missed while the host was down
+# (deploy, reboot, outage) fires once shortly after boot instead of
+# silently waiting for the next scheduled time.
+OnCalendar=*-*-* 06,18:00:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

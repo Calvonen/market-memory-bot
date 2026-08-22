@@ -960,6 +960,112 @@ console.log(JSON.stringify({{ sevenDayIds, allIds }}));
     def test_track_button_is_disabled_while_its_own_request_is_in_flight(self) -> None:
         self.assertIn("disabled={trackingIds.has(row.calendarEventId ?? '')}", self.upcoming_source)
 
+    # -- track mutation must beat a stale in-flight refresh (P2 regression) -
+
+    def test_track_success_bumps_the_load_generation_after_updating_state(self) -> None:
+        on_track_start = self.upcoming_source.index("const onTrack = useCallback(async (calendarEventId")
+        on_track_end = self.upcoming_source.index("}, []);", on_track_start)
+        on_track_body = self.upcoming_source[on_track_start:on_track_end]
+
+        set_events_index = on_track_body.index(
+            "event.calendar_event_id === calendarEventId ? updated : event"
+        )
+        bump_index = on_track_body.index("++latestLoadId.current;")
+        catch_index = on_track_body.index("} catch (err) {")
+        # The bump must happen in the success path, after the local state
+        # is updated - not in catch/finally, and not before the update.
+        self.assertLess(set_events_index, bump_index)
+        self.assertLess(bump_index, catch_index)
+
+    def test_track_success_wins_over_a_stale_in_flight_refresh_response(self) -> None:
+        # Behavioral proof: a pull-to-refresh GET is already in flight when
+        # the user successfully tracks a candidate. The GET only resolves
+        # *after* the track completes, carrying a pre-track snapshot (the
+        # row still 'candidate') - that stale response must never revert
+        # the just-tracked row back to 'candidate'.
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available in this environment")
+
+        load_start = self.upcoming_source.index("const load = useCallback(() => {")
+        load_body_start = load_start + len("const load = useCallback(() => {")
+        load_end = self.upcoming_source.index("\n  }, []);", load_start)
+        load_body = self.upcoming_source[load_body_start:load_end]
+
+        on_track_start = self.upcoming_source.index(
+            "const onTrack = useCallback(async (calendarEventId: string) => {"
+        )
+        on_track_body_start = on_track_start + len(
+            "const onTrack = useCallback(async (calendarEventId: string) => {"
+        )
+        on_track_end = self.upcoming_source.index("\n  }, []);", on_track_start)
+        on_track_body = self.upcoming_source[on_track_body_start:on_track_end]
+
+        script = f"""
+let latestLoadId = {{ current: 0 }};
+let calendarEventsState = [
+  {{ calendar_event_id: 'cal-1', instrument: 'AAPL', status: 'candidate' }},
+];
+function setCalendarEvents(updater) {{
+  calendarEventsState = typeof updater === 'function' ? updater(calendarEventsState) : updater;
+}}
+function setEvents() {{}}
+function setError() {{}}
+function setTrackError() {{}}
+function setTrackingIds() {{}}
+
+let resolveStaleGet;
+const staleGetPromise = new Promise((resolve) => {{ resolveStaleGet = resolve; }});
+
+function getEvents() {{ return Promise.resolve([]); }}
+function getUpcomingCalendarEvents() {{ return staleGetPromise; }}
+function trackCalendarEvent(id) {{
+  return Promise.resolve({{ calendar_event_id: id, instrument: 'AAPL', status: 'tracked' }});
+}}
+
+function load() {{
+{load_body}
+}}
+
+async function onTrack(calendarEventId) {{
+{on_track_body}
+}}
+
+async function main() {{
+  // 1) A pull-to-refresh GET starts and captures the current loadId - it
+  // deliberately never settles until step 3 below.
+  load();
+
+  // 2) The user successfully tracks the candidate while that GET is still
+  // pending.
+  await onTrack('cal-1');
+
+  // 3) The stale GET now resolves, with data reflecting the state from
+  // *before* the track (still 'candidate').
+  resolveStaleGet([{{ calendar_event_id: 'cal-1', instrument: 'AAPL', status: 'candidate' }}]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  console.log(JSON.stringify(calendarEventsState));
+}}
+
+main();
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+
+        try:
+            result = subprocess.run(
+                [node, script_path], capture_output=True, text=True, timeout=10
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        final_state = json.loads(result.stdout)
+        cal1 = next(e for e in final_state if e["calendar_event_id"] == "cal-1")
+        self.assertEqual(cal1["status"], "tracked")
+
     # -- security boundary: admin key never present in the mobile app -------
 
     def test_admin_api_key_is_absent_from_the_mobile_source_tree(self) -> None:
