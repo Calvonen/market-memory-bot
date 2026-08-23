@@ -73,6 +73,26 @@ class MarketEventReactionOverlapTests(unittest.TestCase):
         self.assertEqual(clean.reference.source_candle_start, references[0].start)
         self.assertEqual(clean.reaction.tracked_reaction.reaction.interval_minutes, 1)
 
+    def test_overlapping_and_clean_candle_in_same_batch_uses_only_the_clean_candle(self) -> None:
+        bridge = MarketEventReactionBridge()
+        references = (_candle(4, "100"),)
+        clean_candle = _candle(6, "97")
+
+        result = bridge.add_for_observation(
+            event=EVENT,
+            tracked=TRACKED,
+            reference_candles=references,
+            reaction_candles=(_candle(5, "99"), clean_candle),
+            observed_at=EVENT.event_at + timedelta(minutes=1, seconds=30),
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        snapshot = result.reaction.tracked_reaction.reaction
+        self.assertEqual(snapshot.candle_start, clean_candle.start)
+        self.assertEqual(snapshot.close_price, clean_candle.close)
+        self.assertEqual(snapshot.interval_minutes, 1)
+
     def test_candle_starting_exactly_at_event_is_still_eligible(self) -> None:
         event = MarketEvent(
             event_id="event-boundary",
