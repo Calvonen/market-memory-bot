@@ -23,6 +23,10 @@ class EventReactionObservation:
     reaction: EventMarketReaction
 
 
+def _is_aware(value: datetime) -> bool:
+    return value.tzinfo is not None and value.utcoffset() is not None
+
+
 class EventReactionOrchestrator:
     """Compose pre-event reference selection with event-scoped reaction state.
 
@@ -45,6 +49,8 @@ class EventReactionOrchestrator:
         tracked: TrackedEtoroInstrument,
         candle: TrackedMarketCandle,
     ) -> None:
+        if not _is_aware(event_at):
+            raise ValueError("event_at must be timezone-aware")
         if (
             candle.tracked_instrument_id != tracked.tracked_instrument_id
             or candle.instrument != tracked.instrument
@@ -56,7 +62,7 @@ class EventReactionOrchestrator:
             raise ValueError("reaction candle interval must be positive")
         if candle.source_minutes != candle.interval_minutes:
             raise ValueError("reaction candle must be a complete window")
-        if candle.start.tzinfo is None or candle.start.utcoffset() is None:
+        if not _is_aware(candle.start):
             raise ValueError("reaction candle start must be timezone-aware")
 
         # Use only a complete candle whose entire window starts at or after the
