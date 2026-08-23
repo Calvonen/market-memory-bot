@@ -41,6 +41,7 @@ class EventReactionOrchestrator:
 
     def __init__(self, *, reaction_pipeline: EventMarketReactionPipeline | None = None) -> None:
         self.reaction_pipeline = reaction_pipeline or EventMarketReactionPipeline()
+        self._locked_references: dict[str, EventReactionReferenceSelection] = {}
 
     @staticmethod
     def _validate_reaction_candle(
@@ -103,6 +104,19 @@ class EventReactionOrchestrator:
         )
         if reference is None:
             return None
+
+        # Lock the full first selection (not just its baseline) per event_id. A
+        # later call could otherwise select a different pre-event candle that
+        # happens to share the same reference_price, which the downstream
+        # baseline comparison alone would not detect. Only raise here when the
+        # baseline still matches: a changed baseline is left to
+        # ``EventMarketReactionPipeline`` below, which already fails closed on
+        # that case. Fail closed before any reaction state is touched.
+        locked_reference = self._locked_references.get(event_id)
+        if locked_reference is None:
+            self._locked_references[event_id] = reference
+        elif locked_reference != reference and locked_reference.baseline == reference.baseline:
+            raise ValueError("event reference changed")
 
         reaction = self.reaction_pipeline.add(
             reaction_candle,

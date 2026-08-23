@@ -198,6 +198,62 @@ class EventReactionOrchestratorTests(unittest.TestCase):
                 reaction_candle=_candle(6, "97"),
             )
 
+    def test_same_event_different_source_candle_same_price_fails_closed(self) -> None:
+        orchestrator = EventReactionOrchestrator()
+
+        first = orchestrator.add(
+            event_id="event-1",
+            event_at=EVENT_AT,
+            tracked=TRACKED,
+            reference_candles=(_candle(3, "100"),),
+            reaction_candle=_candle(5, "98"),
+        )
+        self.assertIsNotNone(first)
+
+        with self.assertRaisesRegex(ValueError, "event reference changed"):
+            orchestrator.add(
+                event_id="event-1",
+                event_at=EVENT_AT,
+                tracked=TRACKED,
+                reference_candles=(_candle(4, "100"),),
+                reaction_candle=_candle(6, "97"),
+            )
+
+    def test_reference_mismatch_failure_preserves_original_reference_and_state(self) -> None:
+        orchestrator = EventReactionOrchestrator()
+
+        first = orchestrator.add(
+            event_id="event-1",
+            event_at=EVENT_AT,
+            tracked=TRACKED,
+            reference_candles=(_candle(3, "100"),),
+            reaction_candle=_candle(5, "98"),
+        )
+        self.assertIsNotNone(first)
+
+        with self.assertRaisesRegex(ValueError, "event reference changed"):
+            orchestrator.add(
+                event_id="event-1",
+                event_at=EVENT_AT,
+                tracked=TRACKED,
+                reference_candles=(_candle(4, "100"),),
+                reaction_candle=_candle(6, "97"),
+            )
+
+        second = orchestrator.add(
+            event_id="event-1",
+            event_at=EVENT_AT,
+            tracked=TRACKED,
+            reference_candles=(_candle(3, "100"),),
+            reaction_candle=_candle(6, "97"),
+        )
+        assert second is not None
+        self.assertEqual(second.reference.source_candle_start, _candle(3, "100").start)
+        self.assertEqual(
+            second.reaction.tracked_reaction.evolution.evolution,
+            ReactionEvolution.EXTENDING,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
