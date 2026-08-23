@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -76,6 +77,18 @@ def _bool(value: Any) -> bool | None:
     return None
 
 
+def _normalise_search_text(value: str) -> str:
+    return " ".join(re.sub(r"[^A-Z0-9]+", " ", value.upper()).split())
+
+
+def _normalise_search_symbol(value: str) -> str:
+    return re.sub(r"\s+", "", value.upper())
+
+
+def _base_search_symbol(value: str) -> str:
+    return _normalise_search_symbol(value).split(".", 1)[0]
+
+
 def _topic_instrument_id(message: dict[str, Any]) -> int | None:
     topic = message.get("topic")
     if not isinstance(topic, str) or not topic.startswith("instrument:"):
@@ -84,6 +97,46 @@ def _topic_instrument_id(message: dict[str, Any]) -> int | None:
         return int(topic.split(":", 1)[1])
     except (TypeError, ValueError):
         return None
+
+
+def _search_candidate(row: dict[str, Any]) -> EtoroInstrumentCandidate | None:
+    raw_id = row.get("instrumentId", row.get("internalInstrumentId", row.get("instrumentID")))
+    try:
+        instrument_id = int(raw_id)
+    except (TypeError, ValueError):
+        return None
+
+    symbol_raw = row.get("internalSymbolFull", row.get("symbol"))
+    symbol = str(symbol_raw).strip() if symbol_raw not in (None, "") else None
+    name_raw = row.get(
+        "internalInstrumentDisplayName",
+        row.get("displayName", row.get("instrumentDisplayName", row.get("name"))),
+    )
+    display_name = str(name_raw or symbol or "").strip()
+    if not display_name:
+        return None
+    market_raw = row.get(
+        "internalExchangeName",
+        row.get("market", row.get("exchangeName", row.get("exchange"))),
+    )
+    market = str(market_raw).strip() if market_raw not in (None, "") else None
+    return EtoroInstrumentCandidate(
+        instrument_id=instrument_id,
+        symbol=symbol,
+        display_name=display_name,
+        market=market,
+    )
+
+
+def _candidate_matches_search_term(candidate: EtoroInstrumentCandidate, term: str) -> bool:
+    requested_symbol = _normalise_search_symbol(term)
+    if candidate.symbol:
+        candidate_symbol = _normalise_search_symbol(candidate.symbol)
+        if candidate_symbol == requested_symbol:
+            return True
+        if _base_search_symbol(candidate.symbol) == _base_search_symbol(term):
+            return True
+    return _normalise_search_text(candidate.display_name) == _normalise_search_text(term)
 
 
 def parse_etoro_stream_message(raw: str | bytes) -> tuple[EtoroMarketUpdate, ...]:
@@ -182,60 +235,88 @@ class EtoroMarketDataProvider:
         }
 
     def search_instruments(self, term: str) -> tuple[EtoroInstrumentCandidate, ...]:
-        """Search eToro instruments by symbol/name using the documented search parameter."""
+        """Search eToro instruments conservatively across the live paged contract.
+
+        The current live endpoint returns ``items`` and pagination metadata, and
+        may ignore the supplied search term. For that shape we page through the
+        full returned result set and apply exact symbol/base-symbol/display-name
+        filtering locally. The older ``data`` shape remains supported as a
+        single server-filtered response for backwards compatibility.
+        """
         search_term = term.strip()
         if not search_term:
             return ()
-        try:
-            response = self._http_get(
-                f"{self.base_url}/search",
-                params={"search": search_term},
-                headers=self._headers(),
-                timeout=self.timeout_seconds,
-            )
-        except requests.RequestException as exc:
-            raise RuntimeError(f"eToro instrument search failed: {exc}") from exc
-
-        if not response.ok:
-            raise RuntimeError(f"eToro instrument search HTTP {response.status_code}: {response.text[:500]}")
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise RuntimeError("eToro instrument search returned invalid JSON") from exc
-
-        rows = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(rows, list):
-            raise RuntimeError("eToro instrument search response is missing data")
 
         candidates: list[EtoroInstrumentCandidate] = []
         seen: set[int] = set()
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            raw_id = row.get("instrumentId", row.get("instrumentID"))
+        page = 1
+        requested_page_size = 1000
+        last_reported_page = 0
+
+        while True:
             try:
-                instrument_id = int(raw_id)
-            except (TypeError, ValueError):
-                continue
-            if instrument_id in seen:
-                continue
-            symbol_raw = row.get("symbol")
-            symbol = str(symbol_raw).strip() if symbol_raw not in (None, "") else None
-            name_raw = row.get("displayName", row.get("instrumentDisplayName", row.get("name")))
-            display_name = str(name_raw or symbol or "").strip()
-            if not display_name:
-                continue
-            market_raw = row.get("market", row.get("exchangeName", row.get("exchange")))
-            market = str(market_raw).strip() if market_raw not in (None, "") else None
-            candidates.append(
-                EtoroInstrumentCandidate(
-                    instrument_id=instrument_id,
-                    symbol=symbol,
-                    display_name=display_name,
-                    market=market,
+                response = self._http_get(
+                    f"{self.base_url}/search",
+                    params={"search": search_term, "page": page, "pageSize": requested_page_size},
+                    headers=self._headers(),
+                    timeout=self.timeout_seconds,
                 )
-            )
-            seen.add(instrument_id)
+            except requests.RequestException as exc:
+                raise RuntimeError(f"eToro instrument search failed: {exc}") from exc
+
+            if not response.ok:
+                raise RuntimeError(f"eToro instrument search HTTP {response.status_code}: {response.text[:500]}")
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise RuntimeError("eToro instrument search returned invalid JSON") from exc
+
+            if not isinstance(payload, dict):
+                raise RuntimeError("eToro instrument search response is invalid")
+
+            if isinstance(payload.get("data"), list):
+                for row in payload["data"]:
+                    if not isinstance(row, dict):
+                        continue
+                    candidate = _search_candidate(row)
+                    if candidate is None or candidate.instrument_id in seen:
+                        continue
+                    candidates.append(candidate)
+                    seen.add(candidate.instrument_id)
+                break
+
+            rows = payload.get("items")
+            if not isinstance(rows, list):
+                raise RuntimeError("eToro instrument search response is missing items")
+
+            try:
+                current_page = int(payload.get("page", page))
+                current_page_size = int(payload.get("pageSize", requested_page_size))
+                total_items = int(payload["totalItems"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError("eToro instrument search response has invalid pagination") from exc
+            if current_page < 1 or current_page_size < 1 or total_items < 0:
+                raise RuntimeError("eToro instrument search response has invalid pagination")
+            if current_page <= last_reported_page:
+                raise RuntimeError("eToro instrument search pagination did not advance")
+            last_reported_page = current_page
+
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                candidate = _search_candidate(row)
+                if candidate is None or candidate.instrument_id in seen:
+                    continue
+                if _candidate_matches_search_term(candidate, search_term):
+                    candidates.append(candidate)
+                    seen.add(candidate.instrument_id)
+
+            if current_page * current_page_size >= total_items:
+                break
+            if not rows:
+                raise RuntimeError("eToro instrument search pagination ended before totalItems")
+            page = current_page + 1
+
         return tuple(candidates)
 
     def fetch_quote(self, instrument_id: int) -> EtoroQuote:

@@ -38,7 +38,9 @@ def resolve_tracked_instrument(
 
     Inactive tracked instruments are intentionally not resolved. Failure or
     ambiguity from the underlying conservative resolver is propagated as
-    ``None`` instead of guessing or creating a partial mapping.
+    ``None`` instead of guessing or creating a partial mapping. If the tracked
+    identity does not yet include a market, the exact resolved eToro market may
+    fill that missing field; an already-supplied tracked market always wins.
     """
     if not tracked.active:
         return None
@@ -56,7 +58,7 @@ def resolve_tracked_instrument(
     return TrackedEtoroInstrument(
         tracked_instrument_id=tracked.tracked_instrument_id,
         instrument=tracked.instrument,
-        market=tracked.market,
+        market=tracked.market or resolved.market,
         etoro_instrument_id=resolved.instrument_id,
         etoro_symbol=resolved.symbol,
         etoro_display_name=resolved.display_name,
