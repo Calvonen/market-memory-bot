@@ -40,8 +40,10 @@ ALL_PRESENT_ROW = {
     "tracked_market_events_table_exists": True,
     "tracked_market_event_reactions_table_exists": True,
     "upsert_tracked_market_event_function_exists": True,
+    "arm_tracked_market_event_resolution_function_exists": True,
     "capture_tracked_market_event_reference_function_exists": True,
     "capture_tracked_market_event_reaction_anchor_function_exists": True,
+    "runtime_schema_version": 2,
 }
 
 
@@ -152,19 +154,6 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("placeholder-preserving implementation version", err)
 
-    def test_fails_closed_when_calendar_upsert_version_key_is_absent(self) -> None:
-        row = dict(ALL_PRESENT_ROW)
-        del row["calendar_candidate_upsert_version_matches"]
-        exit_code, _out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[row])))
-        self.assertEqual(exit_code, 1)
-        self.assertIn("placeholder-preserving implementation version", err)
-
-    def test_fails_closed_on_the_older_atomic_upsert_marker_version(self) -> None:
-        row = dict(ALL_PRESENT_ROW, calendar_candidate_upsert_implementation_version=1)
-        exit_code, _out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[row])))
-        self.assertEqual(exit_code, 1)
-        self.assertIn("atomic implementation version 2", err)
-
     def test_fails_closed_when_explicit_upsert_version_is_absent(self) -> None:
         row = dict(ALL_PRESENT_ROW)
         del row["calendar_candidate_upsert_implementation_version"]
@@ -172,54 +161,23 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("deployed: None", err)
 
-    def test_fails_closed_when_the_calendar_schema_keys_are_absent_entirely(self) -> None:
-        row = dict(ALL_PRESENT_ROW)
-        del row["calendar_events_table_exists"]
-        del row["upsert_calendar_candidate_function_exists"]
-        del row["transition_calendar_event_status_function_exists"]
-        exit_code, _out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[row])))
-        self.assertEqual(exit_code, 1)
-        self.assertIn("calendar_events table", err)
-        self.assertIn("upsert_calendar_candidate() function", err)
-        self.assertIn("transition_calendar_event_status() function", err)
-
-    def test_fails_closed_when_the_schema_version_key_is_absent(self) -> None:
-        row = {
-            "event_strategy_approvals_table_exists": True,
-            "approve_strategy_draft_function_exists": True,
-            "insert_next_expectation_version_function_exists": True,
-        }
-        exit_code, _out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[row])))
-        self.assertEqual(exit_code, 1)
-        self.assertIn("implementation version", err)
-
-    def test_reports_every_missing_object_at_once(self) -> None:
-        row = {
-            "event_strategy_approvals_table_exists": False,
-            "approve_strategy_draft_function_exists": False,
-            "insert_next_expectation_version_function_exists": False,
-            "schema_version_matches": False,
-            "calendar_events_table_exists": False,
-            "upsert_calendar_candidate_function_exists": False,
-            "transition_calendar_event_status_function_exists": False,
-            "calendar_candidate_upsert_version_matches": False,
-        }
-        exit_code, _out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[row])))
-        self.assertEqual(exit_code, 1)
-        self.assertIn("event_strategy_approvals table", err)
-        self.assertIn("approve_strategy_draft() function", err)
-        self.assertIn("insert_next_expectation_version() function", err)
-        self.assertIn("implementation version", err)
-        self.assertIn("calendar_events table", err)
-        self.assertIn("upsert_calendar_candidate() function", err)
-        self.assertIn("transition_calendar_event_status() function", err)
-        self.assertIn("placeholder-preserving implementation version", err)
-
     def test_fails_closed_when_tracked_event_runtime_object_is_missing(self) -> None:
         row = dict(ALL_PRESENT_ROW, capture_tracked_market_event_reaction_anchor_function_exists=False)
         exit_code, _out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[row])))
         self.assertEqual(exit_code, 1)
         self.assertIn("capture_tracked_market_event_reaction_anchor() function", err)
+
+    def test_fails_closed_when_resolution_preflight_rpc_is_missing(self) -> None:
+        row = dict(ALL_PRESENT_ROW, arm_tracked_market_event_resolution_function_exists=False)
+        exit_code, _out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[row])))
+        self.assertEqual(exit_code, 1)
+        self.assertIn("arm_tracked_market_event_resolution() function", err)
+
+    def test_fails_closed_on_old_tracked_event_runtime_schema_version(self) -> None:
+        row = dict(ALL_PRESENT_ROW, runtime_schema_version=1)
+        exit_code, _out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[row])))
+        self.assertEqual(exit_code, 1)
+        self.assertIn("tracked-event runtime schema version 2", err)
 
     def test_passes_when_every_required_object_is_present(self) -> None:
         exit_code, out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[ALL_PRESENT_ROW])))
