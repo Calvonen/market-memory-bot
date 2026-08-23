@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from trading_system.market_event import MarketEvent, MarketEventKind, MarketEventSource
@@ -32,20 +32,27 @@ EVENT = MarketEvent(
 )
 
 
-def _candle(minute: int, close: str, *, tracked_id: str = "tracked-1") -> TrackedMarketCandle:
+def _candle(
+    minute: int,
+    close: str,
+    *,
+    tracked_id: str = "tracked-1",
+    interval: int = 1,
+    hour: int = 7,
+) -> TrackedMarketCandle:
     price = Decimal(close)
     return TrackedMarketCandle(
         tracked_instrument_id=tracked_id,
         instrument="ABC",
         market="LSE",
         etoro_instrument_id=123,
-        interval_minutes=1,
-        start=datetime(2026, 8, 23, 7, minute, tzinfo=UTC),
+        interval_minutes=interval,
+        start=datetime(2026, 8, 23, hour, minute, tzinfo=UTC),
         open=price,
         high=price,
         low=price,
         close=price,
-        source_minutes=1,
+        source_minutes=interval,
     )
 
 
@@ -200,6 +207,104 @@ class MarketEventReactionBridgeTests(unittest.TestCase):
         )
 
         self.assertIsNone(result)
+
+    def test_monitoring_profile_selects_one_minute_before_thirty_minutes(self) -> None:
+        bridge = MarketEventReactionBridge()
+
+        result = bridge.add_for_observation(
+            event=EVENT,
+            tracked=TRACKED,
+            reference_candles=(_candle(4, "100"),),
+            reaction_candles=(
+                _candle(9, "98", interval=1),
+                _candle(5, "97", interval=5),
+            ),
+            observed_at=EVENT.event_at + timedelta(minutes=5),
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.reaction.tracked_reaction.reaction.interval_minutes, 1)
+        self.assertEqual(result.reference.interval_minutes, 1)
+
+    def test_monitoring_profile_switches_to_five_minutes_with_stable_one_minute_reference(self) -> None:
+        bridge = MarketEventReactionBridge()
+        references = (_candle(4, "100"),)
+
+        first = bridge.add_for_observation(
+            event=EVENT,
+            tracked=TRACKED,
+            reference_candles=references,
+            reaction_candles=(_candle(10, "98", interval=1),),
+            observed_at=EVENT.event_at + timedelta(minutes=6),
+        )
+        second = bridge.add_for_observation(
+            event=EVENT,
+            tracked=TRACKED,
+            reference_candles=references,
+            reaction_candles=(
+                _candle(39, "96", interval=1),
+                _candle(35, "95", interval=5),
+            ),
+            observed_at=EVENT.event_at + timedelta(minutes=35),
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        assert first is not None and second is not None
+        self.assertEqual(first.reference.source_candle_start, references[0].start)
+        self.assertEqual(second.reference.source_candle_start, references[0].start)
+        self.assertEqual(first.reference.baseline.reference_price, Decimal("100"))
+        self.assertEqual(second.reference.baseline.reference_price, Decimal("100"))
+        self.assertEqual(second.reaction.tracked_reaction.reaction.interval_minutes, 5)
+
+    def test_monitoring_profile_switches_to_fifteen_minutes(self) -> None:
+        bridge = MarketEventReactionBridge()
+
+        result = bridge.add_for_observation(
+            event=EVENT,
+            tracked=TRACKED,
+            reference_candles=(_candle(4, "100"),),
+            reaction_candles=(
+                _candle(44, "97", interval=1, hour=9),
+                _candle(40, "96", interval=5, hour=9),
+                _candle(30, "94", interval=15, hour=9),
+            ),
+            observed_at=EVENT.event_at + timedelta(minutes=160),
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.reaction.tracked_reaction.reaction.interval_minutes, 15)
+        self.assertEqual(result.reference.interval_minutes, 1)
+
+    def test_monitoring_profile_returns_none_when_active_interval_did_not_close(self) -> None:
+        bridge = MarketEventReactionBridge()
+
+        result = bridge.add_for_observation(
+            event=EVENT,
+            tracked=TRACKED,
+            reference_candles=(_candle(4, "100"),),
+            reaction_candles=(_candle(35, "95", interval=5),),
+            observed_at=EVENT.event_at + timedelta(minutes=10),
+        )
+
+        self.assertIsNone(result)
+
+    def test_monitoring_profile_fails_closed_on_ambiguous_active_candle(self) -> None:
+        bridge = MarketEventReactionBridge()
+
+        with self.assertRaisesRegex(ValueError, "ambiguous active reaction candle"):
+            bridge.add_for_observation(
+                event=EVENT,
+                tracked=TRACKED,
+                reference_candles=(_candle(4, "100"),),
+                reaction_candles=(
+                    _candle(9, "98", interval=1),
+                    _candle(10, "97", interval=1),
+                ),
+                observed_at=EVENT.event_at + timedelta(minutes=6),
+            )
 
 
 if __name__ == "__main__":
