@@ -91,7 +91,7 @@ begin
     current_start := (stage ->> 'start_after_minutes')::numeric;
     current_interval := (stage ->> 'interval_minutes')::numeric;
 
-    if current_start < 0 then
+    if current_start < 0 or current_start <> trunc(current_start) then
       return false;
     end if;
     if current_interval not in (1, 5, 15) then
