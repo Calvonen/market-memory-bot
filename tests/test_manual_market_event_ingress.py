@@ -20,9 +20,18 @@ TRACKED = TrackedEtoroInstrument(
 EVENT_AT = datetime(2026, 8, 23, 7, 30, tzinfo=UTC)
 
 
+class _UnusedRuntime:
+    def observe_event(self, **kwargs):
+        raise AssertionError("manual ingress must not observe events")
+
+
+def _monitor() -> RegisteredMarketEventMonitor:
+    return RegisteredMarketEventMonitor(_UnusedRuntime())
+
+
 class ManualMarketEventIngressTests(unittest.TestCase):
     def test_creates_manual_event_from_resolved_tracked_identity_and_registers_it(self) -> None:
-        monitor = RegisteredMarketEventMonitor()
+        monitor = _monitor()
 
         event = register_manual_market_event(
             monitor,
@@ -41,12 +50,10 @@ class ManualMarketEventIngressTests(unittest.TestCase):
         self.assertEqual(event.source, MarketEventSource.MANUAL)
         self.assertEqual(event.kind, MarketEventKind.NEWS)
         self.assertEqual(event.title, "Unexpected contract announcement")
-
-        self.assertEqual(monitor.registration_for("manual-1").event, event)
-        self.assertEqual(monitor.registration_for("manual-1").tracked, TRACKED)
+        self.assertTrue(monitor.unregister("manual-1"))
 
     def test_default_kind_is_custom(self) -> None:
-        monitor = RegisteredMarketEventMonitor()
+        monitor = _monitor()
 
         event = register_manual_market_event(
             monitor,
@@ -59,7 +66,7 @@ class ManualMarketEventIngressTests(unittest.TestCase):
         self.assertEqual(event.source, MarketEventSource.MANUAL)
 
     def test_same_manual_event_is_idempotent(self) -> None:
-        monitor = RegisteredMarketEventMonitor()
+        monitor = _monitor()
 
         first = register_manual_market_event(
             monitor,
@@ -77,10 +84,11 @@ class ManualMarketEventIngressTests(unittest.TestCase):
         )
 
         self.assertEqual(second, first)
-        self.assertEqual(monitor.registration_for("manual-1").event, first)
+        self.assertTrue(monitor.unregister("manual-1"))
+        self.assertFalse(monitor.unregister("manual-1"))
 
     def test_reusing_manual_event_id_for_different_event_fails_closed(self) -> None:
-        monitor = RegisteredMarketEventMonitor()
+        monitor = _monitor()
         register_manual_market_event(
             monitor,
             TRACKED,
@@ -97,7 +105,7 @@ class ManualMarketEventIngressTests(unittest.TestCase):
             )
 
     def test_market_event_validation_still_applies(self) -> None:
-        monitor = RegisteredMarketEventMonitor()
+        monitor = _monitor()
 
         with self.assertRaisesRegex(ValueError, "event_at must be timezone-aware"):
             register_manual_market_event(
