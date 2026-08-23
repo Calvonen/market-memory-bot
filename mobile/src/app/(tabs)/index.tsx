@@ -10,6 +10,7 @@ import {
   View,
 } from 'react-native';
 
+import { TrackedEventsSection } from '@/components/TrackedEventsSection';
 import {
   CalendarEvent,
   EventExpectation,
@@ -20,6 +21,7 @@ import {
 } from '@/services/api';
 
 type EventStatus = { run: PaperRun | null; statusError: boolean };
+type TrackedEventSnapshot = { count: number; calendarEventIds: string[] };
 
 // Mirrors MAX_CALENDAR_LOOKAHEAD_DAYS in trading_system/api.py - the widest
 // window the backend accepts, and what an omitted from_date/to_date used to
@@ -55,6 +57,10 @@ export default function HomeScreen() {
   // depends on `events` too and the two fetches now resolve independently
   // of each other (see loadEvents()).
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[] | null>(null);
+  const [trackedEventCount, setTrackedEventCount] = useState<number | null>(null);
+  const [persistentCalendarEventIds, setPersistentCalendarEventIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   // Separate from `error` (EventExpectation-only) - a calendar failure must
   // never be conflated with an EventExpectation failure, or silently
   // swallowed. calendarEvents itself is left untouched on failure (see the
@@ -137,6 +143,11 @@ export default function HomeScreen() {
     return Promise.race([eventsPromise, calendarPromise]);
   }, []);
 
+  const handleTrackedEventSnapshot = useCallback((snapshot: TrackedEventSnapshot) => {
+    setTrackedEventCount(snapshot.count);
+    setPersistentCalendarEventIds(new Set(snapshot.calendarEventIds));
+  }, []);
+
   // Tracked calendar rows for display: status = 'tracked' only, and never
   // an occurrence already tracked through the real trading system - same
   // de-dupe as events/upcoming.tsx's mergeUpcomingRows(), keyed on
@@ -151,11 +162,12 @@ export default function HomeScreen() {
     );
     return calendarEvents.filter((event) => {
       if (event.status !== 'tracked') return false;
+      if (persistentCalendarEventIds.has(event.calendar_event_id)) return false;
       if (event.event_type !== 'earnings') return true;
       const key = `${event.instrument.toUpperCase()}|${event.scheduled_date}`;
       return !trackedEarningsOccurrences.has(key);
     });
-  }, [calendarEvents, events]);
+  }, [calendarEvents, events, persistentCalendarEventIds]);
 
   // Refires on every focus, not just mount - so returning to Home after
   // tracking a candidate on /events/upcoming picks up the newly tracked
@@ -226,6 +238,7 @@ export default function HomeScreen() {
           empty response, which a failed request is not. */}
       {events &&
       events.length === 0 &&
+      trackedEventCount === 0 &&
       trackedCalendarEvents &&
       trackedCalendarEvents.length === 0 &&
       !calendarError ? (
@@ -239,6 +252,8 @@ export default function HomeScreen() {
       {events?.map((event) => (
         <EventCard key={event.event_id} event={event} status={statuses[event.event_id]} />
       ))}
+
+      <TrackedEventsSection onSnapshot={handleTrackedEventSnapshot} />
 
       {trackedCalendarEvents?.map((event) => (
         <CalendarEventCard key={event.calendar_event_id} event={event} />
