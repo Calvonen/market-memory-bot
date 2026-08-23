@@ -24,6 +24,7 @@ from trading_system.tracked_instruments import TrackedInstrument, TrackedInstrum
 
 
 WORKER_ACTOR = "tracked-event-worker"
+PREFLIGHT_ACTOR = "tracked-event-preflight"
 DEFAULT_POLL_SECONDS = 30.0
 DEFAULT_LOOKAHEAD_HOURS = 24.0
 DEFAULT_MAX_PAST_HOURS = 12.0
@@ -71,26 +72,81 @@ def _normalise_text(value: str) -> str:
     return " ".join(value.strip().upper().split())
 
 
+def _resolved_identity_from_event(event: PersistentTrackedEvent) -> TrackedEtoroInstrument:
+    if event.resolved_etoro_instrument_id is None or event.resolved_etoro_instrument_id <= 0:
+        raise RuntimeError("tracked event is not armed with an eToro instrument id")
+    if not event.resolved_etoro_symbol:
+        raise RuntimeError("tracked event is not armed with an eToro symbol")
+    if not event.resolved_etoro_display_name:
+        raise RuntimeError("tracked event is not armed with an eToro display name")
+    if event.resolution_armed_at is None or not event.resolution_armed_by:
+        raise RuntimeError("tracked event eToro resolution is not armed")
+    return TrackedEtoroInstrument(
+        tracked_instrument_id=event.tracked_instrument_id,
+        instrument=event.instrument,
+        market=event.market,
+        etoro_instrument_id=event.resolved_etoro_instrument_id,
+        etoro_symbol=event.resolved_etoro_symbol,
+        etoro_display_name=event.resolved_etoro_display_name,
+    )
+
+
+def _preflight_resolution_sync(
+    event: PersistentTrackedEvent,
+    *,
+    repository: SupabaseTrackedEventRepository,
+    provider: EtoroMarketDataProvider,
+) -> PersistentTrackedEvent:
+    """Resolve and validate broker identity outside the event critical path.
+
+    This may traverse eToro's catalog and therefore can be slow. run_forever runs
+    it in a background thread as soon as an event enters the lookahead window.
+    monitor_one_event never calls the catalog resolver.
+    """
+    if event.resolved_etoro_instrument_id is not None:
+        return event
+    if datetime.now(UTC) >= event.event_at:
+        raise RuntimeError("event reached event_at before eToro identity was armed")
+
+    tracked = _tracked_identity(event)
+    resolved = resolve_tracked_instrument(tracked, EtoroInstrumentResolver(provider))
+    if resolved is None:
+        raise RuntimeError("eToro instrument resolution failed or was ambiguous")
+
+    # Validate that the resolved id is usable by the live market-data account
+    # before persisting it. The worker later reuses this exact id for reference
+    # snapshots and WebSocket subscription instead of searching the catalog.
+    quote = provider.fetch_quote(resolved.etoro_instrument_id)
+    if quote.instrument_id != resolved.etoro_instrument_id:
+        raise RuntimeError("eToro preflight quote identity mismatch")
+    if not quote.last_execution.is_finite() or quote.last_execution <= 0:
+        raise RuntimeError("eToro preflight quote has invalid lastExecution")
+
+    return repository.arm_resolution(
+        event_id=event.event_id,
+        etoro_instrument_id=resolved.etoro_instrument_id,
+        etoro_symbol=resolved.etoro_symbol,
+        etoro_display_name=resolved.etoro_display_name,
+        actor=PREFLIGHT_ACTOR,
+    )
+
+
 def _validate_persisted_reference_identity(
     event: PersistentTrackedEvent,
     resolved: TrackedEtoroInstrument,
 ) -> None:
     if event.reference_price is None:
         return
-    if event.resolved_etoro_instrument_id is None:
-        raise RuntimeError("persisted reference is missing resolved eToro instrument id")
     if event.resolved_etoro_instrument_id != resolved.etoro_instrument_id:
-        raise RuntimeError("persisted reference eToro instrument id no longer matches resolver")
-    if not event.resolved_etoro_symbol:
-        raise RuntimeError("persisted reference is missing resolved eToro symbol")
-    if _normalise_text(event.resolved_etoro_symbol) != _normalise_text(resolved.etoro_symbol):
-        raise RuntimeError("persisted reference eToro symbol no longer matches resolver")
-    if not event.resolved_etoro_display_name:
-        raise RuntimeError("persisted reference is missing resolved eToro display name")
-    if _normalise_text(event.resolved_etoro_display_name) != _normalise_text(
-        resolved.etoro_display_name
+        raise RuntimeError("persisted reference eToro instrument id does not match armed identity")
+    if not event.resolved_etoro_symbol or _normalise_text(event.resolved_etoro_symbol) != _normalise_text(
+        resolved.etoro_symbol
     ):
-        raise RuntimeError("persisted reference eToro display name no longer matches resolver")
+        raise RuntimeError("persisted reference eToro symbol does not match armed identity")
+    if not event.resolved_etoro_display_name or _normalise_text(
+        event.resolved_etoro_display_name
+    ) != _normalise_text(resolved.etoro_display_name):
+        raise RuntimeError("persisted reference eToro display name does not match armed identity")
 
 
 def _capture_reference_if_needed(
@@ -108,6 +164,8 @@ def _capture_reference_if_needed(
         raise RuntimeError("event reached event_at without a persisted pre-event reference")
 
     quote = provider.fetch_quote(resolved.etoro_instrument_id)
+    if quote.instrument_id != resolved.etoro_instrument_id:
+        raise RuntimeError("eToro reference quote identity mismatch")
     price = quote.last_execution
     if not price.is_finite() or price <= 0:
         raise RuntimeError("eToro pre-event lastExecution is not finite and positive")
@@ -260,14 +318,10 @@ async def monitor_one_event(
     reference_lead_seconds: float = DEFAULT_REFERENCE_LEAD_SECONDS,
     max_wait_for_market_hours: float = DEFAULT_MAX_WAIT_FOR_MARKET_HOURS,
 ) -> None:
-    tracked = _tracked_identity(event)
-    resolved = resolve_tracked_instrument(tracked, EtoroInstrumentResolver(provider))
-    if resolved is None:
-        repository.mark_failed(
-            event.event_id,
-            actor=WORKER_ACTOR,
-            error="eToro instrument resolution failed or was ambiguous",
-        )
+    try:
+        resolved = _resolved_identity_from_event(event)
+    except RuntimeError as exc:
+        repository.mark_failed(event.event_id, actor=WORKER_ACTOR, error=str(exc))
         return
 
     try:
@@ -403,6 +457,7 @@ async def run_forever() -> None:
     )
 
     active: dict[str, asyncio.Task[None]] = {}
+    preflight: dict[str, asyncio.Task[PersistentTrackedEvent]] = {}
     while True:
         for event_id, task in list(active.items()):
             if not task.done():
@@ -415,6 +470,23 @@ async def run_forever() -> None:
             except Exception as exc:
                 print(f"tracked-event worker retryable failure event={event_id}: {exc}", flush=True)
 
+        for event_id, task in list(preflight.items()):
+            if not task.done():
+                continue
+            preflight.pop(event_id, None)
+            try:
+                armed = task.result()
+                print(
+                    f"tracked-event preflight armed event={event_id} "
+                    f"etoro_id={armed.resolved_etoro_instrument_id} "
+                    f"symbol={armed.resolved_etoro_symbol}",
+                    flush=True,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"tracked-event preflight retryable failure event={event_id}: {exc}", flush=True)
+
         now = datetime.now(UTC)
         try:
             runnable = repository.list_runnable(now=now, lookahead=lookahead, max_past=max_past)
@@ -424,8 +496,32 @@ async def run_forever() -> None:
             continue
 
         for event in runnable:
-            if event.event_id in active:
+            if event.event_id in active or event.event_id in preflight:
                 continue
+
+            if event.resolved_etoro_instrument_id is None:
+                if now >= event.event_at:
+                    repository.mark_failed(
+                        event.event_id,
+                        actor=WORKER_ACTOR,
+                        error="event reached event_at before eToro identity was armed",
+                    )
+                    continue
+                # Keep catalog discovery outside the timing-critical monitor and
+                # off the asyncio loop. Limit to one catalog traversal at a time
+                # because the live eToro search contract can be expensive.
+                if not preflight:
+                    preflight[event.event_id] = asyncio.create_task(
+                        asyncio.to_thread(
+                            _preflight_resolution_sync,
+                            event,
+                            repository=repository,
+                            provider=provider,
+                        ),
+                        name=f"tracked-event-preflight-{event.event_id}",
+                    )
+                continue
+
             active[event.event_id] = asyncio.create_task(
                 monitor_one_event(
                     event,
