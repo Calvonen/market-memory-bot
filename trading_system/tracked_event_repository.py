@@ -136,6 +136,18 @@ class SupabaseTrackedEventRepository:
         rows = response.data or []
         return self._row_to_event(rows[0]) if rows else None
 
+    def list_recent(self, *, limit: int = 20) -> tuple[PersistentTrackedEvent, ...]:
+        if limit < 1 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+        response = (
+            self.client.table("tracked_market_events")
+            .select("*")
+            .order("event_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return tuple(self._row_to_event(row) for row in (response.data or []))
+
     def list_runnable(
         self,
         *,
