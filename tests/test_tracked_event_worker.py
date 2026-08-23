@@ -175,7 +175,7 @@ class TrackedEventWorkerTests(unittest.TestCase):
         self.assertEqual(len(repo.armed), 1)
 
     def test_monitor_uses_persisted_identity_without_catalog_search(self):
-        event_at = datetime.now(UTC) - timedelta(hours=2)
+        event_at = datetime.now(UTC) - timedelta(minutes=5)
         event = _event(event_at=event_at, reference_price=Decimal("7.50"), armed=True)
         event = replace(event, reaction_anchor_at=event_at)
         repo = _FakeRepository(event)
