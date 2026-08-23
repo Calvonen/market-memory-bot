@@ -12,12 +12,14 @@ from trading_system.event_market_reaction import (
 )
 from trading_system.reaction_monitoring_profile import DEFAULT_EVENT_REACTION_MONITORING_PROFILE
 from trading_system.tracked_candle_pipeline import TrackedMarketCandle
+from trading_system.tracked_event_config import snapshot_effective_tracking_config
 from trading_system.tracked_event_reaction_live import stream_tracked_event_reaction_runtime
 from trading_system.tracked_event_reaction_runtime import TrackedEventReactionRuntime
 from trading_system.tracked_event_repository import (
     PersistentTrackedEvent,
     SupabaseTrackedEventRepository,
     TrackedEventReactionRecord,
+    TrackedEventStatus,
 )
 from trading_system.tracked_instrument_etoro import TrackedEtoroInstrument, resolve_tracked_instrument
 from trading_system.tracked_instruments import TrackedInstrument, TrackedInstrumentSource
@@ -308,6 +310,34 @@ def _persist_reactions_from_batch(
         )
 
 
+def _capture_tracking_config_snapshot(
+    event: PersistentTrackedEvent,
+    *,
+    repository: SupabaseTrackedEventRepository,
+    monitor_hours: float,
+    reference_lead_seconds: float,
+    max_wait_for_market_hours: float,
+) -> PersistentTrackedEvent:
+    """Persist the exact effective settings this event is about to be monitored with.
+
+    Built from the same resolved values (monitor_hours/reference_lead_seconds/
+    max_wait_for_market_hours from run_forever's env resolution, and the reaction
+    profile monitor_one_event actually uses below) rather than re-reading defaults,
+    so the snapshot can never drift from what this run actually does.
+    """
+    snapshot = snapshot_effective_tracking_config(
+        monitor_hours=monitor_hours,
+        reference_lead_seconds=reference_lead_seconds,
+        max_wait_for_market_hours=max_wait_for_market_hours,
+        profile=DEFAULT_EVENT_REACTION_MONITORING_PROFILE,
+    )
+    return repository.capture_tracking_config_snapshot(
+        event_id=event.event_id,
+        snapshot=snapshot.to_dict(),
+        actor=WORKER_ACTOR,
+    )
+
+
 async def monitor_one_event(
     event: PersistentTrackedEvent,
     *,
@@ -317,6 +347,29 @@ async def monitor_one_event(
     reference_lead_seconds: float = DEFAULT_REFERENCE_LEAD_SECONDS,
     max_wait_for_market_hours: float = DEFAULT_MAX_WAIT_FOR_MARKET_HOURS,
 ) -> None:
+    # A pre-snapshot legacy run can already be in MONITORING after deployment.
+    # Its earlier reactions may have been produced with settings we cannot
+    # reconstruct, so never backfill today's settings and mislabel history.
+    # New TRACKED events, and MONITORING restarts that already have a snapshot,
+    # still go through the capture-once RPC so identical settings are verified
+    # idempotently and conflicts fail closed before any new market-data work.
+    legacy_in_progress = (
+        event.status == TrackedEventStatus.MONITORING
+        and event.tracking_config_snapshot is None
+    )
+    if not legacy_in_progress:
+        try:
+            event = _capture_tracking_config_snapshot(
+                event,
+                repository=repository,
+                monitor_hours=monitor_hours,
+                reference_lead_seconds=reference_lead_seconds,
+                max_wait_for_market_hours=max_wait_for_market_hours,
+            )
+        except RuntimeError as exc:
+            repository.mark_failed(event.event_id, actor=WORKER_ACTOR, error=str(exc))
+            return
+
     try:
         resolved = _resolved_identity_from_event(event)
     except RuntimeError as exc:

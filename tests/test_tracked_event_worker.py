@@ -8,7 +8,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from trading_system.etoro_market_data import EtoroInstrumentCandidate, EtoroQuote
+from trading_system.reaction_monitoring_profile import DEFAULT_EVENT_REACTION_MONITORING_PROFILE
 from trading_system.tracked_candle_pipeline import TrackedMarketCandle
+from trading_system.tracked_event_config import snapshot_effective_tracking_config
 from trading_system.tracked_event_repository import (
     PersistentTrackedEvent,
     TrackedEventReactionRecord,
@@ -16,6 +18,8 @@ from trading_system.tracked_event_repository import (
     TrackedEventTimeStatus,
 )
 from trading_system.tracked_event_worker import (
+    DEFAULT_MAX_WAIT_FOR_MARKET_HOURS,
+    DEFAULT_REFERENCE_LEAD_SECONDS,
     _capture_reference_if_needed,
     _preflight_resolution_sync,
     _resolved_identity_from_event,
@@ -54,7 +58,12 @@ class _FakeProvider:
 
 
 class _FakeRepository:
-    def __init__(self, event: PersistentTrackedEvent | None = None) -> None:
+    def __init__(
+        self,
+        event: PersistentTrackedEvent | None = None,
+        *,
+        snapshot_capture_error: Exception | None = None,
+    ) -> None:
         self.event = event
         self.captured = None
         self.armed = []
@@ -63,6 +72,24 @@ class _FakeRepository:
         self.completed = []
         self.failed = []
         self.reactions: list[TrackedEventReactionRecord] = []
+        self.snapshot_capture_error = snapshot_capture_error
+        self.snapshot_captures: list[tuple[str, dict, str]] = []
+        self.call_order: list[str] = []
+
+    def capture_tracking_config_snapshot(self, *, event_id, snapshot, actor):
+        if self.event is None:
+            raise AssertionError("test repository needs an event")
+        self.call_order.append("snapshot")
+        self.snapshot_captures.append((event_id, snapshot, actor))
+        if self.snapshot_capture_error is not None:
+            raise self.snapshot_capture_error
+        existing = self.event.tracking_config_snapshot
+        if existing is not None and existing != snapshot:
+            raise RuntimeError(
+                f"tracked event {event_id} already has a different tracking_config_snapshot"
+            )
+        self.event = replace(self.event, tracking_config_snapshot=snapshot)
+        return self.event
 
     def arm_resolution(self, *, event_id, etoro_instrument_id, etoro_symbol, etoro_display_name, actor):
         if self.event is None:
@@ -98,6 +125,7 @@ class _FakeRepository:
         return self.event
 
     def mark_monitoring(self, event_id, *, actor, started_at):
+        self.call_order.append("monitoring")
         self.monitoring.append((event_id, actor, started_at))
 
     def mark_completed(self, event_id, *, actor, completed_at):
@@ -377,6 +405,158 @@ class TrackedEventWorkerTests(unittest.TestCase):
 
         self.assertEqual(len(repo.reactions), 2)
         self.assertEqual(repo.reactions[-1].evolution, "extending")
+        self.assertEqual(repo.snapshot_captures, [])
+        self.assertIsNone(repo.event.tracking_config_snapshot)
+        self.assertEqual(repo.failed, [])
+
+    def _expected_snapshot(self, *, monitor_hours: float) -> dict:
+        return snapshot_effective_tracking_config(
+            monitor_hours=monitor_hours,
+            reference_lead_seconds=DEFAULT_REFERENCE_LEAD_SECONDS,
+            max_wait_for_market_hours=DEFAULT_MAX_WAIT_FOR_MARKET_HOURS,
+            profile=DEFAULT_EVENT_REACTION_MONITORING_PROFILE,
+        ).to_dict()
+
+    def test_snapshot_capture_happens_before_monitoring_begins(self):
+        event_at = datetime.now(UTC) - timedelta(hours=2)
+        event = _event(event_at=event_at, reference_price=Decimal("7.50"), armed=True)
+        repo = _FakeRepository(event)
+        provider = _FakeProvider()
+        candle_start = datetime.now(UTC) - timedelta(minutes=1)
+        candle = TrackedMarketCandle(
+            tracked_instrument_id=event.tracked_instrument_id,
+            instrument="NHF.ASX",
+            market="Sydney",
+            etoro_instrument_id=777,
+            interval_minutes=1,
+            start=candle_start,
+            open=Decimal("7.50"),
+            high=Decimal("7.62"),
+            low=Decimal("7.49"),
+            close=Decimal("7.60"),
+            source_minutes=1,
+        )
+
+        async def fake_stream(*args, **kwargs):
+            yield SimpleNamespace(candles=(candle,))
+
+        with patch(
+            "trading_system.tracked_event_worker.stream_tracked_event_reaction_runtime",
+            side_effect=lambda *args, **kwargs: fake_stream(),
+        ):
+            import asyncio
+
+            asyncio.run(
+                monitor_one_event(
+                    event,
+                    repository=repo,
+                    provider=provider,
+                    monitor_hours=1.0,
+                )
+            )
+
+        self.assertEqual(len(repo.snapshot_captures), 1)
+        captured_event_id, captured_snapshot, captured_actor = repo.snapshot_captures[0]
+        self.assertEqual(captured_event_id, event.event_id)
+        self.assertEqual(captured_snapshot, self._expected_snapshot(monitor_hours=1.0))
+        self.assertEqual(captured_actor, "tracked-event-worker")
+        self.assertEqual(repo.event.tracking_config_snapshot, captured_snapshot)
+        self.assertIn("snapshot", repo.call_order)
+        self.assertIn("monitoring", repo.call_order)
+        self.assertLess(repo.call_order.index("snapshot"), repo.call_order.index("monitoring"))
+        self.assertEqual(repo.failed, [])
+
+    def test_snapshot_capture_failure_fails_closed_before_monitoring(self):
+        event_at = datetime.now(UTC) + timedelta(hours=1)
+        event = _event(event_at=event_at, armed=True)
+        repo = _FakeRepository(
+            event,
+            snapshot_capture_error=RuntimeError(
+                f"tracked event {event.event_id} already has a different tracking_config_snapshot"
+            ),
+        )
+        provider = _FakeProvider()
+
+        import asyncio
+
+        asyncio.run(monitor_one_event(event, repository=repo, provider=provider))
+
+        self.assertEqual(len(repo.snapshot_captures), 1)
+        self.assertEqual(repo.monitoring, [])
+        self.assertEqual(repo.armed, [])
+        self.assertEqual(repo.reactions, [])
+        self.assertEqual(repo.completed, [])
+        self.assertEqual(len(repo.failed), 1)
+        self.assertIn("different tracking_config_snapshot", repo.failed[0][2])
+        self.assertEqual(provider.quote_calls, [])
+
+    def test_conflicting_existing_snapshot_fails_closed_without_overwrite(self):
+        event_at = datetime.now(UTC) + timedelta(hours=1)
+        event = replace(
+            _event(event_at=event_at, armed=True),
+            tracking_config_snapshot=self._expected_snapshot(monitor_hours=99.0),
+        )
+        repo = _FakeRepository(event)
+        provider = _FakeProvider()
+
+        import asyncio
+
+        asyncio.run(monitor_one_event(event, repository=repo, provider=provider, monitor_hours=1.0))
+
+        self.assertEqual(len(repo.snapshot_captures), 1)
+        self.assertEqual(repo.monitoring, [])
+        self.assertEqual(len(repo.failed), 1)
+        self.assertIn("different tracking_config_snapshot", repo.failed[0][2])
+        # Never overwritten with the newly attempted (different) content.
+        self.assertEqual(repo.event.tracking_config_snapshot, self._expected_snapshot(monitor_hours=99.0))
+
+    def test_existing_identical_snapshot_lets_restart_continue(self):
+        now = datetime.now(UTC)
+        event_at = now - timedelta(minutes=5)
+        expected_snapshot = self._expected_snapshot(monitor_hours=1.0)
+        event = replace(
+            _event(event_at=event_at, reference_price=Decimal("100"), armed=True),
+            status=TrackedEventStatus.MONITORING,
+            reaction_anchor_at=event_at,
+            tracking_config_snapshot=expected_snapshot,
+        )
+        repo = _FakeRepository(event)
+        provider = _FakeProvider()
+        candle = TrackedMarketCandle(
+            tracked_instrument_id=event.tracked_instrument_id,
+            instrument="NHF.ASX",
+            market="Sydney",
+            etoro_instrument_id=777,
+            interval_minutes=1,
+            start=event_at + timedelta(minutes=1),
+            open=Decimal("100"),
+            high=Decimal("101"),
+            low=Decimal("100"),
+            close=Decimal("101"),
+            source_minutes=1,
+        )
+
+        async def fake_stream(*args, **kwargs):
+            yield SimpleNamespace(candles=(candle,))
+
+        with patch(
+            "trading_system.tracked_event_worker.stream_tracked_event_reaction_runtime",
+            side_effect=lambda *args, **kwargs: fake_stream(),
+        ):
+            import asyncio
+
+            asyncio.run(
+                monitor_one_event(
+                    event,
+                    repository=repo,
+                    provider=provider,
+                    monitor_hours=1.0,
+                )
+            )
+
+        self.assertEqual(len(repo.snapshot_captures), 1)
+        self.assertEqual(repo.event.tracking_config_snapshot, expected_snapshot)
+        self.assertEqual(len(repo.reactions), 1)
         self.assertEqual(repo.failed, [])
 
 
