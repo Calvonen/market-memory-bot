@@ -94,6 +94,11 @@ class TrackedEventConfigSnapshot:
             if stage.start_after_minutes <= previous_start:
                 raise ValueError("reaction stage start_after_minutes must be strictly increasing")
             previous_start = stage.start_after_minutes
+        # bool is an int subclass (True == 1), so schema_version=True would
+        # otherwise silently equal TRACKING_CONFIG_SCHEMA_VERSION and pass
+        # while producing a JSON `true` the DB contract rejects.
+        if isinstance(self.schema_version, bool):
+            raise ValueError("schema_version must not be a boolean")
         if self.schema_version != TRACKING_CONFIG_SCHEMA_VERSION:
             raise ValueError("unsupported tracking config schema_version")
 

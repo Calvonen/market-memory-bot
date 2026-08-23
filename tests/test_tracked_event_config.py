@@ -206,6 +206,29 @@ class TrackedEventConfigSnapshotTests(unittest.TestCase):
                     start_after_minutes=0, interval_minutes=bad_value
                 )
 
+    def test_snapshot_rejects_boolean_schema_version(self) -> None:
+        # bool is an int subclass, so schema_version=True == 1 would
+        # otherwise silently equal TRACKING_CONFIG_SCHEMA_VERSION and pass
+        # the plain "!=" comparison.
+        valid_stages = snapshot_effective_tracking_config(
+            monitor_hours=8.0,
+            reference_lead_seconds=30.0,
+            max_wait_for_market_hours=72.0,
+            profile=DEFAULT_EVENT_REACTION_MONITORING_PROFILE,
+        ).reaction_stages
+        for bad_value in (True, False):
+            with (
+                self.subTest(bad_value=bad_value),
+                self.assertRaisesRegex(ValueError, "must not be a boolean"),
+            ):
+                TrackedEventConfigSnapshot(
+                    monitor_hours=8.0,
+                    reference_lead_seconds=30.0,
+                    max_wait_for_market_hours=72.0,
+                    reaction_stages=valid_stages,
+                    schema_version=bad_value,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
