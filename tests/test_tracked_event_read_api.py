@@ -140,6 +140,26 @@ class TrackedEventReadApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["detail"], "tracked-event read failed")
 
+    def test_supabase_query_failure_is_normalized_to_503(self):
+        repository = SupabaseTrackedEventRepository(
+            _Client([], error=Exception("postgrest unavailable"))
+        )
+        client = TestClient(
+            create_app(
+                tracked_event_repository=repository,
+                read_api_key="read-secret",
+            )
+        )
+
+        response = client.get(
+            "/api/v1/tracked-events",
+            headers={"X-MarketAI-Key": "read-secret"},
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("failed to list tracked market events", response.json()["detail"])
+        self.assertIn("postgrest unavailable", response.json()["detail"])
+
 
 class _Response:
     def __init__(self, data):
@@ -147,8 +167,9 @@ class _Response:
 
 
 class _Table:
-    def __init__(self, rows) -> None:
+    def __init__(self, rows, error: Exception | None = None) -> None:
         self.rows = rows
+        self.error = error
         self.calls = []
 
     def select(self, value):
@@ -165,12 +186,14 @@ class _Table:
 
     def execute(self):
         self.calls.append(("execute",))
+        if self.error is not None:
+            raise self.error
         return _Response(self.rows)
 
 
 class _Client:
-    def __init__(self, rows) -> None:
-        self.table_query = _Table(rows)
+    def __init__(self, rows, error: Exception | None = None) -> None:
+        self.table_query = _Table(rows, error=error)
         self.table_names = []
 
     def table(self, name):
@@ -224,6 +247,33 @@ class TrackedEventRecentRepositoryTests(unittest.TestCase):
             repository.list_recent(limit=0)
         with self.assertRaises(ValueError):
             repository.list_recent(limit=101)
+
+    def test_list_recent_normalizes_malformed_persisted_row(self):
+        event = _event()
+        repository = SupabaseTrackedEventRepository(
+            _Client(
+                [
+                    {
+                        "id": event.event_id,
+                        "tracked_instrument_id": event.tracked_instrument_id,
+                        "calendar_event_id": None,
+                        "company_name": event.company_name,
+                        "instrument": event.instrument,
+                        "market": event.market,
+                        "source": event.source,
+                        "external_key": event.external_key,
+                        "kind": event.kind,
+                        "title": event.title,
+                        "event_at": event.event_at.isoformat(),
+                        "event_time_status": "not-a-valid-status",
+                        "status": event.status.value,
+                    }
+                ]
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "failed to list tracked market events"):
+            repository.list_recent()
 
 
 if __name__ == "__main__":
