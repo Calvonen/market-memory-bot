@@ -22,11 +22,23 @@ class MarketEventReactionBridge:
         self.orchestrator = orchestrator or EventReactionOrchestrator()
 
     @staticmethod
-    def _validate_identity(event: MarketEvent, tracked: TrackedEtoroInstrument) -> None:
+    def _canonical_market(value: str) -> str:
+        """Canonicalize a market string the same way ``MarketEvent`` does.
+
+        ``TrackedEtoroInstrument.market`` can retain its original casing, while
+        ``MarketEvent.market`` is normalised to collapsed-whitespace uppercase.
+        Comparing raw strings would fail closed on cosmetic case differences
+        (e.g. "LSE" vs "Lse") even though the identity is the same; this is an
+        exact match on canonical form, not a fuzzy comparison.
+        """
+        return " ".join(value.strip().split()).upper()
+
+    @classmethod
+    def _validate_identity(cls, event: MarketEvent, tracked: TrackedEtoroInstrument) -> None:
         if (
             event.tracked_instrument_id != tracked.tracked_instrument_id
             or event.instrument != tracked.instrument
-            or event.market != tracked.market
+            or cls._canonical_market(event.market) != cls._canonical_market(tracked.market)
         ):
             raise ValueError("market event and tracked identity mismatch")
 

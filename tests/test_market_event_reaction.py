@@ -134,6 +134,61 @@ class MarketEventReactionBridgeTests(unittest.TestCase):
             ReactionEvolution.INITIAL,
         )
 
+    def test_market_case_difference_is_not_treated_as_identity_mismatch(self) -> None:
+        bridge = MarketEventReactionBridge()
+        tracked_mixed_case = TrackedEtoroInstrument(
+            tracked_instrument_id="tracked-1",
+            instrument="ABC",
+            market="Lse",
+            etoro_instrument_id=123,
+            etoro_symbol="ABC.L",
+            etoro_display_name="ABC plc",
+        )
+
+        def candle_for_tracked(minute: int, close: str) -> TrackedMarketCandle:
+            price = Decimal(close)
+            return TrackedMarketCandle(
+                tracked_instrument_id="tracked-1",
+                instrument="ABC",
+                market="Lse",
+                etoro_instrument_id=123,
+                interval_minutes=1,
+                start=datetime(2026, 8, 23, 7, minute, tzinfo=UTC),
+                open=price,
+                high=price,
+                low=price,
+                close=price,
+                source_minutes=1,
+            )
+
+        result = bridge.add(
+            event=EVENT,
+            tracked=tracked_mixed_case,
+            reference_candles=(candle_for_tracked(4, "100"),),
+            reaction_candle=candle_for_tracked(5, "96"),
+        )
+
+        self.assertIsNotNone(result)
+
+    def test_genuinely_different_market_still_fails_closed(self) -> None:
+        bridge = MarketEventReactionBridge()
+        tracked_other_market = TrackedEtoroInstrument(
+            tracked_instrument_id="tracked-1",
+            instrument="ABC",
+            market="NASDAQ",
+            etoro_instrument_id=123,
+            etoro_symbol="ABC.L",
+            etoro_display_name="ABC plc",
+        )
+
+        with self.assertRaisesRegex(ValueError, "identity mismatch"):
+            bridge.add(
+                event=EVENT,
+                tracked=tracked_other_market,
+                reference_candles=(_candle(4, "100"),),
+                reaction_candle=_candle(5, "96"),
+            )
+
     def test_no_reference_returns_none_through_bridge(self) -> None:
         bridge = MarketEventReactionBridge()
 
