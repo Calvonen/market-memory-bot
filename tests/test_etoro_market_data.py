@@ -87,6 +87,33 @@ def _market_message(*, message_type: str = "Snapshot") -> str:
     )
 
 
+def _live_rate_message(*, sparse: bool = False) -> str:
+    content = {
+        "Date": "2026-08-23T06:43:19.3545038Z" if sparse else "2026-08-23T06:43:18.539711Z",
+        "PriceRateID": "153955435458" if sparse else "153955435265",
+    }
+    if not sparse:
+        content.update(
+            {
+                "Ask": "76269.7",
+                "Bid": "76262.48",
+                "LastExecution": "76262.48",
+            }
+        )
+    return json.dumps(
+        {
+            "messages": [
+                {
+                    "topic": "instrument:100000",
+                    "content": json.dumps(content),
+                    "id": "rate-message-id",
+                    "type": "Trading.Instrument.Rate",
+                }
+            ]
+        }
+    )
+
+
 class EtoroMarketDataProviderTests(unittest.TestCase):
     def test_missing_credentials_fail_closed(self) -> None:
         previous_api = os.environ.pop("ETORO_API_KEY", None)
@@ -161,6 +188,18 @@ class EtoroMarketDataProviderTests(unittest.TestCase):
         self.assertFalse(update.is_exchange_open)
         self.assertEqual(update.message_type, "Snapshot")
 
+    def test_parse_live_rate_derives_instrument_id_from_topic(self) -> None:
+        updates = parse_etoro_stream_message(_live_rate_message())
+
+        self.assertEqual(len(updates), 1)
+        update = updates[0]
+        self.assertEqual(update.instrument_id, 100000)
+        self.assertEqual(update.bid, Decimal("76262.48"))
+        self.assertEqual(update.ask, Decimal("76269.7"))
+        self.assertEqual(update.last_execution, Decimal("76262.48"))
+        self.assertEqual(update.timestamp.isoformat(), "2026-08-23T06:43:18.539711+00:00")
+        self.assertEqual(update.message_type, "Trading.Instrument.Rate")
+
 
 class EtoroMarketDataProviderAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_stream_authenticates_subscribes_and_yields_snapshot(self) -> None:
@@ -194,9 +233,43 @@ class EtoroMarketDataProviderAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(websocket.sent[0]["data"]["apiKey"], "api-secret")
         self.assertEqual(websocket.sent[0]["data"]["userKey"], "user-secret")
         self.assertEqual(websocket.sent[1]["data"]["topics"], ["instrument:2619"])
-        self.assertTrue(websocket.sent[1]["data"]["snapshot"])
+        self.assertFalse(websocket.sent[1]["data"]["snapshot"])
         self.assertTrue(websocket.sent[0]["id"])
         self.assertTrue(websocket.sent[1]["id"])
+
+    async def test_stream_carries_latest_prices_into_sparse_live_rate_update(self) -> None:
+        websocket = _FakeWebSocket([])
+
+        def connect(_url):
+            return _FakeConnection(websocket)
+
+        provider = EtoroMarketDataProvider(
+            api_key="api-secret",
+            user_key="user-secret",
+            websocket_connect=connect,
+        )
+
+        original_send = websocket.send
+
+        async def send_and_queue_ack(raw: str) -> None:
+            await original_send(raw)
+            request = websocket.sent[-1]
+            websocket.responses.append(_ack(request["operation"], request["id"]))
+            if request["operation"] == "Subscribe":
+                websocket.responses.append(_live_rate_message())
+                websocket.responses.append(_live_rate_message(sparse=True))
+
+        websocket.send = send_and_queue_ack
+
+        updates = [update async for update in provider.stream_instrument(100000, reconnect=False)]
+
+        self.assertEqual(len(updates), 2)
+        self.assertEqual(updates[0].last_execution, Decimal("76262.48"))
+        self.assertEqual(updates[1].instrument_id, 100000)
+        self.assertEqual(updates[1].bid, Decimal("76262.48"))
+        self.assertEqual(updates[1].ask, Decimal("76269.7"))
+        self.assertEqual(updates[1].last_execution, Decimal("76262.48"))
+        self.assertEqual(updates[1].timestamp.isoformat(), "2026-08-23T06:43:19.354503+00:00")
 
     async def test_stream_reconnects_and_resubscribes_after_connection_failure(self) -> None:
         websocket = _FakeWebSocket([])
@@ -261,7 +334,6 @@ class EtoroMarketDataProviderAsyncTests(unittest.IsolatedAsyncioTestCase):
             if request["operation"] == "Authenticate":
                 websocket.responses.append(_ack(request["operation"], request["id"]))
             else:
-                # Server sends a heartbeat and the snapshot before the Subscribe ack.
                 websocket.responses.append(b"\x00")
                 websocket.responses.append(_market_message())
                 websocket.responses.append(_ack(request["operation"], request["id"]))
