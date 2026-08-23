@@ -264,6 +264,17 @@ class SupabaseTrackedEventRepository:
             .execute()
         )
 
+    def list_reactions(self, event_id: str) -> tuple[TrackedEventReactionRecord, ...]:
+        response = (
+            self.client.table("tracked_market_event_reactions")
+            .select("*")
+            .eq("tracked_market_event_id", event_id)
+            .order("candle_start")
+            .order("interval_minutes")
+            .execute()
+        )
+        return tuple(self._row_to_reaction(row) for row in (response.data or []))
+
     def save_reaction(self, record: TrackedEventReactionRecord) -> None:
         payload = {
             "tracked_market_event_id": record.tracked_market_event_id,
@@ -340,6 +351,20 @@ class SupabaseTrackedEventRepository:
             updated_by=str(value("updated_by") or ""),
             created_at=cls._parse_datetime_optional(value("created_at")),
             updated_at=cls._parse_datetime_optional(value("updated_at")),
+        )
+
+    @classmethod
+    def _row_to_reaction(cls, row: dict[str, Any]) -> TrackedEventReactionRecord:
+        return TrackedEventReactionRecord(
+            tracked_market_event_id=str(row["tracked_market_event_id"]),
+            interval_minutes=int(row["interval_minutes"]),
+            candle_start=cls._parse_datetime(row["candle_start"]),
+            reference_price=Decimal(str(row["reference_price"])),
+            close_price=Decimal(str(row["close_price"])),
+            return_pct=Decimal(str(row["return_pct"])),
+            direction=str(row["direction"]),
+            evolution=str(row["evolution"]),
+            observed_at=cls._parse_datetime(row["observed_at"]),
         )
 
     @staticmethod
