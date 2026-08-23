@@ -29,6 +29,13 @@ export type TrackedMarketEvent = {
   updated_at: string | null;
 };
 
-export function getTrackedEvents(limit = 20): Promise<TrackedMarketEvent[]> {
-  return apiGet<TrackedMarketEvent[]>(`/api/v1/tracked-events?limit=${encodeURIComponent(String(limit))}`);
+export type TrackedEventView = 'active' | 'history';
+
+export function getTrackedEvents(
+  view: TrackedEventView = 'active',
+  limit = 20,
+): Promise<TrackedMarketEvent[]> {
+  return apiGet<TrackedMarketEvent[]>(
+    `/api/v1/tracked-events?view=${encodeURIComponent(view)}&limit=${encodeURIComponent(String(limit))}`,
+  );
 }

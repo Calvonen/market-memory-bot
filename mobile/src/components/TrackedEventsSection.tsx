@@ -65,7 +65,7 @@ export function TrackedEventsSection({ onSnapshot }: Props) {
   );
 }
 
-function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
+export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
   const scheduleText = formatTrackedEventSchedule(event);
   const presentation = describeTrackedEvent(event);
 

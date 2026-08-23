@@ -267,6 +267,14 @@ export default function HomeScreen() {
         <Text style={styles.upcomingButtonChevron}>→</Text>
       </Pressable>
 
+      <Pressable
+        style={styles.upcomingButton}
+        onPress={() => router.push('/history')}
+      >
+        <Text style={styles.upcomingButtonText}>Historia</Text>
+        <Text style={styles.upcomingButtonChevron}>→</Text>
+      </Pressable>
+
       <Text style={styles.footer}>MarketAI • vain PAPER-kaupankäynti</Text>
     </ScrollView>
   );
