@@ -1,0 +1,330 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from enum import Enum
+from typing import Any
+
+
+class TrackedEventTimeStatus(str, Enum):
+    CONFIRMED = "confirmed"
+    ESTIMATED = "estimated"
+    UNKNOWN = "unknown"
+
+
+class TrackedEventStatus(str, Enum):
+    TRACKED = "tracked"
+    MONITORING = "monitoring"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class PersistentTrackedEvent:
+    event_id: str
+    tracked_instrument_id: str
+    calendar_event_id: str | None
+    company_name: str
+    instrument: str
+    market: str
+    source: str
+    external_key: str
+    kind: str
+    title: str
+    event_at: datetime
+    event_time_status: TrackedEventTimeStatus
+    status: TrackedEventStatus
+    resolved_etoro_instrument_id: int | None = None
+    resolved_etoro_symbol: str | None = None
+    resolved_etoro_display_name: str | None = None
+    reference_price: Decimal | None = None
+    reference_captured_at: datetime | None = None
+    reference_kind: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    last_error: str | None = None
+    created_by: str = ""
+    updated_by: str = ""
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class TrackedEventReactionRecord:
+    tracked_market_event_id: str
+    interval_minutes: int
+    candle_start: datetime
+    reference_price: Decimal
+    close_price: Decimal
+    return_pct: Decimal
+    direction: str
+    evolution: str
+    observed_at: datetime
+
+
+class SupabaseTrackedEventRepository:
+    """Persistence boundary for generic tracked-event reaction monitoring.
+
+    These rows represent observation tasks only. This repository has no strategy,
+    risk, broker, order, or trading-task behavior.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+
+    @classmethod
+    def from_env(cls) -> "SupabaseTrackedEventRepository":
+        from supabase import create_client
+
+        url = os.environ.get("MARKETAI_SUPABASE_URL")
+        key = os.environ.get("MARKETAI_SUPABASE_SECRET_KEY")
+        if not url or not key:
+            raise RuntimeError(
+                "MARKETAI_SUPABASE_URL and MARKETAI_SUPABASE_SECRET_KEY are required"
+            )
+        return cls(create_client(url, key))
+
+    def upsert(
+        self,
+        *,
+        company_name: str,
+        instrument: str,
+        market: str,
+        source: str,
+        external_key: str,
+        kind: str,
+        title: str,
+        event_at: datetime,
+        event_time_status: TrackedEventTimeStatus,
+        actor: str,
+        calendar_event_id: str | None = None,
+    ) -> tuple[PersistentTrackedEvent, str]:
+        if event_at.tzinfo is None or event_at.utcoffset() is None:
+            raise ValueError("event_at must be timezone-aware")
+        response = self.client.rpc(
+            "upsert_tracked_market_event",
+            {
+                "input_company_name": company_name,
+                "input_instrument": instrument,
+                "input_market": market,
+                "input_source": source,
+                "input_external_key": external_key,
+                "input_kind": kind,
+                "input_title": title,
+                "input_event_at": event_at.astimezone(UTC).isoformat(),
+                "input_event_time_status": event_time_status.value,
+                "input_actor": actor,
+                "input_calendar_event_id": calendar_event_id,
+            },
+        ).execute()
+        rows = response.data or []
+        if not rows:
+            raise RuntimeError("upsert_tracked_market_event returned no rows")
+        row = rows[0]
+        return self._row_to_event(row, out_prefix=True), str(row["out_action"])
+
+    def get(self, event_id: str) -> PersistentTrackedEvent | None:
+        response = (
+            self.client.table("tracked_market_events")
+            .select("*")
+            .eq("id", event_id)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        return self._row_to_event(rows[0]) if rows else None
+
+    def list_runnable(
+        self,
+        *,
+        now: datetime,
+        lookahead: timedelta,
+        max_past: timedelta,
+    ) -> tuple[PersistentTrackedEvent, ...]:
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        lower = (now - max_past).astimezone(UTC).isoformat()
+        upper = (now + lookahead).astimezone(UTC).isoformat()
+        response = (
+            self.client.table("tracked_market_events")
+            .select("*")
+            .in_("status", [TrackedEventStatus.TRACKED.value, TrackedEventStatus.MONITORING.value])
+            .gte("event_at", lower)
+            .lte("event_at", upper)
+            .order("event_at")
+            .execute()
+        )
+        return tuple(self._row_to_event(row) for row in (response.data or []))
+
+    def capture_reference(
+        self,
+        *,
+        event_id: str,
+        reference_price: Decimal,
+        captured_at: datetime,
+        reference_kind: str,
+        etoro_instrument_id: int,
+        etoro_symbol: str,
+        etoro_display_name: str,
+        actor: str,
+    ) -> PersistentTrackedEvent:
+        if captured_at.tzinfo is None or captured_at.utcoffset() is None:
+            raise ValueError("captured_at must be timezone-aware")
+        response = self.client.rpc(
+            "capture_tracked_market_event_reference",
+            {
+                "input_event_id": event_id,
+                "input_reference_price": str(reference_price),
+                "input_reference_captured_at": captured_at.astimezone(UTC).isoformat(),
+                "input_reference_kind": reference_kind,
+                "input_etoro_instrument_id": etoro_instrument_id,
+                "input_etoro_symbol": etoro_symbol,
+                "input_etoro_display_name": etoro_display_name,
+                "input_actor": actor,
+            },
+        ).execute()
+        data = response.data
+        if isinstance(data, list):
+            if not data:
+                raise RuntimeError("capture_tracked_market_event_reference returned no rows")
+            row = data[0]
+        elif isinstance(data, dict):
+            row = data
+        else:
+            raise RuntimeError("capture_tracked_market_event_reference returned invalid data")
+        return self._row_to_event(row)
+
+    def mark_monitoring(self, event_id: str, *, actor: str, started_at: datetime) -> None:
+        (
+            self.client.table("tracked_market_events")
+            .update(
+                {
+                    "status": TrackedEventStatus.MONITORING.value,
+                    "started_at": started_at.astimezone(UTC).isoformat(),
+                    "updated_by": actor,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                    "last_error": None,
+                }
+            )
+            .eq("id", event_id)
+            .in_("status", [TrackedEventStatus.TRACKED.value, TrackedEventStatus.MONITORING.value])
+            .execute()
+        )
+
+    def mark_completed(self, event_id: str, *, actor: str, completed_at: datetime) -> None:
+        (
+            self.client.table("tracked_market_events")
+            .update(
+                {
+                    "status": TrackedEventStatus.COMPLETED.value,
+                    "completed_at": completed_at.astimezone(UTC).isoformat(),
+                    "updated_by": actor,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                    "last_error": None,
+                }
+            )
+            .eq("id", event_id)
+            .in_("status", [TrackedEventStatus.TRACKED.value, TrackedEventStatus.MONITORING.value])
+            .execute()
+        )
+
+    def mark_failed(self, event_id: str, *, actor: str, error: str) -> None:
+        (
+            self.client.table("tracked_market_events")
+            .update(
+                {
+                    "status": TrackedEventStatus.FAILED.value,
+                    "last_error": error[:1000],
+                    "updated_by": actor,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            .eq("id", event_id)
+            .in_("status", [TrackedEventStatus.TRACKED.value, TrackedEventStatus.MONITORING.value])
+            .execute()
+        )
+
+    def save_reaction(self, record: TrackedEventReactionRecord) -> None:
+        payload = {
+            "tracked_market_event_id": record.tracked_market_event_id,
+            "interval_minutes": record.interval_minutes,
+            "candle_start": record.candle_start.astimezone(UTC).isoformat(),
+            "reference_price": str(record.reference_price),
+            "close_price": str(record.close_price),
+            "return_pct": str(record.return_pct),
+            "direction": record.direction,
+            "evolution": record.evolution,
+            "observed_at": record.observed_at.astimezone(UTC).isoformat(),
+        }
+        # Idempotent restart/reconnect behavior: one event+interval+candle has one
+        # canonical reaction record. A repeated observation updates the same row.
+        (
+            self.client.table("tracked_market_event_reactions")
+            .upsert(
+                payload,
+                on_conflict="tracked_market_event_id,interval_minutes,candle_start",
+            )
+            .execute()
+        )
+
+    @classmethod
+    def _row_to_event(cls, row: dict[str, Any], *, out_prefix: bool = False) -> PersistentTrackedEvent:
+        prefix = "out_" if out_prefix else ""
+
+        def value(name: str, default: Any = None) -> Any:
+            return row.get(f"{prefix}{name}", default)
+
+        return PersistentTrackedEvent(
+            event_id=str(value("id")),
+            tracked_instrument_id=str(value("tracked_instrument_id")),
+            calendar_event_id=str(value("calendar_event_id")) if value("calendar_event_id") else None,
+            company_name=str(value("company_name") or ""),
+            instrument=str(value("instrument")),
+            market=str(value("market")),
+            source=str(value("source")),
+            external_key=str(value("external_key")),
+            kind=str(value("kind")),
+            title=str(value("title") or ""),
+            event_at=cls._parse_datetime(value("event_at")),
+            event_time_status=TrackedEventTimeStatus(value("event_time_status")),
+            status=TrackedEventStatus(value("status")),
+            resolved_etoro_instrument_id=(
+                int(value("resolved_etoro_instrument_id"))
+                if value("resolved_etoro_instrument_id") is not None
+                else None
+            ),
+            resolved_etoro_symbol=(str(value("resolved_etoro_symbol")) if value("resolved_etoro_symbol") else None),
+            resolved_etoro_display_name=(
+                str(value("resolved_etoro_display_name"))
+                if value("resolved_etoro_display_name")
+                else None
+            ),
+            reference_price=(Decimal(str(value("reference_price"))) if value("reference_price") is not None else None),
+            reference_captured_at=cls._parse_datetime_optional(value("reference_captured_at")),
+            reference_kind=(str(value("reference_kind")) if value("reference_kind") else None),
+            started_at=cls._parse_datetime_optional(value("started_at")),
+            completed_at=cls._parse_datetime_optional(value("completed_at")),
+            last_error=(str(value("last_error")) if value("last_error") else None),
+            created_by=str(value("created_by") or ""),
+            updated_by=str(value("updated_by") or ""),
+            created_at=cls._parse_datetime_optional(value("created_at")),
+            updated_at=cls._parse_datetime_optional(value("updated_at")),
+        )
+
+    @staticmethod
+    def _parse_datetime(value: str | datetime | None) -> datetime:
+        parsed = SupabaseTrackedEventRepository._parse_datetime_optional(value)
+        if parsed is None:
+            raise RuntimeError("tracked event timestamp is missing")
+        return parsed
+
+    @staticmethod
+    def _parse_datetime_optional(value: str | datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=UTC)
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
