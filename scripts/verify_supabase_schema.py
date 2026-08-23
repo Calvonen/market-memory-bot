@@ -61,10 +61,14 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
         "capture_tracked_market_event_reaction_anchor_function_exists",
         "capture_tracked_market_event_reaction_anchor() function",
     ),
+    (
+        "capture_tracked_market_event_config_snapshot_function_exists",
+        "capture_tracked_market_event_config_snapshot() function",
+    ),
 )
 
 REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 2
-REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 2
+REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 3
 
 
 def main() -> int:
