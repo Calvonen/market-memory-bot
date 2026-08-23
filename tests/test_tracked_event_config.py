@@ -1,0 +1,80 @@
+from __future__ import annotations
+
+import unittest
+from datetime import timedelta
+
+from trading_system.reaction_monitoring_profile import (
+    DEFAULT_EVENT_REACTION_MONITORING_PROFILE,
+    ReactionMonitoringProfile,
+    ReactionMonitoringStage,
+)
+from trading_system.tracked_event_config import (
+    TRACKING_CONFIG_SCHEMA_VERSION,
+    TrackedEventConfigSnapshot,
+    snapshot_effective_tracking_config,
+)
+
+
+class TrackedEventConfigSnapshotTests(unittest.TestCase):
+    def test_default_effective_config_serializes_stable_snapshot(self) -> None:
+        snapshot = snapshot_effective_tracking_config(
+            monitor_hours=8.0,
+            reference_lead_seconds=30.0,
+            max_wait_for_market_hours=72.0,
+            profile=DEFAULT_EVENT_REACTION_MONITORING_PROFILE,
+        )
+
+        self.assertEqual(
+            snapshot.to_dict(),
+            {
+                "schema_version": TRACKING_CONFIG_SCHEMA_VERSION,
+                "monitor_hours": 8.0,
+                "reference_lead_seconds": 30.0,
+                "max_wait_for_market_hours": 72.0,
+                "reaction_stages": [
+                    {"start_after_minutes": 0, "interval_minutes": 1},
+                    {"start_after_minutes": 30, "interval_minutes": 5},
+                    {"start_after_minutes": 150, "interval_minutes": 15},
+                ],
+            },
+        )
+
+    def test_snapshot_rejects_non_positive_runtime_values(self) -> None:
+        for field in (
+            "monitor_hours",
+            "reference_lead_seconds",
+            "max_wait_for_market_hours",
+        ):
+            kwargs = {
+                "monitor_hours": 8.0,
+                "reference_lead_seconds": 30.0,
+                "max_wait_for_market_hours": 72.0,
+                "reaction_stages": snapshot_effective_tracking_config(
+                    monitor_hours=8.0,
+                    reference_lead_seconds=30.0,
+                    max_wait_for_market_hours=72.0,
+                    profile=DEFAULT_EVENT_REACTION_MONITORING_PROFILE,
+                ).reaction_stages,
+            }
+            kwargs[field] = 0.0
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                TrackedEventConfigSnapshot(**kwargs)
+
+    def test_snapshot_requires_whole_minute_stage_boundaries(self) -> None:
+        profile = ReactionMonitoringProfile(
+            stages=(
+                ReactionMonitoringStage(start_after=timedelta(0), interval_minutes=1),
+                ReactionMonitoringStage(start_after=timedelta(seconds=90), interval_minutes=5),
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "whole minutes"):
+            snapshot_effective_tracking_config(
+                monitor_hours=8.0,
+                reference_lead_seconds=30.0,
+                max_wait_for_market_hours=72.0,
+                profile=profile,
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()
