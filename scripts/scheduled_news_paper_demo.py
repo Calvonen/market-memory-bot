@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
+from trading_system.brokers.etoro_demo import EtoroDemoBroker
 from trading_system.etoro_instrument_resolver import EtoroInstrumentResolver
 from trading_system.etoro_market_data import EtoroMarketDataProvider
 from trading_system.models import (
@@ -27,8 +28,8 @@ from trading_system.tracked_instruments import TrackedInstrumentSource, create_t
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run a scheduled NEWS event against real eToro market data and send only a simulated PAPER order "
-            "through StrategyEngine -> RiskEngine -> PaperBroker when the live post-event move crosses the demo trigger."
+            "Run a scheduled NEWS event against real eToro market data and, after StrategyEngine + RiskEngine approval, "
+            "submit a market order to eToro's DEMO / Virtual Portfolio only."
         )
     )
     parser.add_argument("--instrument", default="BTC")
@@ -44,8 +45,9 @@ def _parse_args() -> argparse.Namespace:
         "--trigger-pct",
         type=float,
         default=0.005,
-        help="Absolute post-event return %% needed for the demo paper signal (default: 0.005%%)",
+        help="Absolute post-event return %% needed for the demo signal (default: 0.005%%)",
     )
+    parser.add_argument("--demo-order-amount-usd", type=float, default=500.0)
     parser.add_argument("--paper-equity", type=float, default=500000.0)
     parser.add_argument(
         "--demo-volatility-pct",
@@ -66,7 +68,7 @@ def _parse_aware_datetime(value: str) -> datetime:
 
 
 def _demo_strategy_inputs(*, instrument: str, event_id: str, direction: Direction) -> StrategyInputs:
-    # Deliberately synthetic scoring: the demo exercises the existing strategy/risk/broker gates,
+    # Deliberately synthetic scoring: the demo exercises the existing strategy/risk/execution gates,
     # not real news/fundamental analysis. 25+20+10+10 = 65, above the default 60 confidence gate.
     return StrategyInputs(
         instrument=instrument,
@@ -101,6 +103,8 @@ def _trade_levels(entry: float, direction: Direction) -> TradeLevels:
 async def _run(args: argparse.Namespace) -> int:
     if args.trigger_pct < 0:
         raise ValueError("--trigger-pct must be non-negative")
+    if args.demo_order_amount_usd <= 0:
+        raise ValueError("--demo-order-amount-usd must be positive")
     if args.paper_equity <= 0:
         raise ValueError("--paper-equity must be positive")
     if args.demo_volatility_pct < 0:
@@ -125,21 +129,29 @@ async def _run(args: argparse.Namespace) -> int:
     mid = (quote.bid + quote.ask) / Decimal("2")
     spread_pct = float(((quote.ask - quote.bid) / mid) * Decimal("100")) if mid > 0 else 999.0
 
+    demo_broker = EtoroDemoBroker.from_env(
+        instrument_id=resolved.etoro_instrument_id,
+        amount_usd=args.demo_order_amount_usd,
+    )
+    demo_broker.verify_demo_access()
+
     print(
         "RESOLVED: "
         f"tracked={resolved.instrument} market={resolved.market!r} etoro_id={resolved.etoro_instrument_id} "
         f"symbol={resolved.etoro_symbol!r} name={resolved.etoro_display_name!r}"
     )
+    print("ETORO DEMO ACCESS: ok (Virtual Portfolio readable)")
     print(
         "DEMO CONFIG: "
-        f"event_at={event_at.isoformat()} trigger={args.trigger_pct}% paper_equity={args.paper_equity:g} "
-        f"spread={spread_pct:.6f}% demo_volatility={args.demo_volatility_pct}% PAPER_ONLY=true"
+        f"event_at={event_at.isoformat()} trigger={args.trigger_pct}% demo_order_amount_usd={args.demo_order_amount_usd:g} "
+        f"paper_equity={args.paper_equity:g} spread={spread_pct:.6f}% "
+        f"demo_volatility={args.demo_volatility_pct}% ETORO_DEMO_ONLY=true"
     )
 
     runtime = TrackedEventReactionRuntime()
     monitor = RegisteredMarketEventMonitor(runtime)
     stream = stream_tracked_event_reaction_runtime((resolved,), provider, runtime, reconnect=True)
-    pipeline = PaperTradingPipeline()
+    pipeline = PaperTradingPipeline(broker=demo_broker)
 
     event = None
     observation_count = 0
@@ -192,7 +204,7 @@ async def _run(args: argparse.Namespace) -> int:
                     move = float(reaction.return_pct)
                     if abs(move) < args.trigger_pct:
                         if observation_count >= args.max_observations:
-                            print("DONE: demo trigger was not crossed; no paper order")
+                            print("DONE: demo trigger was not crossed; no eToro demo order")
                             return 4
                         continue
 
@@ -222,22 +234,25 @@ async def _run(args: argparse.Namespace) -> int:
                     )
                     print(
                         "RISK: "
-                        f"status={result.proposal.risk.status.value} quantity={result.proposal.risk.max_quantity} "
+                        f"status={result.proposal.risk.status.value} quantity_limit={result.proposal.risk.max_quantity} "
                         f"rr={result.proposal.risk.reward_risk} reasons={result.proposal.risk.reasons}"
                     )
                     if result.order is None:
-                        print("DONE: trigger crossed but RiskEngine rejected; no paper order")
+                        print("DONE: trigger crossed but RiskEngine rejected; no eToro demo order")
                         return 5
+                    response = demo_broker.last_response or {}
+                    data = response.get("data") if isinstance(response.get("data"), dict) else response
                     print(
-                        "PAPER ORDER: "
-                        f"id={result.order.order_id} instrument={result.order.instrument} "
-                        f"direction={result.order.direction.value} quantity={result.order.quantity} "
-                        f"reference_price={result.order.reference_price} status={result.order.status}"
+                        "ETORO DEMO ORDER: "
+                        f"order_id={data.get('orderId', result.order.order_id)} "
+                        f"token={data.get('token')} reference_id={data.get('referenceId')} "
+                        f"instrument={result.order.instrument} direction={result.order.direction.value} "
+                        f"amount_usd={args.demo_order_amount_usd:g} status={result.order.status}"
                     )
-                    print("DONE: simulated paper order filled; no live broker order was sent")
+                    print("DONE: order accepted by eToro DEMO endpoint; no real-money order endpoint exists in this broker")
                     return 0
     except TimeoutError:
-        print("TIMEOUT: scheduled news paper demo did not finish within the configured window")
+        print("TIMEOUT: scheduled news eToro demo did not finish within the configured window")
         return 3
     finally:
         await stream.aclose()
