@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -45,19 +46,36 @@ class _FakeProvider:
 
 
 class _FakeRepository:
-    def __init__(self) -> None:
+    def __init__(self, event: PersistentTrackedEvent | None = None) -> None:
+        self.event = event
         self.captured = None
+        self.anchors = []
         self.monitoring = []
         self.completed = []
         self.failed = []
         self.reactions = []
 
     def capture_reference(self, **kwargs):
+        if self.event is None:
+            raise AssertionError("test repository needs an event")
         self.captured = kwargs
-        event = kwargs.pop("_event") if "_event" in kwargs else None
-        if event is None:
-            raise AssertionError("test must override capture_reference")
-        return event
+        self.event = replace(
+            self.event,
+            reference_price=kwargs["reference_price"],
+            reference_captured_at=kwargs["captured_at"],
+            reference_kind=kwargs["reference_kind"],
+            resolved_etoro_instrument_id=kwargs["etoro_instrument_id"],
+            resolved_etoro_symbol=kwargs["etoro_symbol"],
+            resolved_etoro_display_name=kwargs["etoro_display_name"],
+        )
+        return self.event
+
+    def capture_reaction_anchor(self, *, event_id, reaction_anchor_at, actor):
+        if self.event is None:
+            raise AssertionError("test repository needs an event")
+        self.anchors.append((event_id, reaction_anchor_at, actor))
+        self.event = replace(self.event, reaction_anchor_at=reaction_anchor_at)
+        return self.event
 
     def mark_monitoring(self, event_id, *, actor, started_at):
         self.monitoring.append((event_id, actor, started_at))
@@ -70,26 +88,6 @@ class _FakeRepository:
 
     def save_reaction(self, record):
         self.reactions.append(record)
-
-
-class _ReferenceRepository(_FakeRepository):
-    def __init__(self, event: PersistentTrackedEvent) -> None:
-        super().__init__()
-        self.event = event
-
-    def capture_reference(self, **kwargs):
-        self.captured = kwargs
-        return PersistentTrackedEvent(
-            **{
-                **self.event.__dict__,
-                "reference_price": kwargs["reference_price"],
-                "reference_captured_at": kwargs["captured_at"],
-                "reference_kind": kwargs["reference_kind"],
-                "resolved_etoro_instrument_id": kwargs["etoro_instrument_id"],
-                "resolved_etoro_symbol": kwargs["etoro_symbol"],
-                "resolved_etoro_display_name": kwargs["etoro_display_name"],
-            }
-        )
 
 
 def _event(*, event_at: datetime, reference_price: Decimal | None = None) -> PersistentTrackedEvent:
@@ -126,7 +124,7 @@ class TrackedEventWorkerTests(unittest.TestCase):
         event_at = datetime.now(UTC) + timedelta(hours=2)
         quote_at = event_at - timedelta(hours=8)
         event = _event(event_at=event_at)
-        repo = _ReferenceRepository(event)
+        repo = _FakeRepository(event)
         provider = _FakeProvider(quote_timestamp=quote_at)
         resolved = SimpleNamespace(
             etoro_instrument_id=777,
@@ -149,7 +147,7 @@ class TrackedEventWorkerTests(unittest.TestCase):
     def test_missing_reference_after_event_fails_closed(self):
         event_at = datetime.now(UTC) - timedelta(minutes=1)
         event = _event(event_at=event_at)
-        repo = _ReferenceRepository(event)
+        repo = _FakeRepository(event)
         provider = _FakeProvider(quote_timestamp=event_at - timedelta(hours=1))
         resolved = SimpleNamespace(
             etoro_instrument_id=777,
@@ -165,12 +163,12 @@ class TrackedEventWorkerTests(unittest.TestCase):
                 now=datetime.now(UTC),
             )
 
-    def test_monitor_persists_reaction_without_creating_trade(self):
-        event_at = datetime.now(UTC) - timedelta(minutes=2)
+    def test_first_tradable_candle_anchors_profile_even_hours_after_event(self):
+        event_at = datetime.now(UTC) - timedelta(hours=2)
         event = _event(event_at=event_at, reference_price=Decimal("7.50"))
-        repo = _FakeRepository()
+        repo = _FakeRepository(event)
         provider = _FakeProvider()
-        candle_start = event_at + timedelta(minutes=1)
+        candle_start = datetime.now(UTC) - timedelta(minutes=1)
         candle = TrackedMarketCandle(
             tracked_instrument_id=event.tracked_instrument_id,
             instrument="NHF.ASX",
@@ -203,7 +201,10 @@ class TrackedEventWorkerTests(unittest.TestCase):
                 )
             )
 
+        self.assertEqual(len(repo.anchors), 1)
+        self.assertEqual(repo.anchors[0][1], candle_start)
         self.assertEqual(len(repo.reactions), 1)
+        self.assertEqual(repo.reactions[0].interval_minutes, 1)
         self.assertEqual(repo.reactions[0].return_pct, Decimal("1.333333333333333333333333333"))
         self.assertEqual(len(repo.completed), 1)
         self.assertEqual(repo.failed, [])
