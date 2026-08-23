@@ -93,8 +93,6 @@ def _spread_pct_from_quote(quote) -> float:
 
 
 def _demo_strategy_inputs(*, instrument: str, event_id: str, direction: Direction) -> StrategyInputs:
-    # Deliberately synthetic scoring: the demo exercises the existing strategy/risk/execution gates,
-    # not real news/fundamental analysis. 25+20+10+10 = 65, above the default 60 confidence gate.
     return StrategyInputs(
         instrument=instrument,
         fundamental=ComponentAssessment("fundamental", Direction.NO_TRADE, 0, 35, ("demo: no fundamental claim",)),
@@ -108,23 +106,11 @@ def _demo_strategy_inputs(*, instrument: str, event_id: str, direction: Directio
 
 
 def _trade_levels(entry: float, direction: Direction) -> TradeLevels:
-    # These levels are used only by RiskEngine in this proof runner. They are NOT attached
-    # to the eToro Virtual Portfolio position; protective-order lifecycle is follow-up work.
-    stop_distance = 0.0025  # 0.25%
-    target_distance = 0.0050  # 0.50% => 2.0 reward/risk
+    stop_distance = 0.0025
+    target_distance = 0.0050
     if direction is Direction.LONG:
-        return TradeLevels(
-            entry=entry,
-            stop=entry * (1.0 - stop_distance),
-            target_1=entry * (1.0 + target_distance),
-            target_2=entry * (1.0 + 0.0075),
-        )
-    return TradeLevels(
-        entry=entry,
-        stop=entry * (1.0 + stop_distance),
-        target_1=entry * (1.0 - target_distance),
-        target_2=entry * (1.0 - 0.0075),
-    )
+        return TradeLevels(entry=entry, stop=entry * (1.0 - stop_distance), target_1=entry * (1.0 + target_distance), target_2=entry * (1.0 + 0.0075))
+    return TradeLevels(entry=entry, stop=entry * (1.0 + stop_distance), target_1=entry * (1.0 - target_distance), target_2=entry * (1.0 - 0.0075))
 
 
 def _minimum_equity_for_one_unit(levels: TradeLevels, config: RiskConfig) -> float:
@@ -132,11 +118,9 @@ def _minimum_equity_for_one_unit(levels: TradeLevels, config: RiskConfig) -> flo
         raise ValueError("valid entry and stop are required for demo equity sizing")
     if config.max_position_pct <= 0 or config.max_risk_per_trade_pct <= 0:
         raise ValueError("risk configuration cannot size a demo position")
-
     position_equity = levels.entry / (config.max_position_pct / 100.0)
     risk_per_unit = abs(levels.entry - levels.stop)
     risk_equity = risk_per_unit / (config.max_risk_per_trade_pct / 100.0)
-    # Tiny headroom avoids a boundary-floor-to-zero from decimal/float representation.
     return max(position_equity, risk_equity) * 1.000001
 
 
@@ -151,12 +135,7 @@ async def _run(args: argparse.Namespace) -> int:
 
     event_at = _parse_aware_datetime(args.event_at)
     provider = EtoroMarketDataProvider.from_env()
-    tracked = create_tracked_instrument(
-        instrument=args.instrument,
-        company_name=args.company_name,
-        market=args.market,
-        source=TrackedInstrumentSource.MANUAL,
-    )
+    tracked = create_tracked_instrument(instrument=args.instrument, company_name=args.company_name, market=args.market, source=TrackedInstrumentSource.MANUAL)
     resolved = resolve_tracked_instrument(tracked, EtoroInstrumentResolver(provider))
     if resolved is None:
         print(f"RESOLVE FAILED: {tracked.instrument}")
@@ -164,32 +143,18 @@ async def _run(args: argparse.Namespace) -> int:
 
     initial_quote = provider.fetch_quote(resolved.etoro_instrument_id)
     initial_spread_pct = _spread_pct_from_quote(initial_quote)
-
-    demo_broker = EtoroDemoBroker.from_env(
-        instrument_id=resolved.etoro_instrument_id,
-        amount_usd=args.demo_order_amount_usd,
-    )
+    demo_broker = EtoroDemoBroker.from_env(instrument_id=resolved.etoro_instrument_id, amount_usd=args.demo_order_amount_usd)
     demo_broker.verify_demo_access()
 
-    print(
-        "RESOLVED: "
-        f"tracked={resolved.instrument} market={resolved.market!r} etoro_id={resolved.etoro_instrument_id} "
-        f"symbol={resolved.etoro_symbol!r} name={resolved.etoro_display_name!r}"
-    )
+    print(f"RESOLVED: tracked={resolved.instrument} market={resolved.market!r} etoro_id={resolved.etoro_instrument_id} symbol={resolved.etoro_symbol!r} name={resolved.etoro_display_name!r}")
     print("ETORO DEMO ACCESS: ok (Virtual Portfolio readable)")
-    print(
-        "DEMO CONFIG: "
-        f"event_at={event_at.isoformat()} trigger={args.trigger_pct}% demo_order_amount_usd={args.demo_order_amount_usd:g} "
-        f"paper_equity_floor={args.paper_equity:g} initial_spread={initial_spread_pct:.6f}% "
-        f"demo_volatility={args.demo_volatility_pct}% ETORO_DEMO_ONLY=true PROTECTIVE_ORDERS=false"
-    )
+    print(f"DEMO CONFIG: event_at={event_at.isoformat()} trigger={args.trigger_pct}% demo_order_amount_usd={args.demo_order_amount_usd:g} paper_equity_floor={args.paper_equity:g} initial_spread={initial_spread_pct:.6f}% demo_volatility={args.demo_volatility_pct}% ETORO_DEMO_ONLY=true PROTECTIVE_ORDERS=false")
 
     runtime = TrackedEventReactionRuntime()
     monitor = RegisteredMarketEventMonitor(runtime)
     stream = stream_tracked_event_reaction_runtime((resolved,), provider, runtime, reconnect=True)
     risk_config = RiskConfig()
     pipeline = PaperTradingPipeline(risk_engine=RiskEngine(risk_config), broker=demo_broker)
-
     event = None
     observation_count = 0
 
@@ -197,47 +162,21 @@ async def _run(args: argparse.Namespace) -> int:
         async with asyncio.timeout(args.timeout_seconds):
             async for batch in stream:
                 for candle in batch.candles:
-                    print(
-                        "CANDLE: "
-                        f"{candle.interval_minutes}m start={candle.start.isoformat()} "
-                        f"o={candle.open} h={candle.high} l={candle.low} c={candle.close}"
-                    )
+                    print(f"CANDLE: {candle.interval_minutes}m start={candle.start.isoformat()} o={candle.open} h={candle.high} l={candle.low} c={candle.close}")
 
                 if event is None:
-                    pre_event_one_minute = [
-                        candle
-                        for candle in batch.candles
-                        if candle.interval_minutes == 1
-                        and candle.start + timedelta(minutes=1) <= event_at
-                    ]
+                    pre_event_one_minute = [c for c in batch.candles if c.interval_minutes == 1 and c.start + timedelta(minutes=1) <= event_at]
                     if not pre_event_one_minute:
                         continue
-                    event = register_news_market_event(
-                        monitor,
-                        resolved,
-                        event_id=f"scheduled-news-demo-{uuid4().hex[:12]}",
-                        event_at=event_at,
-                        title=args.title,
-                    )
-                    print(
-                        "EVENT REGISTERED: "
-                        f"id={event.event_id} source=news event_at={event.event_at.isoformat()} "
-                        "waiting for clean post-event candle"
-                    )
+                    event = register_news_market_event(monitor, resolved, event_id=f"scheduled-news-demo-{uuid4().hex[:12]}", event_at=event_at, title=args.title)
+                    print(f"EVENT REGISTERED: id={event.event_id} source=news event_at={event.event_at.isoformat()} waiting for clean post-event candle")
                     continue
 
                 observed_at = batch.update.update.timestamp or datetime.now(UTC)
-                reactions = monitor.observe_batch(batch, observed_at=observed_at)
-                for registered in reactions:
+                for registered in monitor.observe_batch(batch, observed_at=observed_at):
                     reaction = registered.observation.reaction.tracked_reaction.reaction
                     observation_count += 1
-                    print(
-                        "REACTION: "
-                        f"#{observation_count} start={reaction.candle_start.isoformat()} "
-                        f"reference={reaction.reference_price} close={reaction.close_price} "
-                        f"return={reaction.return_pct}%"
-                    )
-
+                    print(f"REACTION: #{observation_count} start={reaction.candle_start.isoformat()} reference={reaction.reference_price} close={reaction.close_price} return={reaction.return_pct}%")
                     move = float(reaction.return_pct)
                     if abs(move) < args.trigger_pct:
                         if observation_count >= args.max_observations:
@@ -248,67 +187,26 @@ async def _run(args: argparse.Namespace) -> int:
                     direction = Direction.LONG if move > 0 else Direction.SHORT
                     entry = float(reaction.close_price)
                     levels = _trade_levels(entry, direction)
-
-                    # Market-quality gating must use a fresh quote at the actual decision point,
-                    # not the potentially stale quote fetched before waiting for the event.
                     decision_quote = provider.fetch_quote(resolved.etoro_instrument_id)
                     decision_spread_pct = _spread_pct_from_quote(decision_quote)
-
-                    # This proof uses integer risk sizing even though the eToro order itself is USD-notional.
-                    # Raise only the synthetic paper-equity input enough to let RiskEngine represent one unit;
-                    # the actual demo order notional remains --demo-order-amount-usd.
                     effective_equity = max(args.paper_equity, _minimum_equity_for_one_unit(levels, risk_config))
                     if effective_equity > args.paper_equity:
-                        print(
-                            "DEMO RISK SIZING: "
-                            f"paper_equity adjusted from {args.paper_equity:g} to {effective_equity:.2f} "
-                            "to represent at least one whole unit; eToro demo order amount is unchanged"
-                        )
+                        print(f"DEMO RISK SIZING: paper_equity adjusted from {args.paper_equity:g} to {effective_equity:.2f} to represent at least one whole unit; eToro demo order amount is unchanged")
 
                     result = pipeline.run(
-                        _demo_strategy_inputs(
-                            instrument=resolved.instrument,
-                            event_id=event.event_id,
-                            direction=direction,
-                        ),
+                        _demo_strategy_inputs(instrument=resolved.instrument, event_id=event.event_id, direction=direction),
                         levels,
-                        PortfolioState(
-                            equity=effective_equity,
-                            cash=effective_equity,
-                            open_positions=0,
-                            instrument_exposure_pct=0.0,
-                            daily_pnl=0.0,
-                            spread_pct=decision_spread_pct,
-                            volatility_pct=args.demo_volatility_pct,
-                        ),
+                        PortfolioState(equity=effective_equity, cash=effective_equity, open_positions=0, instrument_exposure_pct=0.0, daily_pnl=0.0, spread_pct=decision_spread_pct, volatility_pct=args.demo_volatility_pct),
                     )
-                    print(
-                        "STRATEGY: "
-                        f"direction={result.strategy.direction.value} confidence={result.strategy.confidence} "
-                        f"long={result.strategy.long_evidence} short={result.strategy.short_evidence}"
-                    )
-                    print(
-                        "RISK: "
-                        f"status={result.proposal.risk.status.value} quantity_limit={result.proposal.risk.max_quantity} "
-                        f"rr={result.proposal.risk.reward_risk} spread={decision_spread_pct:.6f}% "
-                        f"reasons={result.proposal.risk.reasons}"
-                    )
+                    print(f"STRATEGY: direction={result.strategy.direction.value} confidence={result.strategy.confidence} long={result.strategy.long_evidence} short={result.strategy.short_evidence}")
+                    print(f"RISK: status={result.proposal.risk.status.value} quantity_limit={result.proposal.risk.max_quantity} rr={result.proposal.risk.reward_risk} spread={decision_spread_pct:.6f}% reasons={result.proposal.risk.reasons}")
                     if result.order is None:
                         print("DONE: trigger crossed but RiskEngine rejected; no eToro demo order")
                         return 5
                     response = demo_broker.last_response or {}
                     data = response.get("data") if isinstance(response.get("data"), dict) else response
-                    print(
-                        "ETORO DEMO ORDER: "
-                        f"order_id={data.get('orderId', result.order.order_id)} "
-                        f"token={data.get('token')} reference_id={data.get('referenceId')} "
-                        f"instrument={result.order.instrument} direction={result.order.direction.value} "
-                        f"amount_usd={args.demo_order_amount_usd:g} status={result.order.status}"
-                    )
-                    print(
-                        "DONE: opening order accepted by eToro DEMO endpoint; "
-                        "no protective SL/TP was attached and no real-money order endpoint exists in this broker"
-                    )
+                    print(f"ETORO DEMO ORDER: order_id={data.get('orderId', result.order.order_id)} token={data.get('token')} reference_id={data.get('referenceId')} instrument={result.order.instrument} direction={result.order.direction.value} amount_usd={args.demo_order_amount_usd:g} status={result.order.status}")
+                    print("DONE: opening order accepted by eToro DEMO endpoint; no protective SL/TP was attached and no real-money order endpoint exists in this broker")
                     return 0
     except TimeoutError:
         print("TIMEOUT: scheduled news eToro demo did not finish within the configured window")
