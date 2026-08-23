@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -21,6 +22,8 @@ class TrackedEventMonitoringStageSnapshot:
     def __post_init__(self) -> None:
         if self.start_after_minutes < 0:
             raise ValueError("start_after_minutes must be non-negative")
+        if not float(self.start_after_minutes).is_integer():
+            raise ValueError("start_after_minutes must be a whole minute")
         # Kept in exact sync with the SQL contract's interval_minutes check
         # (is_valid_tracked_event_config_snapshot_v1 in the 20260830090000
         # migration) - a snapshot the DB would reject must never be
@@ -51,12 +54,17 @@ class TrackedEventConfigSnapshot:
     schema_version: int = TRACKING_CONFIG_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if self.monitor_hours <= 0:
-            raise ValueError("monitor_hours must be positive")
-        if self.reference_lead_seconds <= 0:
-            raise ValueError("reference_lead_seconds must be positive")
-        if self.max_wait_for_market_hours <= 0:
-            raise ValueError("max_wait_for_market_hours must be positive")
+        # math.isfinite() explicitly rejects NaN and +/-Infinity. A bare
+        # "<= 0" comparison alone would let NaN and +Infinity slip through as
+        # "positive" (NaN compares false to everything, so "nan <= 0" is
+        # false; "+inf <= 0" is also false) even though neither is a
+        # meaningful runtime setting.
+        if not math.isfinite(self.monitor_hours) or self.monitor_hours <= 0:
+            raise ValueError("monitor_hours must be a finite positive number")
+        if not math.isfinite(self.reference_lead_seconds) or self.reference_lead_seconds <= 0:
+            raise ValueError("reference_lead_seconds must be a finite positive number")
+        if not math.isfinite(self.max_wait_for_market_hours) or self.max_wait_for_market_hours <= 0:
+            raise ValueError("max_wait_for_market_hours must be a finite positive number")
         if not self.reaction_stages:
             raise ValueError("reaction_stages must not be empty")
         # Same ordering contract as the SQL validator: first stage at event

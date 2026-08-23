@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import unittest
 from datetime import timedelta
 
@@ -128,6 +129,36 @@ class TrackedEventConfigSnapshotTests(unittest.TestCase):
                 reaction_stages=valid_stages,
                 schema_version=2,
             )
+
+    def test_stage_rejects_fractional_start_after_minutes(self) -> None:
+        with self.assertRaisesRegex(ValueError, "whole minute"):
+            TrackedEventMonitoringStageSnapshot(start_after_minutes=0.5, interval_minutes=1)
+
+    def test_snapshot_rejects_non_finite_runtime_values(self) -> None:
+        valid_stages = snapshot_effective_tracking_config(
+            monitor_hours=8.0,
+            reference_lead_seconds=30.0,
+            max_wait_for_market_hours=72.0,
+            profile=DEFAULT_EVENT_REACTION_MONITORING_PROFILE,
+        ).reaction_stages
+        for field in (
+            "monitor_hours",
+            "reference_lead_seconds",
+            "max_wait_for_market_hours",
+        ):
+            for bad_value in (math.nan, math.inf, -math.inf):
+                kwargs = {
+                    "monitor_hours": 8.0,
+                    "reference_lead_seconds": 30.0,
+                    "max_wait_for_market_hours": 72.0,
+                    "reaction_stages": valid_stages,
+                }
+                kwargs[field] = bad_value
+                with (
+                    self.subTest(field=field, bad_value=bad_value),
+                    self.assertRaisesRegex(ValueError, "finite positive"),
+                ):
+                    TrackedEventConfigSnapshot(**kwargs)
 
 
 if __name__ == "__main__":
