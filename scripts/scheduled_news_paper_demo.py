@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -158,7 +158,8 @@ async def _run(args: argparse.Namespace) -> int:
                     pre_event_one_minute = [
                         candle
                         for candle in batch.candles
-                        if candle.interval_minutes == 1 and candle.end <= event_at
+                        if candle.interval_minutes == 1
+                        and candle.start + timedelta(minutes=1) <= event_at
                     ]
                     if not pre_event_one_minute:
                         continue
