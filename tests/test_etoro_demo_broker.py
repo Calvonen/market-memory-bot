@@ -62,7 +62,7 @@ class EtoroDemoBrokerTests(unittest.TestCase):
         self.assertEqual(calls[0][0], EtoroDemoBroker.DEMO_PORTFOLIO_URL)
         self.assertIn("/demo/portfolio", calls[0][0])
 
-    def test_execute_posts_only_to_demo_orders_endpoint(self) -> None:
+    def test_execute_posts_only_opening_order_to_demo_endpoint(self) -> None:
         calls = []
 
         def fake_post(url, **kwargs):
@@ -78,10 +78,15 @@ class EtoroDemoBrokerTests(unittest.TestCase):
         )
         order = broker.execute(_proposal())
 
+        payload = calls[0][1]["json"]
         self.assertEqual(calls[0][0], EtoroDemoBroker.DEMO_ORDERS_URL)
         self.assertIn("/execution/demo/orders", calls[0][0])
-        self.assertEqual(calls[0][1]["json"]["transaction"], "buy")
-        self.assertEqual(calls[0][1]["json"]["amount"], 500.0)
+        self.assertEqual(payload["transaction"], "buy")
+        self.assertEqual(payload["amount"], 500.0)
+        self.assertNotIn("stopLossRate", payload)
+        self.assertNotIn("stopLossType", payload)
+        self.assertNotIn("takeProfitRate", payload)
+        self.assertNotIn("takeProfitType", payload)
         self.assertEqual(order.status, "ETORO_DEMO_ACCEPTED")
 
     def test_short_demo_signal_uses_sell_transaction(self) -> None:
