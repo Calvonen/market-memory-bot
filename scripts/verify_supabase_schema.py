@@ -2,12 +2,10 @@
 """Pre-deploy Supabase schema gate for MarketAI backend runtime dependencies.
 
 The existing strategy-draft and calendar/watchlist checks stay in place. The
-persistent tracked-event worker additionally requires the objects introduced by
-20260827090000_persistent_tracked_market_events.sql,
-20260827091000_tracked_event_schema_gate.sql and
-20260827092000_tracked_event_reaction_anchor.sql. Migrations are applied
-out-of-band; this script only verifies them before backend/systemd processes are
-restarted.
+persistent tracked-event worker additionally requires the tracked-event runtime
+migrations through the eToro-resolution preflight version. Migrations are
+applied out-of-band; this script only verifies them before backend/systemd
+processes are restarted.
 """
 
 from __future__ import annotations
@@ -52,6 +50,10 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
         "upsert_tracked_market_event() function",
     ),
     (
+        "arm_tracked_market_event_resolution_function_exists",
+        "arm_tracked_market_event_resolution() function",
+    ),
+    (
         "capture_tracked_market_event_reference_function_exists",
         "capture_tracked_market_event_reference() function",
     ),
@@ -62,6 +64,7 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
 )
 
 REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 2
+REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 2
 
 
 def main() -> int:
@@ -138,6 +141,13 @@ def main() -> int:
     missing.extend(
         label for key_name, label in REQUIRED_TRACKED_EVENT_CHECKS if not tracked_row.get(key_name)
     )
+    deployed_runtime_version = tracked_row.get("runtime_schema_version")
+    if deployed_runtime_version != REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION:
+        missing.append(
+            "tracked-event runtime schema version "
+            f"{REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION} "
+            f"(deployed: {deployed_runtime_version!r})"
+        )
 
     if missing:
         print(
@@ -151,7 +161,7 @@ def main() -> int:
 
     print(
         "Supabase schema gate passed: strategy-draft/calendar dependencies and "
-        "persistent tracked-event runtime tables/RPCs are present."
+        "persistent tracked-event runtime preflight tables/RPCs are present."
     )
     return 0
 
