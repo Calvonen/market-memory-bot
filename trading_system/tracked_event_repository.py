@@ -196,7 +196,13 @@ class SupabaseTrackedEventRepository:
                 .select("*")
                 .in_("status", list(_TERMINAL_STATUSES))
                 .gte("updated_at", cutoff)
-                .order("updated_at", desc=True)
+                # updated_at is only the 24h cutoff filter above, never the
+                # ranking: preselection must order by the same key (event_at)
+                # as the merged result below, or a terminal row with an
+                # older updated_at but a newer event_at than `limit` other
+                # rows could be dropped here before it ever reaches the
+                # final event_at top-N.
+                .order("event_at", desc=True)
                 .limit(limit)
                 .execute()
             )

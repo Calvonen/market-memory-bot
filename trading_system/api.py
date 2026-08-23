@@ -394,8 +394,8 @@ def create_app(
         # endpoint without view, so default=active must apply the same
         # lifecycle cutoff regardless of caller.
         now = datetime.now(UTC)
-        repository = get_tracked_event_repository()
         try:
+            repository = get_tracked_event_repository()
             events = (
                 repository.list_active(limit=limit, now=now)
                 if view == "active"

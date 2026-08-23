@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -205,6 +206,30 @@ class TrackedEventReadApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertIn("failed to list tracked market events", response.json()["detail"])
         self.assertIn("postgrest unavailable", response.json()["detail"])
+
+    def test_repository_initialization_failure_is_503_not_500(self):
+        # No tracked_event_repository injected, so the endpoint's lazy
+        # get_tracked_event_repository() falls through to
+        # SupabaseTrackedEventRepository.from_env(), which raises RuntimeError
+        # when the Supabase env vars are missing - that init failure must be
+        # normalized to 503 exactly like a read failure, never leak out as an
+        # unhandled 500.
+        original_url = os.environ.pop("MARKETAI_SUPABASE_URL", None)
+        original_key = os.environ.pop("MARKETAI_SUPABASE_SECRET_KEY", None)
+        try:
+            client = TestClient(create_app(read_api_key="read-secret"))
+            response = client.get(
+                "/api/v1/tracked-events",
+                headers={"X-MarketAI-Key": "read-secret"},
+            )
+        finally:
+            if original_url is not None:
+                os.environ["MARKETAI_SUPABASE_URL"] = original_url
+            if original_key is not None:
+                os.environ["MARKETAI_SUPABASE_SECRET_KEY"] = original_key
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("MARKETAI_SUPABASE_URL", response.json()["detail"])
 
 
 class _Response:
@@ -468,6 +493,46 @@ class TrackedEventActiveHistoryRepositoryTests(unittest.TestCase):
 
         self.assertEqual([event.event_id for event in active_events], ["boundary-cancelled"])
         self.assertEqual(history_events, ())
+
+    def test_terminal_preselection_does_not_lose_newest_event_at_when_over_limit(self):
+        # All three rows are terminal and within the 24h active window, but
+        # their updated_at order is the reverse of their event_at order.
+        # Preselecting the bounded terminal query by updated_at (the old
+        # bug) would keep "a" and "b" and drop "c" - even though "c" has the
+        # newest event_at and belongs in the final event_at top-2.
+        now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+        rows = [
+            _row(
+                event_id="a-old-event-recent-update",
+                status=TrackedEventStatus.COMPLETED,
+                event_at=now - timedelta(hours=10),
+                updated_at=now - timedelta(hours=1),
+            ),
+            _row(
+                event_id="b-middle",
+                status=TrackedEventStatus.COMPLETED,
+                event_at=now - timedelta(hours=5),
+                updated_at=now - timedelta(hours=2),
+            ),
+            _row(
+                event_id="c-new-event-stale-update",
+                status=TrackedEventStatus.COMPLETED,
+                event_at=now - timedelta(hours=1),
+                updated_at=now - timedelta(hours=3),
+            ),
+        ]
+        client = _Client(rows)
+        repository = SupabaseTrackedEventRepository(client)
+
+        events = repository.list_active(limit=2, now=now)
+
+        self.assertEqual(
+            [event.event_id for event in events],
+            ["c-new-event-stale-update", "b-middle"],
+        )
+        terminal_table = client.tables_created[1]
+        self.assertIn(("order", "event_at", {"desc": True}), terminal_table.calls)
+        self.assertIn(("limit", 2), terminal_table.calls)
 
     def test_active_and_history_queries_are_bounded(self):
         now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
