@@ -114,6 +114,27 @@ def _live_rate_message(*, sparse: bool = False) -> str:
     )
 
 
+def _partial_live_rate_message() -> str:
+    return json.dumps(
+        {
+            "messages": [
+                {
+                    "topic": "instrument:100000",
+                    "content": json.dumps(
+                        {
+                            "Bid": "76270.01",
+                            "Date": "2026-08-23T06:43:20.000000Z",
+                            "PriceRateID": "153955435999",
+                        }
+                    ),
+                    "id": "partial-rate-message-id",
+                    "type": "Trading.Instrument.Rate",
+                }
+            ]
+        }
+    )
+
+
 class EtoroMarketDataProviderTests(unittest.TestCase):
     def test_missing_credentials_fail_closed(self) -> None:
         previous_api = os.environ.pop("ETORO_API_KEY", None)
@@ -270,6 +291,41 @@ class EtoroMarketDataProviderAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updates[1].ask, Decimal("76269.7"))
         self.assertEqual(updates[1].last_execution, Decimal("76262.48"))
         self.assertEqual(updates[1].timestamp.isoformat(), "2026-08-23T06:43:19.354503+00:00")
+
+    async def test_stream_does_not_carry_stale_last_execution_into_partial_price_update(self) -> None:
+        websocket = _FakeWebSocket([])
+
+        def connect(_url):
+            return _FakeConnection(websocket)
+
+        provider = EtoroMarketDataProvider(
+            api_key="api-secret",
+            user_key="user-secret",
+            websocket_connect=connect,
+        )
+
+        original_send = websocket.send
+
+        async def send_and_queue_ack(raw: str) -> None:
+            await original_send(raw)
+            request = websocket.sent[-1]
+            websocket.responses.append(_ack(request["operation"], request["id"]))
+            if request["operation"] == "Subscribe":
+                websocket.responses.append(_live_rate_message())
+                websocket.responses.append(_partial_live_rate_message())
+                websocket.responses.append(_live_rate_message(sparse=True))
+
+        websocket.send = send_and_queue_ack
+
+        updates = [update async for update in provider.stream_instrument(100000, reconnect=False)]
+
+        self.assertEqual(len(updates), 3)
+        self.assertEqual(updates[1].bid, Decimal("76270.01"))
+        self.assertIsNone(updates[1].ask)
+        self.assertIsNone(updates[1].last_execution)
+        self.assertEqual(updates[2].bid, Decimal("76270.01"))
+        self.assertIsNone(updates[2].ask)
+        self.assertIsNone(updates[2].last_execution)
 
     async def test_stream_reconnects_and_resubscribes_after_connection_failure(self) -> None:
         websocket = _FakeWebSocket([])
