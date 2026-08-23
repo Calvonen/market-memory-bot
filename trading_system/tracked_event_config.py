@@ -20,10 +20,18 @@ class TrackedEventMonitoringStageSnapshot:
     interval_minutes: int
 
     def __post_init__(self) -> None:
+        # bool is a subclass of int (True == 1, False == 0), so it would
+        # otherwise silently pass every numeric check below (e.g. True
+        # would look like a valid start_after_minutes=1 / interval_minutes=1)
+        # while producing a JSON `true`/`false` the DB contract rejects.
+        if isinstance(self.start_after_minutes, bool):
+            raise ValueError("start_after_minutes must not be a boolean")
         if self.start_after_minutes < 0:
             raise ValueError("start_after_minutes must be non-negative")
         if not float(self.start_after_minutes).is_integer():
             raise ValueError("start_after_minutes must be a whole minute")
+        if isinstance(self.interval_minutes, bool):
+            raise ValueError("interval_minutes must not be a boolean")
         # Kept in exact sync with the SQL contract's interval_minutes check
         # (is_valid_tracked_event_config_snapshot_v1 in the 20260830090000
         # migration) - a snapshot the DB would reject must never be
@@ -59,10 +67,20 @@ class TrackedEventConfigSnapshot:
         # "positive" (NaN compares false to everything, so "nan <= 0" is
         # false; "+inf <= 0" is also false) even though neither is a
         # meaningful runtime setting.
+        #
+        # bool is a subclass of int, so it must be rejected explicitly too:
+        # True/False would otherwise pass as a "finite positive" 1.0/0.0
+        # while producing a JSON `true`/`false` the DB contract rejects.
+        if isinstance(self.monitor_hours, bool):
+            raise ValueError("monitor_hours must not be a boolean")
         if not math.isfinite(self.monitor_hours) or self.monitor_hours <= 0:
             raise ValueError("monitor_hours must be a finite positive number")
+        if isinstance(self.reference_lead_seconds, bool):
+            raise ValueError("reference_lead_seconds must not be a boolean")
         if not math.isfinite(self.reference_lead_seconds) or self.reference_lead_seconds <= 0:
             raise ValueError("reference_lead_seconds must be a finite positive number")
+        if isinstance(self.max_wait_for_market_hours, bool):
+            raise ValueError("max_wait_for_market_hours must not be a boolean")
         if not math.isfinite(self.max_wait_for_market_hours) or self.max_wait_for_market_hours <= 0:
             raise ValueError("max_wait_for_market_hours must be a finite positive number")
         if not self.reaction_stages:

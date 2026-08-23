@@ -39,6 +39,14 @@ begin
     return false;
   end if;
 
+  -- Exactly the five known v1 top-level keys - no more, no less. Combined
+  -- with the "snapshot ? 'x'" presence checks below (which confirm each of
+  -- those five specific keys exists), a key count of 5 rules out any
+  -- unknown/typo'd top-level key, since there is no room left for one.
+  if (select count(*) from jsonb_object_keys(snapshot)) <> 5 then
+    return false;
+  end if;
+
   if not (snapshot ? 'schema_version')
      or jsonb_typeof(snapshot -> 'schema_version') <> 'number'
      or (snapshot ->> 'schema_version')::numeric <> 1 then
@@ -77,6 +85,11 @@ begin
     stage_index := stage_index + 1;
 
     if jsonb_typeof(stage) <> 'object' then
+      return false;
+    end if;
+    -- Exactly the two known v1 stage keys, same reasoning as the top-level
+    -- key-count check above.
+    if (select count(*) from jsonb_object_keys(stage)) <> 2 then
       return false;
     end if;
     if not (stage ? 'start_after_minutes')

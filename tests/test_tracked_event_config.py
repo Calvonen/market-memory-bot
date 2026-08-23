@@ -160,6 +160,52 @@ class TrackedEventConfigSnapshotTests(unittest.TestCase):
                 ):
                     TrackedEventConfigSnapshot(**kwargs)
 
+    def test_snapshot_rejects_boolean_runtime_values(self) -> None:
+        valid_stages = snapshot_effective_tracking_config(
+            monitor_hours=8.0,
+            reference_lead_seconds=30.0,
+            max_wait_for_market_hours=72.0,
+            profile=DEFAULT_EVENT_REACTION_MONITORING_PROFILE,
+        ).reaction_stages
+        for field in (
+            "monitor_hours",
+            "reference_lead_seconds",
+            "max_wait_for_market_hours",
+        ):
+            for bad_value in (True, False):
+                kwargs = {
+                    "monitor_hours": 8.0,
+                    "reference_lead_seconds": 30.0,
+                    "max_wait_for_market_hours": 72.0,
+                    "reaction_stages": valid_stages,
+                }
+                kwargs[field] = bad_value
+                with (
+                    self.subTest(field=field, bad_value=bad_value),
+                    self.assertRaisesRegex(ValueError, "must not be a boolean"),
+                ):
+                    TrackedEventConfigSnapshot(**kwargs)
+
+    def test_stage_rejects_boolean_start_after_minutes(self) -> None:
+        for bad_value in (True, False):
+            with (
+                self.subTest(bad_value=bad_value),
+                self.assertRaisesRegex(ValueError, "must not be a boolean"),
+            ):
+                TrackedEventMonitoringStageSnapshot(
+                    start_after_minutes=bad_value, interval_minutes=1
+                )
+
+    def test_stage_rejects_boolean_interval_minutes(self) -> None:
+        for bad_value in (True, False):
+            with (
+                self.subTest(bad_value=bad_value),
+                self.assertRaisesRegex(ValueError, "must not be a boolean"),
+            ):
+                TrackedEventMonitoringStageSnapshot(
+                    start_after_minutes=0, interval_minutes=bad_value
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
