@@ -27,7 +27,7 @@ def test_active_tracked_instrument_is_forwarded_to_resolver() -> None:
         market="Helsinki",
         source=TrackedInstrumentSource.SCANNER,
     )
-    resolver = _ResolverStub(ResolvedEtoroInstrument(2001, "NOKIA", "Nokia Oyj"))
+    resolver = _ResolverStub(ResolvedEtoroInstrument(2001, "NOKIA", "Nokia Oyj", "eToro Helsinki"))
 
     mapped = resolve_tracked_instrument(tracked, resolver)
 
@@ -45,6 +45,20 @@ def test_active_tracked_instrument_is_forwarded_to_resolver() -> None:
     assert mapped.etoro_instrument_id == 2001
     assert mapped.etoro_symbol == "NOKIA"
     assert mapped.etoro_display_name == "Nokia Oyj"
+
+
+def test_missing_tracked_market_is_filled_from_exact_etoro_resolution() -> None:
+    tracked = create_tracked_instrument(
+        instrument="BTC",
+        source=TrackedInstrumentSource.MANUAL,
+    )
+    resolver = _ResolverStub(ResolvedEtoroInstrument(100000, "BTC", "Bitcoin", "Digital Currency"))
+
+    mapped = resolve_tracked_instrument(tracked, resolver)
+
+    assert mapped is not None
+    assert mapped.market == "Digital Currency"
+    assert mapped.etoro_instrument_id == 100000
 
 
 def test_unresolved_instrument_propagates_none() -> None:
