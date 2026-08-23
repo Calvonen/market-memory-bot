@@ -88,14 +88,23 @@ class EventReactionOrchestrator:
     ) -> EventReactionObservation | None:
         """Select the baseline and analyze one complete post-event candle.
 
-        ``None`` means that no eligible pre-event reference candle was available;
-        in that case reaction state is not touched.
+        ``None`` means that no eligible pre-event reference candle was available
+        and the event has never locked one before; in that case reaction state
+        is not touched.
 
         By default the reference uses the same interval as ``reaction_candle`` to
         preserve the existing behavior. Callers that switch reaction resolution
         over the lifetime of one event can provide a fixed
         ``reference_interval_minutes`` so every stage keeps the same deterministic
         pre-event baseline while 1m/5m/15m reaction candles change independently.
+
+        ``reference_candles`` may come from a bounded history that no longer
+        contains the original pre-event candle once an event runs long enough
+        (e.g. into the 15m monitoring stage). Once a reference has been locked
+        for this ``event_id``, a re-selection that finds nothing is treated as
+        "still using the locked reference", not as "no reference exists" -
+        eviction from the caller's bounded candle window must never silently
+        drop an already-started reaction sequence.
         """
         self._validate_reaction_candle(
             event_at=event_at,
@@ -114,18 +123,20 @@ class EventReactionOrchestrator:
             candles=reference_candles,
             interval_minutes=reference_interval,
         )
-        if reference is None:
-            return None
-
-        # Lock the full first selection (not just its baseline) per event_id. A
-        # later call could otherwise select a different pre-event candle that
-        # happens to share the same reference_price, which the downstream
-        # baseline comparison alone would not detect. Only raise here when the
-        # baseline still matches: a changed baseline is left to
-        # ``EventMarketReactionPipeline`` below, which already fails closed on
-        # that case. Fail closed before any reaction state is touched.
         locked_reference = self._locked_references.get(event_id)
-        if locked_reference is None:
+
+        if reference is None:
+            if locked_reference is None:
+                return None
+            reference = locked_reference
+        elif locked_reference is None:
+            # Lock the full first selection (not just its baseline) per event_id. A
+            # later call could otherwise select a different pre-event candle that
+            # happens to share the same reference_price, which the downstream
+            # baseline comparison alone would not detect. Only raise here when the
+            # baseline still matches: a changed baseline is left to
+            # ``EventMarketReactionPipeline`` below, which already fails closed on
+            # that case. Fail closed before any reaction state is touched.
             self._locked_references[event_id] = reference
         elif locked_reference != reference and locked_reference.baseline == reference.baseline:
             raise ValueError("event reference changed")
