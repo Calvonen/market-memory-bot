@@ -40,6 +40,8 @@ class PersistentTrackedEvent:
     resolved_etoro_instrument_id: int | None = None
     resolved_etoro_symbol: str | None = None
     resolved_etoro_display_name: str | None = None
+    resolution_armed_at: datetime | None = None
+    resolution_armed_by: str | None = None
     reference_price: Decimal | None = None
     reference_captured_at: datetime | None = None
     reference_kind: str | None = None
@@ -67,11 +69,7 @@ class TrackedEventReactionRecord:
 
 
 class SupabaseTrackedEventRepository:
-    """Persistence boundary for generic tracked-event reaction monitoring.
-
-    These rows represent observation tasks only. This repository has no strategy,
-    risk, broker, order, or trading-task behavior.
-    """
+    """Persistence boundary for generic tracked-event reaction monitoring."""
 
     def __init__(self, client: Any) -> None:
         self.client = client
@@ -159,6 +157,30 @@ class SupabaseTrackedEventRepository:
             .execute()
         )
         return tuple(self._row_to_event(row) for row in (response.data or []))
+
+    def arm_resolution(
+        self,
+        *,
+        event_id: str,
+        etoro_instrument_id: int,
+        etoro_symbol: str,
+        etoro_display_name: str,
+        actor: str,
+    ) -> PersistentTrackedEvent:
+        response = self.client.rpc(
+            "arm_tracked_market_event_resolution",
+            {
+                "input_event_id": event_id,
+                "input_etoro_instrument_id": etoro_instrument_id,
+                "input_etoro_symbol": etoro_symbol,
+                "input_etoro_display_name": etoro_display_name,
+                "input_actor": actor,
+            },
+        ).execute()
+        return self._single_event_response(
+            response.data,
+            error_message="arm_tracked_market_event_resolution returned invalid data",
+        )
 
     def capture_reference(
         self,
@@ -264,17 +286,6 @@ class SupabaseTrackedEventRepository:
             .execute()
         )
 
-    def list_reactions(self, event_id: str) -> tuple[TrackedEventReactionRecord, ...]:
-        response = (
-            self.client.table("tracked_market_event_reactions")
-            .select("*")
-            .eq("tracked_market_event_id", event_id)
-            .order("candle_start")
-            .order("interval_minutes")
-            .execute()
-        )
-        return tuple(self._row_to_reaction(row) for row in (response.data or []))
-
     def save_reaction(self, record: TrackedEventReactionRecord) -> None:
         payload = {
             "tracked_market_event_id": record.tracked_market_event_id,
@@ -295,6 +306,17 @@ class SupabaseTrackedEventRepository:
             )
             .execute()
         )
+
+    def list_reactions(self, event_id: str) -> tuple[TrackedEventReactionRecord, ...]:
+        response = (
+            self.client.table("tracked_market_event_reactions")
+            .select("*")
+            .eq("tracked_market_event_id", event_id)
+            .order("candle_start")
+            .order("interval_minutes")
+            .execute()
+        )
+        return tuple(self._row_to_reaction(row) for row in (response.data or []))
 
     @classmethod
     def _single_event_response(cls, data: Any, *, error_message: str) -> PersistentTrackedEvent:
@@ -340,6 +362,8 @@ class SupabaseTrackedEventRepository:
                 if value("resolved_etoro_display_name")
                 else None
             ),
+            resolution_armed_at=cls._parse_datetime_optional(value("resolution_armed_at")),
+            resolution_armed_by=(str(value("resolution_armed_by")) if value("resolution_armed_by") else None),
             reference_price=(Decimal(str(value("reference_price"))) if value("reference_price") is not None else None),
             reference_captured_at=cls._parse_datetime_optional(value("reference_captured_at")),
             reference_kind=(str(value("reference_kind")) if value("reference_kind") else None),
