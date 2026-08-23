@@ -29,12 +29,131 @@ class _SearchStub:
 
 
 class EtoroInstrumentSearchTests(unittest.TestCase):
-    def test_search_uses_documented_search_parameter_and_maps_candidates(self) -> None:
+    def test_search_maps_current_items_shape_and_filters_locally(self) -> None:
         captured: dict = {}
 
         def fake_get(url, params=None, headers=None, timeout=None):
             captured.update(url=url, params=params, headers=headers, timeout=timeout)
             return _FakeResponse(
+                {
+                    "page": 1,
+                    "pageSize": 1000,
+                    "totalItems": 2,
+                    "items": [
+                        {
+                            "internalInstrumentId": 999,
+                            "internalSymbolFull": "AAPL",
+                            "internalInstrumentDisplayName": "Apple Inc",
+                            "internalExchangeName": "NASDAQ",
+                        },
+                        {
+                            "instrumentId": 100000,
+                            "internalInstrumentId": 100000,
+                            "internalSymbolFull": "BTC",
+                            "internalInstrumentDisplayName": "Bitcoin",
+                            "internalExchangeName": "Digital Currency",
+                        },
+                    ],
+                }
+            )
+
+        provider = EtoroMarketDataProvider(
+            api_key="api-secret",
+            user_key="user-secret",
+            http_get=fake_get,
+        )
+
+        results = provider.search_instruments("BTC")
+
+        self.assertTrue(captured["url"].endswith("/search"))
+        self.assertEqual(captured["params"], {"search": "BTC", "page": 1, "pageSize": 1000})
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].instrument_id, 100000)
+        self.assertEqual(results[0].symbol, "BTC")
+        self.assertEqual(results[0].display_name, "Bitcoin")
+        self.assertEqual(results[0].market, "Digital Currency")
+
+    def test_search_pages_until_local_exact_match_is_found(self) -> None:
+        calls: list[dict] = []
+
+        def fake_get(_url, params=None, **_kwargs):
+            calls.append(dict(params or {}))
+            page = params["page"]
+            if page == 1:
+                return _FakeResponse(
+                    {
+                        "page": 1,
+                        "pageSize": 1,
+                        "totalItems": 2,
+                        "items": [
+                            {
+                                "internalInstrumentId": 999,
+                                "internalSymbolFull": "AAPL",
+                                "internalInstrumentDisplayName": "Apple Inc",
+                                "internalExchangeName": "NASDAQ",
+                            }
+                        ],
+                    }
+                )
+            return _FakeResponse(
+                {
+                    "page": 2,
+                    "pageSize": 1,
+                    "totalItems": 2,
+                    "items": [
+                        {
+                            "internalInstrumentId": 100000,
+                            "internalSymbolFull": "BTC",
+                            "internalInstrumentDisplayName": "Bitcoin",
+                            "internalExchangeName": "Digital Currency",
+                        }
+                    ],
+                }
+            )
+
+        provider = EtoroMarketDataProvider(
+            api_key="api-secret",
+            user_key="user-secret",
+            http_get=fake_get,
+        )
+
+        results = provider.search_instruments("BTC")
+
+        self.assertEqual([call["page"] for call in calls], [1, 2])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].instrument_id, 100000)
+
+    def test_search_returns_base_symbol_candidates_for_suffix_resolution(self) -> None:
+        provider = EtoroMarketDataProvider(
+            api_key="api-secret",
+            user_key="user-secret",
+            http_get=lambda *a, **k: _FakeResponse(
+                {
+                    "page": 1,
+                    "pageSize": 1000,
+                    "totalItems": 1,
+                    "items": [
+                        {
+                            "internalInstrumentId": 2001,
+                            "internalSymbolFull": "NOKIA",
+                            "internalInstrumentDisplayName": "Nokia Oyj",
+                            "internalExchangeName": "Helsinki",
+                        }
+                    ],
+                }
+            ),
+        )
+
+        results = provider.search_instruments("NOKIA.HE")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].instrument_id, 2001)
+
+    def test_search_keeps_legacy_data_shape_supported(self) -> None:
+        provider = EtoroMarketDataProvider(
+            api_key="api-secret",
+            user_key="user-secret",
+            http_get=lambda *a, **k: _FakeResponse(
                 {
                     "data": [
                         {
@@ -45,26 +164,16 @@ class EtoroInstrumentSearchTests(unittest.TestCase):
                         }
                     ]
                 }
-            )
-
-        provider = EtoroMarketDataProvider(
-            api_key="api-secret",
-            user_key="user-secret",
-            http_get=fake_get,
+            ),
         )
 
         results = provider.search_instruments("Hays")
 
-        self.assertTrue(captured["url"].endswith("/search"))
-        self.assertEqual(captured["params"], {"search": "Hays"})
-        self.assertNotIn("query", captured["params"])
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].instrument_id, 2619)
-        self.assertEqual(results[0].symbol, "HAS.L")
-        self.assertEqual(results[0].display_name, "Hays PLC")
         self.assertEqual(results[0].market, "London Stock Exchange")
 
-    def test_search_fails_closed_when_response_shape_is_missing_data(self) -> None:
+    def test_search_fails_closed_when_response_shape_is_unknown(self) -> None:
         provider = EtoroMarketDataProvider(
             api_key="api-secret",
             user_key="user-secret",
@@ -94,6 +203,7 @@ class EtoroInstrumentResolverTests(unittest.TestCase):
         assert resolved is not None
         self.assertEqual(resolved.instrument_id, 1001)
         self.assertEqual(resolved.symbol, "AAPL")
+        self.assertEqual(resolved.market, "NASDAQ")
 
     def test_unique_base_symbol_can_resolve_suffix_variant(self) -> None:
         stub = _SearchStub(
@@ -147,6 +257,7 @@ class EtoroInstrumentResolverTests(unittest.TestCase):
         assert resolved is not None
         self.assertEqual(resolved.instrument_id, 2619)
         self.assertEqual(resolved.display_name, "Hays PLC")
+        self.assertEqual(resolved.market, "London Stock Exchange")
 
     def test_partial_or_fuzzy_name_is_not_guessed(self) -> None:
         stub = _SearchStub(
