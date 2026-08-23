@@ -76,6 +76,16 @@ def _bool(value: Any) -> bool | None:
     return None
 
 
+def _topic_instrument_id(message: dict[str, Any]) -> int | None:
+    topic = message.get("topic")
+    if not isinstance(topic, str) or not topic.startswith("instrument:"):
+        return None
+    try:
+        return int(topic.split(":", 1)[1])
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_etoro_stream_message(raw: str | bytes) -> tuple[EtoroMarketUpdate, ...]:
     """Parse one eToro WebSocket frame into zero or more market updates."""
     if raw in (b"\x00", "\x00"):
@@ -111,7 +121,10 @@ def parse_etoro_stream_message(raw: str | bytes) -> tuple[EtoroMarketUpdate, ...
         try:
             instrument_id = int(raw_instrument_id)
         except (TypeError, ValueError):
-            continue
+            topic_instrument_id = _topic_instrument_id(message)
+            if topic_instrument_id is None:
+                continue
+            instrument_id = topic_instrument_id
 
         updates.append(
             EtoroMarketUpdate(
@@ -316,7 +329,7 @@ class EtoroMarketDataProvider:
                 {
                     "id": request_id,
                     "operation": "Subscribe",
-                    "data": {"topics": [f"instrument:{instrument_id}"], "snapshot": True},
+                    "data": {"topics": [f"instrument:{instrument_id}"], "snapshot": False},
                 }
             )
         )
@@ -328,8 +341,42 @@ class EtoroMarketDataProvider:
         *,
         reconnect: bool = True,
     ) -> AsyncIterator[EtoroMarketUpdate]:
-        """Yield eToro snapshot/update frames for one instrument."""
+        """Yield eToro live rate updates for one instrument.
+
+        The live Rate feed may emit a fully priced update followed by sparse
+        timestamp-only updates. Within one WebSocket connection, retain the
+        latest complete price-bearing message so timestamp-only updates can
+        advance event-time candle construction without inventing a new price.
+        Partial price-bearing updates replace the cache as a whole, preventing
+        stale fields from an older message from overriding fresher bid/ask data.
+        """
         while True:
+            last_bid: Decimal | None = None
+            last_ask: Decimal | None = None
+            last_execution: Decimal | None = None
+
+            def hydrate(update: EtoroMarketUpdate) -> EtoroMarketUpdate:
+                nonlocal last_bid, last_ask, last_execution
+                has_price = any(
+                    value is not None
+                    for value in (update.bid, update.ask, update.last_execution)
+                )
+                if has_price:
+                    last_bid = update.bid
+                    last_ask = update.ask
+                    last_execution = update.last_execution
+                    return update
+                return EtoroMarketUpdate(
+                    instrument_id=update.instrument_id,
+                    bid=last_bid,
+                    ask=last_ask,
+                    last_execution=last_execution,
+                    timestamp=update.timestamp,
+                    is_market_open=update.is_market_open,
+                    is_exchange_open=update.is_exchange_open,
+                    message_type=update.message_type,
+                )
+
             try:
                 async with self._websocket_connect(self.websocket_url) as websocket:
                     await self._authenticate(websocket)
@@ -337,12 +384,12 @@ class EtoroMarketDataProvider:
                     for raw in buffered:
                         for update in parse_etoro_stream_message(raw):
                             if update.instrument_id == instrument_id:
-                                yield update
+                                yield hydrate(update)
 
                     async for raw in websocket:
                         for update in parse_etoro_stream_message(raw):
                             if update.instrument_id == instrument_id:
-                                yield update
+                                yield hydrate(update)
             except asyncio.CancelledError:
                 raise
             except (ConnectionClosed, OSError, TimeoutError) as exc:
