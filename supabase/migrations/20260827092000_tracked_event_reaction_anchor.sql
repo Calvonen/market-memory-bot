@@ -6,6 +6,8 @@ alter table public.tracked_market_events
   add column if not exists reaction_anchor_at timestamptz null;
 
 alter table public.tracked_market_events
+  drop constraint if exists tracked_market_events_reaction_anchor_after_event;
+alter table public.tracked_market_events
   add constraint tracked_market_events_reaction_anchor_after_event
   check (reaction_anchor_at is null or reaction_anchor_at >= event_at);
 
@@ -61,7 +63,11 @@ $$;
 revoke all on function public.capture_tracked_market_event_reaction_anchor from public;
 grant execute on function public.capture_tracked_market_event_reaction_anchor to service_role;
 
-create or replace function public.verify_tracked_event_runtime_schema()
+-- PostgreSQL cannot change the OUT-column shape of an existing function with
+-- CREATE OR REPLACE, so replace this read-only schema marker explicitly.
+drop function if exists public.verify_tracked_event_runtime_schema();
+
+create function public.verify_tracked_event_runtime_schema()
 returns table (
   tracked_market_events_table_exists boolean,
   tracked_market_event_reactions_table_exists boolean,
