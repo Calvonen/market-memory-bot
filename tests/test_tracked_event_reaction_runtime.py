@@ -10,6 +10,7 @@ from trading_system.tracked_candle_pipeline import TrackedMarketCandle
 from trading_system.tracked_etoro_live import TrackedEtoroMarketUpdate
 from trading_system.tracked_event_reaction_runtime import TrackedEventReactionRuntime
 from trading_system.tracked_instrument_etoro import TrackedEtoroInstrument
+from trading_system.tracked_one_minute_history import TrackedOneMinuteHistory
 
 
 TRACKED = TrackedEtoroInstrument(
@@ -169,6 +170,63 @@ class TrackedEventReactionRuntimeTests(unittest.TestCase):
         )
 
         self.assertIsNone(result)
+
+    def test_reaction_survives_pre_event_reference_eviction_from_bounded_history(self) -> None:
+        pre_event = (_candle(4, "100"),)
+        first_reaction = (_candle(6, "98"),)
+        filler = (_candle(7, "95"),)
+        fifteen_minute = (
+            TrackedMarketCandle(
+                tracked_instrument_id="tracked-1",
+                instrument="ABC",
+                market="LSE",
+                etoro_instrument_id=123,
+                interval_minutes=15,
+                start=datetime(2026, 8, 23, 9, 45, tzinfo=UTC),
+                open=Decimal("80"),
+                high=Decimal("80"),
+                low=Decimal("80"),
+                close=Decimal("80"),
+                source_minutes=15,
+            ),
+        )
+        runtime = TrackedEventReactionRuntime(
+            candle_pipeline=_FakePipeline((pre_event, first_reaction, filler, fifteen_minute)),
+            history=TrackedOneMinuteHistory(max_candles_per_instrument=2),
+        )
+
+        runtime.add_market_update(_update(5))
+        first_batch = runtime.add_market_update(_update(7))
+        first_result = runtime.observe_event(
+            event=EVENT,
+            tracked=TRACKED,
+            reaction_candles=first_batch,
+            observed_at=EVENT.event_at + timedelta(seconds=90),
+        )
+        self.assertIsNotNone(first_result)
+        assert first_result is not None
+        self.assertEqual(first_result.reference.baseline.reference_price, Decimal("100"))
+
+        # A third 1m candle pushes the bounded history past its cap of 2 and
+        # evicts the original pre-event reference candle.
+        runtime.add_market_update(_update(8))
+        self.assertEqual(
+            runtime.history.candles_for("tracked-1"),
+            (first_reaction[0], filler[0]),
+        )
+
+        later_result = runtime.observe_event(
+            event=EVENT,
+            tracked=TRACKED,
+            reaction_candles=fifteen_minute,
+            observed_at=EVENT.event_at + timedelta(minutes=160),
+        )
+
+        self.assertIsNotNone(later_result)
+        assert later_result is not None
+        self.assertEqual(later_result.reference, first_result.reference)
+        self.assertEqual(later_result.reference.baseline.reference_price, Decimal("100"))
+        self.assertEqual(later_result.reaction.tracked_reaction.reaction.interval_minutes, 15)
 
 
 if __name__ == "__main__":
