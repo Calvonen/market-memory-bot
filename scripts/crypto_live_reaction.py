@@ -12,7 +12,7 @@ from trading_system.market_event import MarketEventKind
 from trading_system.registered_market_event_monitor import RegisteredMarketEventMonitor
 from trading_system.tracked_event_reaction_live import stream_tracked_event_reaction_runtime
 from trading_system.tracked_event_reaction_runtime import TrackedEventReactionRuntime
-from trading_system.tracked_instrument_etoro import resolve_tracked_instrument
+from trading_system.tracked_instrument_etoro import TrackedEtoroInstrument, resolve_tracked_instrument
 from trading_system.tracked_instruments import TrackedInstrumentSource, create_tracked_instrument
 
 
@@ -26,6 +26,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--instrument", default="BTC", help="Tracked/eToro symbol to resolve (default: BTC)")
     parser.add_argument("--company-name", default="", help="Optional exact eToro display name constraint")
     parser.add_argument("--market", default="", help="Optional tracked market label")
+    parser.add_argument(
+        "--etoro-instrument-id",
+        type=int,
+        default=None,
+        help=(
+            "Optional exact eToro instrument id for an explicit live smoke test. "
+            "When supplied, bypasses instrument search/resolution without changing production resolver behavior."
+        ),
+    )
     parser.add_argument("--observations", type=int, default=3, help="Stop after this many reaction observations")
     parser.add_argument("--timeout-seconds", type=float, default=900.0, help="Overall runner timeout")
     return parser.parse_args()
@@ -46,6 +55,39 @@ def _print_resolution_failure(provider: EtoroMarketDataProvider, instrument: str
         )
 
 
+def _resolve_target(
+    args: argparse.Namespace,
+    provider: EtoroMarketDataProvider,
+) -> TrackedEtoroInstrument | None:
+    tracked = create_tracked_instrument(
+        instrument=args.instrument,
+        company_name=args.company_name,
+        market=args.market,
+        source=TrackedInstrumentSource.MANUAL,
+    )
+    if args.etoro_instrument_id is not None:
+        if args.etoro_instrument_id <= 0:
+            raise ValueError("--etoro-instrument-id must be positive")
+        print(
+            "RESOLVE BYPASS: "
+            f"using explicit eToro instrument id {args.etoro_instrument_id}; "
+            "production resolver behavior is unchanged"
+        )
+        return TrackedEtoroInstrument(
+            tracked_instrument_id=tracked.tracked_instrument_id,
+            instrument=tracked.instrument,
+            market=tracked.market,
+            etoro_instrument_id=args.etoro_instrument_id,
+            etoro_symbol=tracked.instrument,
+            etoro_display_name=args.company_name.strip() or tracked.instrument,
+        )
+
+    resolved = resolve_tracked_instrument(tracked, EtoroInstrumentResolver(provider))
+    if resolved is None:
+        _print_resolution_failure(provider, tracked.instrument)
+    return resolved
+
+
 async def _run(args: argparse.Namespace) -> int:
     if args.observations < 1:
         raise ValueError("--observations must be at least 1")
@@ -53,15 +95,8 @@ async def _run(args: argparse.Namespace) -> int:
         raise ValueError("--timeout-seconds must be positive")
 
     provider = EtoroMarketDataProvider.from_env()
-    tracked = create_tracked_instrument(
-        instrument=args.instrument,
-        company_name=args.company_name,
-        market=args.market,
-        source=TrackedInstrumentSource.MANUAL,
-    )
-    resolved = resolve_tracked_instrument(tracked, EtoroInstrumentResolver(provider))
+    resolved = _resolve_target(args, provider)
     if resolved is None:
-        _print_resolution_failure(provider, tracked.instrument)
         return 2
 
     quote = provider.fetch_quote(resolved.etoro_instrument_id)
