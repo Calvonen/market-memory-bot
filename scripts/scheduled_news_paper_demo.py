@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -19,6 +20,7 @@ from trading_system.models import (
 from trading_system.news_market_event_ingress import register_news_market_event
 from trading_system.pipeline import PaperTradingPipeline
 from trading_system.registered_market_event_monitor import RegisteredMarketEventMonitor
+from trading_system.risk import RiskConfig, RiskEngine
 from trading_system.tracked_event_reaction_live import stream_tracked_event_reaction_runtime
 from trading_system.tracked_event_reaction_runtime import TrackedEventReactionRuntime
 from trading_system.tracked_instrument_etoro import resolve_tracked_instrument
@@ -29,7 +31,8 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run a scheduled NEWS event against real eToro market data and, after StrategyEngine + RiskEngine approval, "
-            "submit a market order to eToro's DEMO / Virtual Portfolio only."
+            "submit an opening market order to eToro's DEMO / Virtual Portfolio only. This proof runner does not attach "
+            "protective stop-loss or take-profit orders at eToro; the stop/targets below are RiskEngine geometry only."
         )
     )
     parser.add_argument("--instrument", default="BTC")
@@ -67,6 +70,28 @@ def _parse_aware_datetime(value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _require_finite(value: float, *, name: str, minimum: float, inclusive: bool = True) -> None:
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite")
+    if inclusive:
+        if value < minimum:
+            raise ValueError(f"{name} must be at least {minimum:g}")
+    elif value <= minimum:
+        raise ValueError(f"{name} must be greater than {minimum:g}")
+
+
+def _spread_pct_from_quote(quote) -> float:
+    if quote.bid is None or quote.ask is None:
+        raise ValueError("eToro quote is missing bid/ask for spread validation")
+    mid = (quote.bid + quote.ask) / Decimal("2")
+    if mid <= 0:
+        raise ValueError("eToro quote midpoint must be positive")
+    spread_pct = float(((quote.ask - quote.bid) / mid) * Decimal("100"))
+    if not math.isfinite(spread_pct) or spread_pct < 0:
+        raise ValueError("eToro quote produced an invalid spread")
+    return spread_pct
+
+
 def _demo_strategy_inputs(*, instrument: str, event_id: str, direction: Direction) -> StrategyInputs:
     # Deliberately synthetic scoring: the demo exercises the existing strategy/risk/execution gates,
     # not real news/fundamental analysis. 25+20+10+10 = 65, above the default 60 confidence gate.
@@ -83,6 +108,8 @@ def _demo_strategy_inputs(*, instrument: str, event_id: str, direction: Directio
 
 
 def _trade_levels(entry: float, direction: Direction) -> TradeLevels:
+    # These levels are used only by RiskEngine in this proof runner. They are NOT attached
+    # to the eToro Virtual Portfolio position; protective-order lifecycle is follow-up work.
     stop_distance = 0.0025  # 0.25%
     target_distance = 0.0050  # 0.50% => 2.0 reward/risk
     if direction is Direction.LONG:
@@ -100,15 +127,25 @@ def _trade_levels(entry: float, direction: Direction) -> TradeLevels:
     )
 
 
+def _minimum_equity_for_one_unit(levels: TradeLevels, config: RiskConfig) -> float:
+    if levels.entry is None or levels.stop is None or levels.entry <= 0 or levels.stop <= 0:
+        raise ValueError("valid entry and stop are required for demo equity sizing")
+    if config.max_position_pct <= 0 or config.max_risk_per_trade_pct <= 0:
+        raise ValueError("risk configuration cannot size a demo position")
+
+    position_equity = levels.entry / (config.max_position_pct / 100.0)
+    risk_per_unit = abs(levels.entry - levels.stop)
+    risk_equity = risk_per_unit / (config.max_risk_per_trade_pct / 100.0)
+    # Tiny headroom avoids a boundary-floor-to-zero from decimal/float representation.
+    return max(position_equity, risk_equity) * 1.000001
+
+
 async def _run(args: argparse.Namespace) -> int:
-    if args.trigger_pct < 0:
-        raise ValueError("--trigger-pct must be non-negative")
-    if args.demo_order_amount_usd <= 0:
-        raise ValueError("--demo-order-amount-usd must be positive")
-    if args.paper_equity <= 0:
-        raise ValueError("--paper-equity must be positive")
-    if args.demo_volatility_pct < 0:
-        raise ValueError("--demo-volatility-pct must be non-negative")
+    _require_finite(args.trigger_pct, name="--trigger-pct", minimum=0.0)
+    _require_finite(args.demo_order_amount_usd, name="--demo-order-amount-usd", minimum=0.0, inclusive=False)
+    _require_finite(args.paper_equity, name="--paper-equity", minimum=0.0, inclusive=False)
+    _require_finite(args.demo_volatility_pct, name="--demo-volatility-pct", minimum=0.0)
+    _require_finite(args.timeout_seconds, name="--timeout-seconds", minimum=0.0, inclusive=False)
     if args.max_observations < 1:
         raise ValueError("--max-observations must be at least 1")
 
@@ -125,9 +162,8 @@ async def _run(args: argparse.Namespace) -> int:
         print(f"RESOLVE FAILED: {tracked.instrument}")
         return 2
 
-    quote = provider.fetch_quote(resolved.etoro_instrument_id)
-    mid = (quote.bid + quote.ask) / Decimal("2")
-    spread_pct = float(((quote.ask - quote.bid) / mid) * Decimal("100")) if mid > 0 else 999.0
+    initial_quote = provider.fetch_quote(resolved.etoro_instrument_id)
+    initial_spread_pct = _spread_pct_from_quote(initial_quote)
 
     demo_broker = EtoroDemoBroker.from_env(
         instrument_id=resolved.etoro_instrument_id,
@@ -144,14 +180,15 @@ async def _run(args: argparse.Namespace) -> int:
     print(
         "DEMO CONFIG: "
         f"event_at={event_at.isoformat()} trigger={args.trigger_pct}% demo_order_amount_usd={args.demo_order_amount_usd:g} "
-        f"paper_equity={args.paper_equity:g} spread={spread_pct:.6f}% "
-        f"demo_volatility={args.demo_volatility_pct}% ETORO_DEMO_ONLY=true"
+        f"paper_equity_floor={args.paper_equity:g} initial_spread={initial_spread_pct:.6f}% "
+        f"demo_volatility={args.demo_volatility_pct}% ETORO_DEMO_ONLY=true PROTECTIVE_ORDERS=false"
     )
 
     runtime = TrackedEventReactionRuntime()
     monitor = RegisteredMarketEventMonitor(runtime)
     stream = stream_tracked_event_reaction_runtime((resolved,), provider, runtime, reconnect=True)
-    pipeline = PaperTradingPipeline(broker=demo_broker)
+    risk_config = RiskConfig()
+    pipeline = PaperTradingPipeline(risk_engine=RiskEngine(risk_config), broker=demo_broker)
 
     event = None
     observation_count = 0
@@ -210,20 +247,38 @@ async def _run(args: argparse.Namespace) -> int:
 
                     direction = Direction.LONG if move > 0 else Direction.SHORT
                     entry = float(reaction.close_price)
+                    levels = _trade_levels(entry, direction)
+
+                    # Market-quality gating must use a fresh quote at the actual decision point,
+                    # not the potentially stale quote fetched before waiting for the event.
+                    decision_quote = provider.fetch_quote(resolved.etoro_instrument_id)
+                    decision_spread_pct = _spread_pct_from_quote(decision_quote)
+
+                    # This proof uses integer risk sizing even though the eToro order itself is USD-notional.
+                    # Raise only the synthetic paper-equity input enough to let RiskEngine represent one unit;
+                    # the actual demo order notional remains --demo-order-amount-usd.
+                    effective_equity = max(args.paper_equity, _minimum_equity_for_one_unit(levels, risk_config))
+                    if effective_equity > args.paper_equity:
+                        print(
+                            "DEMO RISK SIZING: "
+                            f"paper_equity adjusted from {args.paper_equity:g} to {effective_equity:.2f} "
+                            "to represent at least one whole unit; eToro demo order amount is unchanged"
+                        )
+
                     result = pipeline.run(
                         _demo_strategy_inputs(
                             instrument=resolved.instrument,
                             event_id=event.event_id,
                             direction=direction,
                         ),
-                        _trade_levels(entry, direction),
+                        levels,
                         PortfolioState(
-                            equity=args.paper_equity,
-                            cash=args.paper_equity,
+                            equity=effective_equity,
+                            cash=effective_equity,
                             open_positions=0,
                             instrument_exposure_pct=0.0,
                             daily_pnl=0.0,
-                            spread_pct=spread_pct,
+                            spread_pct=decision_spread_pct,
                             volatility_pct=args.demo_volatility_pct,
                         ),
                     )
@@ -235,7 +290,8 @@ async def _run(args: argparse.Namespace) -> int:
                     print(
                         "RISK: "
                         f"status={result.proposal.risk.status.value} quantity_limit={result.proposal.risk.max_quantity} "
-                        f"rr={result.proposal.risk.reward_risk} reasons={result.proposal.risk.reasons}"
+                        f"rr={result.proposal.risk.reward_risk} spread={decision_spread_pct:.6f}% "
+                        f"reasons={result.proposal.risk.reasons}"
                     )
                     if result.order is None:
                         print("DONE: trigger crossed but RiskEngine rejected; no eToro demo order")
@@ -249,7 +305,10 @@ async def _run(args: argparse.Namespace) -> int:
                         f"instrument={result.order.instrument} direction={result.order.direction.value} "
                         f"amount_usd={args.demo_order_amount_usd:g} status={result.order.status}"
                     )
-                    print("DONE: order accepted by eToro DEMO endpoint; no real-money order endpoint exists in this broker")
+                    print(
+                        "DONE: opening order accepted by eToro DEMO endpoint; "
+                        "no protective SL/TP was attached and no real-money order endpoint exists in this broker"
+                    )
                     return 0
     except TimeoutError:
         print("TIMEOUT: scheduled news eToro demo did not finish within the configured window")
