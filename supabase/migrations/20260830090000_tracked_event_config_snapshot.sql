@@ -4,48 +4,126 @@ alter table public.tracked_market_events
 comment on column public.tracked_market_events.tracking_config_snapshot is
   'Immutable snapshot of the effective reaction-monitoring settings used for this tracked event. Null for legacy/not-yet-started events.';
 
+-- Mirrors the capture-once row-lock pattern already used by
+-- capture_tracked_market_event_reference (20260827090000): lock the row
+-- with `select ... for update` and branch explicitly on its current state,
+-- rather than relying on a conditional UPDATE + FOUND to distinguish
+-- "no such event" from "a different snapshot is already stored" - both of
+-- those would otherwise silently return zero rows with no way for the
+-- caller to tell them apart, and neither should ever overwrite an existing
+-- different snapshot.
 create or replace function public.capture_tracked_market_event_config_snapshot(
   input_event_id uuid,
   input_tracking_config_snapshot jsonb,
   input_actor text
 )
-returns setof public.tracked_market_events
+returns public.tracked_market_events
 language plpgsql
-security definer
-set search_path = public
+security invoker
 as $$
+declare
+  existing_row public.tracked_market_events%rowtype;
+  saved_row public.tracked_market_events%rowtype;
 begin
-  if input_event_id is null then
-    raise exception 'input_event_id is required';
-  end if;
   if input_tracking_config_snapshot is null
      or jsonb_typeof(input_tracking_config_snapshot) <> 'object'
      or input_tracking_config_snapshot = '{}'::jsonb then
-    raise exception 'input_tracking_config_snapshot must be a non-empty JSON object';
+    raise exception 'invalid_tracking_config_snapshot';
   end if;
   if nullif(btrim(input_actor), '') is null then
     raise exception 'input_actor is required';
   end if;
 
-  return query
-  update public.tracked_market_events
-     set tracking_config_snapshot = input_tracking_config_snapshot,
-         updated_by = input_actor,
-         updated_at = now()
-   where id = input_event_id
-     and tracking_config_snapshot is null
-     and status in ('tracked', 'monitoring')
-  returning *;
+  select * into existing_row
+  from public.tracked_market_events
+  where id = input_event_id
+  for update;
 
-  if not found then
-    return query
-    select *
-      from public.tracked_market_events
-     where id = input_event_id
-       and tracking_config_snapshot = input_tracking_config_snapshot;
+  if existing_row.id is null then
+    raise exception 'tracked_market_event_not_found' using errcode = 'P0002';
   end if;
+
+  if existing_row.tracking_config_snapshot is not null then
+    if existing_row.tracking_config_snapshot = input_tracking_config_snapshot then
+      return existing_row;
+    end if;
+    raise exception 'tracked_market_event_config_snapshot_locked';
+  end if;
+
+  if existing_row.status not in ('tracked', 'monitoring') then
+    raise exception 'tracked_market_event_not_snapshotable';
+  end if;
+
+  update public.tracked_market_events
+  set tracking_config_snapshot = input_tracking_config_snapshot,
+      updated_by = input_actor,
+      updated_at = now()
+  where id = input_event_id
+  returning * into saved_row;
+
+  return saved_row;
 end;
 $$;
 
-revoke all on function public.capture_tracked_market_event_config_snapshot(uuid, jsonb, text) from public;
-grant execute on function public.capture_tracked_market_event_config_snapshot(uuid, jsonb, text) to service_role;
+revoke all on function public.capture_tracked_market_event_config_snapshot from public;
+grant execute on function public.capture_tracked_market_event_config_snapshot to service_role;
+
+-- Keep the pre-deploy schema gate (verify_tracked_event_runtime_schema(),
+-- scripts/verify_supabase_schema.py) in lockstep with this migration, same
+-- as every earlier tracked-event runtime migration: bump the version marker
+-- and extend the verifier so a deploy against a database missing this RPC
+-- fails closed instead of starting a worker that cannot capture snapshots.
+create or replace function public.tracked_event_runtime_schema_version()
+returns integer
+language sql
+immutable
+security invoker
+as $$
+  select 3;
+$$;
+
+revoke all on function public.tracked_event_runtime_schema_version from public;
+grant execute on function public.tracked_event_runtime_schema_version to service_role;
+
+-- The OUT signature changed in this migration, so PostgreSQL requires the old
+-- verifier to be dropped before recreating it with the extra column.
+drop function if exists public.verify_tracked_event_runtime_schema();
+
+create function public.verify_tracked_event_runtime_schema()
+returns table (
+  tracked_market_events_table_exists boolean,
+  tracked_market_event_reactions_table_exists boolean,
+  upsert_tracked_market_event_function_exists boolean,
+  arm_tracked_market_event_resolution_function_exists boolean,
+  capture_tracked_market_event_reference_function_exists boolean,
+  capture_tracked_market_event_reaction_anchor_function_exists boolean,
+  capture_tracked_market_event_config_snapshot_function_exists boolean,
+  runtime_schema_version integer
+)
+language sql
+stable
+security invoker
+as $$
+  select
+    to_regclass('public.tracked_market_events') is not null,
+    to_regclass('public.tracked_market_event_reactions') is not null,
+    to_regprocedure(
+      'public.upsert_tracked_market_event(text,text,text,text,text,text,text,timestamptz,text,text,uuid)'
+    ) is not null,
+    to_regprocedure(
+      'public.arm_tracked_market_event_resolution(uuid,bigint,text,text,text)'
+    ) is not null,
+    to_regprocedure(
+      'public.capture_tracked_market_event_reference(uuid,numeric,timestamptz,text,bigint,text,text,text)'
+    ) is not null,
+    to_regprocedure(
+      'public.capture_tracked_market_event_reaction_anchor(uuid,timestamptz,text)'
+    ) is not null,
+    to_regprocedure(
+      'public.capture_tracked_market_event_config_snapshot(uuid,jsonb,text)'
+    ) is not null,
+    public.tracked_event_runtime_schema_version();
+$$;
+
+revoke all on function public.verify_tracked_event_runtime_schema from public;
+grant execute on function public.verify_tracked_event_runtime_schema to service_role;
