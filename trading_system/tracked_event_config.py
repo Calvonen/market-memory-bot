@@ -4,7 +4,10 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from trading_system.reaction_monitoring_profile import ReactionMonitoringProfile
+from trading_system.reaction_monitoring_profile import (
+    SUPPORTED_REACTION_INTERVALS,
+    ReactionMonitoringProfile,
+)
 
 
 TRACKING_CONFIG_SCHEMA_VERSION = 1
@@ -18,8 +21,12 @@ class TrackedEventMonitoringStageSnapshot:
     def __post_init__(self) -> None:
         if self.start_after_minutes < 0:
             raise ValueError("start_after_minutes must be non-negative")
-        if self.interval_minutes <= 0:
-            raise ValueError("interval_minutes must be positive")
+        # Kept in exact sync with the SQL contract's interval_minutes check
+        # (is_valid_tracked_event_config_snapshot_v1 in the 20260830090000
+        # migration) - a snapshot the DB would reject must never be
+        # constructible here in the first place.
+        if self.interval_minutes not in SUPPORTED_REACTION_INTERVALS:
+            raise ValueError("interval_minutes must be one of 1, 5 or 15")
 
     def to_dict(self) -> dict[str, int]:
         return {
@@ -52,6 +59,15 @@ class TrackedEventConfigSnapshot:
             raise ValueError("max_wait_for_market_hours must be positive")
         if not self.reaction_stages:
             raise ValueError("reaction_stages must not be empty")
+        # Same ordering contract as the SQL validator: first stage at event
+        # time, strictly increasing thereafter.
+        if self.reaction_stages[0].start_after_minutes != 0:
+            raise ValueError("first reaction stage must start at 0 minutes")
+        previous_start = -1
+        for stage in self.reaction_stages:
+            if stage.start_after_minutes <= previous_start:
+                raise ValueError("reaction stage start_after_minutes must be strictly increasing")
+            previous_start = stage.start_after_minutes
         if self.schema_version != TRACKING_CONFIG_SCHEMA_VERSION:
             raise ValueError("unsupported tracking config schema_version")
 

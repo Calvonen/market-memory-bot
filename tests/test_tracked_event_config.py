@@ -11,6 +11,7 @@ from trading_system.reaction_monitoring_profile import (
 from trading_system.tracked_event_config import (
     TRACKING_CONFIG_SCHEMA_VERSION,
     TrackedEventConfigSnapshot,
+    TrackedEventMonitoringStageSnapshot,
     snapshot_effective_tracking_config,
 )
 
@@ -73,6 +74,59 @@ class TrackedEventConfigSnapshotTests(unittest.TestCase):
                 reference_lead_seconds=30.0,
                 max_wait_for_market_hours=72.0,
                 profile=profile,
+            )
+
+    def test_stage_rejects_unsupported_interval(self) -> None:
+        with self.assertRaisesRegex(ValueError, "1, 5 or 15"):
+            TrackedEventMonitoringStageSnapshot(start_after_minutes=0, interval_minutes=7)
+
+    def test_snapshot_rejects_first_stage_not_at_zero(self) -> None:
+        with self.assertRaisesRegex(ValueError, "first reaction stage"):
+            TrackedEventConfigSnapshot(
+                monitor_hours=8.0,
+                reference_lead_seconds=30.0,
+                max_wait_for_market_hours=72.0,
+                reaction_stages=(
+                    TrackedEventMonitoringStageSnapshot(start_after_minutes=5, interval_minutes=1),
+                ),
+            )
+
+    def test_snapshot_rejects_non_increasing_stage_starts(self) -> None:
+        with self.assertRaisesRegex(ValueError, "strictly increasing"):
+            TrackedEventConfigSnapshot(
+                monitor_hours=8.0,
+                reference_lead_seconds=30.0,
+                max_wait_for_market_hours=72.0,
+                reaction_stages=(
+                    TrackedEventMonitoringStageSnapshot(start_after_minutes=0, interval_minutes=1),
+                    TrackedEventMonitoringStageSnapshot(start_after_minutes=30, interval_minutes=5),
+                    TrackedEventMonitoringStageSnapshot(start_after_minutes=30, interval_minutes=15),
+                ),
+            )
+
+    def test_snapshot_rejects_empty_reaction_stages(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            TrackedEventConfigSnapshot(
+                monitor_hours=8.0,
+                reference_lead_seconds=30.0,
+                max_wait_for_market_hours=72.0,
+                reaction_stages=(),
+            )
+
+    def test_snapshot_rejects_unsupported_schema_version(self) -> None:
+        valid_stages = snapshot_effective_tracking_config(
+            monitor_hours=8.0,
+            reference_lead_seconds=30.0,
+            max_wait_for_market_hours=72.0,
+            profile=DEFAULT_EVENT_REACTION_MONITORING_PROFILE,
+        ).reaction_stages
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            TrackedEventConfigSnapshot(
+                monitor_hours=8.0,
+                reference_lead_seconds=30.0,
+                max_wait_for_market_hours=72.0,
+                reaction_stages=valid_stages,
+                schema_version=2,
             )
 
 

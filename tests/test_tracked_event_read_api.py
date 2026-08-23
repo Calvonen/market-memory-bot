@@ -724,6 +724,26 @@ class TrackedEventConfigSnapshotRepositoryTests(unittest.TestCase):
                 actor="tracked-event-worker",
             )
 
+    def test_capture_propagates_db_schema_rejection_unwrapped(self):
+        # is_valid_tracked_event_config_snapshot_v1() (20260830090000) rejects
+        # a malformed snapshot before the RPC ever takes the row lock - this
+        # is a defense-in-depth path the worker's own snapshot_effective_
+        # tracking_config() builder should never actually trigger, but the
+        # repository must not misreport it as a content conflict either.
+        client = _RpcCapableClient(
+            rpc_error=Exception("invalid_tracking_config_snapshot (P0001)")
+        )
+        repository = SupabaseTrackedEventRepository(client)
+
+        with self.assertRaises(Exception) as ctx:
+            repository.capture_tracking_config_snapshot(
+                event_id="11111111-1111-1111-1111-111111111111",
+                snapshot={"schema_version": 1},
+                actor="tracked-event-worker",
+            )
+        self.assertNotIsInstance(ctx.exception, RuntimeError)
+        self.assertIn("invalid_tracking_config_snapshot", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
