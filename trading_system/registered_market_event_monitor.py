@@ -37,11 +37,21 @@ class RegisteredMarketEventMonitor:
     Registrations have no implicit expiry. The caller owns their lifecycle and can
     remove an event explicitly. This class does not discover events, build candles,
     persist results, or make trading decisions.
+
+    The identity first seen for one ``event_id`` is retained even after
+    ``unregister``. The reaction runtime keeps event-keyed reaction/reference
+    state independently of this registry's active set, so once an ``event_id``
+    has been observed it must keep resolving to the same event/tracked identity
+    for the lifetime of this monitor -- otherwise a later, unrelated event could
+    be registered under a reused ``event_id`` and pick up or conflict with that
+    stale runtime state. This class never clears runtime/orchestrator state
+    itself.
     """
 
     def __init__(self, runtime: TrackedEventReactionRuntime) -> None:
         self.runtime = runtime
         self._events: dict[str, RegisteredMarketEvent] = {}
+        self._known_identities: dict[str, RegisteredMarketEvent] = {}
 
     @staticmethod
     def _canonical_market(value: str) -> str:
@@ -61,17 +71,31 @@ class RegisteredMarketEventMonitor:
             raise ValueError("market event and tracked identity mismatch")
 
     def register(self, event: MarketEvent, tracked: TrackedEtoroInstrument) -> None:
-        """Register one event idempotently, failing closed on conflicting reuse."""
+        """Register one event idempotently, failing closed on conflicting reuse.
+
+        Idempotent for the exact same event/tracked pair, including after that
+        ``event_id`` was previously unregistered. Reuse of the ``event_id`` for a
+        different event or a different tracked identity fails closed, even if no
+        registration is currently active for it, because the runtime may still
+        hold reaction/reference state keyed by that ``event_id``.
+        """
         self._validate_registration(event, tracked)
         registration = RegisteredMarketEvent(event=event, tracked=tracked)
-        existing = self._events.get(event.event_id)
-        if existing is None:
-            self._events[event.event_id] = registration
-        elif existing != registration:
+        known = self._known_identities.get(event.event_id)
+        if known is None:
+            self._known_identities[event.event_id] = registration
+        elif known != registration:
             raise ValueError("market event registration changed")
+        self._events[event.event_id] = registration
 
     def unregister(self, event_id: str) -> bool:
-        """Remove one registration; return whether an event was present."""
+        """Remove one active registration; return whether it was active.
+
+        This only stops the event from being observed on future batches. The
+        identity recorded for ``event_id`` is retained so a later attempt to
+        reuse it for a conflicting event still fails closed; it is not a
+        general-purpose expiry mechanism.
+        """
         normalized = event_id.strip()
         if not normalized:
             raise ValueError("event_id must not be blank")

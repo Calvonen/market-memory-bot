@@ -208,6 +208,75 @@ class RegisteredMarketEventMonitorTests(unittest.TestCase):
         )
         self.assertEqual(runtime.calls, [])
 
+    def test_unregistered_event_is_inactive_and_reregistering_same_pair_is_idempotent(
+        self,
+    ) -> None:
+        runtime = _FakeRuntime()
+        observation = object()
+        runtime.results[EVENT.event_id] = observation
+        monitor = RegisteredMarketEventMonitor(runtime)  # type: ignore[arg-type]
+        observed_at = datetime(2026, 8, 23, 7, 7, tzinfo=UTC)
+
+        monitor.register(EVENT, TRACKED)
+        self.assertTrue(monitor.unregister(EVENT.event_id))
+
+        # Unregistering deactivates the event: no observation is produced for it.
+        self.assertEqual(monitor.observe_batch(_batch(), observed_at=observed_at), ())
+        self.assertEqual(runtime.calls, [])
+
+        # Re-registering the exact same event/tracked pair is idempotent, and
+        # reactivates it for future batches.
+        monitor.register(EVENT, TRACKED)
+        results = monitor.observe_batch(_batch(), observed_at=observed_at)
+        self.assertEqual(len(results), 1)
+        self.assertIs(results[0].observation, observation)
+
+    def test_conflicting_event_reuse_of_event_id_fails_closed_after_unregister(
+        self,
+    ) -> None:
+        runtime = _FakeRuntime()
+        monitor = RegisteredMarketEventMonitor(runtime)  # type: ignore[arg-type]
+
+        monitor.register(EVENT, TRACKED)
+        self.assertTrue(monitor.unregister(EVENT.event_id))
+        monitor.register(EVENT, TRACKED)
+        self.assertTrue(monitor.unregister(EVENT.event_id))
+
+        different_event = MarketEvent(
+            event_id=EVENT.event_id,
+            tracked_instrument_id=EVENT.tracked_instrument_id,
+            instrument=EVENT.instrument,
+            market=EVENT.market,
+            event_at=EVENT.event_at,
+            source=EVENT.source,
+            kind=MarketEventKind.GUIDANCE,
+            title="Different event",
+        )
+
+        with self.assertRaisesRegex(ValueError, "registration changed"):
+            monitor.register(different_event, TRACKED)
+
+    def test_conflicting_tracked_identity_reuse_of_event_id_fails_closed_after_unregister(
+        self,
+    ) -> None:
+        runtime = _FakeRuntime()
+        monitor = RegisteredMarketEventMonitor(runtime)  # type: ignore[arg-type]
+
+        monitor.register(EVENT, TRACKED)
+        self.assertTrue(monitor.unregister(EVENT.event_id))
+
+        different_tracked = TrackedEtoroInstrument(
+            tracked_instrument_id=TRACKED.tracked_instrument_id,
+            instrument=TRACKED.instrument,
+            market=TRACKED.market,
+            etoro_instrument_id=999,
+            etoro_symbol="ABC-NEW",
+            etoro_display_name="ABC plc (renamed)",
+        )
+
+        with self.assertRaisesRegex(ValueError, "registration changed"):
+            monitor.register(EVENT, different_tracked)
+
 
 if __name__ == "__main__":
     unittest.main()
