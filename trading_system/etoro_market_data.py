@@ -76,6 +76,16 @@ def _bool(value: Any) -> bool | None:
     return None
 
 
+def _topic_instrument_id(message: dict[str, Any]) -> int | None:
+    topic = message.get("topic")
+    if not isinstance(topic, str) or not topic.startswith("instrument:"):
+        return None
+    try:
+        return int(topic.split(":", 1)[1])
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_etoro_stream_message(raw: str | bytes) -> tuple[EtoroMarketUpdate, ...]:
     """Parse one eToro WebSocket frame into zero or more market updates."""
     if raw in (b"\x00", "\x00"):
@@ -111,7 +121,10 @@ def parse_etoro_stream_message(raw: str | bytes) -> tuple[EtoroMarketUpdate, ...
         try:
             instrument_id = int(raw_instrument_id)
         except (TypeError, ValueError):
-            continue
+            topic_instrument_id = _topic_instrument_id(message)
+            if topic_instrument_id is None:
+                continue
+            instrument_id = topic_instrument_id
 
         updates.append(
             EtoroMarketUpdate(
@@ -316,7 +329,7 @@ class EtoroMarketDataProvider:
                 {
                     "id": request_id,
                     "operation": "Subscribe",
-                    "data": {"topics": [f"instrument:{instrument_id}"], "snapshot": True},
+                    "data": {"topics": [f"instrument:{instrument_id}"], "snapshot": False},
                 }
             )
         )
@@ -328,8 +341,39 @@ class EtoroMarketDataProvider:
         *,
         reconnect: bool = True,
     ) -> AsyncIterator[EtoroMarketUpdate]:
-        """Yield eToro snapshot/update frames for one instrument."""
+        """Yield eToro live rate updates for one instrument.
+
+        The live Rate feed may emit a fully priced update followed by sparse
+        timestamp-only updates. Within one WebSocket connection, retain the
+        latest known bid/ask/last values so those sparse updates can advance
+        event-time candle construction without inventing a new price.
+        """
         while True:
+            last_bid: Decimal | None = None
+            last_ask: Decimal | None = None
+            last_execution: Decimal | None = None
+
+            def hydrate(update: EtoroMarketUpdate) -> EtoroMarketUpdate:
+                nonlocal last_bid, last_ask, last_execution
+                if update.bid is not None:
+                    last_bid = update.bid
+                if update.ask is not None:
+                    last_ask = update.ask
+                if update.last_execution is not None:
+                    last_execution = update.last_execution
+                return EtoroMarketUpdate(
+                    instrument_id=update.instrument_id,
+                    bid=update.bid if update.bid is not None else last_bid,
+                    ask=update.ask if update.ask is not None else last_ask,
+                    last_execution=(
+                        update.last_execution if update.last_execution is not None else last_execution
+                    ),
+                    timestamp=update.timestamp,
+                    is_market_open=update.is_market_open,
+                    is_exchange_open=update.is_exchange_open,
+                    message_type=update.message_type,
+                )
+
             try:
                 async with self._websocket_connect(self.websocket_url) as websocket:
                     await self._authenticate(websocket)
@@ -337,12 +381,12 @@ class EtoroMarketDataProvider:
                     for raw in buffered:
                         for update in parse_etoro_stream_message(raw):
                             if update.instrument_id == instrument_id:
-                                yield update
+                                yield hydrate(update)
 
                     async for raw in websocket:
                         for update in parse_etoro_stream_message(raw):
                             if update.instrument_id == instrument_id:
-                                yield update
+                                yield hydrate(update)
             except asyncio.CancelledError:
                 raise
             except (ConnectionClosed, OSError, TimeoutError) as exc:
