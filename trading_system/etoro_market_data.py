@@ -345,8 +345,10 @@ class EtoroMarketDataProvider:
 
         The live Rate feed may emit a fully priced update followed by sparse
         timestamp-only updates. Within one WebSocket connection, retain the
-        latest known bid/ask/last values so those sparse updates can advance
-        event-time candle construction without inventing a new price.
+        latest complete price-bearing message so timestamp-only updates can
+        advance event-time candle construction without inventing a new price.
+        Partial price-bearing updates replace the cache as a whole, preventing
+        stale fields from an older message from overriding fresher bid/ask data.
         """
         while True:
             last_bid: Decimal | None = None
@@ -355,19 +357,20 @@ class EtoroMarketDataProvider:
 
             def hydrate(update: EtoroMarketUpdate) -> EtoroMarketUpdate:
                 nonlocal last_bid, last_ask, last_execution
-                if update.bid is not None:
+                has_price = any(
+                    value is not None
+                    for value in (update.bid, update.ask, update.last_execution)
+                )
+                if has_price:
                     last_bid = update.bid
-                if update.ask is not None:
                     last_ask = update.ask
-                if update.last_execution is not None:
                     last_execution = update.last_execution
+                    return update
                 return EtoroMarketUpdate(
                     instrument_id=update.instrument_id,
-                    bid=update.bid if update.bid is not None else last_bid,
-                    ask=update.ask if update.ask is not None else last_ask,
-                    last_execution=(
-                        update.last_execution if update.last_execution is not None else last_execution
-                    ),
+                    bid=last_bid,
+                    ask=last_ask,
+                    last_execution=last_execution,
                     timestamp=update.timestamp,
                     is_market_open=update.is_market_open,
                     is_exchange_open=update.is_exchange_open,
