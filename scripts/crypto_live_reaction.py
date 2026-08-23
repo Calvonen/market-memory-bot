@@ -68,6 +68,8 @@ def _resolve_target(
     if args.etoro_instrument_id is not None:
         if args.etoro_instrument_id <= 0:
             raise ValueError("--etoro-instrument-id must be positive")
+        if not tracked.market:
+            raise ValueError("--market is required when --etoro-instrument-id is supplied")
         print(
             "RESOLVE BYPASS: "
             f"using explicit eToro instrument id {args.etoro_instrument_id}; "
