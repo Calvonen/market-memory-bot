@@ -89,6 +89,31 @@ class TrackedOneMinuteHistoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "complete one-minute"):
             history.add((_candle(1, "100", source_minutes=0),))
 
+    def test_whitespace_tracked_id_is_normalized_to_canonical_history(self) -> None:
+        history = TrackedOneMinuteHistory()
+        padded = _candle(1, "100", tracked_id=" tracked-1 ")
+        history.add((padded,))
+
+        self.assertEqual(history.candles_for("tracked-1"), (padded,))
+        self.assertEqual(history.candles_for(" tracked-1 "), (padded,))
+
+    def test_whitespace_and_canonical_tracked_id_share_one_history(self) -> None:
+        history = TrackedOneMinuteHistory()
+        padded = _candle(1, "100", tracked_id=" tracked-1 ")
+        canonical = _candle(2, "101", tracked_id="tracked-1")
+        history.add((padded,))
+        history.add((canonical,))
+
+        self.assertEqual(history.candles_for("tracked-1"), (padded, canonical))
+        self.assertEqual(len(history._histories), 1)
+        self.assertEqual(len(history._identities), 1)
+
+    def test_blank_tracked_id_fails_closed_on_add(self) -> None:
+        history = TrackedOneMinuteHistory()
+
+        with self.assertRaisesRegex(ValueError, "must not be blank"):
+            history.add((_candle(1, "100", tracked_id="   "),))
+
     def test_invalid_capacity_and_blank_lookup_fail_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "must be positive"):
             TrackedOneMinuteHistory(max_candles_per_instrument=0)

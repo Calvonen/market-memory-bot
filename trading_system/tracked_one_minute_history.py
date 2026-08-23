@@ -29,8 +29,15 @@ class TrackedOneMinuteHistory:
         self._histories: dict[str, deque[TrackedMarketCandle]] = {}
         self._identities: dict[str, _TrackedHistoryIdentity] = {}
 
-    def _validate_identity(self, candle: TrackedMarketCandle) -> None:
-        tracked_id = candle.tracked_instrument_id
+    @staticmethod
+    def _normalize_tracked_id(tracked_instrument_id: str) -> str:
+        tracked_id = tracked_instrument_id.strip()
+        if not tracked_id:
+            raise ValueError("tracked_instrument_id must not be blank")
+        return tracked_id
+
+    def _validate_identity(self, candle: TrackedMarketCandle) -> str:
+        tracked_id = self._normalize_tracked_id(candle.tracked_instrument_id)
         identity = _TrackedHistoryIdentity(
             instrument=candle.instrument,
             market=candle.market,
@@ -41,6 +48,7 @@ class TrackedOneMinuteHistory:
             self._identities[tracked_id] = identity
         elif existing != identity:
             raise ValueError("tracked candle history identity changed")
+        return tracked_id
 
     def add(self, candles: tuple[TrackedMarketCandle, ...]) -> None:
         """Store complete 1m candles from an already-produced closed-candle batch."""
@@ -50,9 +58,9 @@ class TrackedOneMinuteHistory:
             if candle.source_minutes != 1:
                 raise ValueError("one-minute history requires complete one-minute candles")
 
-            self._validate_identity(candle)
+            tracked_id = self._validate_identity(candle)
             history = self._histories.setdefault(
-                candle.tracked_instrument_id,
+                tracked_id,
                 deque(maxlen=self.max_candles_per_instrument),
             )
 
@@ -67,8 +75,6 @@ class TrackedOneMinuteHistory:
             history.append(candle)
 
     def candles_for(self, tracked_instrument_id: str) -> tuple[TrackedMarketCandle, ...]:
-        tracked_id = tracked_instrument_id.strip()
-        if not tracked_id:
-            raise ValueError("tracked_instrument_id must not be blank")
+        tracked_id = self._normalize_tracked_id(tracked_instrument_id)
         history = self._histories.get(tracked_id)
         return tuple(history) if history is not None else ()
