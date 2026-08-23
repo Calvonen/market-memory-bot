@@ -43,6 +43,7 @@ class PersistentTrackedEvent:
     reference_price: Decimal | None = None
     reference_captured_at: datetime | None = None
     reference_kind: str | None = None
+    reaction_anchor_at: datetime | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     last_error: str | None = None
@@ -186,16 +187,32 @@ class SupabaseTrackedEventRepository:
                 "input_actor": actor,
             },
         ).execute()
-        data = response.data
-        if isinstance(data, list):
-            if not data:
-                raise RuntimeError("capture_tracked_market_event_reference returned no rows")
-            row = data[0]
-        elif isinstance(data, dict):
-            row = data
-        else:
-            raise RuntimeError("capture_tracked_market_event_reference returned invalid data")
-        return self._row_to_event(row)
+        return self._single_event_response(
+            response.data,
+            error_message="capture_tracked_market_event_reference returned invalid data",
+        )
+
+    def capture_reaction_anchor(
+        self,
+        *,
+        event_id: str,
+        reaction_anchor_at: datetime,
+        actor: str,
+    ) -> PersistentTrackedEvent:
+        if reaction_anchor_at.tzinfo is None or reaction_anchor_at.utcoffset() is None:
+            raise ValueError("reaction_anchor_at must be timezone-aware")
+        response = self.client.rpc(
+            "capture_tracked_market_event_reaction_anchor",
+            {
+                "input_event_id": event_id,
+                "input_reaction_anchor_at": reaction_anchor_at.astimezone(UTC).isoformat(),
+                "input_actor": actor,
+            },
+        ).execute()
+        return self._single_event_response(
+            response.data,
+            error_message="capture_tracked_market_event_reaction_anchor returned invalid data",
+        )
 
     def mark_monitoring(self, event_id: str, *, actor: str, started_at: datetime) -> None:
         (
@@ -259,8 +276,6 @@ class SupabaseTrackedEventRepository:
             "evolution": record.evolution,
             "observed_at": record.observed_at.astimezone(UTC).isoformat(),
         }
-        # Idempotent restart/reconnect behavior: one event+interval+candle has one
-        # canonical reaction record. A repeated observation updates the same row.
         (
             self.client.table("tracked_market_event_reactions")
             .upsert(
@@ -269,6 +284,18 @@ class SupabaseTrackedEventRepository:
             )
             .execute()
         )
+
+    @classmethod
+    def _single_event_response(cls, data: Any, *, error_message: str) -> PersistentTrackedEvent:
+        if isinstance(data, list):
+            if not data:
+                raise RuntimeError(error_message)
+            row = data[0]
+        elif isinstance(data, dict):
+            row = data
+        else:
+            raise RuntimeError(error_message)
+        return cls._row_to_event(row)
 
     @classmethod
     def _row_to_event(cls, row: dict[str, Any], *, out_prefix: bool = False) -> PersistentTrackedEvent:
@@ -305,6 +332,7 @@ class SupabaseTrackedEventRepository:
             reference_price=(Decimal(str(value("reference_price"))) if value("reference_price") is not None else None),
             reference_captured_at=cls._parse_datetime_optional(value("reference_captured_at")),
             reference_kind=(str(value("reference_kind")) if value("reference_kind") else None),
+            reaction_anchor_at=cls._parse_datetime_optional(value("reaction_anchor_at")),
             started_at=cls._parse_datetime_optional(value("started_at")),
             completed_at=cls._parse_datetime_optional(value("completed_at")),
             last_error=(str(value("last_error")) if value("last_error") else None),
