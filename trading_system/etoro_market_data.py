@@ -251,6 +251,7 @@ class EtoroMarketDataProvider:
         seen: set[int] = set()
         page = 1
         requested_page_size = 1000
+        last_reported_page = 0
 
         while True:
             try:
@@ -296,6 +297,9 @@ class EtoroMarketDataProvider:
                 raise RuntimeError("eToro instrument search response has invalid pagination") from exc
             if current_page < 1 or current_page_size < 1 or total_items < 0:
                 raise RuntimeError("eToro instrument search response has invalid pagination")
+            if current_page <= last_reported_page:
+                raise RuntimeError("eToro instrument search pagination did not advance")
+            last_reported_page = current_page
 
             for row in rows:
                 if not isinstance(row, dict):
