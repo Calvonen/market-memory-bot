@@ -1,0 +1,203 @@
+from __future__ import annotations
+
+import unittest
+from datetime import UTC, datetime
+from decimal import Decimal
+
+from trading_system.event_reaction_orchestration import EventReactionOrchestrator
+from trading_system.market_reaction import ReactionDirection
+from trading_system.market_reaction_evolution import ReactionEvolution
+from trading_system.tracked_candle_pipeline import TrackedMarketCandle
+from trading_system.tracked_instrument_etoro import TrackedEtoroInstrument
+
+
+TRACKED = TrackedEtoroInstrument(
+    tracked_instrument_id="tracked-1",
+    instrument="ABC",
+    market="LSE",
+    etoro_instrument_id=123,
+    etoro_symbol="ABC.L",
+    etoro_display_name="ABC plc",
+)
+EVENT_AT = datetime(2026, 8, 23, 7, 5, tzinfo=UTC)
+
+
+def _candle(
+    minute: int,
+    close: str,
+    *,
+    interval: int = 1,
+    source_minutes: int | None = None,
+    tracked_id: str = "tracked-1",
+    instrument: str = "ABC",
+    market: str = "LSE",
+    etoro_id: int = 123,
+) -> TrackedMarketCandle:
+    price = Decimal(close)
+    return TrackedMarketCandle(
+        tracked_instrument_id=tracked_id,
+        instrument=instrument,
+        market=market,
+        etoro_instrument_id=etoro_id,
+        interval_minutes=interval,
+        start=datetime(2026, 8, 23, 7, minute, tzinfo=UTC),
+        open=price,
+        high=price,
+        low=price,
+        close=price,
+        source_minutes=interval if source_minutes is None else source_minutes,
+    )
+
+
+class EventReactionOrchestratorTests(unittest.TestCase):
+    def test_selects_latest_matching_reference_and_analyzes_post_event_candle(self) -> None:
+        orchestrator = EventReactionOrchestrator()
+
+        result = orchestrator.add(
+            event_id="event-1",
+            event_at=EVENT_AT,
+            tracked=TRACKED,
+            reference_candles=(_candle(2, "100"), _candle(4, "99")),
+            reaction_candle=_candle(5, "95"),
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.reference.source_candle_start, _candle(4, "99").start)
+        self.assertEqual(result.reference.baseline.reference_price, Decimal("99"))
+        self.assertEqual(
+            result.reaction.tracked_reaction.reaction.direction,
+            ReactionDirection.NEGATIVE,
+        )
+        self.assertEqual(
+            result.reaction.tracked_reaction.evolution.evolution,
+            ReactionEvolution.INITIAL,
+        )
+
+    def test_same_event_continues_reaction_evolution_with_same_reference(self) -> None:
+        orchestrator = EventReactionOrchestrator()
+        references = (_candle(4, "100"),)
+
+        first = orchestrator.add(
+            event_id="event-1",
+            event_at=EVENT_AT,
+            tracked=TRACKED,
+            reference_candles=references,
+            reaction_candle=_candle(5, "98"),
+        )
+        second = orchestrator.add(
+            event_id="event-1",
+            event_at=EVENT_AT,
+            tracked=TRACKED,
+            reference_candles=references,
+            reaction_candle=_candle(6, "96"),
+        )
+
+        assert first is not None and second is not None
+        self.assertEqual(
+            first.reaction.tracked_reaction.evolution.evolution,
+            ReactionEvolution.INITIAL,
+        )
+        self.assertEqual(
+            second.reaction.tracked_reaction.evolution.evolution,
+            ReactionEvolution.EXTENDING,
+        )
+
+    def test_no_reference_returns_none_without_starting_reaction_sequence(self) -> None:
+        orchestrator = EventReactionOrchestrator()
+
+        missing = orchestrator.add(
+            event_id="event-1",
+            event_at=EVENT_AT,
+            tracked=TRACKED,
+            reference_candles=(_candle(5, "100"),),
+            reaction_candle=_candle(6, "98"),
+        )
+        valid = orchestrator.add(
+            event_id="event-1",
+            event_at=EVENT_AT,
+            tracked=TRACKED,
+            reference_candles=(_candle(4, "100"),),
+            reaction_candle=_candle(6, "98"),
+        )
+
+        self.assertIsNone(missing)
+        assert valid is not None
+        self.assertEqual(
+            valid.reaction.tracked_reaction.evolution.evolution,
+            ReactionEvolution.INITIAL,
+        )
+
+    def test_reaction_candle_identity_mismatch_fails_before_state_is_touched(self) -> None:
+        orchestrator = EventReactionOrchestrator()
+
+        with self.assertRaisesRegex(ValueError, "identity mismatch"):
+            orchestrator.add(
+                event_id="event-1",
+                event_at=EVENT_AT,
+                tracked=TRACKED,
+                reference_candles=(_candle(4, "100"),),
+                reaction_candle=_candle(5, "98", etoro_id=999),
+            )
+
+        valid = orchestrator.add(
+            event_id="event-1",
+            event_at=EVENT_AT,
+            tracked=TRACKED,
+            reference_candles=(_candle(4, "100"),),
+            reaction_candle=_candle(5, "98"),
+        )
+        assert valid is not None
+        self.assertEqual(
+            valid.reaction.tracked_reaction.evolution.evolution,
+            ReactionEvolution.INITIAL,
+        )
+
+    def test_pre_event_or_overlapping_reaction_candle_is_rejected(self) -> None:
+        orchestrator = EventReactionOrchestrator()
+
+        with self.assertRaisesRegex(ValueError, "start at or after event_at"):
+            orchestrator.add(
+                event_id="event-1",
+                event_at=datetime(2026, 8, 23, 7, 5, 30, tzinfo=UTC),
+                tracked=TRACKED,
+                reference_candles=(_candle(4, "100"),),
+                reaction_candle=_candle(5, "98"),
+            )
+
+    def test_incomplete_reaction_window_is_rejected(self) -> None:
+        orchestrator = EventReactionOrchestrator()
+
+        with self.assertRaisesRegex(ValueError, "complete window"):
+            orchestrator.add(
+                event_id="event-1",
+                event_at=EVENT_AT,
+                tracked=TRACKED,
+                reference_candles=(_candle(0, "100", interval=5),),
+                reaction_candle=_candle(5, "98", interval=5, source_minutes=4),
+            )
+
+    def test_changed_reference_for_started_event_fails_closed(self) -> None:
+        orchestrator = EventReactionOrchestrator()
+
+        first = orchestrator.add(
+            event_id="event-1",
+            event_at=EVENT_AT,
+            tracked=TRACKED,
+            reference_candles=(_candle(3, "100"),),
+            reaction_candle=_candle(5, "98"),
+        )
+        self.assertIsNotNone(first)
+
+        with self.assertRaisesRegex(ValueError, "event baseline changed"):
+            orchestrator.add(
+                event_id="event-1",
+                event_at=EVENT_AT,
+                tracked=TRACKED,
+                reference_candles=(_candle(4, "99"),),
+                reaction_candle=_candle(6, "97"),
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()
