@@ -19,6 +19,7 @@ export default function AppTabs() {
           renderingMode="template"
         />
       </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="history"><NativeTabs.Trigger.Label>Historia</NativeTabs.Trigger.Label><NativeTabs.Trigger.Icon src={require('@/assets/images/tabIcons/explore.png')} renderingMode="template" /></NativeTabs.Trigger>
       <NativeTabs.Trigger name="memory"><NativeTabs.Trigger.Label>Memory</NativeTabs.Trigger.Label><NativeTabs.Trigger.Icon src={require('@/assets/images/tabIcons/explore.png')} renderingMode="template" /></NativeTabs.Trigger>
       <NativeTabs.Trigger name="scanner"><NativeTabs.Trigger.Label>Scanneri</NativeTabs.Trigger.Label><NativeTabs.Trigger.Icon src={require('@/assets/images/tabIcons/explore.png')} renderingMode="template" /></NativeTabs.Trigger>
       <NativeTabs.Trigger name="trades"><NativeTabs.Trigger.Label>Tradet</NativeTabs.Trigger.Label><NativeTabs.Trigger.Icon src={require('@/assets/images/tabIcons/explore.png')} renderingMode="template" /></NativeTabs.Trigger>
