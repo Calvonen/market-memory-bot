@@ -105,8 +105,6 @@ def _search_candidate(row: dict[str, Any]) -> EtoroInstrumentCandidate | None:
         instrument_id = int(raw_id)
     except (TypeError, ValueError):
         return None
-    if instrument_id <= 0:
-        return None
 
     symbol_raw = row.get("internalSymbolFull", row.get("symbol"))
     symbol = str(symbol_raw).strip() if symbol_raw not in (None, "") else None
