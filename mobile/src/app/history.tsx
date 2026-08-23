@@ -1,8 +1,8 @@
 import { useFocusEffect } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { ScreenShell } from '@/components/screen-shell';
+import { BackButton } from '@/components/back-button';
 import { TrackedEventCard } from '@/components/TrackedEventsSection';
 import { getTrackedEvents, TrackedMarketEvent } from '@/services/tracked-events';
 
@@ -35,7 +35,16 @@ export default function HistoryScreen() {
   );
 
   return (
-    <ScreenShell title="Historia" subtitle="Päättyneet seurannat yli 24 tunnin takaa">
+    <ScrollView
+      style={styles.screen}
+      contentContainerStyle={styles.content}
+      showsVerticalScrollIndicator={false}
+    >
+      <BackButton label="Tapahtumat" />
+
+      <Text style={styles.title}>Historia</Text>
+      <Text style={styles.subtitle}>Päättyneet seurannat yli 24 tunnin takaa</Text>
+
       {error ? (
         <View style={styles.errorCard}>
           <Text style={styles.errorText}>{error}</Text>
@@ -57,11 +66,32 @@ export default function HistoryScreen() {
       {events?.map((event) => (
         <TrackedEventCard key={event.event_id} event={event} />
       ))}
-    </ScreenShell>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
+  screen: {
+    flex: 1,
+    backgroundColor: '#0b0e13',
+  },
+  content: {
+    paddingHorizontal: 18,
+    paddingTop: 58,
+    paddingBottom: 48,
+  },
+  title: {
+    color: '#f4f7fb',
+    fontSize: 24,
+    fontWeight: '800',
+  },
+  subtitle: {
+    color: '#8590a1',
+    fontSize: 13,
+    lineHeight: 19,
+    marginTop: 6,
+    marginBottom: 22,
+  },
   emptyCard: {
     backgroundColor: '#131821',
     borderWidth: 1,
