@@ -40,12 +40,23 @@ async def stream_tracked_event_reaction_runtime(
     ``runtime.add_market_update``. The returned item preserves that update together
     with the exact closed-candle batch produced by the runtime, including empty
     batches when no candle closed on that market update.
+
+    The upstream orchestrator stream is held explicitly (rather than iterated with a
+    bare ``async for``) so that if this adapter's own generator is closed early, the
+    upstream generator's ``aclose()`` is awaited before this generator finishes
+    closing. Relying on implicit async-generator finalization would leave the
+    orchestrator's ``finally`` cleanup and worker cancellation to run at an
+    unspecified later time instead of deterministically on shutdown.
     """
-    async for update in stream_tracked_etoro_instruments(
+    upstream = stream_tracked_etoro_instruments(
         tracked_instruments,
         provider,
         reconnect=reconnect,
         queue_maxsize=queue_maxsize,
-    ):
-        candles = runtime.add_market_update(update)
-        yield TrackedRuntimeMarketBatch(update=update, candles=candles)
+    )
+    try:
+        async for update in upstream:
+            candles = runtime.add_market_update(update)
+            yield TrackedRuntimeMarketBatch(update=update, candles=candles)
+    finally:
+        await upstream.aclose()

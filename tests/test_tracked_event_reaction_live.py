@@ -121,6 +121,34 @@ class TrackedEventReactionLiveTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(runtime.seen, [first])
 
+    async def test_adapter_aclose_awaits_upstream_cleanup_before_returning(self) -> None:
+        state = {"closed": False}
+        runtime = _FakeRuntime(((),))
+
+        async def fake_stream(tracked_instruments, provider, *, reconnect, queue_maxsize):
+            try:
+                state["closed"] = False
+                yield _update(5)
+                yield _update(6)
+            finally:
+                state["closed"] = True
+
+        with patch.object(live_module, "stream_tracked_etoro_instruments", fake_stream):
+            stream = stream_tracked_event_reaction_runtime(
+                (TRACKED,),
+                object(),
+                runtime,  # type: ignore[arg-type]
+            )
+            first_result = await anext(stream)
+            self.assertEqual(first_result.update, _update(5))
+            self.assertFalse(state["closed"])
+
+            await stream.aclose()
+
+            self.assertTrue(state["closed"])
+
+        self.assertEqual(runtime.seen, [_update(5)])
+
 
 if __name__ == "__main__":
     unittest.main()
