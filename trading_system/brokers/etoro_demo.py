@@ -13,10 +13,11 @@ from trading_system.models import Direction, RiskStatus, TradeProposal, TradingM
 class EtoroDemoBroker(Broker):
     """Submit risk-approved demo orders to eToro's Virtual Portfolio only.
 
-    The execution URL is intentionally fixed to the documented ``/demo/orders``
-    endpoint. This broker has no code path for the real-money execution endpoint.
+    Both portfolio verification and execution are pinned to eToro's documented
+    demo paths. This broker intentionally has no real-money execution path.
     """
 
+    DEMO_PORTFOLIO_URL = "https://public-api.etoro.com/api/v1/trading/info/demo/portfolio"
     DEMO_ORDERS_URL = "https://public-api.etoro.com/api/v2/trading/execution/demo/orders"
 
     def __init__(
@@ -27,6 +28,7 @@ class EtoroDemoBroker(Broker):
         instrument_id: int,
         amount_usd: float = 500.0,
         timeout_seconds: float = 15.0,
+        http_get: Callable = requests.get,
         http_post: Callable = requests.post,
     ) -> None:
         if not api_key.strip() or not user_key.strip():
@@ -42,6 +44,7 @@ class EtoroDemoBroker(Broker):
         self.instrument_id = instrument_id
         self.amount_usd = float(amount_usd)
         self.timeout_seconds = float(timeout_seconds)
+        self._http_get = http_get
         self._http_post = http_post
         self.last_response: dict | None = None
         self.last_request_id: str | None = None
@@ -54,6 +57,28 @@ class EtoroDemoBroker(Broker):
             instrument_id=instrument_id,
             amount_usd=amount_usd,
         )
+
+    def _headers(self, request_id: str) -> dict[str, str]:
+        return {
+            "x-api-key": self.api_key,
+            "x-user-key": self.user_key,
+            "x-request-id": request_id,
+            "Content-Type": "application/json",
+        }
+
+    def verify_demo_access(self) -> None:
+        """Fail before the scheduled event if the configured keys cannot read the demo portfolio."""
+        request_id = str(uuid.uuid4())
+        try:
+            response = self._http_get(
+                self.DEMO_PORTFOLIO_URL,
+                headers=self._headers(request_id),
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(f"eToro demo portfolio check failed: {exc}") from exc
+        if not response.ok:
+            raise RuntimeError(f"eToro demo portfolio HTTP {response.status_code}: {response.text[:500]}")
 
     def execute(self, proposal: TradeProposal) -> BrokerOrder:
         if proposal.mode is not TradingMode.PAPER:
@@ -79,16 +104,10 @@ class EtoroDemoBroker(Broker):
             "leverage": 1,
             "stopLossType": "fixed",
         }
-        headers = {
-            "x-api-key": self.api_key,
-            "x-user-key": self.user_key,
-            "x-request-id": request_id,
-            "Content-Type": "application/json",
-        }
         try:
             response = self._http_post(
                 self.DEMO_ORDERS_URL,
-                headers=headers,
+                headers=self._headers(request_id),
                 json=payload,
                 timeout=self.timeout_seconds,
             )
