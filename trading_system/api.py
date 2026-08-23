@@ -5,8 +5,8 @@ import os
 import re
 import secrets
 from dataclasses import asdict, replace
-from datetime import date
-from typing import Any, Protocol
+from datetime import UTC, date, datetime
+from typing import Any, Literal, Protocol
 
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, status
@@ -384,15 +384,24 @@ def create_app(
 
     @app.get("/api/v1/tracked-events")
     def list_tracked_events(
+        view: Literal["active", "history"] = Query(default="active"),
         limit: int = Query(default=20, ge=1, le=100),
         x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
     ) -> list[dict[str, Any]]:
         require_read(x_marketai_key)
+        # The 24h active/history split is resolved here from the backend's own
+        # clock, never a client-supplied time - the mobile app calls this
+        # endpoint without view, so default=active must apply the same
+        # lifecycle cutoff regardless of caller.
+        now = datetime.now(UTC)
+        repository = get_tracked_event_repository()
         try:
-            return [
-                _tracked_event_payload(item)
-                for item in get_tracked_event_repository().list_recent(limit=limit)
-            ]
+            events = (
+                repository.list_active(limit=limit, now=now)
+                if view == "active"
+                else repository.list_history(limit=limit, now=now)
+            )
+            return [_tracked_event_payload(item) for item in events]
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 

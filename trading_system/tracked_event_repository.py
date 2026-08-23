@@ -22,6 +22,21 @@ class TrackedEventStatus(str, Enum):
     FAILED = "failed"
 
 
+# Active/history split for GET /api/v1/tracked-events (view=active|history):
+# tracked/monitoring are always active; a terminal status stays active for
+# this long past its terminal updated_at before it becomes history.
+_ACTIVE_HISTORY_WINDOW = timedelta(hours=24)
+_ALWAYS_ACTIVE_STATUSES = (
+    TrackedEventStatus.TRACKED.value,
+    TrackedEventStatus.MONITORING.value,
+)
+_TERMINAL_STATUSES = (
+    TrackedEventStatus.COMPLETED.value,
+    TrackedEventStatus.FAILED.value,
+    TrackedEventStatus.CANCELLED.value,
+)
+
+
 @dataclass(frozen=True)
 class PersistentTrackedEvent:
     event_id: str
@@ -144,6 +159,80 @@ class SupabaseTrackedEventRepository:
                 self.client.table("tracked_market_events")
                 .select("*")
                 .order("event_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            return tuple(self._row_to_event(row) for row in (response.data or []))
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"failed to list tracked market events: {exc}") from exc
+
+    def list_active(
+        self, *, limit: int = 20, now: datetime
+    ) -> tuple[PersistentTrackedEvent, ...]:
+        # tracked/monitoring are always active; a terminal event (completed/
+        # failed/cancelled) stays active until 24h past its terminal
+        # updated_at, then falls into list_history() - see mark_completed/
+        # mark_failed above, which both bump updated_at on the terminal
+        # transition. completed_at is not shared by failed/cancelled, so
+        # updated_at is the only timestamp common to all three.
+        if limit < 1 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        cutoff = (now - _ACTIVE_HISTORY_WINDOW).astimezone(UTC).isoformat()
+        try:
+            always_active_response = (
+                self.client.table("tracked_market_events")
+                .select("*")
+                .in_("status", list(_ALWAYS_ACTIVE_STATUSES))
+                .order("event_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            recent_terminal_response = (
+                self.client.table("tracked_market_events")
+                .select("*")
+                .in_("status", list(_TERMINAL_STATUSES))
+                .gte("updated_at", cutoff)
+                .order("updated_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            rows = list(always_active_response.data or []) + list(
+                recent_terminal_response.data or []
+            )
+            events_by_id: dict[str, PersistentTrackedEvent] = {}
+            for row in rows:
+                event = self._row_to_event(row)
+                events_by_id[event.event_id] = event
+            ordered = sorted(
+                events_by_id.values(),
+                key=lambda event: (event.event_at, event.event_id),
+                reverse=True,
+            )
+            return tuple(ordered[:limit])
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"failed to list tracked market events: {exc}") from exc
+
+    def list_history(
+        self, *, limit: int = 20, now: datetime
+    ) -> tuple[PersistentTrackedEvent, ...]:
+        if limit < 1 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        cutoff = (now - _ACTIVE_HISTORY_WINDOW).astimezone(UTC).isoformat()
+        try:
+            response = (
+                self.client.table("tracked_market_events")
+                .select("*")
+                .in_("status", list(_TERMINAL_STATUSES))
+                .lt("updated_at", cutoff)
+                .order("updated_at", desc=True)
                 .limit(limit)
                 .execute()
             )
