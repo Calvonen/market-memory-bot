@@ -134,7 +134,7 @@ class TrackedEventReactionRuntimeTests(unittest.TestCase):
                 market="LSE",
                 etoro_instrument_id=123,
                 interval_minutes=5,
-                start=datetime(2026, 8, 23, 7, 40, tzinfo=UTC),
+                start=datetime(2026, 8, 23, 7, 35, tzinfo=UTC),
                 open=Decimal("96"),
                 high=Decimal("96"),
                 low=Decimal("96"),
