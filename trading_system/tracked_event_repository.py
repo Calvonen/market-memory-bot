@@ -68,11 +68,6 @@ class PersistentTrackedEvent:
     updated_by: str = ""
     created_at: datetime | None = None
     updated_at: datetime | None = None
-    # Immutable snapshot of the effective reaction-monitoring settings this
-    # event was actually tracked with (see tracked_event_config.py). None for
-    # rows captured before this column existed - never fabricated here from
-    # today's defaults, since that would silently misrepresent history.
-    tracking_config_snapshot: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -353,39 +348,6 @@ class SupabaseTrackedEventRepository:
             error_message="capture_tracked_market_event_reaction_anchor returned invalid data",
         )
 
-    def capture_tracking_config_snapshot(
-        self,
-        *,
-        event_id: str,
-        snapshot: dict[str, Any],
-        actor: str,
-    ) -> PersistentTrackedEvent:
-        try:
-            response = self.client.rpc(
-                "capture_tracked_market_event_config_snapshot",
-                {
-                    "input_event_id": event_id,
-                    "input_tracking_config_snapshot": snapshot,
-                    "input_actor": actor,
-                },
-            ).execute()
-        except Exception as exc:
-            # capture_tracked_market_event_config_snapshot() raises this exact
-            # message (no dedicated errcode, same as the sibling
-            # capture_tracked_market_event_reference()'s _locked conflict) when
-            # a *different* snapshot is already stored - never overwritten.
-            # Translate it to RuntimeError so callers can distinguish this
-            # permanent, non-retryable conflict from a transient RPC failure.
-            if "tracked_market_event_config_snapshot_locked" in str(exc):
-                raise RuntimeError(
-                    f"tracked event {event_id} already has a different tracking_config_snapshot"
-                ) from exc
-            raise
-        return self._single_event_response(
-            response.data,
-            error_message="capture_tracked_market_event_config_snapshot returned invalid data",
-        )
-
     def mark_monitoring(self, event_id: str, *, actor: str, started_at: datetime) -> None:
         (
             self.client.table("tracked_market_events")
@@ -525,10 +487,6 @@ class SupabaseTrackedEventRepository:
             updated_by=str(value("updated_by") or ""),
             created_at=cls._parse_datetime_optional(value("created_at")),
             updated_at=cls._parse_datetime_optional(value("updated_at")),
-            # NULL stays None here - a missing/NULL snapshot must never be
-            # defaulted to {} or invented from current settings, or history
-            # would silently look like it was tracked with today's config.
-            tracking_config_snapshot=value("tracking_config_snapshot"),
         )
 
     @classmethod

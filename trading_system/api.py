@@ -190,7 +190,6 @@ def _tracked_event_payload(event: PersistentTrackedEvent) -> dict[str, Any]:
         "completed_at": iso(event.completed_at),
         "last_error": event.last_error,
         "updated_at": iso(event.updated_at),
-        "tracking_config_snapshot": event.tracking_config_snapshot,
     }
 
 

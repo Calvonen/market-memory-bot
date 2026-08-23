@@ -1,22 +1,5 @@
 import { apiGet } from '@/services/api';
 
-export type TrackedEventMonitoringStageSnapshot = {
-  start_after_minutes: number;
-  interval_minutes: number;
-};
-
-// Immutable record of the effective reaction-monitoring settings a given
-// event was actually tracked with (trading_system/tracked_event_config.py).
-// Only schema_version 1 is understood by the UI today - render it as-is,
-// never re-derive it from today's live/global settings.
-export type TrackedEventTrackingConfigSnapshot = {
-  schema_version: number;
-  monitor_hours: number;
-  reference_lead_seconds: number;
-  max_wait_for_market_hours: number;
-  reaction_stages: TrackedEventMonitoringStageSnapshot[];
-};
-
 export type TrackedMarketEvent = {
   event_id: string;
   tracked_instrument_id: string;
@@ -44,7 +27,6 @@ export type TrackedMarketEvent = {
   completed_at: string | null;
   last_error: string | null;
   updated_at: string | null;
-  tracking_config_snapshot: TrackedEventTrackingConfigSnapshot | null;
 };
 
 export type TrackedEventView = 'active' | 'history';
