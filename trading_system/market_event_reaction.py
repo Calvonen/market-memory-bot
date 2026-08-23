@@ -82,8 +82,9 @@ class MarketEventReactionBridge:
 
         ``reaction_candles`` is the caller's batch of newly closed candles. The
         monitoring profile chooses which interval is active relative to the
-        event timestamp. Inactive intervals are ignored; if the active interval
-        did not close in this batch, no reaction observation is emitted.
+        event timestamp. Inactive intervals and event-overlapping candles are
+        ignored; if no complete post-event candle for the active interval closed
+        in this batch, no reaction observation is emitted.
 
         The pre-event reference remains fixed to the 1-minute interval while the
         reaction interval changes, so one event keeps one stable baseline across
@@ -97,11 +98,18 @@ class MarketEventReactionBridge:
         if active_interval is None:
             return None
 
-        active = tuple(
-            candle
-            for candle in reaction_candles
-            if candle.interval_minutes == active_interval
-        )
+        def eligible(candle: TrackedMarketCandle) -> bool:
+            if candle.interval_minutes != active_interval:
+                return False
+            # Preserve fail-closed validation for malformed naive timestamps by
+            # leaving them to EventReactionOrchestrator. For valid aware candles,
+            # skip any window that starts before the event because it contains
+            # pre-event prices and is not a clean reaction candle.
+            if candle.start.tzinfo is None or candle.start.utcoffset() is None:
+                return True
+            return candle.start >= event.event_at
+
+        active = tuple(candle for candle in reaction_candles if eligible(candle))
         if not active:
             return None
         if len(active) != 1:
