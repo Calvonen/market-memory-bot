@@ -60,10 +60,11 @@ def main() -> int:
         actor=args.actor,
         calendar_event_id=args.calendar_event_id,
     )
+    armed = event.resolved_etoro_instrument_id is not None
     print(
         f"{action}: id={event.event_id} instrument={event.instrument} "
         f"event_at={event.event_at.isoformat()} time_status={event.event_time_status.value} "
-        f"status={event.status.value}"
+        f"status={event.status.value} etoro_armed={str(armed).lower()}"
     )
     return 0
 
