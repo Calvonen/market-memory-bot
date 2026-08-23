@@ -11,6 +11,7 @@ from trading_system.event_market_reaction import (
     EventMarketReactionPipeline,
 )
 from trading_system.reaction_monitoring_profile import DEFAULT_EVENT_REACTION_MONITORING_PROFILE
+from trading_system.tracked_candle_pipeline import TrackedMarketCandle
 from trading_system.tracked_event_reaction_live import stream_tracked_event_reaction_runtime
 from trading_system.tracked_event_reaction_runtime import TrackedEventReactionRuntime
 from trading_system.tracked_event_repository import (
@@ -66,6 +67,32 @@ def _tracked_identity(event: PersistentTrackedEvent) -> TrackedInstrument:
     )
 
 
+def _normalise_text(value: str) -> str:
+    return " ".join(value.strip().upper().split())
+
+
+def _validate_persisted_reference_identity(
+    event: PersistentTrackedEvent,
+    resolved: TrackedEtoroInstrument,
+) -> None:
+    if event.reference_price is None:
+        return
+    if event.resolved_etoro_instrument_id is None:
+        raise RuntimeError("persisted reference is missing resolved eToro instrument id")
+    if event.resolved_etoro_instrument_id != resolved.etoro_instrument_id:
+        raise RuntimeError("persisted reference eToro instrument id no longer matches resolver")
+    if not event.resolved_etoro_symbol:
+        raise RuntimeError("persisted reference is missing resolved eToro symbol")
+    if _normalise_text(event.resolved_etoro_symbol) != _normalise_text(resolved.etoro_symbol):
+        raise RuntimeError("persisted reference eToro symbol no longer matches resolver")
+    if not event.resolved_etoro_display_name:
+        raise RuntimeError("persisted reference is missing resolved eToro display name")
+    if _normalise_text(event.resolved_etoro_display_name) != _normalise_text(
+        resolved.etoro_display_name
+    ):
+        raise RuntimeError("persisted reference eToro display name no longer matches resolver")
+
+
 def _capture_reference_if_needed(
     event: PersistentTrackedEvent,
     *,
@@ -75,6 +102,7 @@ def _capture_reference_if_needed(
     now: datetime,
 ) -> PersistentTrackedEvent:
     if event.reference_price is not None:
+        _validate_persisted_reference_identity(event, resolved)
         return event
     if now >= event.event_at:
         raise RuntimeError("event reached event_at without a persisted pre-event reference")
@@ -112,6 +140,7 @@ async def _ensure_reference(
     reference_lead_seconds: float,
 ) -> PersistentTrackedEvent | None:
     if event.reference_price is not None:
+        _validate_persisted_reference_identity(event, resolved)
         return event
 
     target = event.event_at - timedelta(seconds=reference_lead_seconds)
@@ -143,6 +172,43 @@ async def _ensure_reference(
         error=str(last_error or "event reached event_at without a persisted pre-event reference"),
     )
     return None
+
+
+def _restore_reaction_pipeline(
+    event: PersistentTrackedEvent,
+    *,
+    resolved: TrackedEtoroInstrument,
+    baseline: EventMarketReactionBaseline,
+    reaction_pipeline: EventMarketReactionPipeline,
+    repository: SupabaseTrackedEventRepository,
+) -> None:
+    for record in repository.list_reactions(event.event_id):
+        if record.tracked_market_event_id != event.event_id:
+            raise RuntimeError("persisted reaction belongs to a different event")
+        if record.reference_price != baseline.reference_price:
+            raise RuntimeError("persisted reaction reference no longer matches event reference")
+        replay_candle = TrackedMarketCandle(
+            tracked_instrument_id=resolved.tracked_instrument_id,
+            instrument=resolved.instrument,
+            market=resolved.market,
+            etoro_instrument_id=resolved.etoro_instrument_id,
+            interval_minutes=record.interval_minutes,
+            start=record.candle_start,
+            open=record.close_price,
+            high=record.close_price,
+            low=record.close_price,
+            close=record.close_price,
+            source_minutes=record.interval_minutes,
+        )
+        replayed = reaction_pipeline.add(replay_candle, baseline=baseline)
+        reaction = replayed.tracked_reaction.reaction
+        evolution = replayed.tracked_reaction.evolution
+        if (
+            reaction.return_pct != record.return_pct
+            or reaction.direction.value != record.direction
+            or evolution.evolution.value != record.evolution
+        ):
+            raise RuntimeError("persisted reaction history cannot be restored deterministically")
 
 
 def _persist_reactions_from_batch(
@@ -204,13 +270,17 @@ async def monitor_one_event(
         )
         return
 
-    event = await _ensure_reference(
-        event,
-        repository=repository,
-        provider=provider,
-        resolved=resolved,
-        reference_lead_seconds=reference_lead_seconds,
-    )
+    try:
+        event = await _ensure_reference(
+            event,
+            repository=repository,
+            provider=provider,
+            resolved=resolved,
+            reference_lead_seconds=reference_lead_seconds,
+        )
+    except RuntimeError as exc:
+        repository.mark_failed(event.event_id, actor=WORKER_ACTOR, error=str(exc))
+        return
     if event is None:
         return
     if event.reference_price is None:
@@ -231,16 +301,24 @@ async def monitor_one_event(
         reference_price=event.reference_price,
     )
     reaction_pipeline = EventMarketReactionPipeline()
+    try:
+        _restore_reaction_pipeline(
+            event,
+            resolved=resolved,
+            baseline=baseline,
+            reaction_pipeline=reaction_pipeline,
+            repository=repository,
+        )
+    except RuntimeError as exc:
+        repository.mark_failed(event.event_id, actor=WORKER_ACTOR, error=str(exc))
+        return
+
     runtime = TrackedEventReactionRuntime()
     stream = stream_tracked_event_reaction_runtime((resolved,), provider, runtime, reconnect=True)
     reaction_anchor_at = event.reaction_anchor_at
 
     try:
         if reaction_anchor_at is None:
-            # Wait for the first *real* complete post-event 1m candle. This is
-            # the reaction-stage anchor. For an overnight event the exchange may
-            # be closed for hours after event_at, so the 1m -> 5m -> 15m profile
-            # must not advance while no tradable candles exist.
             try:
                 async with asyncio.timeout(max_wait_for_market_hours * 3600):
                     async for batch in stream:
