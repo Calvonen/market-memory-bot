@@ -103,6 +103,39 @@ class EventReactionOrchestratorTests(unittest.TestCase):
             ReactionEvolution.EXTENDING,
         )
 
+    def test_fixed_reference_interval_survives_reaction_interval_switch(self) -> None:
+        orchestrator = EventReactionOrchestrator()
+        references = (
+            _candle(0, "90", interval=5),
+            _candle(4, "100", interval=1),
+        )
+
+        one_minute = orchestrator.add(
+            event_id="event-1",
+            event_at=EVENT_AT,
+            tracked=TRACKED,
+            reference_candles=references,
+            reaction_candle=_candle(5, "98", interval=1),
+            reference_interval_minutes=1,
+        )
+        five_minute = orchestrator.add(
+            event_id="event-1",
+            event_at=EVENT_AT,
+            tracked=TRACKED,
+            reference_candles=references,
+            reaction_candle=_candle(10, "95", interval=5),
+            reference_interval_minutes=1,
+        )
+
+        assert one_minute is not None and five_minute is not None
+        self.assertEqual(one_minute.reference.interval_minutes, 1)
+        self.assertEqual(five_minute.reference.interval_minutes, 1)
+        self.assertEqual(one_minute.reference.source_candle_start, _candle(4, "100").start)
+        self.assertEqual(five_minute.reference.source_candle_start, _candle(4, "100").start)
+        self.assertEqual(one_minute.reference.baseline.reference_price, Decimal("100"))
+        self.assertEqual(five_minute.reference.baseline.reference_price, Decimal("100"))
+        self.assertEqual(five_minute.reaction.tracked_reaction.reaction.interval_minutes, 5)
+
     def test_no_reference_returns_none_without_starting_reaction_sequence(self) -> None:
         orchestrator = EventReactionOrchestrator()
 
