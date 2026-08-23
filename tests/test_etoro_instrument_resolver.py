@@ -123,6 +123,38 @@ class EtoroInstrumentSearchTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].instrument_id, 100000)
 
+    def test_search_fails_closed_when_reported_page_does_not_advance(self) -> None:
+        calls: list[dict] = []
+
+        def fake_get(_url, params=None, **_kwargs):
+            calls.append(dict(params or {}))
+            return _FakeResponse(
+                {
+                    "page": 1,
+                    "pageSize": 1,
+                    "totalItems": 3,
+                    "items": [
+                        {
+                            "internalInstrumentId": 999,
+                            "internalSymbolFull": "AAPL",
+                            "internalInstrumentDisplayName": "Apple Inc",
+                            "internalExchangeName": "NASDAQ",
+                        }
+                    ],
+                }
+            )
+
+        provider = EtoroMarketDataProvider(
+            api_key="api-secret",
+            user_key="user-secret",
+            http_get=fake_get,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "pagination did not advance"):
+            provider.search_instruments("BTC")
+
+        self.assertEqual([call["page"] for call in calls], [1, 2])
+
     def test_search_returns_base_symbol_candidates_for_suffix_resolution(self) -> None:
         provider = EtoroMarketDataProvider(
             api_key="api-secret",
