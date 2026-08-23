@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 SUPPORTED_REACTION_INTERVALS = frozenset({1, 5, 15})
@@ -48,7 +48,10 @@ class ReactionMonitoringProfile:
         if observed_at.tzinfo is None or observed_at.utcoffset() is None:
             raise ValueError("observed_at must be timezone-aware")
 
-        elapsed = observed_at - event_at
+        # Convert to UTC before subtracting so the elapsed duration reflects real
+        # wall-clock time even when event_at and observed_at straddle a DST
+        # transition in a shared local tzinfo.
+        elapsed = observed_at.astimezone(timezone.utc) - event_at.astimezone(timezone.utc)
         if elapsed < timedelta(0):
             return None
 
