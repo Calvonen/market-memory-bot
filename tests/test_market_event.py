@@ -4,6 +4,7 @@ import unittest
 from datetime import UTC, datetime
 
 from trading_system.market_event import MarketEvent, MarketEventKind, MarketEventSource
+from trading_system.tracked_instruments import TrackedInstrument
 
 
 class MarketEventTests(unittest.TestCase):
@@ -56,12 +57,26 @@ class MarketEventTests(unittest.TestCase):
             source=MarketEventSource.CALENDAR,
             kind=MarketEventKind.EARNINGS,
         )
-        for field_name in ("event_id", "tracked_instrument_id", "instrument"):
+        for field_name in ("event_id", "tracked_instrument_id", "instrument", "market"):
             values = dict(base)
             values[field_name] = "   "
             with self.subTest(field=field_name):
                 with self.assertRaises(ValueError):
                     MarketEvent(**values)
+
+    def test_instrument_canonicalizes_like_tracked_instrument(self) -> None:
+        tracked = TrackedInstrument(instrument=" BRK B ")
+        event = MarketEvent(
+            event_id="event-1",
+            tracked_instrument_id="tracked-1",
+            instrument=" BRK B ",
+            market="LSE",
+            event_at=datetime(2026, 8, 23, 7, 5, tzinfo=UTC),
+            source=MarketEventSource.CALENDAR,
+            kind=MarketEventKind.EARNINGS,
+        )
+
+        self.assertEqual(event.instrument, tracked.instrument)
 
     def test_naive_event_time_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "timezone-aware"):

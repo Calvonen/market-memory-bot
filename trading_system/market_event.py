@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
+from trading_system.tracked_instruments import _normalise_symbol
+
 
 class MarketEventSource(str, Enum):
     CALENDAR = "calendar"
@@ -45,7 +47,7 @@ class MarketEvent:
     def __post_init__(self) -> None:
         event_id = self.event_id.strip()
         tracked_instrument_id = self.tracked_instrument_id.strip()
-        instrument = self.instrument.strip().upper()
+        instrument = _normalise_symbol(self.instrument)
         market = " ".join(self.market.strip().split()).upper()
         title = self.title.strip()
 
@@ -55,6 +57,8 @@ class MarketEvent:
             raise ValueError("tracked_instrument_id must not be blank")
         if not instrument:
             raise ValueError("instrument must not be blank")
+        if not market:
+            raise ValueError("market must not be blank")
         if self.event_at.tzinfo is None or self.event_at.utcoffset() is None:
             raise ValueError("event_at must be timezone-aware")
         if not isinstance(self.source, MarketEventSource):
