@@ -113,14 +113,13 @@ def _preflight_resolution_sync(
     if resolved is None:
         raise RuntimeError("eToro instrument resolution failed or was ambiguous")
 
-    # Validate that the resolved id is usable by the live market-data account
-    # before persisting it. The worker later reuses this exact id for reference
-    # snapshots and WebSocket subscription instead of searching the catalog.
+    # Preflight owns broker identity only. A closed exchange may legitimately
+    # return an empty/non-positive lastExecution, so do not gate arming on price.
+    # The timing-critical reference capture below still requires a finite,
+    # positive pre-event lastExecution and therefore remains fail-closed.
     quote = provider.fetch_quote(resolved.etoro_instrument_id)
     if quote.instrument_id != resolved.etoro_instrument_id:
         raise RuntimeError("eToro preflight quote identity mismatch")
-    if not quote.last_execution.is_finite() or quote.last_execution <= 0:
-        raise RuntimeError("eToro preflight quote has invalid lastExecution")
 
     return repository.arm_resolution(
         event_id=event.event_id,
