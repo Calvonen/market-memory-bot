@@ -46,6 +46,10 @@ from trading_system.strategy_draft_repository import (
 )
 from trading_system.supabase_calendar_repository import SupabaseCalendarEventRepository
 from trading_system.supabase_event_repository import SupabaseEventExpectationRepository
+from trading_system.tracked_event_repository import (
+    PersistentTrackedEvent,
+    SupabaseTrackedEventRepository,
+)
 
 # Calendar range MVP: the mobile UI only ever offers 7/30-day chips and the
 # calendar sync worker never fetches further out than this (see
@@ -155,6 +159,40 @@ def _calendar_event_payload(event: Any) -> dict[str, Any]:
     return payload
 
 
+def _tracked_event_payload(event: PersistentTrackedEvent) -> dict[str, Any]:
+    def iso(value: Any) -> str | None:
+        return value.isoformat() if value is not None else None
+
+    return {
+        "event_id": event.event_id,
+        "tracked_instrument_id": event.tracked_instrument_id,
+        "calendar_event_id": event.calendar_event_id,
+        "company_name": event.company_name,
+        "instrument": event.instrument,
+        "market": event.market,
+        "source": event.source,
+        "external_key": event.external_key,
+        "kind": event.kind,
+        "title": event.title,
+        "event_at": iso(event.event_at),
+        "event_time_status": event.event_time_status.value,
+        "status": event.status.value,
+        "resolved_etoro_instrument_id": event.resolved_etoro_instrument_id,
+        "resolved_etoro_symbol": event.resolved_etoro_symbol,
+        "resolved_etoro_display_name": event.resolved_etoro_display_name,
+        "resolution_armed_at": iso(event.resolution_armed_at),
+        "resolution_armed_by": event.resolution_armed_by,
+        "reference_price": str(event.reference_price) if event.reference_price is not None else None,
+        "reference_captured_at": iso(event.reference_captured_at),
+        "reference_kind": event.reference_kind,
+        "reaction_anchor_at": iso(event.reaction_anchor_at),
+        "started_at": iso(event.started_at),
+        "completed_at": iso(event.completed_at),
+        "last_error": event.last_error,
+        "updated_at": iso(event.updated_at),
+    }
+
+
 _POSTGRES_UUID_TEXT = re.compile(
     r"(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
@@ -232,6 +270,7 @@ def create_app(
     paper_repository: PaperStatusRepository | None = None,
     approval_repository: StrategyDraftApprovalRepository | None = None,
     calendar_repository: CalendarEventRepository | None = None,
+    tracked_event_repository: SupabaseTrackedEventRepository | None = None,
     admin_token: str | None = None,
     read_api_key: str | None = None,
     control_api_key: str | None = None,
@@ -263,6 +302,7 @@ def create_app(
     paper_repo_cache: PaperStatusRepository | None = paper_repository
     approval_repo_cache: StrategyDraftApprovalRepository | None = approval_repository
     calendar_repo_cache: CalendarEventRepository | None = calendar_repository
+    tracked_event_repo_cache: SupabaseTrackedEventRepository | None = tracked_event_repository
     configured_admin_token = admin_token or os.environ.get("MARKETAI_ADMIN_API_KEY")
     configured_read_api_key = read_api_key or os.environ.get("MARKETAI_READ_API_KEY")
     # Backend-only control-auth for the strategy-draft approval endpoint. This
@@ -299,6 +339,12 @@ def create_app(
             calendar_repo_cache = SupabaseCalendarEventRepository.from_env()
         return calendar_repo_cache
 
+    def get_tracked_event_repository() -> SupabaseTrackedEventRepository:
+        nonlocal tracked_event_repo_cache
+        if tracked_event_repo_cache is None:
+            tracked_event_repo_cache = SupabaseTrackedEventRepository.from_env()
+        return tracked_event_repo_cache
+
     def require_admin(x_admin_token: str | None) -> None:
         if not configured_admin_token:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Event editing is disabled until MARKETAI_ADMIN_API_KEY is configured")
@@ -333,6 +379,20 @@ def create_app(
         require_read(x_marketai_key)
         try:
             return [_expectation_payload(item) for item in get_repository().list_upcoming()]
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.get("/api/v1/tracked-events")
+    def list_tracked_events(
+        limit: int = Query(default=20, ge=1, le=100),
+        x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
+    ) -> list[dict[str, Any]]:
+        require_read(x_marketai_key)
+        try:
+            return [
+                _tracked_event_payload(item)
+                for item in get_tracked_event_repository().list_recent(limit=limit)
+            ]
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
