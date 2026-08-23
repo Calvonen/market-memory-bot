@@ -65,7 +65,7 @@ export function TrackedEventsSection({ onSnapshot }: Props) {
   );
 }
 
-function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
+export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
   const scheduleText = formatTrackedEventSchedule(event);
   const presentation = describeTrackedEvent(event);
 
@@ -89,18 +89,12 @@ function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
   );
 }
 
-// event_time_status is descriptive event metadata, not a trading threshold
-// (see docs/tracked_event_runtime.md) - the label must never read as more
-// certain than the backend actually knows the timing to be.
 const EVENT_TIME_STATUS_LABELS: Record<TrackedMarketEvent['event_time_status'], string> = {
   confirmed: 'vahvistettu',
   estimated: 'arvioitu',
   unknown: 'aika epävarma',
 };
 
-// Local device time, not the backend host's - same principle as Home's own
-// date formatting (see app/(tabs)/index.tsx). Falls back to the raw
-// event_at string rather than crashing or hiding the row on an invalid date.
 function formatTrackedEventSchedule(event: TrackedMarketEvent): string {
   const timeStatusLabel = EVENT_TIME_STATUS_LABELS[event.event_time_status] ?? 'aika epävarma';
   const eventAt = new Date(event.event_at);
@@ -115,8 +109,6 @@ function formatTrackedEventSchedule(event: TrackedMarketEvent): string {
 
 const MAX_FAILURE_REASON_LENGTH = 180;
 
-// last_error is a raw backend/worker error string - never render it
-// unbounded, and never outside the 'failed' status it actually describes.
 function formatFailureReason(lastError: string | null): string {
   const trimmed = (lastError ?? '').trim();
   if (!trimmed) return 'Syytä ei ole tiedossa.';
