@@ -84,23 +84,35 @@ class EventReactionOrchestrator:
         tracked: TrackedEtoroInstrument,
         reference_candles: tuple[TrackedMarketCandle, ...],
         reaction_candle: TrackedMarketCandle,
+        reference_interval_minutes: int | None = None,
     ) -> EventReactionObservation | None:
         """Select the baseline and analyze one complete post-event candle.
 
         ``None`` means that no eligible pre-event reference candle was available;
         in that case reaction state is not touched.
+
+        By default the reference uses the same interval as ``reaction_candle`` to
+        preserve the existing behavior. Callers that switch reaction resolution
+        over the lifetime of one event can provide a fixed
+        ``reference_interval_minutes`` so every stage keeps the same deterministic
+        pre-event baseline while 1m/5m/15m reaction candles change independently.
         """
         self._validate_reaction_candle(
             event_at=event_at,
             tracked=tracked,
             candle=reaction_candle,
         )
+        reference_interval = (
+            reaction_candle.interval_minutes
+            if reference_interval_minutes is None
+            else reference_interval_minutes
+        )
         reference = select_event_reaction_reference(
             event_id=event_id,
             event_at=event_at,
             tracked=tracked,
             candles=reference_candles,
-            interval_minutes=reaction_candle.interval_minutes,
+            interval_minutes=reference_interval,
         )
         if reference is None:
             return None
