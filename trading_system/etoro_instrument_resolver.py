@@ -19,6 +19,7 @@ class ResolvedEtoroInstrument:
     instrument_id: int
     symbol: str
     display_name: str
+    market: str = ""
 
 
 class EtoroInstrumentSearch(Protocol):
@@ -139,4 +140,5 @@ class EtoroInstrumentResolver:
             instrument_id=candidate.instrument_id,
             symbol=candidate.symbol or "",
             display_name=candidate.display_name,
+            market=candidate.market or "",
         )
