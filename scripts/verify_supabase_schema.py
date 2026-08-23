@@ -3,9 +3,11 @@
 
 The existing strategy-draft and calendar/watchlist checks stay in place. The
 persistent tracked-event worker additionally requires the objects introduced by
-20260827090000_persistent_tracked_market_events.sql and
-20260827091000_tracked_event_schema_gate.sql. Migrations are applied out-of-band;
-this script only verifies them before any backend/systemd process is restarted.
+20260827090000_persistent_tracked_market_events.sql,
+20260827091000_tracked_event_schema_gate.sql and
+20260827092000_tracked_event_reaction_anchor.sql. Migrations are applied
+out-of-band; this script only verifies them before backend/systemd processes are
+restarted.
 """
 
 from __future__ import annotations
@@ -52,6 +54,10 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
     (
         "capture_tracked_market_event_reference_function_exists",
         "capture_tracked_market_event_reference() function",
+    ),
+    (
+        "capture_tracked_market_event_reaction_anchor_function_exists",
+        "capture_tracked_market_event_reaction_anchor() function",
     ),
 )
 
@@ -115,8 +121,7 @@ def main() -> int:
     except Exception as exc:
         print(
             "SCHEMA GATE FAILED: could not call verify_tracked_event_runtime_schema(). "
-            "Apply 20260827090000_persistent_tracked_market_events.sql and "
-            "20260827091000_tracked_event_schema_gate.sql before deploying. "
+            "Apply the pending tracked-event migrations before deploying. "
             f"Underlying error: {exc}",
             file=sys.stderr,
         )
