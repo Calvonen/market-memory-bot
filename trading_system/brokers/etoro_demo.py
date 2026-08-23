@@ -11,10 +11,15 @@ from trading_system.models import Direction, RiskStatus, TradeProposal, TradingM
 
 
 class EtoroDemoBroker(Broker):
-    """Submit risk-approved demo orders to eToro's Virtual Portfolio only.
+    """Submit risk-approved opening orders to eToro's Virtual Portfolio only.
 
     Both portfolio verification and execution are pinned to eToro's documented
     demo paths. This broker intentionally has no real-money execution path.
+
+    This proof broker currently submits only an opening market order. TradeProposal
+    stop/target levels are RiskEngine inputs; they are not attached to the eToro
+    position as protective stop-loss/take-profit orders here. Protective-order and
+    position-lifecycle management belong in a separate follow-up implementation.
     """
 
     DEMO_PORTFOLIO_URL = "https://public-api.etoro.com/api/v1/trading/info/demo/portfolio"
@@ -102,7 +107,6 @@ class EtoroDemoBroker(Broker):
             "amount": self.amount_usd,
             "orderCurrency": "usd",
             "leverage": 1,
-            "stopLossType": "fixed",
         }
         try:
             response = self._http_post(
