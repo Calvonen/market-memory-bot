@@ -1,54 +1,11 @@
 #!/usr/bin/env python3
-"""Pre-deploy Supabase schema gate for the strategy-draft approval flow and
-the calendar/watchlist candidate-tracking endpoints.
+"""Pre-deploy Supabase schema gate for MarketAI backend runtime dependencies.
 
-This backend commit's strategy-draft endpoints
-(POST .../strategy-draft/approve, and the admin write endpoint's
-apply_partial_update()) depend on Supabase objects added by
-supabase/migrations/20260821090000_event_strategy_approvals.sql,
-supabase/migrations/20260821140000_shared_expectation_version_lock.sql,
-supabase/migrations/20260822090000_verify_strategy_draft_schema.sql, and
-supabase/migrations/20260823090000_expectation_write_atomic_response_and_schema_version.sql.
-The calendar/watchlist endpoints (GET/POST /api/v1/calendar/*) similarly
-depend on objects added by
-supabase/migrations/20260824090000_calendar_watchlist_events.sql and
-supabase/migrations/20260825090000_calendar_schema_gate.sql (the latter is
-what extends verify_strategy_draft_schema() itself with the calendar
-checks below), and
-supabase/migrations/20260829090000_distinct_atomic_calendar_candidate_upsert_version.sql,
-which atomically installs and version-gates the placeholder-preserving
-candidate upsert body without depending on the two earlier follow-ups. Those
-migrations are applied out-of-band, before merging,
-through a separate secure mechanism (the Supabase CLI/dashboard) - this
-script and the CI it runs in hold no Postgres-DDL-capable credential and
-apply no migrations themselves.
-
-Existence checks alone are not sufficient here: insert_next_expectation_
-version() has changed its actual behavior more than once while keeping the
-exact same call signature, so "a function with this signature exists" can
-be true against an outdated deployment whose body still has the earlier
-(buggy) semantics. schema_version_matches closes that gap - it calls
-strategy_draft_schema_version(), a small marker function bumped by every
-migration that changes this write path's semantics, and compares it
-against the exact value this backend commit requires. An older deployment
-either has no such function to call (which PostgREST surfaces as this
-entire RPC call failing - see "Fails closed" below) or has it returning a
-stale value, and either way this check reports it as missing/failed.
-
-This script only *verifies* the resulting schema is present, using the
-read-only verify_strategy_draft_schema() RPC and the same
-MARKETAI_SUPABASE_URL/MARKETAI_SUPABASE_SECRET_KEY the already-running
-backend service itself uses. It never receives a GitHub Actions secret and
-is never given the Supabase service-role/admin key inline - see
-.github/workflows/deploy-seesam-hub.yml, which sources the same env file
-the systemd service already reads before invoking this script.
-
-Fails closed: any problem - missing env vars, a network error, the RPC
-itself missing (almost always meaning the migrations above have not been
-applied yet), or any individual check coming back false - exits non-zero.
-The deploy workflow runs this before restarting the backend and must treat
-a non-zero exit here as "do not restart" (see the "Deploy gate: Supabase
-schema verification" section of docs/event_configuration_storage.md).
+The existing strategy-draft and calendar/watchlist checks stay in place. The
+persistent tracked-event worker additionally requires the tracked-event runtime
+migrations through the eToro-resolution preflight version. Migrations are
+applied out-of-band; this script only verifies them before backend/systemd
+processes are restarted.
 """
 
 from __future__ import annotations
@@ -82,7 +39,32 @@ REQUIRED_CHECKS: tuple[tuple[str, str], ...] = (
     ),
 )
 
+REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
+    ("tracked_market_events_table_exists", "tracked_market_events table"),
+    (
+        "tracked_market_event_reactions_table_exists",
+        "tracked_market_event_reactions table",
+    ),
+    (
+        "upsert_tracked_market_event_function_exists",
+        "upsert_tracked_market_event() function",
+    ),
+    (
+        "arm_tracked_market_event_resolution_function_exists",
+        "arm_tracked_market_event_resolution() function",
+    ),
+    (
+        "capture_tracked_market_event_reference_function_exists",
+        "capture_tracked_market_event_reference() function",
+    ),
+    (
+        "capture_tracked_market_event_reaction_anchor_function_exists",
+        "capture_tracked_market_event_reaction_anchor() function",
+    ),
+)
+
 REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 2
+REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 2
 
 
 def main() -> int:
@@ -111,16 +93,9 @@ def main() -> int:
         response = client.rpc("verify_strategy_draft_schema", {}).execute()
     except Exception as exc:
         print(
-            "SCHEMA GATE FAILED: could not call verify_strategy_draft_schema(). This "
-            "almost always means the required Supabase migrations "
-            "(supabase/migrations/20260821090000_event_strategy_approvals.sql, "
-            "20260821140000_shared_expectation_version_lock.sql, "
-            "20260822090000_verify_strategy_draft_schema.sql, "
-            "20260823090000_expectation_write_atomic_response_and_schema_version.sql, "
-            "20260824090000_calendar_watchlist_events.sql, and "
-            "20260825090000_calendar_schema_gate.sql, and "
-            "20260829090000_distinct_atomic_calendar_candidate_upsert_version.sql) "
-            f"have not been applied to this Supabase project yet. Underlying error: {exc}",
+            "SCHEMA GATE FAILED: could not call verify_strategy_draft_schema(). "
+            "Apply the pending strategy/calendar migrations before deploying. "
+            f"Underlying error: {exc}",
             file=sys.stderr,
         )
         return 1
@@ -144,6 +119,36 @@ def main() -> int:
             f"(deployed: {deployed_upsert_version!r})"
         )
 
+    try:
+        tracked_response = client.rpc("verify_tracked_event_runtime_schema", {}).execute()
+    except Exception as exc:
+        print(
+            "SCHEMA GATE FAILED: could not call verify_tracked_event_runtime_schema(). "
+            "Apply the pending tracked-event migrations before deploying. "
+            f"Underlying error: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    tracked_rows = getattr(tracked_response, "data", None) or []
+    if not tracked_rows:
+        print(
+            "SCHEMA GATE FAILED: verify_tracked_event_runtime_schema() returned no rows.",
+            file=sys.stderr,
+        )
+        return 1
+    tracked_row: dict[str, Any] = tracked_rows[0]
+    missing.extend(
+        label for key_name, label in REQUIRED_TRACKED_EVENT_CHECKS if not tracked_row.get(key_name)
+    )
+    deployed_runtime_version = tracked_row.get("runtime_schema_version")
+    if deployed_runtime_version != REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION:
+        missing.append(
+            "tracked-event runtime schema version "
+            f"{REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION} "
+            f"(deployed: {deployed_runtime_version!r})"
+        )
+
     if missing:
         print(
             "SCHEMA GATE FAILED: the following required Supabase objects are missing: "
@@ -155,12 +160,8 @@ def main() -> int:
         return 1
 
     print(
-        "Supabase schema gate passed: event_strategy_approvals, "
-        "approve_strategy_draft(), and insert_next_expectation_version() are all "
-        "present, insert_next_expectation_version() is on the required "
-        "implementation version, calendar_events and calendar RPCs are present, "
-        "and upsert_calendar_candidate() has the required placeholder-preserving "
-        "implementation version."
+        "Supabase schema gate passed: strategy-draft/calendar dependencies and "
+        "persistent tracked-event runtime preflight tables/RPCs are present."
     )
     return 0
 

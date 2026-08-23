@@ -77,19 +77,23 @@ jobs:
           # Calendar/watchlist candidate sync (Finnhub) is a scheduled
           # one-shot job, not a long-running worker - see
           # docs/calendar_watchlist.md. Installed/updated on every deploy so
-          # a unit file change in this repo actually takes effect, and
-          # `enable --now` is idempotent (safe to run on a deploy where
-          # nothing about the timer changed). Placed after the schema gate,
-          # like the two systemctl restarts below, so a missing calendar
-          # migration stops this too, not just the API/release-worker
-          # restarts.
+          # a unit file change in this repo actually takes effect.
           sudo /usr/bin/install -m 0644 deploy/systemd/marketai-calendar-sync.service /etc/systemd/system/marketai-calendar-sync.service
           sudo /usr/bin/install -m 0644 deploy/systemd/marketai-calendar-sync.timer /etc/systemd/system/marketai-calendar-sync.timer
+
+          # Persistent tracked-event monitoring is a long-running observation
+          # worker. It reads canonical tracked_market_events, resolves eToro
+          # identity, captures a pre-event baseline and persists reactions. It
+          # has no strategy/risk/broker execution path.
+          sudo /usr/bin/install -m 0644 deploy/systemd/marketai-tracked-events.service /etc/systemd/system/marketai-tracked-events.service
+
           sudo /usr/bin/systemctl daemon-reload
           sudo /usr/bin/systemctl enable --now marketai-calendar-sync.timer
+          sudo /usr/bin/systemctl enable marketai-tracked-events.service
 
           sudo /usr/bin/systemctl restart marketai-api.service
           sudo /usr/bin/systemctl restart marketai-hays-release.service
+          sudo /usr/bin/systemctl restart marketai-tracked-events.service
 
           for attempt in $(seq 1 15); do
             if curl --fail --silent http://127.0.0.1:8001/health >/tmp/marketai-health.json; then
@@ -103,6 +107,12 @@ jobs:
             sleep 1
           done
           cat /tmp/marketai-health.json
+
+          if ! /usr/bin/systemctl is-active --quiet marketai-tracked-events.service; then
+            echo "::error::marketai-tracked-events.service is not active after restart"
+            sudo /usr/bin/systemctl status marketai-tracked-events.service --no-pager -l || true
+            exit 1
+          fi
 
           # The Hays worker intentionally exits 0 once the event has reached a
           # terminal paper state. In that case systemd reports the unit as
