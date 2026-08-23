@@ -171,7 +171,11 @@ $$;
 revoke all on function public.tracked_event_runtime_schema_version from public;
 grant execute on function public.tracked_event_runtime_schema_version to service_role;
 
-create or replace function public.verify_tracked_event_runtime_schema()
+-- The OUT signature changed in this migration, so PostgreSQL requires the old
+-- verifier to be dropped before recreating it with the extra columns.
+drop function if exists public.verify_tracked_event_runtime_schema();
+
+create function public.verify_tracked_event_runtime_schema()
 returns table (
   tracked_market_events_table_exists boolean,
   tracked_market_event_reactions_table_exists boolean,
