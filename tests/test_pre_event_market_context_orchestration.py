@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 import unittest
@@ -9,6 +9,7 @@ import pandas as pd
 
 from trading_system.pre_event_market_context_orchestration import (
     acquire_and_persist_pre_event_market_context,
+    acquire_and_persist_pre_event_market_context_for_event,
 )
 
 
@@ -41,6 +42,16 @@ class _Repository:
     def get(self, event_id):
         self.get_calls.append(event_id)
         return self.saved_event
+
+
+class _Calendar:
+    def __init__(self, sessions) -> None:
+        self.sessions = pd.DatetimeIndex(sessions)
+        self.calls = []
+
+    def sessions_in_range(self, start, end):
+        self.calls.append((start, end))
+        return self.sessions[(self.sessions >= start) & (self.sessions <= end)]
 
 
 class PreEventMarketContextOrchestrationTests(unittest.TestCase):
@@ -102,6 +113,131 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
                 "close_to_close_direction": "up",
             },
         )
+
+    def test_auto_entrypoint_resolves_sydney_sessions_before_acquisition(self) -> None:
+        version = datetime(2026, 8, 24, 14, 47, tzinfo=UTC)
+        event = SimpleNamespace(
+            instrument="WDS.ASX",
+            resolved_etoro_market="Sydney",
+            event_at=datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
+            updated_at=version,
+        )
+        repository = _Repository(event=event)
+        calendar = _Calendar(["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25"])
+        calendar_ids = []
+        fetch_calls = []
+
+        def calendar_loader(calendar_id):
+            calendar_ids.append(calendar_id)
+            return calendar
+
+        def fetcher(ticker, period, interval):
+            fetch_calls.append((ticker, period, interval))
+            return pd.DataFrame(
+                {
+                    "Open": [Decimal("10"), Decimal("11")],
+                    "High": [Decimal("11"), Decimal("13")],
+                    "Low": [Decimal("9"), Decimal("10")],
+                    "Close": [Decimal("10.5"), Decimal("12")],
+                    "Volume": [100, 200],
+                },
+                index=pd.DatetimeIndex(["2026-08-21", "2026-08-24"]),
+            )
+
+        saved = acquire_and_persist_pre_event_market_context_for_event(
+            repository,
+            event_id="event-1",
+            ticker="WDS.ASX",
+            actor="tracked-event-worker",
+            fetcher=fetcher,
+            calendar_loader=calendar_loader,
+        )
+
+        self.assertIs(saved, event)
+        self.assertEqual(calendar_ids, ["XASX"])
+        self.assertEqual(fetch_calls, [("WDS.ASX", "1mo", "1d")])
+        self.assertEqual(repository.get_calls, ["event-1", "event-1"])
+        rpc_name, payload = repository.client.calls[0]
+        self.assertEqual(
+            rpc_name,
+            "capture_tracked_market_event_pre_event_context_if_current",
+        )
+        self.assertEqual(payload["input_market_timezone"], "Australia/Sydney")
+        self.assertEqual(payload["input_expected_updated_at"], version.isoformat())
+        self.assertEqual(payload["input_pre_event_market_context"]["session_date"], "2026-08-24")
+        self.assertEqual(payload["input_pre_event_market_context"]["previous_session_date"], "2026-08-21")
+
+    def test_auto_entrypoint_rejects_unresolved_market_before_calendar_or_fetch(self) -> None:
+        event = SimpleNamespace(
+            instrument="WDS.ASX",
+            resolved_etoro_market=None,
+            event_at=datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 8, 24, 14, 47, tzinfo=UTC),
+        )
+        repository = _Repository(event=event)
+        calendar_calls = []
+        fetch_calls = []
+
+        with self.assertRaisesRegex(ValueError, "no resolved_etoro_market"):
+            acquire_and_persist_pre_event_market_context_for_event(
+                repository,
+                event_id="event-1",
+                ticker="WDS.ASX",
+                actor="tracked-event-worker",
+                fetcher=lambda *args: fetch_calls.append(args),
+                calendar_loader=lambda calendar_id: calendar_calls.append(calendar_id),
+            )
+
+        self.assertEqual(calendar_calls, [])
+        self.assertEqual(fetch_calls, [])
+        self.assertEqual(repository.client.calls, [])
+
+    def test_auto_entrypoint_rejects_unknown_broker_market_before_calendar_or_fetch(self) -> None:
+        event = SimpleNamespace(
+            instrument="WDS.ASX",
+            resolved_etoro_market="Australia",
+            event_at=datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 8, 24, 14, 47, tzinfo=UTC),
+        )
+        repository = _Repository(event=event)
+        calendar_calls = []
+
+        with self.assertRaisesRegex(ValueError, "unsupported eToro market"):
+            acquire_and_persist_pre_event_market_context_for_event(
+                repository,
+                event_id="event-1",
+                ticker="WDS.ASX",
+                actor="tracked-event-worker",
+                calendar_loader=lambda calendar_id: calendar_calls.append(calendar_id),
+            )
+
+        self.assertEqual(calendar_calls, [])
+        self.assertEqual(repository.client.calls, [])
+
+    def test_auto_entrypoint_requires_event_version_before_external_calls(self) -> None:
+        event = SimpleNamespace(
+            instrument="WDS.ASX",
+            resolved_etoro_market="Sydney",
+            event_at=datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
+            updated_at=None,
+        )
+        repository = _Repository(event=event)
+        calendar_calls = []
+        fetch_calls = []
+
+        with self.assertRaisesRegex(ValueError, "no updated_at version"):
+            acquire_and_persist_pre_event_market_context_for_event(
+                repository,
+                event_id="event-1",
+                ticker="WDS.ASX",
+                actor="tracked-event-worker",
+                fetcher=lambda *args: fetch_calls.append(args),
+                calendar_loader=lambda calendar_id: calendar_calls.append(calendar_id),
+            )
+
+        self.assertEqual(calendar_calls, [])
+        self.assertEqual(fetch_calls, [])
+        self.assertEqual(repository.client.calls, [])
 
     def test_rejects_ticker_that_does_not_match_canonical_event_before_fetch(self) -> None:
         repository = _Repository(event=SimpleNamespace(instrument="EXM.L"))
