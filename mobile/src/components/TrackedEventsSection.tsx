@@ -2,7 +2,12 @@ import { useFocusEffect } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { getTrackedEvents, TrackedMarketEvent } from '@/services/tracked-events';
+import {
+  getTrackedEventLatestReaction,
+  getTrackedEvents,
+  TrackedEventLatestReaction,
+  TrackedMarketEvent,
+} from '@/services/tracked-events';
 
 type Snapshot = {
   count: number;
@@ -12,6 +17,11 @@ type Snapshot = {
 type Props = {
   onSnapshot?: (snapshot: Snapshot) => void;
 };
+
+type LatestReactionState =
+  | { status: 'loading' }
+  | { status: 'ready'; reaction: TrackedEventLatestReaction | null }
+  | { status: 'error' };
 
 export function TrackedEventsSection({ onSnapshot }: Props) {
   const [events, setEvents] = useState<TrackedMarketEvent[] | null>(null);
@@ -69,6 +79,31 @@ export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
   const scheduleText = formatTrackedEventSchedule(event);
   const presentation = describeTrackedEvent(event);
   const configText = formatTrackingConfigSnapshot(event.tracking_config_snapshot);
+  const [latestReactionState, setLatestReactionState] = useState<LatestReactionState>({
+    status: 'loading',
+  });
+
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      void getTrackedEventLatestReaction(event.event_id)
+        .then((response) => {
+          if (!active) return;
+          if (response.event_id !== event.event_id) {
+            setLatestReactionState({ status: 'error' });
+            return;
+          }
+          setLatestReactionState({ status: 'ready', reaction: response.latest_reaction });
+        })
+        .catch(() => {
+          if (!active) return;
+          setLatestReactionState({ status: 'error' });
+        });
+      return () => {
+        active = false;
+      };
+    }, [event.event_id]),
+  );
 
   return (
     <View style={styles.eventCard}>
@@ -91,6 +126,51 @@ export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
         <Text style={styles.configTitle}>Seuranta-asetukset</Text>
         <Text style={styles.configText}>{configText}</Text>
       </View>
+
+      <TrackedEventResult state={latestReactionState} />
+    </View>
+  );
+}
+
+function TrackedEventResult({ state }: { state: LatestReactionState }) {
+  if (state.status === 'loading') {
+    return (
+      <View style={styles.resultBlock}>
+        <Text style={styles.configTitle}>Tulos</Text>
+        <Text style={styles.configText}>Haetaan viimeisintä havaintoa…</Text>
+      </View>
+    );
+  }
+  if (state.status === 'error') {
+    return (
+      <View style={styles.resultBlock}>
+        <Text style={styles.configTitle}>Tulos</Text>
+        <Text style={styles.configText}>Tulosta ei juuri nyt saatu haettua.</Text>
+      </View>
+    );
+  }
+  if (!state.reaction) {
+    return (
+      <View style={styles.resultBlock}>
+        <Text style={styles.configTitle}>Tulos</Text>
+        <Text style={styles.configText}>Ei vielä tallennettua markkinareaktiota.</Text>
+      </View>
+    );
+  }
+
+  const reaction = state.reaction;
+  return (
+    <View style={styles.resultBlock}>
+      <Text style={styles.configTitle}>Tulos</Text>
+      <Text style={styles.resultText}>
+        Viimeisin havainto · {reaction.interval_minutes} min · Muutos {reaction.return_pct} %
+      </Text>
+      <Text style={styles.resultDetail}>
+        Reference {reaction.reference_price} · Close {reaction.close_price}
+      </Text>
+      <Text style={styles.resultDetail}>
+        Suunta {reaction.direction} · Kehitys {reaction.evolution}
+      </Text>
     </View>
   );
 }
@@ -245,6 +325,23 @@ const styles = StyleSheet.create({
     letterSpacing: 0.3,
   },
   configText: {
+    color: '#8994a6',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  resultBlock: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#202734',
+  },
+  resultText: {
+    color: '#d8dee8',
+    fontSize: 12,
+    marginTop: 2,
+    fontWeight: '600',
+  },
+  resultDetail: {
     color: '#8994a6',
     fontSize: 12,
     marginTop: 2,
