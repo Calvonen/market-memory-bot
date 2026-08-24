@@ -10,6 +10,7 @@ from trading_system.event_market_reaction import (
     EventMarketReactionBaseline,
     EventMarketReactionPipeline,
 )
+from trading_system.market_session_profile import has_grounded_market_session_profile
 from trading_system.pre_event_market_context_orchestration import (
     acquire_and_persist_pre_event_market_context_for_event,
     persisted_pre_event_market_context_is_current,
@@ -556,15 +557,27 @@ async def _prepare_and_monitor_one_event(
 ) -> None:
     """Prepare grounded pre-event context before entering the live monitor.
 
-    Only new TRACKED events without a reference are prepared here. MONITORING
-    rows and already-referenced legacy TRACKED rows predate this worker wiring
-    and continue through the existing monitor path unchanged. External calendar
-    and Yahoo work runs off the asyncio loop. Preparation failures raised before
-    the event's deadline stay retryable at the run_forever task boundary; a
-    failure - including one from an acquisition call that was still running when
-    event_at passed - discovered at or after that deadline terminal-fails the
-    event instead, so a slow or repeatedly-failing acquisition can never keep it
-    stuck retrying in TRACKED past max_past. Every such terminal failure goes
+    Only new TRACKED events without a reference are prepared here, and only on
+    markets that already have a grounded exact eToro market session profile.
+    Preparation needs a real exchange calendar and market timezone for the
+    broker's exact market label, and those are registered one grounded market at
+    a time (see market_session_profile.py). An event on a market that has not
+    been grounded yet keeps exactly its existing reaction-monitoring behavior:
+    it is never prepared, and never fails for the absence of a profile - that
+    absence means "not rolled out here yet", not "misconfigured event". The
+    predicate is deliberately an explicit exact-label lookup rather than a
+    caught resolve_market_session_profile() error, so rollout scope can never be
+    widened by alias, ticker, country, or calendar-market inference.
+
+    MONITORING rows and already-referenced legacy TRACKED rows predate this
+    worker wiring and continue through the existing monitor path unchanged.
+    External calendar and Yahoo work runs off the asyncio loop. Preparation
+    failures raised before the event's deadline stay retryable at the
+    run_forever task boundary; a failure - including one from an acquisition
+    call that was still running when event_at passed - discovered at or after
+    that deadline terminal-fails the event instead, so a slow or
+    repeatedly-failing acquisition can never keep it stuck retrying in TRACKED
+    past max_past. Every such terminal failure goes
     through _fail_pre_event_deadline, which is compare-and-swap bound to the
     version the decision was made from: the RPC re-checks the deadline against
     the locked current row, so an event rescheduled into the future is never
@@ -596,6 +609,7 @@ async def _prepare_and_monitor_one_event(
         event.status == TrackedEventStatus.TRACKED
         and event.reference_price is None
         and bool(event.resolved_etoro_market)
+        and has_grounded_market_session_profile(event.resolved_etoro_market)
     )
     if is_unreferenced_tracked_event and event.pre_event_market_context is None:
         if datetime.now(UTC) >= event.event_at:

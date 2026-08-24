@@ -6,6 +6,7 @@ from trading_system.market_session_profile import (
     GROUNDED_MARKET_SESSION_PROFILES,
     SYDNEY_MARKET_SESSION_PROFILE,
     MarketSessionProfile,
+    has_grounded_market_session_profile,
     resolve_market_session_profile,
 )
 
@@ -92,6 +93,67 @@ class MarketSessionProfileTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "etoro_market"):
             resolve_market_session_profile(" ", profiles=())
+
+
+class HasGroundedMarketSessionProfileTests(unittest.TestCase):
+    def test_grounded_sydney_is_the_only_currently_rolled_out_market(self) -> None:
+        self.assertTrue(has_grounded_market_session_profile("Sydney"))
+
+    def test_markets_awaiting_grounding_report_false_instead_of_raising(self) -> None:
+        # London/NASDAQ tracked events already run the existing reaction
+        # monitor; they simply have no grounded session profile yet, which the
+        # predicate must report as "not rolled out" rather than as an error.
+        for label in ("London", "NASDAQ", "NYSE", "Helsinki"):
+            with self.subTest(label=label):
+                self.assertFalse(has_grounded_market_session_profile(label))
+
+    def test_never_aliases_or_infers_from_ticker_country_or_calendar_market(self) -> None:
+        for label in ("sydney", "SYDNEY", " Sydney", "Sydney ", "Australia", "ASX", "XASX"):
+            with self.subTest(label=label):
+                self.assertFalse(has_grounded_market_session_profile(label))
+
+    def test_missing_or_blank_market_is_not_grounded(self) -> None:
+        for label in (None, "", " "):
+            with self.subTest(label=label):
+                self.assertFalse(has_grounded_market_session_profile(label))
+
+    def test_ambiguously_registered_label_is_not_grounded(self) -> None:
+        first = MarketSessionProfile(
+            etoro_market="Observed Market Label",
+            market_timezone="Europe/London",
+            calendar_id="CALENDAR_A",
+        )
+        second = MarketSessionProfile(
+            etoro_market="Observed Market Label",
+            market_timezone="Europe/London",
+            calendar_id="CALENDAR_B",
+        )
+
+        self.assertFalse(
+            has_grounded_market_session_profile(
+                "Observed Market Label", profiles=(first, second)
+            )
+        )
+
+    def test_agrees_exactly_with_resolve_market_session_profile(self) -> None:
+        profile = MarketSessionProfile(
+            etoro_market="Observed Market Label",
+            market_timezone="Europe/London",
+            calendar_id="OBSERVED_CALENDAR",
+        )
+        profiles = (profile,)
+
+        for label in ("Observed Market Label", "observed market label", "Other", "", " "):
+            with self.subTest(label=label):
+                try:
+                    resolve_market_session_profile(label, profiles=profiles)
+                except ValueError:
+                    resolvable = False
+                else:
+                    resolvable = True
+                self.assertEqual(
+                    has_grounded_market_session_profile(label, profiles=profiles), resolvable
+                )
 
 
 if __name__ == "__main__":

@@ -62,3 +62,25 @@ def resolve_market_session_profile(
             raise ValueError(f"unsupported eToro market: {etoro_market}")
         raise ValueError(f"ambiguous eToro market profile: {etoro_market}")
     return matches[0]
+
+
+def has_grounded_market_session_profile(
+    etoro_market: str | None,
+    *,
+    profiles: tuple[MarketSessionProfile, ...] = GROUNDED_MARKET_SESSION_PROFILES,
+) -> bool:
+    """Report whether one grounded profile exists for an exact broker label.
+
+    This is the rollout predicate for features that require a grounded market
+    session profile. It answers the same question as
+    ``resolve_market_session_profile`` without raising, so callers can branch on
+    availability instead of catching a ValueError as control flow - a missing
+    profile means "not rolled out here yet", which is not an error condition.
+
+    Matching is exact and identical to ``resolve_market_session_profile``: no
+    aliases, suffix rules, ticker/country inference, or fallback mapping. A
+    missing, blank, untrimmed, or ambiguously registered label is not grounded.
+    """
+    if not etoro_market or etoro_market != etoro_market.strip():
+        return False
+    return len([profile for profile in profiles if profile.etoro_market == etoro_market]) == 1

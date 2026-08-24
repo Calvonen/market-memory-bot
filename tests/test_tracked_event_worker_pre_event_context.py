@@ -42,6 +42,7 @@ def _event(
     status: TrackedEventStatus = TrackedEventStatus.TRACKED,
     updated_at: datetime | None = None,
     pre_event_market_context: dict[str, object] | None = None,
+    resolved_etoro_market: str | None = "Sydney",
 ):
     return PersistentTrackedEvent(
         event_id="11111111-1111-1111-1111-111111111111",
@@ -60,7 +61,7 @@ def _event(
         resolved_etoro_instrument_id=7016,
         resolved_etoro_symbol="WDS.ASX",
         resolved_etoro_display_name="Woodside Energy Group Ltd",
-        resolved_etoro_market="Sydney",
+        resolved_etoro_market=resolved_etoro_market,
         resolution_armed_at=event_at - timedelta(hours=4),
         resolution_armed_by="tracked-event-preflight",
         pre_event_market_context=pre_event_market_context,
@@ -447,6 +448,138 @@ class TrackedEventWorkerPreEventContextTests(unittest.TestCase):
             "revalidation failed at or after event_at",
             p.fail_deadline.call_args.kwargs["error"],
         )
+
+    def test_grounded_sydney_market_is_prepared_normally(self) -> None:
+        # Sydney is the one grounded exact eToro market, so the full pre-event
+        # preparation path applies to it.
+        event = _event(
+            event_at=datetime.now(UTC) + timedelta(hours=4),
+            resolved_etoro_market="Sydney",
+        )
+        prepared = replace(event, updated_at=event.updated_at + timedelta(seconds=1))
+        repository = _Repository()
+
+        with ExitStack() as stack:
+            p = _Patches(stack, acquire={"return_value": prepared})
+            asyncio.run(_run(event, repository=repository))
+
+        p.acquire.assert_called_once()
+        p.monitor.assert_awaited_once()
+        self.assertEqual(repository.failed, [])
+
+    def test_market_without_grounded_profile_goes_straight_to_legacy_monitor(self) -> None:
+        # London/NASDAQ tracked events already work through the existing
+        # reaction monitor. Until their session profile is grounded, the new
+        # mandatory preparation must not apply to them at all - no acquisition,
+        # no revalidation, no deadline decision, just monitor_one_event with
+        # the event exactly as it was read.
+        for market in ("London", "NASDAQ"):
+            with self.subTest(market=market):
+                event = _event(
+                    event_at=datetime.now(UTC) + timedelta(hours=4),
+                    resolved_etoro_market=market,
+                )
+                repository = _Repository()
+                provider = _Provider()
+
+                with ExitStack() as stack:
+                    p = _Patches(stack)
+                    asyncio.run(_run(event, repository=repository, provider=provider))
+
+                p.acquire.assert_not_called()
+                p.is_current.assert_not_called()
+                p.validate.assert_not_called()
+                p.fail_deadline.assert_not_called()
+                p.monitor.assert_awaited_once_with(
+                    event,
+                    repository=repository,
+                    provider=provider,
+                    monitor_hours=8.0,
+                    reference_lead_seconds=30.0,
+                    max_wait_for_market_hours=72.0,
+                )
+                self.assertEqual(repository.failed, [])
+                self.assertEqual(repository.get_calls, [])
+
+    def test_market_without_grounded_profile_is_not_failed_at_event_at(self) -> None:
+        # Past event_at with no context, the grounded-market path would
+        # terminal-fail. An ungrounded market must not be failed merely because
+        # its profile has not been registered yet.
+        event = _event(
+            event_at=datetime.now(UTC) - timedelta(seconds=1),
+            resolved_etoro_market="London",
+        )
+        repository = _Repository()
+
+        with ExitStack() as stack:
+            p = _Patches(stack)
+            asyncio.run(_run(event, repository=repository))
+
+        p.acquire.assert_not_called()
+        p.fail_deadline.assert_not_called()
+        p.monitor.assert_awaited_once()
+        self.assertEqual(repository.failed, [])
+
+    def test_persisted_context_on_ungrounded_market_still_skips_preparation(self) -> None:
+        # A row that somehow carries a snapshot on a market whose profile is not
+        # grounded cannot be revalidated (there is no calendar to revalidate
+        # against), so it also stays on the legacy monitor path.
+        event = _event(
+            event_at=datetime.now(UTC) + timedelta(hours=4),
+            resolved_etoro_market="London",
+            pre_event_market_context=_SNAPSHOT,
+        )
+        repository = _Repository(current_event=event)
+
+        with ExitStack() as stack:
+            p = _Patches(stack)
+            asyncio.run(_run(event, repository=repository))
+
+        p.acquire.assert_not_called()
+        p.is_current.assert_not_called()
+        p.validate.assert_not_called()
+        p.fail_deadline.assert_not_called()
+        p.monitor.assert_awaited_once()
+        self.assertEqual(repository.failed, [])
+
+    def test_missing_resolved_market_keeps_its_existing_behavior(self) -> None:
+        # Unchanged by the rollout gate: an unarmed row was already excluded by
+        # the bool(resolved_etoro_market) condition and goes to the monitor,
+        # which owns the fail-closed decision for incomplete arming.
+        event = _event(
+            event_at=datetime.now(UTC) + timedelta(hours=4),
+            resolved_etoro_market=None,
+        )
+        repository = _Repository()
+
+        with ExitStack() as stack:
+            p = _Patches(stack)
+            asyncio.run(_run(event, repository=repository))
+
+        p.acquire.assert_not_called()
+        p.fail_deadline.assert_not_called()
+        p.monitor.assert_awaited_once()
+        self.assertEqual(repository.failed, [])
+
+    def test_rollout_gate_does_not_alias_or_infer_the_grounded_market(self) -> None:
+        # Only the exact persisted label counts - no case folding, no country or
+        # calendar-market inference, no ticker-suffix mapping.
+        for market in ("sydney", "SYDNEY", "Australia", "ASX", "XASX"):
+            with self.subTest(market=market):
+                event = _event(
+                    event_at=datetime.now(UTC) + timedelta(hours=4),
+                    resolved_etoro_market=market,
+                )
+                repository = _Repository()
+
+                with ExitStack() as stack:
+                    p = _Patches(stack)
+                    asyncio.run(_run(event, repository=repository))
+
+                p.acquire.assert_not_called()
+                p.fail_deadline.assert_not_called()
+                p.monitor.assert_awaited_once()
+                self.assertEqual(repository.failed, [])
 
     def test_monitoring_restart_preserves_existing_legacy_path(self) -> None:
         event = _event(
