@@ -109,6 +109,26 @@ class TrackedEventLatestReactionTests(unittest.TestCase):
         self.assertEqual(result.interval_minutes, 1)
         self.assertEqual(result.return_pct, Decimal("3.0"))
 
+    def test_rejects_timezone_naive_candle_start(self):
+        base = datetime(2026, 8, 24, 7, 0, tzinfo=UTC)
+        row = _reaction(
+            candle_start=datetime(2026, 8, 24, 7, 0),
+            observed_at=base + timedelta(minutes=1),
+        )
+
+        with self.assertRaisesRegex(ValueError, "candle_start must be timezone-aware"):
+            latest_tracked_event_reaction((row,))
+
+    def test_rejects_timezone_naive_observed_at(self):
+        base = datetime(2026, 8, 24, 7, 0, tzinfo=UTC)
+        row = _reaction(
+            candle_start=base,
+            observed_at=datetime(2026, 8, 24, 7, 1),
+        )
+
+        with self.assertRaisesRegex(ValueError, "observed_at must be timezone-aware"):
+            latest_tracked_event_reaction((row,))
+
     def test_persisted_values_are_copied_without_rounding_or_recalculation(self):
         base = datetime(2026, 8, 24, 7, 0, tzinfo=UTC)
         row = _reaction(
