@@ -3,6 +3,58 @@
 -- compatible with the currently deployed worker while giving later runtime
 -- code an immutable, identity-checked write path for resolved_etoro_market.
 
+create or replace function public.guard_tracked_market_event_resolved_market()
+returns trigger
+language plpgsql
+security invoker
+as $$
+begin
+  if tg_op = 'INSERT' then
+    if new.resolved_etoro_market is not null then
+      raise exception 'tracked_market_event_resolved_market_direct_write_forbidden';
+    end if;
+    return new;
+  end if;
+
+  if new.resolved_etoro_market is not distinct from old.resolved_etoro_market then
+    return new;
+  end if;
+
+  if old.resolved_etoro_market is not null then
+    raise exception 'tracked_market_event_resolved_market_immutable';
+  end if;
+
+  -- First capture is only permitted from the SECURITY DEFINER RPC below.
+  -- Direct service-role table updates execute with current_user=session_user
+  -- and fail closed here.
+  if current_user = session_user then
+    raise exception 'tracked_market_event_resolved_market_direct_write_forbidden';
+  end if;
+
+  if new.resolved_etoro_market is null
+     or btrim(new.resolved_etoro_market) = ''
+     or new.status <> 'tracked'
+     or new.reference_price is not null
+     or new.resolved_etoro_instrument_id is null
+     or new.resolved_etoro_symbol is null
+     or new.resolved_etoro_display_name is null
+     or new.resolution_armed_at is null then
+    raise exception 'tracked_market_event_resolved_market_invalid_capture';
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists guard_tracked_market_event_resolved_market
+  on public.tracked_market_events;
+
+create trigger guard_tracked_market_event_resolved_market
+before insert or update of resolved_etoro_market
+on public.tracked_market_events
+for each row
+execute function public.guard_tracked_market_event_resolved_market();
+
 create or replace function public.capture_tracked_market_event_resolved_market(
   input_event_id uuid,
   input_etoro_instrument_id bigint,
@@ -13,7 +65,8 @@ create or replace function public.capture_tracked_market_event_resolved_market(
 )
 returns public.tracked_market_events
 language plpgsql
-security invoker
+security definer
+set search_path = pg_catalog, public
 as $$
 declare
   existing_row public.tracked_market_events%rowtype;
@@ -36,10 +89,6 @@ begin
     raise exception 'tracked_market_event_not_found' using errcode = 'P0002';
   end if;
 
-  if existing_row.status <> 'tracked' or existing_row.reference_price is not null then
-    raise exception 'tracked_market_event_resolved_market_locked';
-  end if;
-
   if existing_row.resolved_etoro_instrument_id is null
      or existing_row.resolution_armed_at is null then
     raise exception 'tracked_market_event_resolution_missing';
@@ -51,11 +100,17 @@ begin
     raise exception 'tracked_market_event_resolution_conflict';
   end if;
 
+  -- Exact retries remain idempotent even if the event has since advanced or
+  -- captured its reference. A different market is always a conflict.
   if existing_row.resolved_etoro_market is not null then
     if existing_row.resolved_etoro_market = input_etoro_market then
       return existing_row;
     end if;
     raise exception 'tracked_market_event_resolved_market_conflict';
+  end if;
+
+  if existing_row.status <> 'tracked' or existing_row.reference_price is not null then
+    raise exception 'tracked_market_event_resolved_market_locked';
   end if;
 
   update public.tracked_market_events
@@ -70,5 +125,6 @@ begin
 end;
 $$;
 
+revoke all on function public.guard_tracked_market_event_resolved_market() from public;
 revoke all on function public.capture_tracked_market_event_resolved_market(uuid,bigint,text,text,text,text) from public;
 grant execute on function public.capture_tracked_market_event_resolved_market(uuid,bigint,text,text,text,text) to service_role;
