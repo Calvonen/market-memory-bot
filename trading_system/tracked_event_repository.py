@@ -332,6 +332,39 @@ class SupabaseTrackedEventRepository:
             error_message="capture_tracked_market_event_reference returned invalid data",
         )
 
+    def capture_resolved_etoro_market(
+        self,
+        *,
+        event_id: str,
+        etoro_instrument_id: int,
+        etoro_symbol: str,
+        etoro_display_name: str,
+        etoro_market: str,
+        actor: str,
+    ) -> PersistentTrackedEvent:
+        try:
+            response = self.client.rpc(
+                "capture_tracked_market_event_resolved_market",
+                {
+                    "input_event_id": event_id,
+                    "input_etoro_instrument_id": etoro_instrument_id,
+                    "input_etoro_symbol": etoro_symbol,
+                    "input_etoro_display_name": etoro_display_name,
+                    "input_etoro_market": etoro_market,
+                    "input_actor": actor,
+                },
+            ).execute()
+        except Exception as exc:
+            if "tracked_market_event_resolved_market_conflict" in str(exc):
+                raise RuntimeError(
+                    f"tracked event {event_id} already has a different resolved_etoro_market"
+                ) from exc
+            raise
+        return self._single_event_response(
+            response.data,
+            error_message="capture_tracked_market_event_resolved_market returned invalid data",
+        )
+
     def capture_reaction_anchor(
         self,
         *,
