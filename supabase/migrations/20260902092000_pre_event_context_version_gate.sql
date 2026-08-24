@@ -32,12 +32,13 @@ begin
   -- response was lost. Delegate the equal-snapshot retry to the canonical RPC
   -- so its existing schema/timezone/actor/event-date validations still apply.
   if existing_row.pre_event_market_context = input_pre_event_market_context then
-    select public.capture_tracked_market_event_pre_event_context(
+    select * into saved_row
+    from public.capture_tracked_market_event_pre_event_context(
       input_event_id,
       input_pre_event_market_context,
       input_market_timezone,
       input_actor
-    ) into saved_row;
+    );
     return saved_row;
   end if;
 
@@ -45,12 +46,13 @@ begin
     raise exception 'tracked_market_event_version_conflict';
   end if;
 
-  select public.capture_tracked_market_event_pre_event_context(
+  select * into saved_row
+  from public.capture_tracked_market_event_pre_event_context(
     input_event_id,
     input_pre_event_market_context,
     input_market_timezone,
     input_actor
-  ) into saved_row;
+  );
 
   return saved_row;
 end;
