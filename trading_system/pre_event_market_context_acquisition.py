@@ -29,6 +29,8 @@ def acquire_pre_event_market_context(
     intentionally does not infer exchange timezone, calendar, or close time.
     Yahoo can include the current still-forming ``1d`` bar, so rows newer than
     ``last_confirmed_closed_session_date`` are discarded before selection.
+    The independently confirmed session itself must be present in the fetched
+    data; otherwise stale older history is rejected rather than substituted.
     """
 
     normalized_ticker = ticker.strip().upper()
@@ -46,7 +48,12 @@ def acquire_pre_event_market_context(
     confirmed = daily_ohlcv.loc[
         daily_ohlcv.index <= pd.Timestamp(last_confirmed_closed_session_date)
     ]
-    return pre_event_market_context(
+    context = pre_event_market_context(
         confirmed,
         event_trading_date=event_trading_date,
     )
+    if context is None:
+        return None
+    if context.session_date != last_confirmed_closed_session_date:
+        raise ValueError("confirmed closed session data is missing")
+    return context
