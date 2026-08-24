@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -15,7 +15,10 @@ from trading_system.pre_event_market_context_acquisition import (
     acquire_pre_event_market_context,
 )
 from trading_system.pre_event_market_context_persistence import capture_pre_event_market_context
-from trading_system.session_calendar_adapter import confirmed_session_dates
+from trading_system.session_calendar_adapter import (
+    confirmed_session_closes,
+    confirmed_session_dates,
+)
 from trading_system.session_date_resolver import resolve_session_dates
 from trading_system.tracked_event_repository import (
     PersistentTrackedEvent,
@@ -145,10 +148,13 @@ def acquire_and_persist_pre_event_market_context_for_event(
     The persisted exact ``resolved_etoro_market`` label selects one explicitly
     grounded market-session profile. The profile calendar supplies confirmed
     exchange sessions and ``resolve_session_dates`` selects the event trading
-    date plus the two immediately preceding sessions. The final persistence is
-    compare-and-swap bound to the same tracked-event ``updated_at`` version that
-    supplied event_at, instrument and broker market, so concurrent event edits
-    fail closed rather than locking a stale immutable context.
+    date plus the two immediately preceding sessions, and both of those sessions
+    must have actually closed by ``now`` - a session that is scheduled before the
+    event but still trading would otherwise freeze a partial daily candle into
+    the immutable snapshot. The final persistence is compare-and-swap bound to
+    the same tracked-event ``updated_at`` version that supplied event_at,
+    instrument and broker market, so concurrent event edits fail closed rather
+    than locking a stale immutable context.
     """
     event = repository.get(event_id)
     if event is None:
@@ -177,18 +183,23 @@ def acquire_and_persist_pre_event_market_context_for_event(
         "end_date": event_local_date + timedelta(days=_SESSION_CALENDAR_LOOKAHEAD_DAYS),
     }
     if calendar_loader is None:
-        sessions = confirmed_session_dates(profile, **calendar_kwargs)
+        session_closes = confirmed_session_closes(profile, **calendar_kwargs)
     else:
-        sessions = confirmed_session_dates(
+        session_closes = confirmed_session_closes(
             profile,
             calendar_loader=calendar_loader,
             **calendar_kwargs,
         )
 
+    # The exchange calendar owns both the session list and each session's real
+    # close, so acquisition never has to guess whether the session immediately
+    # before the event has finished trading yet.
     resolution = resolve_session_dates(
         event.event_at,
         profile=profile,
-        confirmed_session_dates=sessions,
+        confirmed_session_dates=tuple(session_date for session_date, _ in session_closes),
+        session_closes=dict(session_closes),
+        now=datetime.now(UTC),
     )
     context = acquire_pre_event_market_context(
         ticker=normalized_ticker,
