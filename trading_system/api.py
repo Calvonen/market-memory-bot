@@ -50,6 +50,10 @@ from trading_system.tracked_event_repository import (
     PersistentTrackedEvent,
     SupabaseTrackedEventRepository,
 )
+from trading_system.tracked_event_result import (
+    TrackedEventLatestReaction,
+    latest_tracked_event_reaction,
+)
 
 # Calendar range MVP: the mobile UI only ever offers 7/30-day chips and the
 # calendar sync worker never fetches further out than this (see
@@ -194,6 +198,21 @@ def _tracked_event_payload(event: PersistentTrackedEvent) -> dict[str, Any]:
     }
 
 
+def _tracked_event_latest_reaction_payload(
+    reaction: TrackedEventLatestReaction,
+) -> dict[str, Any]:
+    return {
+        "interval_minutes": reaction.interval_minutes,
+        "candle_start": reaction.candle_start.isoformat(),
+        "reference_price": str(reaction.reference_price),
+        "close_price": str(reaction.close_price),
+        "return_pct": str(reaction.return_pct),
+        "direction": reaction.direction,
+        "evolution": reaction.evolution,
+        "observed_at": reaction.observed_at.isoformat(),
+    }
+
+
 _POSTGRES_UUID_TEXT = re.compile(
     r"(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
@@ -216,6 +235,14 @@ def _require_valid_calendar_event_id(calendar_event_id: str) -> str:
             status_code=400, detail="calendar_event_id must be a valid UUID"
         )
     return calendar_event_id
+
+
+def _require_valid_tracked_event_id(event_id: str) -> str:
+    if _POSTGRES_UUID_TEXT.fullmatch(event_id) is None:
+        raise HTTPException(
+            status_code=400, detail="event_id must be a valid UUID"
+        )
+    return event_id
 
 
 class ManualCalendarEventRequest(BaseModel):
@@ -405,6 +432,43 @@ def create_app(
             return [_tracked_event_payload(item) for item in events]
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.get("/api/v1/tracked-events/{event_id}/latest-reaction")
+    def get_tracked_event_latest_reaction(
+        event_id: str,
+        x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
+    ) -> dict[str, Any]:
+        require_read(x_marketai_key)
+        event_id = _require_valid_tracked_event_id(event_id)
+        try:
+            repository = get_tracked_event_repository()
+            event = repository.get(event_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503, detail="Tracked-event read failed"
+            ) from exc
+        if event is None:
+            raise HTTPException(status_code=404, detail="Tracked event not found")
+
+        try:
+            latest = latest_tracked_event_reaction(repository.list_reactions(event_id))
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503, detail="Tracked-event reaction read failed"
+            ) from exc
+
+        return {
+            "event_id": event_id,
+            "latest_reaction": (
+                _tracked_event_latest_reaction_payload(latest)
+                if latest is not None
+                else None
+            ),
+        }
 
     @app.get("/api/v1/symbols")
     def symbols(q: str = Query(..., max_length=100), limit: int = 8, x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key")) -> list[dict[str, str]]:
