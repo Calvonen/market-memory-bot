@@ -28,6 +28,7 @@ class TrackedEtoroInstrument:
     etoro_instrument_id: int
     etoro_symbol: str
     etoro_display_name: str
+    etoro_market: str = ""
 
 
 def resolve_tracked_instrument(
@@ -38,9 +39,10 @@ def resolve_tracked_instrument(
 
     Inactive tracked instruments are intentionally not resolved. Failure or
     ambiguity from the underlying conservative resolver is propagated as
-    ``None`` instead of guessing or creating a partial mapping. If the tracked
-    identity does not yet include a market, the exact resolved eToro market may
-    fill that missing field; an already-supplied tracked market always wins.
+    ``None`` instead of guessing or creating a partial mapping. ``market`` keeps
+    the tracked/runtime market semantics, while ``etoro_market`` always preserves
+    the broker-resolved market label independently for persistence and later
+    exchange/session resolution.
     """
     if not tracked.active:
         return None
@@ -62,4 +64,5 @@ def resolve_tracked_instrument(
         etoro_instrument_id=resolved.instrument_id,
         etoro_symbol=resolved.symbol,
         etoro_display_name=resolved.display_name,
+        etoro_market=resolved.market,
     )

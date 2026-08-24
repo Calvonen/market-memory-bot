@@ -42,6 +42,7 @@ def test_active_tracked_instrument_is_forwarded_to_resolver() -> None:
     assert mapped.tracked_instrument_id == tracked.tracked_instrument_id
     assert mapped.instrument == "NOKIA.HE"
     assert mapped.market == "Helsinki"
+    assert mapped.etoro_market == "eToro Helsinki"
     assert mapped.etoro_instrument_id == 2001
     assert mapped.etoro_symbol == "NOKIA"
     assert mapped.etoro_display_name == "Nokia Oyj"
@@ -58,6 +59,7 @@ def test_missing_tracked_market_is_filled_from_exact_etoro_resolution() -> None:
 
     assert mapped is not None
     assert mapped.market == "Digital Currency"
+    assert mapped.etoro_market == "Digital Currency"
     assert mapped.etoro_instrument_id == 100000
 
 

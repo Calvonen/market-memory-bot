@@ -67,6 +67,7 @@ class _FakeRepository:
         self.event = event
         self.captured = None
         self.armed = []
+        self.market_captures = []
         self.anchors = []
         self.monitoring = []
         self.completed = []
@@ -103,6 +104,31 @@ class _FakeRepository:
             resolution_armed_at=datetime.now(UTC),
             resolution_armed_by=actor,
         )
+        return self.event
+
+    def capture_resolved_etoro_market(
+        self,
+        *,
+        event_id,
+        etoro_instrument_id,
+        etoro_symbol,
+        etoro_display_name,
+        etoro_market,
+        actor,
+    ):
+        if self.event is None:
+            raise AssertionError("test repository needs an event")
+        self.market_captures.append(
+            (
+                event_id,
+                etoro_instrument_id,
+                etoro_symbol,
+                etoro_display_name,
+                etoro_market,
+                actor,
+            )
+        )
+        self.event = replace(self.event, resolved_etoro_market=etoro_market)
         return self.event
 
     def capture_reference(self, **kwargs):
@@ -170,6 +196,7 @@ def _event(
         resolved_etoro_instrument_id=777 if armed else None,
         resolved_etoro_symbol="NHF.ASX" if armed else None,
         resolved_etoro_display_name="nib holdings limited" if armed else None,
+        resolved_etoro_market="Sydney" if armed else None,
         resolution_armed_at=(event_at - timedelta(hours=2)) if armed else None,
         resolution_armed_by="test-preflight" if armed else None,
         reference_price=reference_price,
@@ -198,9 +225,27 @@ class TrackedEventWorkerTests(unittest.TestCase):
 
         self.assertEqual(armed.resolved_etoro_instrument_id, 777)
         self.assertEqual(armed.resolved_etoro_symbol, "NHF.ASX")
+        self.assertEqual(armed.resolved_etoro_market, "Sydney")
         self.assertTrue(provider.search_calls)
         self.assertEqual(provider.quote_calls, [777])
         self.assertEqual(len(repo.armed), 1)
+        self.assertEqual(len(repo.market_captures), 1)
+
+    def test_preflight_backfills_missing_market_for_already_armed_identity(self):
+        event = replace(
+            _event(event_at=datetime.now(UTC) + timedelta(hours=2), armed=True),
+            resolved_etoro_market=None,
+        )
+        repo = _FakeRepository(event)
+        provider = _FakeProvider()
+
+        armed = _preflight_resolution_sync(event, repository=repo, provider=provider)
+
+        self.assertEqual(armed.resolved_etoro_market, "Sydney")
+        self.assertEqual(repo.armed, [])
+        self.assertEqual(len(repo.market_captures), 1)
+        self.assertTrue(provider.search_calls)
+        self.assertEqual(provider.quote_calls, [777])
 
     def test_monitor_uses_persisted_identity_without_catalog_search(self):
         event_at = datetime.now(UTC) - timedelta(minutes=5)
