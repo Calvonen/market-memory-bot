@@ -32,6 +32,10 @@ jobs:
       - name: Checkout exact commit
         uses: actions/checkout@v4
 
+      - name: Install backend dependencies
+        run: |
+          /home/marko/marketai-repo/.venv/bin/pip install -r requirements.txt
+
       - name: Compile Python
         run: |
           /home/marko/marketai-repo/.venv/bin/python -m py_compile trading_system/*.py trading_system/brokers/*.py scripts/*.py tests/*.py
@@ -59,8 +63,6 @@ jobs:
             echo "::error::Could not acquire the seesam-hub deploy/OTA lock (${LOCK_FILE}) within ${LOCK_TIMEOUT_SECONDS}s. Another deploy or OTA publish is holding it too long."
             exit 1
           fi
-
-          /home/marko/marketai-repo/.venv/bin/pip install -r requirements.txt
 
           cd /home/marko/marketai-repo || exit 1
           test "$(git branch --show-current)" = "feature/trading-system-foundation"
