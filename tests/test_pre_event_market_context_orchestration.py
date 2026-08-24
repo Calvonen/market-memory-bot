@@ -460,6 +460,52 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
 
         self.assertTrue(is_current)
 
+    def test_only_a_post_close_event_can_emit_a_same_day_snapshot(self) -> None:
+        # The DB capture RPC permits session_date == the event's local market
+        # date but cannot verify the close time itself (no exchange calendar in
+        # Postgres), so this orchestration is the trust boundary that proves it.
+        # A post-close event may emit a same-day snapshot; a pre-close one must
+        # never be able to, and no snapshot may ever name a later session.
+        sessions = ["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25"]
+
+        post_close, _ = self._acquire_at(
+            event_at=datetime(2026, 8, 24, 7, 0, tzinfo=UTC),
+            sessions=sessions,
+            now=datetime(2026, 8, 24, 7, 0, tzinfo=UTC),
+            ohlcv_dates=["2026-08-21", "2026-08-24"],
+        )
+        _name, payload = post_close.client.calls[0]
+        self.assertEqual(payload["input_pre_event_market_context"]["session_date"], "2026-08-24")
+
+        pre_close, _ = self._acquire_at(
+            event_at=datetime(2026, 8, 24, 5, 0, tzinfo=UTC),
+            sessions=sessions,
+            now=datetime(2026, 8, 24, 5, 0, tzinfo=UTC),
+            ohlcv_dates=["2026-08-20", "2026-08-21"],
+        )
+        _name, payload = pre_close.client.calls[0]
+        snapshot = payload["input_pre_event_market_context"]
+        self.assertNotEqual(snapshot["session_date"], "2026-08-24")
+        self.assertEqual(snapshot["session_date"], "2026-08-21")
+        # Previous session is strictly earlier and also before the event day.
+        self.assertLess(snapshot["previous_session_date"], snapshot["session_date"])
+        self.assertLess(snapshot["previous_session_date"], "2026-08-24")
+
+    def test_a_snapshot_never_names_a_session_after_the_event(self) -> None:
+        # The one thing the DB still rejects outright is a session dated after
+        # the event's local date; acquisition must never produce one.
+        repository, _ = self._acquire_at(
+            event_at=datetime(2026, 8, 24, 7, 0, tzinfo=UTC),
+            sessions=["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25", "2026-08-26"],
+            now=datetime(2026, 8, 24, 7, 0, tzinfo=UTC),
+            ohlcv_dates=["2026-08-21", "2026-08-24"],
+        )
+
+        _name, payload = repository.client.calls[0]
+        snapshot = payload["input_pre_event_market_context"]
+        self.assertLessEqual(snapshot["session_date"], "2026-08-24")
+        self.assertNotIn(snapshot["session_date"], ("2026-08-25", "2026-08-26"))
+
     def test_revalidation_agrees_with_acquisition_about_the_same_event_at(self) -> None:
         # The regression this guards: acquisition selecting Monday/Friday for a
         # post-close Monday event while revalidation expected Friday/Thursday,
