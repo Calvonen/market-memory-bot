@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Iterable
 
@@ -30,15 +30,22 @@ class TrackedEventLatestReaction:
 def latest_tracked_event_reaction(
     reactions: Iterable[TrackedEventReactionRecord],
 ) -> TrackedEventLatestReaction | None:
-    """Return the row with the latest persisted candle start.
+    """Return the row whose persisted candle ends latest in market time.
 
-    Ties are resolved deterministically by observed_at and interval_minutes.
-    No numeric values are rounded or recomputed.
+    Stage changes can make a longer candle start before the latest shorter
+    candle while still closing later. Rank by candle end first, then resolve
+    equal-end ties deterministically by observed_at, candle_start and
+    interval_minutes. No persisted numeric values are rounded or recomputed.
     """
 
     latest = max(
         reactions,
-        key=lambda row: (row.candle_start, row.observed_at, row.interval_minutes),
+        key=lambda row: (
+            row.candle_start + timedelta(minutes=row.interval_minutes),
+            row.observed_at,
+            row.candle_start,
+            row.interval_minutes,
+        ),
         default=None,
     )
     if latest is None:
