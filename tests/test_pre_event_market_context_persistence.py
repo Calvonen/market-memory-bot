@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import unittest
 
 from trading_system.pre_event_market_context_persistence import capture_pre_event_market_context
@@ -70,6 +71,43 @@ class PreEventMarketContextPersistenceTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_version_gate_uses_cas_rpc_with_exact_timestamp(self) -> None:
+        saved_event = object()
+        repository = _Repository(event=saved_event)
+        version = datetime(2026, 8, 24, 14, 47, tzinfo=UTC)
+
+        result = capture_pre_event_market_context(
+            repository,
+            event_id="event-1",
+            snapshot={"schema_version": 1},
+            market_timezone="Australia/Sydney",
+            actor="tracked-event-worker",
+            expected_event_updated_at=version,
+        )
+
+        self.assertIs(result, saved_event)
+        rpc_name, payload = repository.client.calls[0]
+        self.assertEqual(
+            rpc_name,
+            "capture_tracked_market_event_pre_event_context_if_current",
+        )
+        self.assertEqual(payload["input_expected_updated_at"], version.isoformat())
+
+    def test_version_conflict_is_non_retryable_runtime_error(self) -> None:
+        repository = _Repository(error=Exception("tracked_market_event_version_conflict"))
+
+        with self.assertRaisesRegex(RuntimeError, "changed before pre-event context capture"):
+            capture_pre_event_market_context(
+                repository,
+                event_id="event-1",
+                snapshot={"schema_version": 1},
+                market_timezone="Australia/Sydney",
+                actor="tracked-event-worker",
+                expected_event_updated_at=datetime(2026, 8, 24, 14, 47, tzinfo=UTC),
+            )
+
+        self.assertEqual(repository.get_calls, [])
 
     def test_different_existing_snapshot_is_non_retryable_runtime_error(self) -> None:
         repository = _Repository(
