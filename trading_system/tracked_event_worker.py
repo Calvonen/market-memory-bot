@@ -10,6 +10,9 @@ from trading_system.event_market_reaction import (
     EventMarketReactionBaseline,
     EventMarketReactionPipeline,
 )
+from trading_system.pre_event_market_context_orchestration import (
+    acquire_and_persist_pre_event_market_context_for_event,
+)
 from trading_system.reaction_monitoring_profile import DEFAULT_EVENT_REACTION_MONITORING_PROFILE
 from trading_system.tracked_candle_pipeline import TrackedMarketCandle
 from trading_system.tracked_event_config import snapshot_effective_tracking_config
@@ -513,6 +516,55 @@ async def monitor_one_event(
     repository.mark_completed(event.event_id, actor=WORKER_ACTOR, completed_at=datetime.now(UTC))
 
 
+async def _prepare_and_monitor_one_event(
+    event: PersistentTrackedEvent,
+    *,
+    repository: SupabaseTrackedEventRepository,
+    provider: EtoroMarketDataProvider,
+    monitor_hours: float,
+    reference_lead_seconds: float,
+    max_wait_for_market_hours: float,
+) -> None:
+    """Prepare grounded pre-event context before entering the live monitor.
+
+    Only new TRACKED events without a reference are prepared here. MONITORING
+    rows and already-referenced legacy TRACKED rows predate this worker wiring
+    and continue through the existing monitor path unchanged. External calendar
+    and Yahoo work runs off the asyncio loop. Preparation failures remain
+    retryable at the run_forever task boundary until event_at, where an event
+    that never completed preparation fails closed before reference monitoring.
+    """
+    should_prepare = (
+        event.status == TrackedEventStatus.TRACKED
+        and event.reference_price is None
+        and bool(event.resolved_etoro_market)
+    )
+    if should_prepare:
+        if datetime.now(UTC) >= event.event_at:
+            repository.mark_failed(
+                event.event_id,
+                actor=WORKER_ACTOR,
+                error="event reached event_at before pre-event market context was prepared",
+            )
+            return
+        event = await asyncio.to_thread(
+            acquire_and_persist_pre_event_market_context_for_event,
+            repository,
+            event_id=event.event_id,
+            ticker=event.instrument,
+            actor=WORKER_ACTOR,
+        )
+
+    await monitor_one_event(
+        event,
+        repository=repository,
+        provider=provider,
+        monitor_hours=monitor_hours,
+        reference_lead_seconds=reference_lead_seconds,
+        max_wait_for_market_hours=max_wait_for_market_hours,
+    )
+
+
 async def run_forever() -> None:
     repository = SupabaseTrackedEventRepository.from_env()
     provider = EtoroMarketDataProvider.from_env()
@@ -598,7 +650,7 @@ async def run_forever() -> None:
                 continue
 
             active[event.event_id] = asyncio.create_task(
-                monitor_one_event(
+                _prepare_and_monitor_one_event(
                     event,
                     repository=repository,
                     provider=provider,
