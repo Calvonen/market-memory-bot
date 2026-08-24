@@ -115,6 +115,18 @@ class PreEventMarketContextTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "timezone-naive market session dates"):
             pre_event_market_context(frame, event_trading_date=date(2026, 8, 24))
 
+    def test_rejects_missing_session_timestamps(self):
+        frame = _frame(
+            [
+                ("2026-08-20", "99", "101", "98", "100"),
+                ("2026-08-21", "100", "104", "99", "103"),
+            ]
+        )
+        frame.index = pd.DatetimeIndex([frame.index[0], pd.NaT])
+
+        with self.assertRaisesRegex(ValueError, "must not contain missing market session dates"):
+            pre_event_market_context(frame, event_trading_date=date(2026, 8, 24))
+
     def test_rejects_duplicate_session_dates(self):
         frame = _frame(
             [
