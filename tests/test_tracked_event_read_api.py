@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -130,9 +131,63 @@ class TrackedEventReadApiTests(unittest.TestCase):
                     "completed_at": None,
                     "last_error": None,
                     "updated_at": "2026-08-23T23:29:45+00:00",
+                    "tracking_config_snapshot": None,
                 }
             ],
         )
+
+    def test_tracking_config_snapshot_round_trips_for_active_and_history(self):
+        snapshot = {
+            "schema_version": 1,
+            "monitor_hours": 8.0,
+            "reference_lead_seconds": 30.0,
+            "max_wait_for_market_hours": 72.0,
+            "reaction_stages": [
+                {"start_after_minutes": 0, "interval_minutes": 1},
+                {"start_after_minutes": 30, "interval_minutes": 5},
+                {"start_after_minutes": 150, "interval_minutes": 15},
+            ],
+        }
+        event = replace(_event(), tracking_config_snapshot=snapshot)
+        repository = _TrackedEventRepository((event,))
+        client = TestClient(
+            create_app(
+                tracked_event_repository=repository,
+                read_api_key="read-secret",
+            )
+        )
+
+        active_response = client.get(
+            "/api/v1/tracked-events?view=active",
+            headers={"X-MarketAI-Key": "read-secret"},
+        )
+        history_response = client.get(
+            "/api/v1/tracked-events?view=history",
+            headers={"X-MarketAI-Key": "read-secret"},
+        )
+
+        self.assertEqual(active_response.status_code, 200)
+        self.assertEqual(history_response.status_code, 200)
+        self.assertEqual(active_response.json()[0]["tracking_config_snapshot"], snapshot)
+        self.assertEqual(history_response.json()[0]["tracking_config_snapshot"], snapshot)
+
+    def test_tracking_config_snapshot_null_for_legacy_event(self):
+        event = replace(_event(), tracking_config_snapshot=None)
+        repository = _TrackedEventRepository((event,))
+        client = TestClient(
+            create_app(
+                tracked_event_repository=repository,
+                read_api_key="read-secret",
+            )
+        )
+
+        response = client.get(
+            "/api/v1/tracked-events",
+            headers={"X-MarketAI-Key": "read-secret"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()[0]["tracking_config_snapshot"])
 
     def test_view_history_uses_history_view(self):
         repository = _TrackedEventRepository((_event(),))
@@ -549,6 +604,145 @@ class TrackedEventActiveHistoryRepositoryTests(unittest.TestCase):
 
         self.assertEqual(len(history_client.tables_created), 1)
         self.assertIn(("limit", 9), history_client.tables_created[0].calls)
+
+    def test_legacy_row_with_null_snapshot_parses_to_none(self):
+        event = _event()
+        row = {
+            "id": event.event_id,
+            "tracked_instrument_id": event.tracked_instrument_id,
+            "calendar_event_id": None,
+            "company_name": event.company_name,
+            "instrument": event.instrument,
+            "market": event.market,
+            "source": event.source,
+            "external_key": event.external_key,
+            "kind": event.kind,
+            "title": event.title,
+            "event_at": event.event_at.isoformat(),
+            "event_time_status": event.event_time_status.value,
+            "status": event.status.value,
+            # tracking_config_snapshot intentionally omitted, as a legacy
+            # pre-migration row would have it - must parse to None, never a
+            # fabricated default.
+        }
+        repository = SupabaseTrackedEventRepository(_Client([row]))
+
+        result = repository.list_recent(limit=1)
+
+        self.assertEqual(len(result), 1)
+        self.assertIsNone(result[0].tracking_config_snapshot)
+
+
+class _RpcResponse:
+    def __init__(self, data) -> None:
+        self.data = data
+
+
+class _RpcCapableClient:
+    """Minimal Supabase-client stand-in exposing only `.rpc(...).execute()`."""
+
+    def __init__(self, *, rpc_result=None, rpc_error: Exception | None = None) -> None:
+        self.rpc_result = rpc_result
+        self.rpc_error = rpc_error
+        self.rpc_calls: list[tuple[str, dict]] = []
+
+    def rpc(self, name, params):
+        self.rpc_calls.append((name, params))
+        return self
+
+    def execute(self):
+        if self.rpc_error is not None:
+            raise self.rpc_error
+        return _RpcResponse(self.rpc_result)
+
+
+class TrackedEventConfigSnapshotRepositoryTests(unittest.TestCase):
+    def test_capture_calls_rpc_with_actor_and_parses_returned_row(self):
+        event = _event()
+        snapshot = {"schema_version": 1, "monitor_hours": 8.0}
+        row = {
+            "id": event.event_id,
+            "tracked_instrument_id": event.tracked_instrument_id,
+            "calendar_event_id": None,
+            "company_name": event.company_name,
+            "instrument": event.instrument,
+            "market": event.market,
+            "source": event.source,
+            "external_key": event.external_key,
+            "kind": event.kind,
+            "title": event.title,
+            "event_at": event.event_at.isoformat(),
+            "event_time_status": event.event_time_status.value,
+            "status": event.status.value,
+            "tracking_config_snapshot": snapshot,
+        }
+        client = _RpcCapableClient(rpc_result=[row])
+        repository = SupabaseTrackedEventRepository(client)
+
+        result = repository.capture_tracking_config_snapshot(
+            event_id=event.event_id,
+            snapshot=snapshot,
+            actor="tracked-event-worker",
+        )
+
+        self.assertEqual(result.tracking_config_snapshot, snapshot)
+        self.assertEqual(
+            client.rpc_calls,
+            [
+                (
+                    "capture_tracked_market_event_config_snapshot",
+                    {
+                        "input_event_id": event.event_id,
+                        "input_tracking_config_snapshot": snapshot,
+                        "input_actor": "tracked-event-worker",
+                    },
+                )
+            ],
+        )
+
+    def test_capture_translates_conflict_into_runtime_error_without_overwrite_claim(self):
+        client = _RpcCapableClient(
+            rpc_error=Exception("tracked_market_event_config_snapshot_locked (P0001)")
+        )
+        repository = SupabaseTrackedEventRepository(client)
+
+        with self.assertRaisesRegex(RuntimeError, "already has a different tracking_config_snapshot"):
+            repository.capture_tracking_config_snapshot(
+                event_id="11111111-1111-1111-1111-111111111111",
+                snapshot={"schema_version": 1},
+                actor="tracked-event-worker",
+            )
+
+    def test_capture_propagates_unrelated_rpc_failures_unwrapped(self):
+        client = _RpcCapableClient(rpc_error=ConnectionError("connection reset"))
+        repository = SupabaseTrackedEventRepository(client)
+
+        with self.assertRaises(ConnectionError):
+            repository.capture_tracking_config_snapshot(
+                event_id="11111111-1111-1111-1111-111111111111",
+                snapshot={"schema_version": 1},
+                actor="tracked-event-worker",
+            )
+
+    def test_capture_propagates_db_schema_rejection_unwrapped(self):
+        # is_valid_tracked_event_config_snapshot_v1() (20260830090000) rejects
+        # a malformed snapshot before the RPC ever takes the row lock - this
+        # is a defense-in-depth path the worker's own snapshot_effective_
+        # tracking_config() builder should never actually trigger, but the
+        # repository must not misreport it as a content conflict either.
+        client = _RpcCapableClient(
+            rpc_error=Exception("invalid_tracking_config_snapshot (P0001)")
+        )
+        repository = SupabaseTrackedEventRepository(client)
+
+        with self.assertRaises(Exception) as ctx:
+            repository.capture_tracking_config_snapshot(
+                event_id="11111111-1111-1111-1111-111111111111",
+                snapshot={"schema_version": 1},
+                actor="tracked-event-worker",
+            )
+        self.assertNotIsInstance(ctx.exception, RuntimeError)
+        self.assertIn("invalid_tracking_config_snapshot", str(ctx.exception))
 
 
 if __name__ == "__main__":
