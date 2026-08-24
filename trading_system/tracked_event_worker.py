@@ -90,6 +90,7 @@ def _resolved_identity_from_event(event: PersistentTrackedEvent) -> TrackedEtoro
         etoro_instrument_id=event.resolved_etoro_instrument_id,
         etoro_symbol=event.resolved_etoro_symbol,
         etoro_display_name=event.resolved_etoro_display_name,
+        etoro_market=event.resolved_etoro_market or "",
     )
 
 
@@ -105,10 +106,10 @@ def _preflight_resolution_sync(
     it in a background thread as soon as an event enters the lookahead window.
     monitor_one_event never calls the catalog resolver.
     """
-    if event.resolved_etoro_instrument_id is not None:
+    if event.resolved_etoro_instrument_id is not None and event.resolved_etoro_market:
         return event
     if datetime.now(UTC) >= event.event_at:
-        raise RuntimeError("event reached event_at before eToro identity was armed")
+        raise RuntimeError("event reached event_at before eToro identity was fully armed")
 
     tracked = _tracked_identity(event)
     resolved = resolve_tracked_instrument(tracked, EtoroInstrumentResolver(provider))
@@ -123,11 +124,21 @@ def _preflight_resolution_sync(
     if quote.instrument_id != resolved.etoro_instrument_id:
         raise RuntimeError("eToro preflight quote identity mismatch")
 
-    return repository.arm_resolution(
+    if event.resolved_etoro_instrument_id is None:
+        event = repository.arm_resolution(
+            event_id=event.event_id,
+            etoro_instrument_id=resolved.etoro_instrument_id,
+            etoro_symbol=resolved.etoro_symbol,
+            etoro_display_name=resolved.etoro_display_name,
+            actor=PREFLIGHT_ACTOR,
+        )
+
+    return repository.capture_resolved_etoro_market(
         event_id=event.event_id,
         etoro_instrument_id=resolved.etoro_instrument_id,
         etoro_symbol=resolved.etoro_symbol,
         etoro_display_name=resolved.etoro_display_name,
+        etoro_market=resolved.etoro_market,
         actor=PREFLIGHT_ACTOR,
     )
 
@@ -551,12 +562,12 @@ async def run_forever() -> None:
             if event.event_id in active or event.event_id in preflight:
                 continue
 
-            if event.resolved_etoro_instrument_id is None:
+            if event.resolved_etoro_instrument_id is None or not event.resolved_etoro_market:
                 if now >= event.event_at:
                     repository.mark_failed(
                         event.event_id,
                         actor=WORKER_ACTOR,
-                        error="event reached event_at before eToro identity was armed",
+                        error="event reached event_at before eToro identity was fully armed",
                     )
                     continue
                 # Keep catalog discovery outside the timing-critical monitor and
