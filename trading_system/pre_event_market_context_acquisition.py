@@ -45,9 +45,11 @@ def acquire_pre_event_market_context(
     if daily_ohlcv.index.hasnans:
         raise ValueError("daily_ohlcv index must not contain missing session timestamps")
 
-    confirmed = daily_ohlcv.loc[
-        daily_ohlcv.index <= pd.Timestamp(last_confirmed_closed_session_date)
-    ]
+    confirmed_session = pd.Timestamp(last_confirmed_closed_session_date)
+    if confirmed_session not in daily_ohlcv.index:
+        raise ValueError("confirmed closed session data is missing")
+
+    confirmed = daily_ohlcv.loc[daily_ohlcv.index <= confirmed_session]
     context = pre_event_market_context(
         confirmed,
         event_trading_date=event_trading_date,
