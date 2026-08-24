@@ -24,10 +24,13 @@ begin
     raise exception 'tracked_market_event_resolved_market_immutable';
   end if;
 
-  -- First capture is only permitted from the SECURITY DEFINER RPC below.
-  -- Direct service-role table updates execute with current_user=session_user
-  -- and fail closed here.
-  if current_user = session_user then
+  -- First capture is permitted only for the exact event/value authorized by
+  -- the dedicated RPC below. The transaction-local settings are absent for a
+  -- normal PostgREST/service-role table UPDATE, so direct writes fail closed.
+  if current_setting('marketai.resolved_etoro_market_capture_event_id', true)
+       is distinct from new.id::text
+     or current_setting('marketai.resolved_etoro_market_capture_value', true)
+       is distinct from new.resolved_etoro_market then
     raise exception 'tracked_market_event_resolved_market_direct_write_forbidden';
   end if;
 
@@ -112,6 +115,19 @@ begin
   if existing_row.status <> 'tracked' or existing_row.reference_price is not null then
     raise exception 'tracked_market_event_resolved_market_locked';
   end if;
+
+  -- Authorize exactly one first-capture event/value inside this transaction.
+  -- These transaction-local settings are not present on ordinary table writes.
+  perform pg_catalog.set_config(
+    'marketai.resolved_etoro_market_capture_event_id',
+    existing_row.id::text,
+    true
+  );
+  perform pg_catalog.set_config(
+    'marketai.resolved_etoro_market_capture_value',
+    input_etoro_market,
+    true
+  );
 
   update public.tracked_market_events
   set resolved_etoro_market = input_etoro_market,
