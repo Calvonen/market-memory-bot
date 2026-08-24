@@ -55,6 +55,7 @@ class PersistentTrackedEvent:
     resolved_etoro_instrument_id: int | None = None
     resolved_etoro_symbol: str | None = None
     resolved_etoro_display_name: str | None = None
+    resolved_etoro_market: str | None = None
     resolution_armed_at: datetime | None = None
     resolution_armed_by: str | None = None
     reference_price: Decimal | None = None
@@ -511,6 +512,9 @@ class SupabaseTrackedEventRepository:
                 str(value("resolved_etoro_display_name"))
                 if value("resolved_etoro_display_name")
                 else None
+            ),
+            resolved_etoro_market=(
+                str(value("resolved_etoro_market")) if value("resolved_etoro_market") else None
             ),
             resolution_armed_at=cls._parse_datetime_optional(value("resolution_armed_at")),
             resolution_armed_by=(str(value("resolution_armed_by")) if value("resolution_armed_by") else None),
