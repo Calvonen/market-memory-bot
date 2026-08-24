@@ -31,6 +31,7 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
         context = acquire_pre_event_market_context(
             ticker=" nhf.asx ",
             event_trading_date=date(2026, 8, 24),
+            last_confirmed_closed_session_date=date(2026, 8, 21),
             fetcher=fetcher,
         )
 
@@ -43,7 +44,33 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
         self.assertEqual(context.previous_close_price, Decimal("100"))
         self.assertEqual(context.close_to_close_return_pct, Decimal("3.00"))
 
-    def test_returns_none_when_two_completed_sessions_are_not_available(self) -> None:
+    def test_excludes_still_forming_daily_bar(self) -> None:
+        def fetcher(ticker: str, period: str, interval: str) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "Open": [Decimal("99"), Decimal("101"), Decimal("150")],
+                    "High": [Decimal("101"), Decimal("104"), Decimal("170")],
+                    "Low": [Decimal("98"), Decimal("100"), Decimal("140")],
+                    "Close": [Decimal("100"), Decimal("103"), Decimal("165")],
+                    "Volume": [1000, 1200, 100],
+                },
+                index=pd.to_datetime(["2026-08-20", "2026-08-21", "2026-08-24"]),
+            )
+
+        context = acquire_pre_event_market_context(
+            ticker="NHF.ASX",
+            event_trading_date=date(2026, 8, 25),
+            last_confirmed_closed_session_date=date(2026, 8, 21),
+            fetcher=fetcher,
+        )
+
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertEqual(context.session_date, date(2026, 8, 21))
+        self.assertEqual(context.close_price, Decimal("103"))
+        self.assertEqual(context.previous_close_price, Decimal("100"))
+
+    def test_returns_none_when_two_confirmed_sessions_are_not_available(self) -> None:
         def fetcher(ticker: str, period: str, interval: str) -> pd.DataFrame:
             return pd.DataFrame(
                 {
@@ -60,6 +87,7 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
             acquire_pre_event_market_context(
                 ticker="DKS",
                 event_trading_date=date(2026, 8, 24),
+                last_confirmed_closed_session_date=date(2026, 8, 21),
                 fetcher=fetcher,
             )
         )
@@ -76,6 +104,7 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
             acquire_pre_event_market_context(
                 ticker="   ",
                 event_trading_date=date(2026, 8, 24),
+                last_confirmed_closed_session_date=date(2026, 8, 21),
                 fetcher=fetcher,
             )
         self.assertFalse(called)
@@ -99,6 +128,7 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
             acquire_pre_event_market_context(
                 ticker="DKS",
                 event_trading_date=date(2026, 8, 24),
+                last_confirmed_closed_session_date=date(2026, 8, 21),
                 fetcher=fetcher,
             )
 
