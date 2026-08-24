@@ -24,16 +24,6 @@ begin
     raise exception 'tracked_market_event_resolved_market_immutable';
   end if;
 
-  -- First capture is permitted only for the exact event/value authorized by
-  -- the dedicated RPC below. The transaction-local settings are absent for a
-  -- normal PostgREST/service-role table UPDATE, so direct writes fail closed.
-  if current_setting('marketai.resolved_etoro_market_capture_event_id', true)
-       is distinct from new.id::text
-     or current_setting('marketai.resolved_etoro_market_capture_value', true)
-       is distinct from new.resolved_etoro_market then
-    raise exception 'tracked_market_event_resolved_market_direct_write_forbidden';
-  end if;
-
   if new.resolved_etoro_market is null
      or btrim(new.resolved_etoro_market) = ''
      or new.status <> 'tracked'
@@ -57,6 +47,35 @@ before insert or update of resolved_etoro_market
 on public.tracked_market_events
 for each row
 execute function public.guard_tracked_market_event_resolved_market();
+
+-- Remove the broad table-level UPDATE privilege so service_role cannot update
+-- resolved_etoro_market directly, then restore UPDATE for every currently
+-- existing non-protected column. Existing runtime writes keep working while
+-- future columns fail closed until a later migration grants them deliberately.
+revoke update on table public.tracked_market_events from service_role;
+
+do $$
+declare
+  update_columns text;
+begin
+  select string_agg(pg_catalog.format('%I', a.attname), ', ' order by a.attnum)
+  into update_columns
+  from pg_catalog.pg_attribute a
+  where a.attrelid = 'public.tracked_market_events'::regclass
+    and a.attnum > 0
+    and not a.attisdropped
+    and a.attname <> 'resolved_etoro_market';
+
+  if update_columns is null then
+    raise exception 'tracked_market_events_update_columns_missing';
+  end if;
+
+  execute pg_catalog.format(
+    'grant update (%s) on table public.tracked_market_events to service_role',
+    update_columns
+  );
+end;
+$$;
 
 create or replace function public.capture_tracked_market_event_resolved_market(
   input_event_id uuid,
@@ -115,19 +134,6 @@ begin
   if existing_row.status <> 'tracked' or existing_row.reference_price is not null then
     raise exception 'tracked_market_event_resolved_market_locked';
   end if;
-
-  -- Authorize exactly one first-capture event/value inside this transaction.
-  -- These transaction-local settings are not present on ordinary table writes.
-  perform pg_catalog.set_config(
-    'marketai.resolved_etoro_market_capture_event_id',
-    existing_row.id::text,
-    true
-  );
-  perform pg_catalog.set_config(
-    'marketai.resolved_etoro_market_capture_value',
-    input_etoro_market,
-    true
-  );
 
   update public.tracked_market_events
   set resolved_etoro_market = input_etoro_market,
