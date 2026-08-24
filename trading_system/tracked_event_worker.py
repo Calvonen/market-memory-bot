@@ -14,6 +14,9 @@ from trading_system.pre_event_market_context_orchestration import (
     acquire_and_persist_pre_event_market_context_for_event,
     persisted_pre_event_market_context_is_current,
 )
+from trading_system.pre_event_market_context_persistence import (
+    validate_pre_event_market_context_if_current,
+)
 from trading_system.reaction_monitoring_profile import DEFAULT_EVENT_REACTION_MONITORING_PROFILE
 from trading_system.tracked_candle_pipeline import TrackedMarketCandle
 from trading_system.tracked_event_config import snapshot_effective_tracking_config
@@ -540,12 +543,22 @@ async def _prepare_and_monitor_one_event(
     blindly trust a persisted snapshot: pre_event_market_context is immutable
     once captured, yet event_at can still be edited afterwards (see
     upsert_tracked_market_event) while the event stays TRACKED with no
-    reference. So a persisted snapshot is only reused once
-    persisted_pre_event_market_context_is_current confirms - from the row
-    already in hand, with local calendar/session logic and no Yahoo fetch -
-    that its session_date/previous_session_date still match the event's
-    current event_at. A stale snapshot (event_at moved to a different trading
-    date since capture) fails the event closed rather than monitoring on it.
+    reference. So revalidation re-reads the row fresh from the repository -
+    never trusting the possibly-stale event this coroutine was called with -
+    and confirms, with local calendar/session logic and no Yahoo fetch, that
+    its persisted session_date/previous_session_date still match that fresh
+    event_at. Nothing stops event_at from being edited again in the gap
+    between that fresh read and the decision to monitor, so the revalidated
+    row is then re-confirmed atomically (row lock + exact version match in one
+    transaction, via validate_pre_event_market_context_if_current) immediately
+    before monitoring starts; a version conflict there is retryable rather
+    than terminal, since it just means a later poll must re-evaluate against
+    whatever the event now is. A stale snapshot (event_at moved to a different
+    trading date since capture) fails the event closed once the deadline has
+    passed rather than monitoring on it; a transient revalidation error stays
+    retryable before the deadline and only fails the event closed at or after
+    event_at, so it can never keep the event stuck in TRACKED past its
+    max_past window.
     """
     is_unreferenced_tracked_event = (
         event.status == TrackedEventStatus.TRACKED
@@ -568,14 +581,38 @@ async def _prepare_and_monitor_one_event(
             actor=WORKER_ACTOR,
         )
     elif is_unreferenced_tracked_event:
-        is_current = await asyncio.to_thread(persisted_pre_event_market_context_is_current, event)
+        current_event = repository.get(event.event_id)
+        if current_event is None:
+            raise RuntimeError(f"tracked event {event.event_id} was not found")
+        if current_event.updated_at is None:
+            raise RuntimeError("tracked event has no updated_at version")
+
+        try:
+            is_current = await asyncio.to_thread(
+                persisted_pre_event_market_context_is_current, current_event
+            )
+        except Exception as exc:
+            if datetime.now(UTC) >= current_event.event_at:
+                repository.mark_failed(
+                    current_event.event_id,
+                    actor=WORKER_ACTOR,
+                    error=f"pre-event market context revalidation failed at or after event_at: {exc}",
+                )
+                return
+            raise
         if not is_current:
             repository.mark_failed(
-                event.event_id,
+                current_event.event_id,
                 actor=WORKER_ACTOR,
                 error="persisted pre-event market context no longer matches the event's current event_at",
             )
             return
+
+        event = validate_pre_event_market_context_if_current(
+            repository,
+            event_id=current_event.event_id,
+            expected_event_updated_at=current_event.updated_at,
+        )
 
     await monitor_one_event(
         event,
