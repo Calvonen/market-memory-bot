@@ -28,6 +28,19 @@ begin
     raise exception 'tracked_market_event_not_found' using errcode = 'P0002';
   end if;
 
+  -- Preserve exact retry idempotency if the first capture committed but its
+  -- response was lost. Delegate the equal-snapshot retry to the canonical RPC
+  -- so its existing schema/timezone/actor/event-date validations still apply.
+  if existing_row.pre_event_market_context = input_pre_event_market_context then
+    select public.capture_tracked_market_event_pre_event_context(
+      input_event_id,
+      input_pre_event_market_context,
+      input_market_timezone,
+      input_actor
+    ) into saved_row;
+    return saved_row;
+  end if;
+
   if existing_row.updated_at is distinct from input_expected_updated_at then
     raise exception 'tracked_market_event_version_conflict';
   end if;
