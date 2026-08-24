@@ -452,8 +452,11 @@ def create_app(
         if event is None:
             raise HTTPException(status_code=404, detail="Tracked event not found")
 
+        canonical_event_id = event.event_id
         try:
-            latest = latest_tracked_event_reaction(repository.list_reactions(event_id))
+            latest = latest_tracked_event_reaction(
+                repository.list_reactions(canonical_event_id)
+            )
         except (RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:
@@ -462,7 +465,7 @@ def create_app(
             ) from exc
 
         return {
-            "event_id": event_id,
+            "event_id": canonical_event_id,
             "latest_reaction": (
                 _tracked_event_latest_reaction_payload(latest)
                 if latest is not None
