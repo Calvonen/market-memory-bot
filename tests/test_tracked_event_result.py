@@ -36,7 +36,30 @@ class TrackedEventLatestReactionTests(unittest.TestCase):
     def test_empty_reactions_have_no_latest_result(self):
         self.assertIsNone(latest_tracked_event_reaction(()))
 
-    def test_latest_candle_start_wins_even_if_older_row_was_observed_later(self):
+    def test_latest_candle_end_wins_even_when_longer_candle_started_earlier(self):
+        base = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+        five_minute = _reaction(
+            candle_start=base + timedelta(minutes=20),
+            observed_at=base + timedelta(minutes=25),
+            interval_minutes=5,
+            return_pct="1.75",
+        )
+        fifteen_minute = _reaction(
+            candle_start=base + timedelta(minutes=15),
+            observed_at=base + timedelta(minutes=30),
+            interval_minutes=15,
+            return_pct="3.25",
+        )
+
+        result = latest_tracked_event_reaction((five_minute, fifteen_minute))
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.candle_start, fifteen_minute.candle_start)
+        self.assertEqual(result.interval_minutes, 15)
+        self.assertEqual(result.return_pct, Decimal("3.25"))
+
+    def test_later_candle_end_wins_even_if_older_row_was_observed_later(self):
         base = datetime(2026, 8, 24, 7, 0, tzinfo=UTC)
         older_candle = _reaction(
             candle_start=base,
@@ -56,41 +79,41 @@ class TrackedEventLatestReactionTests(unittest.TestCase):
         self.assertEqual(result.candle_start, newer_candle.candle_start)
         self.assertEqual(result.return_pct, Decimal("1.75"))
 
-    def test_ties_are_deterministic_by_observed_at_then_interval(self):
+    def test_equal_candle_ends_are_deterministic_by_observed_at_then_start_then_interval(self):
         base = datetime(2026, 8, 24, 7, 0, tzinfo=UTC)
-        first = _reaction(
+        earlier_observation = _reaction(
             candle_start=base,
             observed_at=base + timedelta(minutes=5),
-            interval_minutes=1,
+            interval_minutes=5,
             return_pct="1.0",
         )
         later_observation = _reaction(
             candle_start=base,
             observed_at=base + timedelta(minutes=6),
-            interval_minutes=1,
+            interval_minutes=5,
             return_pct="2.0",
         )
-        larger_interval_same_observation = _reaction(
-            candle_start=base,
+        later_start_same_end_and_observation = _reaction(
+            candle_start=base + timedelta(minutes=4),
             observed_at=base + timedelta(minutes=6),
-            interval_minutes=5,
+            interval_minutes=1,
             return_pct="3.0",
         )
 
         result = latest_tracked_event_reaction(
-            (larger_interval_same_observation, first, later_observation)
+            (later_start_same_end_and_observation, earlier_observation, later_observation)
         )
 
         self.assertIsNotNone(result)
         assert result is not None
-        self.assertEqual(result.interval_minutes, 5)
+        self.assertEqual(result.interval_minutes, 1)
         self.assertEqual(result.return_pct, Decimal("3.0"))
 
     def test_persisted_values_are_copied_without_rounding_or_recalculation(self):
         base = datetime(2026, 8, 24, 7, 0, tzinfo=UTC)
         row = _reaction(
             candle_start=base,
-            observed_at=base + timedelta(minutes=1),
+            observed_at=base + timedelta(minutes=15),
             interval_minutes=15,
             reference_price="7.123456",
             close_price="7.987654",
