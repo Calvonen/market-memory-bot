@@ -24,7 +24,7 @@ def capture_pre_event_market_context(
     immutability validation.
     """
     try:
-        response = repository.client.rpc(
+        repository.client.rpc(
             "capture_tracked_market_event_pre_event_context",
             {
                 "input_event_id": event_id,
@@ -40,7 +40,7 @@ def capture_pre_event_market_context(
             ) from exc
         raise
 
-    return repository._single_event_response(
-        response.data,
-        error_message="capture_tracked_market_event_pre_event_context returned invalid data",
-    )
+    event = repository.get(event_id)
+    if event is None:
+        raise RuntimeError("captured pre-event market context event could not be re-read")
+    return event
