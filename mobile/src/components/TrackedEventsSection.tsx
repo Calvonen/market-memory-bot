@@ -104,15 +104,20 @@ function formatTrackingConfigSnapshot(
   if (!snapshot || snapshot.schema_version !== 1) {
     return 'Seuranta-asetuksia ei tallennettu';
   }
-  const monitor = formatCompactNumber(snapshot.monitor_hours);
-  const reference = formatCompactNumber(snapshot.reference_lead_seconds);
-  const marketWait = formatCompactNumber(snapshot.max_wait_for_market_hours);
-  const stages = snapshot.reaction_stages.map((stage) => `${stage.interval_minutes}m`).join(' → ');
+  const monitor = formatPersistedNumber(snapshot.monitor_hours);
+  const reference = formatPersistedNumber(snapshot.reference_lead_seconds);
+  const marketWait = formatPersistedNumber(snapshot.max_wait_for_market_hours);
+  const stages = snapshot.reaction_stages
+    .map(
+      (stage) =>
+        `${formatPersistedNumber(stage.start_after_minutes)}m→${formatPersistedNumber(stage.interval_minutes)}m`,
+    )
+    .join(' · ');
   return `Seuranta ${monitor} h · Reference ${reference} s ennen tapahtumaa · Markkinan odotus enintään ${marketWait} h · Aikavälit ${stages}`;
 }
 
-function formatCompactNumber(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+function formatPersistedNumber(value: number): string {
+  return String(value);
 }
 
 // event_time_status is descriptive event metadata, not a trading threshold
