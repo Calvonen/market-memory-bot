@@ -74,6 +74,18 @@ def _normalise_text(value: str) -> str:
     return " ".join(value.strip().upper().split())
 
 
+def _needs_resolution_preflight(event: PersistentTrackedEvent) -> bool:
+    if event.resolved_etoro_instrument_id is None:
+        return True
+    if event.resolved_etoro_market:
+        return False
+    # Rows that already captured a reference, or already entered MONITORING,
+    # predate broker-market persistence and cannot safely use the capture RPC.
+    # Let those legacy runs resume with their already-persisted broker identity;
+    # only new TRACKED rows before reference capture must backfill the market.
+    return event.status == TrackedEventStatus.TRACKED and event.reference_price is None
+
+
 def _resolved_identity_from_event(event: PersistentTrackedEvent) -> TrackedEtoroInstrument:
     if event.resolved_etoro_instrument_id is None or event.resolved_etoro_instrument_id <= 0:
         raise RuntimeError("tracked event is not armed with an eToro instrument id")
@@ -106,7 +118,7 @@ def _preflight_resolution_sync(
     it in a background thread as soon as an event enters the lookahead window.
     monitor_one_event never calls the catalog resolver.
     """
-    if event.resolved_etoro_instrument_id is not None and event.resolved_etoro_market:
+    if not _needs_resolution_preflight(event):
         return event
     if datetime.now(UTC) >= event.event_at:
         raise RuntimeError("event reached event_at before eToro identity was fully armed")
@@ -562,7 +574,7 @@ async def run_forever() -> None:
             if event.event_id in active or event.event_id in preflight:
                 continue
 
-            if event.resolved_etoro_instrument_id is None or not event.resolved_etoro_market:
+            if _needs_resolution_preflight(event):
                 if now >= event.event_at:
                     repository.mark_failed(
                         event.event_id,
