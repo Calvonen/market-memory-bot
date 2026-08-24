@@ -14,3 +14,5 @@ The intended follow-up sequence is deliberately small:
 4. expose the context through the read API/mobile card only after the runtime data is proven live.
 
 A later acquisition slice may populate `late_session_return_pct` from intraday candles. Keeping it optional avoids coupling the first persistence/runtime change to an intraday historical-data implementation.
+
+`session_date` is the market session's calendar date. Persistence/runtime code must therefore compare it using exchange/session semantics rather than assuming the UTC calendar date is the market's trading date.
