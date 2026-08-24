@@ -15,10 +15,7 @@ from trading_system.pre_event_market_context_acquisition import (
     acquire_pre_event_market_context,
 )
 from trading_system.pre_event_market_context_persistence import capture_pre_event_market_context
-from trading_system.session_calendar_adapter import (
-    confirmed_session_closes,
-    confirmed_session_dates,
-)
+from trading_system.session_calendar_adapter import confirmed_session_closes
 from trading_system.session_date_resolver import resolve_session_dates
 from trading_system.tracked_event_repository import (
     PersistentTrackedEvent,
@@ -94,8 +91,16 @@ def persisted_pre_event_market_context_is_current(
     it was grounded on; this recomputes that same pair from the event's current
     ``event_at`` using only calendar/session logic - no Yahoo fetch, no new
     persistence write - and checks they still match. A mismatch means the
-    snapshot no longer corresponds to the sessions before this event's current
-    trading date and must not be reused for monitoring.
+    snapshot no longer corresponds to the sessions this event's current
+    ``event_at`` implies and must not be reused for monitoring.
+
+    It runs the same canonical selection acquisition does, off the same real
+    exchange close timestamps, so the two can never disagree about one
+    ``event_at`` - a post-close event resolves to its own same-day session in
+    both. The acquisition-time ``now`` gate is deliberately not applied here:
+    ``now`` only governs whether a candle is still forming at capture time,
+    which is settled once a snapshot exists. This asks purely which pair the
+    current ``event_at`` implies.
     """
     snapshot = event.pre_event_market_context
     if snapshot is None:
@@ -118,14 +123,16 @@ def persisted_pre_event_market_context_is_current(
         "end_date": event_local_date + timedelta(days=_SESSION_CALENDAR_LOOKAHEAD_DAYS),
     }
     if calendar_loader is None:
-        sessions = confirmed_session_dates(profile, **calendar_kwargs)
+        session_closes = confirmed_session_closes(profile, **calendar_kwargs)
     else:
-        sessions = confirmed_session_dates(profile, calendar_loader=calendar_loader, **calendar_kwargs)
+        session_closes = confirmed_session_closes(
+            profile, calendar_loader=calendar_loader, **calendar_kwargs
+        )
 
     resolution = resolve_session_dates(
         event.event_at,
         profile=profile,
-        confirmed_session_dates=sessions,
+        session_closes=session_closes,
     )
     return (
         resolution.latest_closed_session == snapshot_session_date
@@ -147,14 +154,16 @@ def acquire_and_persist_pre_event_market_context_for_event(
 
     The persisted exact ``resolved_etoro_market`` label selects one explicitly
     grounded market-session profile. The profile calendar supplies confirmed
-    exchange sessions and ``resolve_session_dates`` selects the event trading
-    date plus the two immediately preceding sessions, and both of those sessions
-    must have actually closed by ``now`` - a session that is scheduled before the
-    event but still trading would otherwise freeze a partial daily candle into
-    the immutable snapshot. The final persistence is compare-and-swap bound to
-    the same tracked-event ``updated_at`` version that supplied event_at,
-    instrument and broker market, so concurrent event edits fail closed rather
-    than locking a stale immutable context.
+    exchange sessions with their real close timestamps, and
+    ``resolve_session_dates`` selects the last two sessions that had closed by
+    ``event_at`` - which includes the event's own session when the event falls
+    after that session's close. Both selected sessions must additionally have
+    closed by ``now``: a session already eligible by ``event_at`` but still
+    trading right now would otherwise freeze a partial daily candle into the
+    immutable snapshot. The final persistence is compare-and-swap bound to the
+    same tracked-event ``updated_at`` version that supplied event_at, instrument
+    and broker market, so concurrent event edits fail closed rather than locking
+    a stale immutable context.
     """
     event = repository.get(event_id)
     if event is None:
@@ -197,8 +206,7 @@ def acquire_and_persist_pre_event_market_context_for_event(
     resolution = resolve_session_dates(
         event.event_at,
         profile=profile,
-        confirmed_session_dates=tuple(session_date for session_date, _ in session_closes),
-        session_closes=dict(session_closes),
+        session_closes=session_closes,
         now=datetime.now(UTC),
     )
     context = acquire_pre_event_market_context(

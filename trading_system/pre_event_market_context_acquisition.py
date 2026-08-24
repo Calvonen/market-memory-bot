@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 
@@ -29,6 +29,11 @@ def acquire_pre_event_market_context(
     exact latest and immediately preceding closed session dates. This adapter
     never infers exchange timezone, holidays, weekends, or close time. Both
     required session rows must be present; stale substitution fails closed.
+
+    ``last_confirmed_closed_session_date`` may equal ``event_trading_date``: an
+    event after its own session's close takes that complete same-day session as
+    its latest reference. It can never be later than the event's trading date,
+    which is checked here rather than assumed.
     """
 
     normalized_ticker = ticker.strip().upper()
@@ -36,6 +41,8 @@ def acquire_pre_event_market_context(
         raise ValueError("ticker is required")
     if previous_confirmed_closed_session_date >= last_confirmed_closed_session_date:
         raise ValueError("previous confirmed session must precede last confirmed session")
+    if last_confirmed_closed_session_date > event_trading_date:
+        raise ValueError("confirmed closed session must not be after the event trading date")
 
     daily_ohlcv = fetcher(normalized_ticker, "1mo", "1d")
     if not isinstance(daily_ohlcv.index, pd.DatetimeIndex):
@@ -52,10 +59,14 @@ def acquire_pre_event_market_context(
     if previous_session not in daily_ohlcv.index:
         raise ValueError("previous confirmed closed session data is missing")
 
+    # The session pair was already resolved from real close timestamps, so the
+    # selector's boundary is "up to and including the confirmed latest closed
+    # session" - not the event trading date, which would drop a same-day
+    # session that closed before the event.
     confirmed = daily_ohlcv.loc[daily_ohlcv.index <= latest_session]
     context = pre_event_market_context(
         confirmed,
-        event_trading_date=event_trading_date,
+        sessions_before=last_confirmed_closed_session_date + timedelta(days=1),
     )
     if context is None:
         raise ValueError("confirmed closed session history is incomplete")

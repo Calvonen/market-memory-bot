@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -45,12 +46,9 @@ class _Repository:
         return self.saved_event
 
 
-# Session closes far enough in the past that wall-clock "now" is always after
-# them, so tests that are not about the close gate stay deterministic.
-_LONG_CLOSED = datetime(2000, 1, 1, tzinfo=UTC)
-# A close no test run can ever be past, used to simulate a session that is
-# scheduled before the event but still trading at acquisition time.
-_STILL_OPEN = datetime(2099, 1, 1, tzinfo=UTC)
+def _xasx_close(session_date: date) -> datetime:
+    """The real XASX close shape: 06:00Z on the session's own date."""
+    return datetime(session_date.year, session_date.month, session_date.day, 6, 0, tzinfo=UTC)
 
 
 class _Calendar:
@@ -67,7 +65,21 @@ class _Calendar:
         return self.sessions[(self.sessions >= start) & (self.sessions <= end)]
 
     def session_close(self, session):
-        return self.closes.get(pd.Timestamp(session).date(), _LONG_CLOSED)
+        session_date = pd.Timestamp(session).date()
+        # Default to each session's own real close. A blanket "closed long ago"
+        # would make every session in range eligible and let selection run past
+        # the event, so the default has to track the session date.
+        return self.closes.get(session_date, _xasx_close(session_date))
+
+
+class _FrozenNow:
+    """Pin acquisition's wall clock so the now-gate is testable."""
+
+    def __init__(self, instant: datetime) -> None:
+        self.instant = instant
+
+    def now(self, tz=None):
+        return self.instant.astimezone(tz) if tz else self.instant
 
 
 class PreEventMarketContextOrchestrationTests(unittest.TestCase):
@@ -160,14 +172,20 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
                 index=pd.DatetimeIndex(["2026-08-21", "2026-08-24"]),
             )
 
-        saved = acquire_and_persist_pre_event_market_context_for_event(
-            repository,
-            event_id="event-1",
-            ticker="WDS.ASX",
-            actor="tracked-event-worker",
-            fetcher=fetcher,
-            calendar_loader=calendar_loader,
-        )
+        # Pinned so the now-gate does not depend on the wall clock: this same
+        # calendar is only acquirable after 2026-08-24's 06:00Z close.
+        with patch(
+            "trading_system.pre_event_market_context_orchestration.datetime",
+            _FrozenNow(datetime(2026, 8, 24, 23, 0, tzinfo=UTC)),
+        ):
+            saved = acquire_and_persist_pre_event_market_context_for_event(
+                repository,
+                event_id="event-1",
+                ticker="WDS.ASX",
+                actor="tracked-event-worker",
+                fetcher=fetcher,
+                calendar_loader=calendar_loader,
+            )
 
         self.assertIs(saved, event)
         self.assertEqual(calendar_ids, ["XASX"])
@@ -183,79 +201,74 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
         self.assertEqual(payload["input_pre_event_market_context"]["session_date"], "2026-08-24")
         self.assertEqual(payload["input_pre_event_market_context"]["previous_session_date"], "2026-08-21")
 
-    def test_auto_entrypoint_waits_when_latest_pre_event_session_is_still_open(self) -> None:
-        # Event is on the next trading day and the session immediately before it
-        # (2026-08-24) has not closed yet. Yahoo's daily row for that session is
-        # still a partial intraday candle, so acquisition must not fetch or
-        # persist anything - and must not silently reach further back to the
-        # already-closed 2026-08-21/2026-08-20 pair either, since the canonical
-        # context is defined as the two sessions immediately preceding the event.
+    @staticmethod
+    def _ohlcv(dates):
+        return pd.DataFrame(
+            {
+                "Open": [Decimal("10"), Decimal("11")],
+                "High": [Decimal("11"), Decimal("13")],
+                "Low": [Decimal("9"), Decimal("10")],
+                "Close": [Decimal("10.5"), Decimal("12")],
+                "Volume": [100, 200],
+            },
+            index=pd.DatetimeIndex(dates),
+        )
+
+    def _acquire_at(self, *, event_at, sessions, now, closes=None, ohlcv_dates=None):
+        """Run the auto entrypoint with a pinned acquisition clock."""
         event = SimpleNamespace(
             instrument="WDS.ASX",
             resolved_etoro_market="Sydney",
-            event_at=datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
+            event_at=event_at,
             updated_at=datetime(2026, 8, 24, 14, 47, tzinfo=UTC),
         )
         repository = _Repository(event=event)
-        calendar = _Calendar(
-            ["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25"],
-            closes={"2026-08-24": _STILL_OPEN},
-        )
+        calendar = _Calendar(sessions, closes=closes)
         fetch_calls = []
 
-        with self.assertRaisesRegex(ValueError, "2026-08-24 has not closed yet"):
+        def fetcher(ticker, period, interval):
+            fetch_calls.append((ticker, period, interval))
+            return self._ohlcv(ohlcv_dates or [])
+
+        with patch(
+            "trading_system.pre_event_market_context_orchestration.datetime",
+            _FrozenNow(now),
+        ):
             acquire_and_persist_pre_event_market_context_for_event(
                 repository,
                 event_id="event-1",
                 ticker="WDS.ASX",
                 actor="tracked-event-worker",
-                fetcher=lambda *args: fetch_calls.append(args),
+                fetcher=fetcher,
                 calendar_loader=lambda calendar_id: calendar,
             )
 
-        self.assertEqual(fetch_calls, [])
-        self.assertEqual(repository.client.calls, [])
-        self.assertFalse(repository.rpc_executed)
+        return repository, fetch_calls
 
-    def test_auto_entrypoint_proceeds_once_that_session_has_closed(self) -> None:
-        # Same event and calendar as above, only the 2026-08-24 close has now
-        # passed: the exact same session pair is accepted and acquisition runs.
-        event = SimpleNamespace(
-            instrument="WDS.ASX",
-            resolved_etoro_market="Sydney",
-            event_at=datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
-            updated_at=datetime(2026, 8, 24, 14, 47, tzinfo=UTC),
-        )
-        repository = _Repository(event=event)
-        calendar = _Calendar(
-            ["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25"],
-            closes={"2026-08-24": _LONG_CLOSED},
-        )
-        fetch_calls = []
-
-        def fetcher(ticker, period, interval):
-            fetch_calls.append((ticker, period, interval))
-            return pd.DataFrame(
-                {
-                    "Open": [Decimal("10"), Decimal("11")],
-                    "High": [Decimal("11"), Decimal("13")],
-                    "Low": [Decimal("9"), Decimal("10")],
-                    "Close": [Decimal("10.5"), Decimal("12")],
-                    "Volume": [100, 200],
-                },
-                index=pd.DatetimeIndex(["2026-08-21", "2026-08-24"]),
+    def test_auto_entrypoint_waits_when_latest_pre_event_session_is_still_open(self) -> None:
+        # event_at is next-day, so Monday 2026-08-24 is eligible by event_at.
+        # But acquisition is running before Monday's 06:00Z close, so Yahoo's
+        # daily row for it is still a partial intraday candle. Acquisition must
+        # not fetch or persist - and must not silently reach further back to
+        # the already-closed 2026-08-21/2026-08-20 pair, which is a different
+        # baseline than the one this event_at implies.
+        with self.assertRaisesRegex(ValueError, "2026-08-24 has not closed yet"):
+            self._acquire_at(
+                event_at=datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
+                sessions=["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25"],
+                now=datetime(2026, 8, 24, 5, 59, tzinfo=UTC),
             )
 
-        saved = acquire_and_persist_pre_event_market_context_for_event(
-            repository,
-            event_id="event-1",
-            ticker="WDS.ASX",
-            actor="tracked-event-worker",
-            fetcher=fetcher,
-            calendar_loader=lambda calendar_id: calendar,
+    def test_auto_entrypoint_proceeds_once_that_session_has_closed(self) -> None:
+        # Same event and calendar, only the acquisition clock moved past
+        # Monday's close: the exact same session pair is now accepted.
+        repository, fetch_calls = self._acquire_at(
+            event_at=datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
+            sessions=["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25"],
+            now=datetime(2026, 8, 24, 6, 0, tzinfo=UTC),
+            ohlcv_dates=["2026-08-21", "2026-08-24"],
         )
 
-        self.assertIs(saved, event)
         self.assertEqual(fetch_calls, [("WDS.ASX", "1mo", "1d")])
         _rpc_name, payload = repository.client.calls[0]
         self.assertEqual(payload["input_pre_event_market_context"]["session_date"], "2026-08-24")
@@ -263,43 +276,65 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
             payload["input_pre_event_market_context"]["previous_session_date"], "2026-08-21"
         )
 
+    def test_same_day_event_after_the_close_uses_the_event_day_session(self) -> None:
+        # Monday event an hour after Monday's close: the event-day session is
+        # complete, so it is the latest reference and Friday is the previous.
+        repository, _fetch_calls = self._acquire_at(
+            event_at=datetime(2026, 8, 24, 7, 0, tzinfo=UTC),
+            sessions=["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25"],
+            now=datetime(2026, 8, 24, 7, 0, tzinfo=UTC),
+            ohlcv_dates=["2026-08-21", "2026-08-24"],
+        )
+
+        _rpc_name, payload = repository.client.calls[0]
+        self.assertEqual(payload["input_pre_event_market_context"]["session_date"], "2026-08-24")
+        self.assertEqual(
+            payload["input_pre_event_market_context"]["previous_session_date"], "2026-08-21"
+        )
+
+    def test_same_day_event_before_the_close_excludes_the_event_day_session(self) -> None:
+        # Monday event an hour before Monday's close: that candle is still
+        # forming, so the pair is Friday/Thursday.
+        repository, _fetch_calls = self._acquire_at(
+            event_at=datetime(2026, 8, 24, 5, 0, tzinfo=UTC),
+            sessions=["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25"],
+            now=datetime(2026, 8, 24, 5, 0, tzinfo=UTC),
+            ohlcv_dates=["2026-08-20", "2026-08-21"],
+        )
+
+        _rpc_name, payload = repository.client.calls[0]
+        self.assertEqual(payload["input_pre_event_market_context"]["session_date"], "2026-08-21")
+        self.assertEqual(
+            payload["input_pre_event_market_context"]["previous_session_date"], "2026-08-20"
+        )
+
+    def test_auto_entrypoint_uses_the_real_early_close_for_same_day_eligibility(self) -> None:
+        # 2026-12-24 is an XASX early close at 03:10Z. A 04:00Z event that day
+        # is after it, so the early-close session is the latest reference; a
+        # fixed close inferred from the market timezone would exclude it.
+        repository, _fetch_calls = self._acquire_at(
+            event_at=datetime(2026, 12, 24, 4, 0, tzinfo=UTC),
+            sessions=["2026-12-22", "2026-12-23", "2026-12-24", "2026-12-29"],
+            closes={"2026-12-24": datetime(2026, 12, 24, 3, 10, tzinfo=UTC)},
+            now=datetime(2026, 12, 24, 4, 0, tzinfo=UTC),
+            ohlcv_dates=["2026-12-23", "2026-12-24"],
+        )
+
+        _rpc_name, payload = repository.client.calls[0]
+        self.assertEqual(payload["input_pre_event_market_context"]["session_date"], "2026-12-24")
+        self.assertEqual(
+            payload["input_pre_event_market_context"]["previous_session_date"], "2026-12-23"
+        )
+
     def test_auto_entrypoint_skips_weekend_and_holiday_gaps_using_real_closes(self) -> None:
         # Monday 2026-12-28 is not an XASX session and 2026-12-25 is a holiday,
-        # so a Monday event resolves forward to 2026-12-29 with the two closed
-        # sessions before it being 2026-12-24 and 2026-12-23 - the non-session
-        # boundary must keep working now that closes gate the selection.
-        event = SimpleNamespace(
-            instrument="WDS.ASX",
-            resolved_etoro_market="Sydney",
+        # so a Sunday-evening event resolves forward to 2026-12-29 with the
+        # 2026-12-24/2026-12-23 pair behind it.
+        repository, _fetch_calls = self._acquire_at(
             event_at=datetime(2026, 12, 27, 22, 0, tzinfo=UTC),
-            updated_at=datetime(2026, 12, 24, 14, 47, tzinfo=UTC),
-        )
-        repository = _Repository(event=event)
-        calendar = _Calendar(
-            ["2026-12-22", "2026-12-23", "2026-12-24", "2026-12-29", "2026-12-30"]
-        )
-        fetch_calls = []
-
-        def fetcher(ticker, period, interval):
-            fetch_calls.append((ticker, period, interval))
-            return pd.DataFrame(
-                {
-                    "Open": [Decimal("10"), Decimal("11")],
-                    "High": [Decimal("11"), Decimal("13")],
-                    "Low": [Decimal("9"), Decimal("10")],
-                    "Close": [Decimal("10.5"), Decimal("12")],
-                    "Volume": [100, 200],
-                },
-                index=pd.DatetimeIndex(["2026-12-23", "2026-12-24"]),
-            )
-
-        acquire_and_persist_pre_event_market_context_for_event(
-            repository,
-            event_id="event-1",
-            ticker="WDS.ASX",
-            actor="tracked-event-worker",
-            fetcher=fetcher,
-            calendar_loader=lambda calendar_id: calendar,
+            sessions=["2026-12-22", "2026-12-23", "2026-12-24", "2026-12-29", "2026-12-30"],
+            now=datetime(2026, 12, 27, 22, 0, tzinfo=UTC),
+            ohlcv_dates=["2026-12-23", "2026-12-24"],
         )
 
         _rpc_name, payload = repository.client.calls[0]
@@ -424,6 +459,80 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
         )
 
         self.assertTrue(is_current)
+
+    def test_revalidation_agrees_with_acquisition_about_the_same_event_at(self) -> None:
+        # The regression this guards: acquisition selecting Monday/Friday for a
+        # post-close Monday event while revalidation expected Friday/Thursday,
+        # which would fail a healthy restart as "stale". Both run the same
+        # canonical selection, so for each event_at the pair acquisition
+        # persists is exactly the pair revalidation accepts.
+        sessions = ["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25", "2026-08-26"]
+
+        for label, event_at, ohlcv_dates in (
+            ("monday post-close", datetime(2026, 8, 24, 7, 0, tzinfo=UTC),
+             ["2026-08-21", "2026-08-24"]),
+            ("monday pre-close", datetime(2026, 8, 24, 5, 0, tzinfo=UTC),
+             ["2026-08-20", "2026-08-21"]),
+            ("next trading day", datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
+             ["2026-08-21", "2026-08-24"]),
+        ):
+            with self.subTest(label=label):
+                repository, _fetch_calls = self._acquire_at(
+                    event_at=event_at,
+                    sessions=sessions,
+                    now=event_at,
+                    ohlcv_dates=ohlcv_dates,
+                )
+                _rpc_name, payload = repository.client.calls[0]
+                persisted = payload["input_pre_event_market_context"]
+
+                # Feed exactly what acquisition persisted back to revalidation.
+                restarted = SimpleNamespace(
+                    resolved_etoro_market="Sydney",
+                    event_at=event_at,
+                    pre_event_market_context=persisted,
+                )
+                self.assertTrue(
+                    persisted_pre_event_market_context_is_current(
+                        restarted,
+                        calendar_loader=lambda calendar_id: _Calendar(sessions),
+                    )
+                )
+
+    def test_revalidation_uses_close_based_selection_for_a_post_close_event(self) -> None:
+        # Directly pins the half that used to be date-only: a post-close Monday
+        # event revalidates against the Monday/Friday pair, not Friday/Thursday.
+        sessions = ["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25"]
+        event_at = datetime(2026, 8, 24, 7, 0, tzinfo=UTC)
+
+        self.assertTrue(
+            persisted_pre_event_market_context_is_current(
+                SimpleNamespace(
+                    resolved_etoro_market="Sydney",
+                    event_at=event_at,
+                    pre_event_market_context={
+                        "schema_version": 1,
+                        "session_date": "2026-08-24",
+                        "previous_session_date": "2026-08-21",
+                    },
+                ),
+                calendar_loader=lambda calendar_id: _Calendar(sessions),
+            )
+        )
+        self.assertFalse(
+            persisted_pre_event_market_context_is_current(
+                SimpleNamespace(
+                    resolved_etoro_market="Sydney",
+                    event_at=event_at,
+                    pre_event_market_context={
+                        "schema_version": 1,
+                        "session_date": "2026-08-21",
+                        "previous_session_date": "2026-08-20",
+                    },
+                ),
+                calendar_loader=lambda calendar_id: _Calendar(sessions),
+            )
+        )
 
     def test_persisted_context_is_stale_after_event_at_moves_to_later_trading_date(self) -> None:
         # event_at moved a session later after the context was captured for the

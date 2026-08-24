@@ -104,9 +104,16 @@ def _positive_decimal(value: object, *, field_name: str) -> Decimal:
 def pre_event_market_context(
     daily_ohlcv: pd.DataFrame,
     *,
-    event_trading_date: date,
+    sessions_before: date,
 ) -> PreEventMarketContext | None:
     """Build context from the last two complete market-session rows.
+
+    ``sessions_before`` is an exclusive upper boundary: only rows whose session
+    date is strictly before it are considered. It is deliberately *not* the
+    event's trading date - when an event falls after its own session's close,
+    that same-day session is complete and belongs in the context, so the
+    caller passes a boundary just past the session pair it already resolved
+    (see session_date_resolver.resolve_session_dates).
 
     The index contract is deliberately strict: it must contain timezone-naive
     midnight labels whose calendar dates already represent the exchange's
@@ -114,8 +121,8 @@ def pre_event_market_context(
     acquisition layer, before this pure selector is called.
     """
 
-    if isinstance(event_trading_date, datetime) or not isinstance(event_trading_date, date):
-        raise ValueError("event_trading_date must be a date")
+    if isinstance(sessions_before, datetime) or not isinstance(sessions_before, date):
+        raise ValueError("sessions_before must be a date")
     missing = [column for column in _REQUIRED_COLUMNS if column not in daily_ohlcv.columns]
     if missing:
         raise ValueError(f"daily_ohlcv is missing required columns: {missing}")
@@ -133,7 +140,7 @@ def pre_event_market_context(
         raise ValueError("daily_ohlcv contains duplicate market session dates")
 
     completed = daily_ohlcv.loc[
-        [session_date < event_trading_date for session_date in session_dates]
+        [session_date < sessions_before for session_date in session_dates]
     ].sort_index()
     if len(completed) < 2:
         return None
