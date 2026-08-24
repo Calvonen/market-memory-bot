@@ -245,6 +245,75 @@ class TrackedEventWorkerPreEventContextTests(unittest.TestCase):
         p.fail_deadline.assert_called_once()
         self.assertEqual(repository.failed, [])
 
+    def test_committed_capture_with_lost_response_is_never_terminal_failed(self) -> None:
+        # The capture RPC committed, but the caller only saw an exception (lost
+        # response, or the acquisition thread raising while re-reading after a
+        # successful capture) and it surfaced after event_at. The fresh row
+        # therefore already carries the context. The deadline RPC's null-context
+        # guard rejects the write, so the event is not terminal-failed: the
+        # error stays retryable and the next poll continues down the
+        # persisted-context restart/revalidation path.
+        stale_event = _event(event_at=datetime.now(UTC) + timedelta(hours=4))
+        captured_event = replace(
+            stale_event,
+            event_at=datetime.now(UTC) - timedelta(seconds=1),
+            pre_event_market_context=_SNAPSHOT,
+            updated_at=stale_event.updated_at + timedelta(seconds=5),
+        )
+        repository = _Repository(current_event=captured_event)
+
+        with ExitStack() as stack:
+            p = _Patches(
+                stack,
+                acquire={"side_effect": RuntimeError("lost response after capture committed")},
+                fail_deadline={
+                    "side_effect": RuntimeError(
+                        "tracked event 11111111-1111-1111-1111-111111111111 is no longer "
+                        "awaiting a pre-event baseline"
+                    )
+                },
+            )
+            with self.assertRaisesRegex(RuntimeError, "no longer awaiting a pre-event baseline"):
+                asyncio.run(_run(stale_event, repository=repository))
+
+        # The decision still went through the version-bound RPC - that is where
+        # the null-context invariant is enforced - and nothing was marked failed.
+        p.fail_deadline.assert_called_once_with(
+            repository,
+            event_id=captured_event.event_id,
+            expected_event_updated_at=captured_event.updated_at,
+            actor=WORKER_ACTOR,
+            error=unittest.mock.ANY,
+        )
+        p.monitor.assert_not_awaited()
+        self.assertEqual(repository.failed, [])
+
+    def test_next_poll_uses_the_persisted_context_after_a_lost_capture_response(self) -> None:
+        # The follow-up poll from the scenario above: the row now carries the
+        # context, so preparation is skipped entirely and the event proceeds
+        # through revalidation into monitoring without any reacquisition.
+        current_event = _event(
+            event_at=datetime.now(UTC) + timedelta(hours=4),
+            pre_event_market_context=_SNAPSHOT,
+        )
+        confirmed_event = replace(
+            current_event, updated_at=current_event.updated_at + timedelta(seconds=1)
+        )
+        repository = _Repository(current_event=current_event)
+
+        with ExitStack() as stack:
+            p = _Patches(
+                stack,
+                is_current={"return_value": True},
+                validate={"return_value": confirmed_event},
+            )
+            asyncio.run(_run(current_event, repository=repository))
+
+        p.acquire.assert_not_called()
+        p.fail_deadline.assert_not_called()
+        p.monitor.assert_awaited_once()
+        self.assertEqual(repository.failed, [])
+
     def test_event_at_without_preparation_fails_closed_before_market_monitor(self) -> None:
         event = _event(event_at=datetime.now(UTC) - timedelta(seconds=1))
         repository = _Repository()
@@ -420,7 +489,16 @@ class TrackedEventWorkerPreEventContextTests(unittest.TestCase):
         p.fail_deadline.assert_not_called()
         self.assertEqual(repository.failed, [])
 
-    def test_revalidation_error_at_or_after_deadline_fails_closed_without_monitoring(self) -> None:
+    def test_revalidation_error_past_deadline_asks_to_fail_but_is_refused(self) -> None:
+        # This row reaches the deadline decision with a context already
+        # persisted, so the RPC's null-context invariant refuses the write: a
+        # prepared event is never terminal-failed for a *preparation* deadline,
+        # whatever the revalidation error was. The attempt is still routed
+        # through the version-bound RPC, and the refusal is retryable, so a
+        # transient revalidation error resolves on a later poll rather than
+        # writing a terminal outcome that misdescribes what happened. Only a
+        # revalidation that *proves* the snapshot stale (is_current False)
+        # terminally fails such a row - see the stale-context test above.
         current_event = _event(
             event_at=datetime.now(UTC) - timedelta(seconds=1),
             pre_event_market_context=_SNAPSHOT,
@@ -431,8 +509,15 @@ class TrackedEventWorkerPreEventContextTests(unittest.TestCase):
             p = _Patches(
                 stack,
                 is_current={"side_effect": RuntimeError("transient calendar loader failure")},
+                fail_deadline={
+                    "side_effect": RuntimeError(
+                        "tracked event 11111111-1111-1111-1111-111111111111 is no longer "
+                        "awaiting a pre-event baseline"
+                    )
+                },
             )
-            asyncio.run(_run(current_event, repository=repository))
+            with self.assertRaisesRegex(RuntimeError, "no longer awaiting a pre-event baseline"):
+                asyncio.run(_run(current_event, repository=repository))
 
         p.acquire.assert_not_called()
         p.validate.assert_not_called()
@@ -448,6 +533,7 @@ class TrackedEventWorkerPreEventContextTests(unittest.TestCase):
             "revalidation failed at or after event_at",
             p.fail_deadline.call_args.kwargs["error"],
         )
+        self.assertEqual(repository.failed, [])
 
     def test_grounded_sydney_market_is_prepared_normally(self) -> None:
         # Sydney is the one grounded exact eToro market, so the full pre-event

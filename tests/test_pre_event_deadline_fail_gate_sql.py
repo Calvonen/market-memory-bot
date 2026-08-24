@@ -39,15 +39,42 @@ class PreEventDeadlineFailGateSqlTests(unittest.TestCase):
         version_check = self.sql.index(
             "if existing_row.updated_at is distinct from input_expected_updated_at then"
         )
-        state_check = self.sql.index(
-            "if existing_row.status <> 'tracked' or existing_row.reference_price is not null then"
-        )
+        state_check = self.sql.index("if existing_row.status <> 'tracked'")
         deadline_check = self.sql.index(
             "if pg_catalog.clock_timestamp() < existing_row.event_at then"
         )
         self.assertLess(lock, version_check)
         self.assertLess(version_check, state_check)
         self.assertLess(state_check, deadline_check)
+
+    def test_a_persisted_context_makes_the_event_not_deadline_failable(self) -> None:
+        # A committed capture proves the preparation this failure is about
+        # succeeded, even when the caller only saw an exception (lost response,
+        # or the acquisition thread raising after the capture committed). The
+        # guard must therefore require a null context alongside the other two
+        # conditions, so FAILED can never be written over a prepared event.
+        guard_start = self.sql.index("if existing_row.status <> 'tracked'")
+        guard_end = self.sql.index("then", guard_start) + len("then")
+        guard_text = " ".join(self.sql[guard_start:guard_end].split())
+        self.assertEqual(
+            guard_text,
+            "if existing_row.status <> 'tracked' "
+            "or existing_row.reference_price is not null "
+            "or existing_row.pre_event_market_context is not null then",
+        )
+
+    def test_context_guard_precedes_the_deadline_check_and_the_write(self) -> None:
+        # Order matters: a prepared event must be rejected as not-failable
+        # rather than reaching the deadline comparison or the terminal write.
+        context_guard = self.sql.index(
+            "or existing_row.pre_event_market_context is not null then"
+        )
+        deadline_check = self.sql.index(
+            "if pg_catalog.clock_timestamp() < existing_row.event_at then"
+        )
+        terminal_write = self.sql.index("set status = 'failed',")
+        self.assertLess(context_guard, deadline_check)
+        self.assertLess(context_guard, terminal_write)
 
     def test_every_guard_precedes_the_terminal_write(self) -> None:
         deadline_check = self.sql.index(

@@ -10,10 +10,15 @@
 -- 'failed' is terminal.
 --
 -- This RPC makes the whole decision atomic: it locks the row, requires the
--- caller's expected version, re-checks the deadline against the row's own
--- current event_at, and only then writes 'failed'. A rescheduled or otherwise
--- changed row raises a version conflict (retryable - the next poll re-evaluates
+-- caller's expected version, confirms the event is still awaiting a pre-event
+-- baseline at all, re-checks the deadline against the row's own current
+-- event_at, and only then writes 'failed'. A rescheduled or otherwise changed
+-- row raises a version conflict (retryable - the next poll re-evaluates
 -- whatever the event now is) instead of being terminal-failed.
+--
+-- The invariant the guard encodes: an event may only be deadline-failed while
+-- pre_event_market_context IS NULL. A committed capture is proof the
+-- preparation this failure is about succeeded, whatever the caller observed.
 --
 -- Keep the pre-deploy schema gate (verify_tracked_event_runtime_schema(),
 -- scripts/verify_supabase_schema.py) in lockstep with this migration, same as
@@ -65,7 +70,18 @@ begin
   -- Only an event still awaiting its pre-event baseline can be failed this
   -- way. A row that has since started monitoring or captured a reference is
   -- past this decision entirely.
-  if existing_row.status <> 'tracked' or existing_row.reference_price is not null then
+  --
+  -- pre_event_market_context is part of that test, not an afterthought: the
+  -- capture RPC can commit and still surface an exception to the worker (a
+  -- lost response, or the acquisition thread raising while re-reading after a
+  -- successful capture). If that lands at or after event_at, the worker asks
+  -- to terminal-fail an event whose preparation actually succeeded. Requiring
+  -- the context to still be null makes that impossible to write: the RPC
+  -- refuses, the failure is retryable, and the next poll continues down the
+  -- persisted-context restart/revalidation path instead.
+  if existing_row.status <> 'tracked'
+     or existing_row.reference_price is not null
+     or existing_row.pre_event_market_context is not null then
     raise exception 'tracked_market_event_not_pre_event_failable';
   end if;
 

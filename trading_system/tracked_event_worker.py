@@ -601,9 +601,19 @@ async def _prepare_and_monitor_one_event(
     starts; a version conflict there is retryable rather than terminal, since it
     just means a later poll must re-evaluate against whatever the event now is.
     A stale snapshot (event_at moved to a different trading date since capture)
-    fails the event closed once the deadline has passed rather than monitoring
-    on it; a transient revalidation error stays retryable before the deadline
-    and only fails the event closed at or after event_at.
+    fails the event closed rather than monitoring on it - that is a proven-
+    invalid snapshot, not a deadline decision, so it goes through mark_failed.
+
+    The deadline RPC additionally refuses to fail any row whose
+    pre_event_market_context is already set: a committed capture is proof the
+    preparation succeeded, even when the caller only saw an exception (a lost
+    response, or the acquisition thread raising after the capture committed).
+    Such an attempt raises instead of writing, which is retryable, and the next
+    poll continues down the persisted-context path above. The practical
+    consequence is that once a context exists, only a revalidation that
+    *proves* it stale can terminally fail the event; a transient revalidation
+    error past event_at retries rather than recording a terminal outcome that
+    would misdescribe what happened.
     """
     is_unreferenced_tracked_event = (
         event.status == TrackedEventStatus.TRACKED

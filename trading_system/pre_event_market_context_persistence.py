@@ -128,10 +128,14 @@ def fail_pre_event_deadline_if_current(
 
     The RPC locks the row, requires this exact version, re-checks the deadline
     against the locked row's own event_at, and confirms the event is still
-    awaiting its pre-event baseline before writing. Every way that can fail -
-    a concurrent write, a reschedule into the future, or an event that already
-    moved on - raises instead of failing the event, and is retryable: the next
-    poll re-evaluates whatever the event now is.
+    awaiting its pre-event baseline before writing. "Still awaiting" includes
+    pre_event_market_context being null: a committed capture proves preparation
+    succeeded even when the caller only saw an exception, so a prepared event
+    is never terminal-failed for a missed preparation deadline. Every way this
+    can fail - a concurrent write, a reschedule into the future, an event that
+    already moved on, or one that turns out to be prepared - raises instead of
+    failing the event, and is retryable: the next poll re-evaluates whatever
+    the event now is.
     """
     if expected_event_updated_at.tzinfo is None or expected_event_updated_at.utcoffset() is None:
         raise ValueError("expected_event_updated_at must be timezone-aware")
