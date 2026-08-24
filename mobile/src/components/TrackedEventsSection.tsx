@@ -68,6 +68,7 @@ export function TrackedEventsSection({ onSnapshot }: Props) {
 export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
   const scheduleText = formatTrackedEventSchedule(event);
   const presentation = describeTrackedEvent(event);
+  const configText = formatTrackingConfigSnapshot(event.tracking_config_snapshot);
 
   return (
     <View style={styles.eventCard}>
@@ -85,8 +86,38 @@ export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
         <Text style={styles.statusText}>{presentation.status}</Text>
         {presentation.detail ? <Text style={styles.detailText}>{presentation.detail}</Text> : null}
       </View>
+
+      <View style={styles.configBlock}>
+        <Text style={styles.configTitle}>Seuranta-asetukset</Text>
+        <Text style={styles.configText}>{configText}</Text>
+      </View>
     </View>
   );
+}
+
+// Only schema_version 1 is understood - an unrecognized/future version falls
+// back to the "not recorded" copy rather than rendering fields that may no
+// longer mean what their names say.
+function formatTrackingConfigSnapshot(
+  snapshot: TrackedMarketEvent['tracking_config_snapshot'],
+): string {
+  if (!snapshot || snapshot.schema_version !== 1) {
+    return 'Seuranta-asetuksia ei tallennettu';
+  }
+  const monitor = formatPersistedNumber(snapshot.monitor_hours);
+  const reference = formatPersistedNumber(snapshot.reference_lead_seconds);
+  const marketWait = formatPersistedNumber(snapshot.max_wait_for_market_hours);
+  const stages = snapshot.reaction_stages
+    .map(
+      (stage) =>
+        `${formatPersistedNumber(stage.start_after_minutes)}m→${formatPersistedNumber(stage.interval_minutes)}m`,
+    )
+    .join(' · ');
+  return `Seuranta ${monitor} h · Reference ${reference} s ennen tapahtumaa · Markkinan odotus enintään ${marketWait} h · Aikavälit ${stages}`;
+}
+
+function formatPersistedNumber(value: number): string {
+  return String(value);
 }
 
 // event_time_status is descriptive event metadata, not a trading threshold
@@ -199,6 +230,24 @@ const styles = StyleSheet.create({
     color: '#8994a6',
     fontSize: 12,
     marginTop: 4,
+  },
+  configBlock: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#202734',
+  },
+  configTitle: {
+    color: '#8590a1',
+    fontSize: 11,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+  },
+  configText: {
+    color: '#8994a6',
+    fontSize: 12,
+    marginTop: 2,
   },
   errorCard: {
     backgroundColor: '#1c1417',
