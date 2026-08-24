@@ -115,10 +115,12 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
         )
 
     def test_auto_entrypoint_resolves_sydney_sessions_before_acquisition(self) -> None:
+        version = datetime(2026, 8, 24, 14, 47, tzinfo=UTC)
         event = SimpleNamespace(
             instrument="WDS.ASX",
             resolved_etoro_market="Sydney",
             event_at=datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
+            updated_at=version,
         )
         repository = _Repository(event=event)
         calendar = _Calendar(["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25"])
@@ -154,9 +156,14 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
         self.assertIs(saved, event)
         self.assertEqual(calendar_ids, ["XASX"])
         self.assertEqual(fetch_calls, [("WDS.ASX", "1mo", "1d")])
+        self.assertEqual(repository.get_calls, ["event-1", "event-1"])
         rpc_name, payload = repository.client.calls[0]
-        self.assertEqual(rpc_name, "capture_tracked_market_event_pre_event_context")
+        self.assertEqual(
+            rpc_name,
+            "capture_tracked_market_event_pre_event_context_if_current",
+        )
         self.assertEqual(payload["input_market_timezone"], "Australia/Sydney")
+        self.assertEqual(payload["input_expected_updated_at"], version.isoformat())
         self.assertEqual(payload["input_pre_event_market_context"]["session_date"], "2026-08-24")
         self.assertEqual(payload["input_pre_event_market_context"]["previous_session_date"], "2026-08-21")
 
@@ -165,6 +172,7 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
             instrument="WDS.ASX",
             resolved_etoro_market=None,
             event_at=datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 8, 24, 14, 47, tzinfo=UTC),
         )
         repository = _Repository(event=event)
         calendar_calls = []
@@ -189,6 +197,7 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
             instrument="WDS.ASX",
             resolved_etoro_market="Australia",
             event_at=datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 8, 24, 14, 47, tzinfo=UTC),
         )
         repository = _Repository(event=event)
         calendar_calls = []
@@ -203,6 +212,31 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
             )
 
         self.assertEqual(calendar_calls, [])
+        self.assertEqual(repository.client.calls, [])
+
+    def test_auto_entrypoint_requires_event_version_before_external_calls(self) -> None:
+        event = SimpleNamespace(
+            instrument="WDS.ASX",
+            resolved_etoro_market="Sydney",
+            event_at=datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
+            updated_at=None,
+        )
+        repository = _Repository(event=event)
+        calendar_calls = []
+        fetch_calls = []
+
+        with self.assertRaisesRegex(ValueError, "no updated_at version"):
+            acquire_and_persist_pre_event_market_context_for_event(
+                repository,
+                event_id="event-1",
+                ticker="WDS.ASX",
+                actor="tracked-event-worker",
+                fetcher=lambda *args: fetch_calls.append(args),
+                calendar_loader=lambda calendar_id: calendar_calls.append(calendar_id),
+            )
+
+        self.assertEqual(calendar_calls, [])
+        self.assertEqual(fetch_calls, [])
         self.assertEqual(repository.client.calls, [])
 
     def test_rejects_ticker_that_does_not_match_canonical_event_before_fetch(self) -> None:
