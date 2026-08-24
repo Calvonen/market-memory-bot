@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 
 from trading_system.market_session_profile import (
+    GROUNDED_MARKET_SESSION_PROFILES,
+    SYDNEY_MARKET_SESSION_PROFILE,
     MarketSessionProfile,
     resolve_market_session_profile,
 )
@@ -22,6 +24,27 @@ class MarketSessionProfileTests(unittest.TestCase):
         )
 
         self.assertIs(resolved, profile)
+
+    def test_grounded_sydney_profile_uses_asx_timezone_and_mic(self) -> None:
+        self.assertEqual(SYDNEY_MARKET_SESSION_PROFILE.etoro_market, "Sydney")
+        self.assertEqual(SYDNEY_MARKET_SESSION_PROFILE.market_timezone, "Australia/Sydney")
+        self.assertEqual(SYDNEY_MARKET_SESSION_PROFILE.calendar_id, "XASX")
+        self.assertEqual(GROUNDED_MARKET_SESSION_PROFILES, (SYDNEY_MARKET_SESSION_PROFILE,))
+
+        resolved = resolve_market_session_profile(
+            "Sydney",
+            profiles=GROUNDED_MARKET_SESSION_PROFILES,
+        )
+        self.assertIs(resolved, SYDNEY_MARKET_SESSION_PROFILE)
+
+    def test_grounded_profiles_do_not_alias_or_infer_other_australian_labels(self) -> None:
+        for label in ("sydney", "Australia", "ASX", "XASX"):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(ValueError, "unsupported eToro market"):
+                    resolve_market_session_profile(
+                        label,
+                        profiles=GROUNDED_MARKET_SESSION_PROFILES,
+                    )
 
     def test_unknown_market_fails_closed_without_alias_or_fallback(self) -> None:
         profile = MarketSessionProfile(
