@@ -38,10 +38,11 @@ class _Provider:
 class _Repository:
     def __init__(self, event: PersistentTrackedEvent) -> None:
         self.event = event
-        self.calls = []
+        self.arm_calls = []
+        self.market_calls = []
 
     def arm_resolution(self, **kwargs):
-        self.calls.append(kwargs)
+        self.arm_calls.append(kwargs)
         self.event = replace(
             self.event,
             resolved_etoro_instrument_id=kwargs["etoro_instrument_id"],
@@ -49,6 +50,14 @@ class _Repository:
             resolved_etoro_display_name=kwargs["etoro_display_name"],
             resolution_armed_at=datetime.now(UTC),
             resolution_armed_by=kwargs["actor"],
+        )
+        return self.event
+
+    def capture_resolved_etoro_market(self, **kwargs):
+        self.market_calls.append(kwargs)
+        self.event = replace(
+            self.event,
+            resolved_etoro_market=kwargs["etoro_market"],
         )
         return self.event
 
@@ -87,7 +96,9 @@ class ClosedMarketPreflightTests(unittest.TestCase):
 
         self.assertEqual(armed.resolved_etoro_instrument_id, 777)
         self.assertEqual(armed.resolved_etoro_symbol, "NHF.ASX")
-        self.assertEqual(len(repository.calls), 1)
+        self.assertEqual(armed.resolved_etoro_market, "Sydney")
+        self.assertEqual(len(repository.arm_calls), 1)
+        self.assertEqual(len(repository.market_calls), 1)
 
 
 if __name__ == "__main__":
