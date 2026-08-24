@@ -534,31 +534,34 @@ async def _prepare_and_monitor_one_event(
     Only new TRACKED events without a reference are prepared here. MONITORING
     rows and already-referenced legacy TRACKED rows predate this worker wiring
     and continue through the existing monitor path unchanged. External calendar
-    and Yahoo work runs off the asyncio loop. Preparation failures remain
-    retryable at the run_forever task boundary until event_at, where an event
-    that never completed preparation fails closed before reference monitoring.
+    and Yahoo work runs off the asyncio loop. Preparation failures raised before
+    a fresh read of the event's deadline stay retryable at the run_forever task
+    boundary; a failure - including one from an acquisition call that was still
+    running when event_at passed - discovered at or after that fresh deadline
+    terminal-fails the event instead, so a slow or repeatedly-failing
+    acquisition can never keep it stuck retrying in TRACKED past max_past.
 
     A restart after context was already captured but before the reference was
     taken must not blindly repeat the calendar/Yahoo work, but it also must not
-    blindly trust a persisted snapshot: pre_event_market_context is immutable
-    once captured, yet event_at can still be edited afterwards (see
-    upsert_tracked_market_event) while the event stays TRACKED with no
-    reference. So revalidation re-reads the row fresh from the repository -
-    never trusting the possibly-stale event this coroutine was called with -
-    and confirms, with local calendar/session logic and no Yahoo fetch, that
-    its persisted session_date/previous_session_date still match that fresh
-    event_at. Nothing stops event_at from being edited again in the gap
-    between that fresh read and the decision to monitor, so the revalidated
-    row is then re-confirmed atomically (row lock + exact version match in one
-    transaction, via validate_pre_event_market_context_if_current) immediately
-    before monitoring starts; a version conflict there is retryable rather
-    than terminal, since it just means a later poll must re-evaluate against
-    whatever the event now is. A stale snapshot (event_at moved to a different
-    trading date since capture) fails the event closed once the deadline has
-    passed rather than monitoring on it; a transient revalidation error stays
-    retryable before the deadline and only fails the event closed at or after
-    event_at, so it can never keep the event stuck in TRACKED past its
-    max_past window.
+    blindly trust a persisted snapshot. upsert_tracked_market_event freezes
+    event_at (and market/event_time_status/title) once pre_event_market_context
+    is non-null, the same way it already freezes them once reference_price is
+    set, so a newly captured or already-persisted context cannot be outlived by
+    a later event_at edit going forward. Revalidation stays in place as a second,
+    independent layer for rows unprotected by that freeze (captured before this
+    invariant existed) and as defense in depth: it re-reads the row fresh from
+    the repository - never trusting the possibly-stale event this coroutine was
+    called with - and confirms, with local calendar/session logic and no Yahoo
+    fetch, that its persisted session_date/previous_session_date still match
+    that fresh event_at. The revalidated row is then re-confirmed atomically
+    (row lock + exact version match in one transaction, via
+    validate_pre_event_market_context_if_current) immediately before monitoring
+    starts; a version conflict there is retryable rather than terminal, since it
+    just means a later poll must re-evaluate against whatever the event now is.
+    A stale snapshot (event_at moved to a different trading date since capture)
+    fails the event closed once the deadline has passed rather than monitoring
+    on it; a transient revalidation error stays retryable before the deadline
+    and only fails the event closed at or after event_at.
     """
     is_unreferenced_tracked_event = (
         event.status == TrackedEventStatus.TRACKED
@@ -573,13 +576,33 @@ async def _prepare_and_monitor_one_event(
                 error="event reached event_at before pre-event market context was prepared",
             )
             return
-        event = await asyncio.to_thread(
-            acquire_and_persist_pre_event_market_context_for_event,
-            repository,
-            event_id=event.event_id,
-            ticker=event.instrument,
-            actor=WORKER_ACTOR,
-        )
+        try:
+            event = await asyncio.to_thread(
+                acquire_and_persist_pre_event_market_context_for_event,
+                repository,
+                event_id=event.event_id,
+                ticker=event.instrument,
+                actor=WORKER_ACTOR,
+            )
+        except Exception as exc:
+            # Acquisition ran off-loop and can block for a while (Yahoo fetch,
+            # exchange-calendar resolution); event_at may have been reached
+            # during that call even though the pre-check above passed. Decide
+            # retryable vs terminal from a fresh read, not the event_at this
+            # coroutine started with, so a slow acquisition can never leave
+            # the event stuck retrying TRACKED past its deadline (and past
+            # max_past) forever.
+            current_event = repository.get(event.event_id)
+            if current_event is None:
+                raise RuntimeError(f"tracked event {event.event_id} was not found") from exc
+            if datetime.now(UTC) >= current_event.event_at:
+                repository.mark_failed(
+                    current_event.event_id,
+                    actor=WORKER_ACTOR,
+                    error=f"event reached event_at during pre-event market context acquisition: {exc}",
+                )
+                return
+            raise
     elif is_unreferenced_tracked_event:
         current_event = repository.get(event.event_id)
         if current_event is None:

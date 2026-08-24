@@ -119,8 +119,10 @@ class TrackedEventWorkerPreEventContextTests(unittest.TestCase):
         self.assertEqual(repository.failed, [])
 
     def test_preparation_failure_remains_retryable_and_does_not_monitor(self) -> None:
+        # A fresh read at failure time still shows a future event_at, so the
+        # original transient error must propagate unchanged (retryable).
         event = _event(event_at=datetime.now(UTC) + timedelta(hours=4))
-        repository = _Repository()
+        repository = _Repository(current_event=event)
 
         with patch(
             "trading_system.tracked_event_worker.acquire_and_persist_pre_event_market_context_for_event",
@@ -143,6 +145,73 @@ class TrackedEventWorkerPreEventContextTests(unittest.TestCase):
 
         monitor.assert_not_awaited()
         self.assertEqual(repository.failed, [])
+
+    def test_acquisition_failure_at_or_after_fresh_deadline_fails_closed(self) -> None:
+        # Acquisition started while event.event_at (the object this coroutine
+        # was called with) was still in the future, so the pre-check passed.
+        # By the time it raised, a fresh read shows event_at has since been
+        # reached (elapsed real time, or a concurrent edit) - the failure must
+        # terminal-fail the event instead of leaving it retryable forever.
+        stale_event = _event(event_at=datetime.now(UTC) + timedelta(hours=4))
+        current_event = replace(stale_event, event_at=datetime.now(UTC) - timedelta(seconds=1))
+        repository = _Repository(current_event=current_event)
+
+        with patch(
+            "trading_system.tracked_event_worker.acquire_and_persist_pre_event_market_context_for_event",
+            side_effect=RuntimeError("DB deadline gate rejected the capture"),
+        ), patch(
+            "trading_system.tracked_event_worker.monitor_one_event",
+            new=AsyncMock(),
+        ) as monitor:
+            asyncio.run(
+                _prepare_and_monitor_one_event(
+                    stale_event,
+                    repository=repository,
+                    provider=_Provider(),
+                    monitor_hours=8.0,
+                    reference_lead_seconds=30.0,
+                    max_wait_for_market_hours=72.0,
+                )
+            )
+
+        monitor.assert_not_awaited()
+        self.assertEqual(len(repository.failed), 1)
+        self.assertEqual(repository.failed[0][0], stale_event.event_id)
+        self.assertEqual(repository.failed[0][1], WORKER_ACTOR)
+        self.assertIn("pre-event market context acquisition", repository.failed[0][2])
+
+    def test_slow_acquisition_crossing_deadline_cannot_leave_event_stuck_tracked(self) -> None:
+        # A long-blocking acquisition call (e.g. a slow Yahoo fetch) can raise
+        # any exception type once event_at has been crossed mid-call, not just
+        # RuntimeError - the deadline handling must still terminal-fail the
+        # event rather than let an unusual error type keep retrying past
+        # max_past with the event stuck in TRACKED.
+        stale_event = _event(event_at=datetime.now(UTC) + timedelta(hours=4))
+        current_event = replace(stale_event, event_at=datetime.now(UTC) - timedelta(seconds=1))
+        repository = _Repository(current_event=current_event)
+
+        with patch(
+            "trading_system.tracked_event_worker.acquire_and_persist_pre_event_market_context_for_event",
+            side_effect=ValueError("confirmed closed session history is incomplete"),
+        ), patch(
+            "trading_system.tracked_event_worker.monitor_one_event",
+            new=AsyncMock(),
+        ) as monitor:
+            asyncio.run(
+                _prepare_and_monitor_one_event(
+                    stale_event,
+                    repository=repository,
+                    provider=_Provider(),
+                    monitor_hours=8.0,
+                    reference_lead_seconds=30.0,
+                    max_wait_for_market_hours=72.0,
+                )
+            )
+
+        monitor.assert_not_awaited()
+        self.assertEqual(len(repository.failed), 1)
+        self.assertEqual(repository.failed[0][1], WORKER_ACTOR)
+        self.assertIn("pre-event market context acquisition", repository.failed[0][2])
 
     def test_event_at_without_preparation_fails_closed_before_market_monitor(self) -> None:
         event = _event(event_at=datetime.now(UTC) - timedelta(seconds=1))
