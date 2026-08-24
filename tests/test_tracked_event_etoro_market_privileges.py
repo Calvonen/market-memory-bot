@@ -18,7 +18,7 @@ class TrackedEventEtoroMarketPrivilegeMigrationTests(unittest.TestCase):
         self.assertNotRegex(
             self.sql,
             re.compile(
-                r"grant\s+update\s+on\s+table\s+public\.tracked_market_events\s+to\s+service_role\s*;",
+                r"grant\s+update\s+on\s+(?:table\s+)?public\.tracked_market_events\s+to\s+service_role\s*;",
                 re.IGNORECASE,
             ),
         )
@@ -26,7 +26,7 @@ class TrackedEventEtoroMarketPrivilegeMigrationTests(unittest.TestCase):
             self.sql,
             re.compile(
                 r"grant\s+update\s*\([^;)]*\bresolved_etoro_market\b[^;)]*\)\s*"
-                r"on\s+table\s+public\.tracked_market_events\s+to\s+service_role\s*;",
+                r"on\s+(?:table\s+)?public\.tracked_market_events\s+to\s+service_role\s*;",
                 re.IGNORECASE,
             ),
         )
