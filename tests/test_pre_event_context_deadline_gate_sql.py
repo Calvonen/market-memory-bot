@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import unittest
 
 
@@ -36,12 +37,13 @@ class PreEventContextDeadlineGateSqlTests(unittest.TestCase):
         )
 
     def test_canonical_capture_still_expands_composite_result(self) -> None:
-        self.assertEqual(
-            self.sql.count(
-                "select * into saved_row\n    from public.capture_tracked_market_event_pre_event_context("
-            ),
-            2,
+        captures = re.findall(
+            r"select\s+\*\s+into\s+saved_row\s+"
+            r"from\s+public\.capture_tracked_market_event_pre_event_context\(",
+            self.sql,
+            flags=re.IGNORECASE,
         )
+        self.assertEqual(len(captures), 2)
 
 
 if __name__ == "__main__":
