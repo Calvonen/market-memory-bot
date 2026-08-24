@@ -10,6 +10,7 @@ import pandas as pd
 from trading_system.pre_event_market_context_orchestration import (
     acquire_and_persist_pre_event_market_context,
     acquire_and_persist_pre_event_market_context_for_event,
+    persisted_pre_event_market_context_is_current,
 )
 
 
@@ -264,6 +265,50 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
         self.assertEqual(repository.client.calls, [])
         self.assertFalse(repository.rpc_executed)
         self.assertEqual(repository.get_calls, ["event-1"])
+
+    def test_persisted_context_is_current_when_event_at_unchanged_since_capture(self) -> None:
+        event = SimpleNamespace(
+            resolved_etoro_market="Sydney",
+            event_at=datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
+            pre_event_market_context={
+                "schema_version": 1,
+                "session_date": "2026-08-24",
+                "previous_session_date": "2026-08-21",
+            },
+        )
+        calendar = _Calendar(["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25", "2026-08-26"])
+
+        is_current = persisted_pre_event_market_context_is_current(
+            event,
+            calendar_loader=lambda calendar_id: calendar,
+        )
+
+        self.assertTrue(is_current)
+
+    def test_persisted_context_is_stale_after_event_at_moves_to_later_trading_date(self) -> None:
+        # event_at moved a session later after the context was captured for the
+        # original event_at (upsert_tracked_market_event still allows editing
+        # event_at while TRACKED with no reference yet). The last two closed
+        # sessions before the new event_at no longer match the persisted
+        # snapshot's session_date/previous_session_date, so it must be treated
+        # as stale rather than reused for monitoring.
+        event = SimpleNamespace(
+            resolved_etoro_market="Sydney",
+            event_at=datetime(2026, 8, 26, 0, 0, tzinfo=UTC),
+            pre_event_market_context={
+                "schema_version": 1,
+                "session_date": "2026-08-24",
+                "previous_session_date": "2026-08-21",
+            },
+        )
+        calendar = _Calendar(["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25", "2026-08-26"])
+
+        is_current = persisted_pre_event_market_context_is_current(
+            event,
+            calendar_loader=lambda calendar_id: calendar,
+        )
+
+        self.assertFalse(is_current)
 
     def test_acquisition_failure_happens_before_any_persistence_write(self) -> None:
         repository = _Repository()

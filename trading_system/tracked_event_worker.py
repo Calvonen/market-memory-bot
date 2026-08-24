@@ -12,6 +12,7 @@ from trading_system.event_market_reaction import (
 )
 from trading_system.pre_event_market_context_orchestration import (
     acquire_and_persist_pre_event_market_context_for_event,
+    persisted_pre_event_market_context_is_current,
 )
 from trading_system.reaction_monitoring_profile import DEFAULT_EVENT_REACTION_MONITORING_PROFILE
 from trading_system.tracked_candle_pipeline import TrackedMarketCandle
@@ -535,17 +536,23 @@ async def _prepare_and_monitor_one_event(
     that never completed preparation fails closed before reference monitoring.
 
     A restart after context was already captured but before the reference was
-    taken must not repeat the calendar/Yahoo work: the persisted
-    pre_event_market_context on the row (read via the normal event query, not
-    a separate worker-side lookup) is enough to know preparation already ran.
+    taken must not blindly repeat the calendar/Yahoo work, but it also must not
+    blindly trust a persisted snapshot: pre_event_market_context is immutable
+    once captured, yet event_at can still be edited afterwards (see
+    upsert_tracked_market_event) while the event stays TRACKED with no
+    reference. So a persisted snapshot is only reused once
+    persisted_pre_event_market_context_is_current confirms - from the row
+    already in hand, with local calendar/session logic and no Yahoo fetch -
+    that its session_date/previous_session_date still match the event's
+    current event_at. A stale snapshot (event_at moved to a different trading
+    date since capture) fails the event closed rather than monitoring on it.
     """
-    should_prepare = (
+    is_unreferenced_tracked_event = (
         event.status == TrackedEventStatus.TRACKED
         and event.reference_price is None
         and bool(event.resolved_etoro_market)
-        and event.pre_event_market_context is None
     )
-    if should_prepare:
+    if is_unreferenced_tracked_event and event.pre_event_market_context is None:
         if datetime.now(UTC) >= event.event_at:
             repository.mark_failed(
                 event.event_id,
@@ -560,6 +567,15 @@ async def _prepare_and_monitor_one_event(
             ticker=event.instrument,
             actor=WORKER_ACTOR,
         )
+    elif is_unreferenced_tracked_event:
+        is_current = await asyncio.to_thread(persisted_pre_event_market_context_is_current, event)
+        if not is_current:
+            repository.mark_failed(
+                event.event_id,
+                actor=WORKER_ACTOR,
+                error="persisted pre-event market context no longer matches the event's current event_at",
+            )
+            return
 
     await monitor_one_event(
         event,

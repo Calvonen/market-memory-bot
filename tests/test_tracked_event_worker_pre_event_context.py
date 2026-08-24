@@ -151,10 +151,14 @@ class TrackedEventWorkerPreEventContextTests(unittest.TestCase):
         self.assertEqual(repository.failed[0][1], WORKER_ACTOR)
         self.assertIn("pre-event market context", repository.failed[0][2])
 
-    def test_tracked_restart_with_persisted_context_skips_reacquisition(self) -> None:
+    def test_tracked_restart_with_current_persisted_context_skips_reacquisition(self) -> None:
         event = replace(
             _event(event_at=datetime.now(UTC) + timedelta(hours=4)),
-            pre_event_market_context={"session_date": "2026-08-24", "candles": []},
+            pre_event_market_context={
+                "schema_version": 1,
+                "session_date": "2026-08-21",
+                "previous_session_date": "2026-08-20",
+            },
         )
         repository = _Repository()
         provider = _Provider()
@@ -162,6 +166,9 @@ class TrackedEventWorkerPreEventContextTests(unittest.TestCase):
         with patch(
             "trading_system.tracked_event_worker.acquire_and_persist_pre_event_market_context_for_event"
         ) as acquire, patch(
+            "trading_system.tracked_event_worker.persisted_pre_event_market_context_is_current",
+            return_value=True,
+        ) as is_current, patch(
             "trading_system.tracked_event_worker.monitor_one_event",
             new=AsyncMock(),
         ) as monitor:
@@ -177,6 +184,7 @@ class TrackedEventWorkerPreEventContextTests(unittest.TestCase):
             )
 
         acquire.assert_not_called()
+        is_current.assert_called_once_with(event)
         monitor.assert_awaited_once_with(
             event,
             repository=repository,
@@ -186,6 +194,50 @@ class TrackedEventWorkerPreEventContextTests(unittest.TestCase):
             max_wait_for_market_hours=72.0,
         )
         self.assertEqual(repository.failed, [])
+
+    def test_tracked_restart_with_stale_persisted_context_fails_closed_without_monitoring(
+        self,
+    ) -> None:
+        # event_at moved to a different trading date after the context snapshot
+        # was captured for the original event_at (see upsert_tracked_market_event,
+        # which still allows editing event_at while TRACKED with no reference).
+        event = replace(
+            _event(event_at=datetime.now(UTC) + timedelta(hours=4)),
+            pre_event_market_context={
+                "schema_version": 1,
+                "session_date": "2026-08-21",
+                "previous_session_date": "2026-08-20",
+            },
+        )
+        repository = _Repository()
+        provider = _Provider()
+
+        with patch(
+            "trading_system.tracked_event_worker.acquire_and_persist_pre_event_market_context_for_event"
+        ) as acquire, patch(
+            "trading_system.tracked_event_worker.persisted_pre_event_market_context_is_current",
+            return_value=False,
+        ) as is_current, patch(
+            "trading_system.tracked_event_worker.monitor_one_event",
+            new=AsyncMock(),
+        ) as monitor:
+            asyncio.run(
+                _prepare_and_monitor_one_event(
+                    event,
+                    repository=repository,
+                    provider=provider,
+                    monitor_hours=8.0,
+                    reference_lead_seconds=30.0,
+                    max_wait_for_market_hours=72.0,
+                )
+            )
+
+        acquire.assert_not_called()
+        is_current.assert_called_once_with(event)
+        monitor.assert_not_awaited()
+        self.assertEqual(len(repository.failed), 1)
+        self.assertEqual(repository.failed[0][1], WORKER_ACTOR)
+        self.assertIn("pre-event market context", repository.failed[0][2])
 
     def test_monitoring_restart_preserves_existing_legacy_path(self) -> None:
         event = _event(
