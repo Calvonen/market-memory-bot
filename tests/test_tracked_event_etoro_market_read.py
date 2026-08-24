@@ -41,6 +41,23 @@ class TrackedEventEtoroMarketReadTests(unittest.TestCase):
         self.assertIsNone(missing.resolved_etoro_market)
         self.assertIsNone(explicit_null.resolved_etoro_market)
 
+    def test_reads_persisted_pre_event_market_context_when_present(self) -> None:
+        snapshot = {"session_date": "2026-08-24", "candles": []}
+        event = SupabaseTrackedEventRepository._row_to_event(
+            self._row(pre_event_market_context=snapshot)
+        )
+
+        self.assertEqual(event.pre_event_market_context, snapshot)
+
+    def test_missing_or_null_pre_event_market_context_stays_none(self) -> None:
+        missing = SupabaseTrackedEventRepository._row_to_event(self._row())
+        explicit_null = SupabaseTrackedEventRepository._row_to_event(
+            self._row(pre_event_market_context=None)
+        )
+
+        self.assertIsNone(missing.pre_event_market_context)
+        self.assertIsNone(explicit_null.pre_event_market_context)
+
 
 if __name__ == "__main__":
     unittest.main()

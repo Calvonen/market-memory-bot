@@ -74,6 +74,11 @@ class PersistentTrackedEvent:
     # rows captured before this column existed - never fabricated here from
     # today's defaults, since that would silently misrepresent history.
     tracking_config_snapshot: dict[str, Any] | None = None
+    # Persisted immutable pre-event context snapshot (see
+    # pre_event_market_context_persistence.py). None until captured; the
+    # worker uses this to skip redundant calendar/Yahoo reacquisition on
+    # restart rather than issuing a separate lookup.
+    pre_event_market_context: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -566,6 +571,9 @@ class SupabaseTrackedEventRepository:
             # defaulted to {} or invented from current settings, or history
             # would silently look like it was tracked with today's config.
             tracking_config_snapshot=value("tracking_config_snapshot"),
+            # NULL stays None here for the same reason as tracking_config_snapshot
+            # above - a not-yet-captured context must never be defaulted to {}.
+            pre_event_market_context=value("pre_event_market_context"),
         )
 
     @classmethod

@@ -533,11 +533,17 @@ async def _prepare_and_monitor_one_event(
     and Yahoo work runs off the asyncio loop. Preparation failures remain
     retryable at the run_forever task boundary until event_at, where an event
     that never completed preparation fails closed before reference monitoring.
+
+    A restart after context was already captured but before the reference was
+    taken must not repeat the calendar/Yahoo work: the persisted
+    pre_event_market_context on the row (read via the normal event query, not
+    a separate worker-side lookup) is enough to know preparation already ran.
     """
     should_prepare = (
         event.status == TrackedEventStatus.TRACKED
         and event.reference_price is None
         and bool(event.resolved_etoro_market)
+        and event.pre_event_market_context is None
     )
     if should_prepare:
         if datetime.now(UTC) >= event.event_at:
