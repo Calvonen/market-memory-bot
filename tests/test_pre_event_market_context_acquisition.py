@@ -70,6 +70,27 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
         self.assertEqual(context.close_price, Decimal("103"))
         self.assertEqual(context.previous_close_price, Decimal("100"))
 
+    def test_rejects_when_confirmed_closed_session_is_missing(self) -> None:
+        def fetcher(ticker: str, period: str, interval: str) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "Open": [Decimal("98"), Decimal("99"), Decimal("150")],
+                    "High": [Decimal("100"), Decimal("101"), Decimal("170")],
+                    "Low": [Decimal("97"), Decimal("98"), Decimal("140")],
+                    "Close": [Decimal("99"), Decimal("100"), Decimal("165")],
+                    "Volume": [1000, 1200, 100],
+                },
+                index=pd.to_datetime(["2026-08-19", "2026-08-20", "2026-08-24"]),
+            )
+
+        with self.assertRaisesRegex(ValueError, "confirmed closed session data is missing"):
+            acquire_pre_event_market_context(
+                ticker="NHF.ASX",
+                event_trading_date=date(2026, 8, 25),
+                last_confirmed_closed_session_date=date(2026, 8, 21),
+                fetcher=fetcher,
+            )
+
     def test_returns_none_when_two_confirmed_sessions_are_not_available(self) -> None:
         def fetcher(ticker: str, period: str, interval: str) -> pd.DataFrame:
             return pd.DataFrame(
