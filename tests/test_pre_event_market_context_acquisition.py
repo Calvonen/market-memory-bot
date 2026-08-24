@@ -32,12 +32,11 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
             ticker=" nhf.asx ",
             event_trading_date=date(2026, 8, 24),
             last_confirmed_closed_session_date=date(2026, 8, 21),
+            previous_confirmed_closed_session_date=date(2026, 8, 20),
             fetcher=fetcher,
         )
 
         self.assertEqual(calls, [("NHF.ASX", "1mo", "1d")])
-        self.assertIsNotNone(context)
-        assert context is not None
         self.assertEqual(context.session_date, date(2026, 8, 21))
         self.assertEqual(context.previous_session_date, date(2026, 8, 20))
         self.assertEqual(context.close_price, Decimal("103"))
@@ -61,16 +60,15 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
             ticker="NHF.ASX",
             event_trading_date=date(2026, 8, 25),
             last_confirmed_closed_session_date=date(2026, 8, 21),
+            previous_confirmed_closed_session_date=date(2026, 8, 20),
             fetcher=fetcher,
         )
 
-        self.assertIsNotNone(context)
-        assert context is not None
         self.assertEqual(context.session_date, date(2026, 8, 21))
+        self.assertEqual(context.previous_session_date, date(2026, 8, 20))
         self.assertEqual(context.close_price, Decimal("103"))
-        self.assertEqual(context.previous_close_price, Decimal("100"))
 
-    def test_rejects_when_confirmed_closed_session_is_missing(self) -> None:
+    def test_rejects_when_latest_confirmed_session_is_missing(self) -> None:
         def fetcher(ticker: str, period: str, interval: str) -> pd.DataFrame:
             return pd.DataFrame(
                 {
@@ -88,51 +86,71 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
                 ticker="NHF.ASX",
                 event_trading_date=date(2026, 8, 25),
                 last_confirmed_closed_session_date=date(2026, 8, 21),
+                previous_confirmed_closed_session_date=date(2026, 8, 20),
                 fetcher=fetcher,
             )
 
-    def test_rejects_missing_confirmed_session_before_none_for_short_history(self) -> None:
+    def test_rejects_when_immediately_preceding_session_is_missing(self) -> None:
         def fetcher(ticker: str, period: str, interval: str) -> pd.DataFrame:
             return pd.DataFrame(
                 {
-                    "Open": [Decimal("99"), Decimal("150")],
-                    "High": [Decimal("101"), Decimal("170")],
-                    "Low": [Decimal("98"), Decimal("140")],
-                    "Close": [Decimal("100"), Decimal("165")],
-                    "Volume": [1200, 100],
+                    "Open": [Decimal("97"), Decimal("101"), Decimal("150")],
+                    "High": [Decimal("99"), Decimal("104"), Decimal("170")],
+                    "Low": [Decimal("96"), Decimal("100"), Decimal("140")],
+                    "Close": [Decimal("98"), Decimal("103"), Decimal("165")],
+                    "Volume": [1000, 1200, 100],
                 },
-                index=pd.to_datetime(["2026-08-20", "2026-08-24"]),
+                index=pd.to_datetime(["2026-08-19", "2026-08-21", "2026-08-24"]),
             )
 
-        with self.assertRaisesRegex(ValueError, "confirmed closed session data is missing"):
+        with self.assertRaisesRegex(ValueError, "previous confirmed closed session data is missing"):
             acquire_pre_event_market_context(
                 ticker="NHF.ASX",
                 event_trading_date=date(2026, 8, 25),
                 last_confirmed_closed_session_date=date(2026, 8, 21),
+                previous_confirmed_closed_session_date=date(2026, 8, 20),
                 fetcher=fetcher,
             )
 
-    def test_returns_none_when_two_confirmed_sessions_are_not_available(self) -> None:
+    def test_rejects_when_expected_previous_session_is_not_immediately_preceding(self) -> None:
         def fetcher(ticker: str, period: str, interval: str) -> pd.DataFrame:
             return pd.DataFrame(
                 {
-                    "Open": [Decimal("100"), Decimal("101")],
-                    "High": [Decimal("102"), Decimal("103")],
-                    "Low": [Decimal("99"), Decimal("100")],
-                    "Close": [Decimal("101"), Decimal("102")],
-                    "Volume": [1000, 1200],
+                    "Open": [Decimal("97"), Decimal("99"), Decimal("101")],
+                    "High": [Decimal("99"), Decimal("101"), Decimal("104")],
+                    "Low": [Decimal("96"), Decimal("98"), Decimal("100")],
+                    "Close": [Decimal("98"), Decimal("100"), Decimal("103")],
+                    "Volume": [900, 1000, 1200],
                 },
-                index=pd.to_datetime(["2026-08-21", "2026-08-24"]),
+                index=pd.to_datetime(["2026-08-19", "2026-08-20", "2026-08-21"]),
             )
 
-        self.assertIsNone(
+        with self.assertRaisesRegex(ValueError, "not immediately preceding"):
+            acquire_pre_event_market_context(
+                ticker="NHF.ASX",
+                event_trading_date=date(2026, 8, 24),
+                last_confirmed_closed_session_date=date(2026, 8, 21),
+                previous_confirmed_closed_session_date=date(2026, 8, 19),
+                fetcher=fetcher,
+            )
+
+    def test_rejects_invalid_confirmed_session_order_before_fetch(self) -> None:
+        called = False
+
+        def fetcher(ticker: str, period: str, interval: str) -> pd.DataFrame:
+            nonlocal called
+            called = True
+            raise AssertionError("fetcher must not be called")
+
+        with self.assertRaisesRegex(ValueError, "previous confirmed session must precede"):
             acquire_pre_event_market_context(
                 ticker="DKS",
                 event_trading_date=date(2026, 8, 24),
                 last_confirmed_closed_session_date=date(2026, 8, 21),
+                previous_confirmed_closed_session_date=date(2026, 8, 21),
                 fetcher=fetcher,
             )
-        )
+        self.assertFalse(called)
 
     def test_rejects_blank_ticker_before_fetch(self) -> None:
         called = False
@@ -147,6 +165,7 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
                 ticker="   ",
                 event_trading_date=date(2026, 8, 24),
                 last_confirmed_closed_session_date=date(2026, 8, 21),
+                previous_confirmed_closed_session_date=date(2026, 8, 20),
                 fetcher=fetcher,
             )
         self.assertFalse(called)
@@ -171,6 +190,7 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
                 ticker="DKS",
                 event_trading_date=date(2026, 8, 24),
                 last_confirmed_closed_session_date=date(2026, 8, 21),
+                previous_confirmed_closed_session_date=date(2026, 8, 20),
                 fetcher=fetcher,
             )
 
