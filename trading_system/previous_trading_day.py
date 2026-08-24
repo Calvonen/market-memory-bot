@@ -123,6 +123,8 @@ def pre_event_market_context(
         raise ValueError("daily_ohlcv index must be a DatetimeIndex")
     if daily_ohlcv.index.tz is not None:
         raise ValueError("daily_ohlcv index must use timezone-naive market session dates")
+    if daily_ohlcv.index.hasnans:
+        raise ValueError("daily_ohlcv index must not contain missing market session dates")
     if any(timestamp != timestamp.normalize() for timestamp in daily_ohlcv.index):
         raise ValueError("daily_ohlcv index must contain midnight market session dates")
 
