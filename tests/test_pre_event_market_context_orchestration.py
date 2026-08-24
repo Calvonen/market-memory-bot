@@ -32,10 +32,10 @@ class _Client:
 
 
 class _Repository:
-    def __init__(self) -> None:
+    def __init__(self, *, event=None) -> None:
         self.client = _Client(self)
         self.rpc_executed = False
-        self.saved_event = object()
+        self.saved_event = event or SimpleNamespace(instrument="EXM.L")
         self.get_calls = []
 
     def get(self, event_id):
@@ -79,7 +79,7 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
 
         self.assertIs(saved, repository.saved_event)
         self.assertEqual(fetch_calls, [("EXM.L", "1mo", "1d")])
-        self.assertEqual(repository.get_calls, ["event-1"])
+        self.assertEqual(repository.get_calls, ["event-1", "event-1"])
         self.assertEqual(len(repository.client.calls), 1)
         rpc_name, payload = repository.client.calls[0]
         self.assertEqual(rpc_name, "capture_tracked_market_event_pre_event_context")
@@ -103,6 +103,32 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
             },
         )
 
+    def test_rejects_ticker_that_does_not_match_canonical_event_before_fetch(self) -> None:
+        repository = _Repository(event=SimpleNamespace(instrument="EXM.L"))
+        fetch_calls = []
+
+        def fetcher(ticker, period, interval):
+            fetch_calls.append((ticker, period, interval))
+            return self._daily_frame()
+
+        with self.assertRaisesRegex(ValueError, "ticker does not match tracked event instrument"):
+            acquire_and_persist_pre_event_market_context(
+                repository,
+                event_id="event-1",
+                ticker="OTHER.L",
+                event_trading_date=date(2026, 8, 24),
+                last_confirmed_closed_session_date=date(2026, 8, 21),
+                previous_confirmed_closed_session_date=date(2026, 8, 20),
+                market_timezone="Europe/London",
+                actor="tracked-event-worker",
+                fetcher=fetcher,
+            )
+
+        self.assertEqual(fetch_calls, [])
+        self.assertEqual(repository.client.calls, [])
+        self.assertFalse(repository.rpc_executed)
+        self.assertEqual(repository.get_calls, ["event-1"])
+
     def test_acquisition_failure_happens_before_any_persistence_write(self) -> None:
         repository = _Repository()
 
@@ -124,7 +150,7 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
 
         self.assertEqual(repository.client.calls, [])
         self.assertFalse(repository.rpc_executed)
-        self.assertEqual(repository.get_calls, [])
+        self.assertEqual(repository.get_calls, ["event-1"])
 
 
 if __name__ == "__main__":
