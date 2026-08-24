@@ -17,6 +17,22 @@ export type TrackedEventTrackingConfigSnapshot = {
   reaction_stages: TrackedEventMonitoringStageSnapshot[];
 };
 
+export type TrackedEventLatestReaction = {
+  interval_minutes: number;
+  candle_start: string;
+  reference_price: string;
+  close_price: string;
+  return_pct: string;
+  direction: string;
+  evolution: string;
+  observed_at: string;
+};
+
+export type TrackedEventLatestReactionResponse = {
+  event_id: string;
+  latest_reaction: TrackedEventLatestReaction | null;
+};
+
 export type TrackedMarketEvent = {
   event_id: string;
   tracked_instrument_id: string;
@@ -55,5 +71,13 @@ export function getTrackedEvents(
 ): Promise<TrackedMarketEvent[]> {
   return apiGet<TrackedMarketEvent[]>(
     `/api/v1/tracked-events?view=${encodeURIComponent(view)}&limit=${encodeURIComponent(String(limit))}`,
+  );
+}
+
+export function getTrackedEventLatestReaction(
+  eventId: string,
+): Promise<TrackedEventLatestReactionResponse> {
+  return apiGet<TrackedEventLatestReactionResponse>(
+    `/api/v1/tracked-events/${encodeURIComponent(eventId)}/latest-reaction`,
   );
 }
