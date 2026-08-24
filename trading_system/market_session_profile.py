@@ -30,6 +30,19 @@ class MarketSessionProfile:
             raise ValueError("market_timezone must be a valid IANA timezone") from exc
 
 
+# First production-grounded broker market profile. The exact eToro label
+# "Sydney" was persisted by the tracked-event preflight for WDS.ASX on
+# 2026-08-24. XASX is the Australian Securities Exchange MIC; no aliases or
+# ticker/country inference are registered alongside it.
+SYDNEY_MARKET_SESSION_PROFILE = MarketSessionProfile(
+    etoro_market="Sydney",
+    market_timezone="Australia/Sydney",
+    calendar_id="XASX",
+)
+
+GROUNDED_MARKET_SESSION_PROFILES = (SYDNEY_MARKET_SESSION_PROFILE,)
+
+
 def resolve_market_session_profile(
     etoro_market: str,
     *,
