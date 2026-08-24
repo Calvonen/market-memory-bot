@@ -27,6 +27,11 @@ class TrackedEventLatestReaction:
     observed_at: datetime
 
 
+def _require_aware_timestamp(value: datetime, *, field_name: str) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+
+
 def latest_tracked_event_reaction(
     reactions: Iterable[TrackedEventReactionRecord],
 ) -> TrackedEventLatestReaction | None:
@@ -35,11 +40,18 @@ def latest_tracked_event_reaction(
     Stage changes can make a longer candle start before the latest shorter
     candle while still closing later. Rank by candle end first, then resolve
     equal-end ties deterministically by observed_at, candle_start and
-    interval_minutes. No persisted numeric values are rounded or recomputed.
+    interval_minutes. Reaction timestamps must be timezone-aware so malformed
+    rows fail closed before they can enter the read model. No persisted numeric
+    values are rounded or recomputed.
     """
 
+    rows = tuple(reactions)
+    for row in rows:
+        _require_aware_timestamp(row.candle_start, field_name="candle_start")
+        _require_aware_timestamp(row.observed_at, field_name="observed_at")
+
     latest = max(
-        reactions,
+        rows,
         key=lambda row: (
             row.candle_start + timedelta(minutes=row.interval_minutes),
             row.observed_at,
