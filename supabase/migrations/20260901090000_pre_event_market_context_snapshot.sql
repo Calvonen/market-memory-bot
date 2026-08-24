@@ -24,6 +24,7 @@ declare
   expected_session_return numeric;
   expected_close_to_close_return numeric;
   expected_direction text;
+  return_tolerance constant numeric := 0.000000000001;
 begin
   if snapshot is null or jsonb_typeof(snapshot) <> 'object' then
     return false;
@@ -85,6 +86,18 @@ begin
     return false;
   end if;
 
+  -- PostgreSQL numeric accepts NaN/Infinity; the Python producer deliberately
+  -- rejects them, so mirror that fail-closed contract before comparisons.
+  if open_value::text in ('NaN', 'Infinity', '-Infinity')
+     or high_value::text in ('NaN', 'Infinity', '-Infinity')
+     or low_value::text in ('NaN', 'Infinity', '-Infinity')
+     or close_value::text in ('NaN', 'Infinity', '-Infinity')
+     or previous_close_value::text in ('NaN', 'Infinity', '-Infinity')
+     or session_return_value::text in ('NaN', 'Infinity', '-Infinity')
+     or close_to_close_return_value::text in ('NaN', 'Infinity', '-Infinity') then
+    return false;
+  end if;
+
   if open_value <= 0 or high_value <= 0 or low_value <= 0
      or close_value <= 0 or previous_close_value <= 0 then
     return false;
@@ -98,8 +111,11 @@ begin
   expected_session_return := ((close_value / open_value) - 1) * 100;
   expected_close_to_close_return := ((close_value / previous_close_value) - 1) * 100;
 
-  if session_return_value <> expected_session_return
-     or close_to_close_return_value <> expected_close_to_close_return then
+  -- Python Decimal and PostgreSQL numeric use different division precision for
+  -- repeating ratios. Validate parity to an explicit 1e-12 percentage-point
+  -- tolerance rather than demanding impossible exact cross-runtime equality.
+  if abs(session_return_value - expected_session_return) > return_tolerance
+     or abs(close_to_close_return_value - expected_close_to_close_return) > return_tolerance then
     return false;
   end if;
 
@@ -159,6 +175,7 @@ create trigger tracked_market_events_pre_event_context_immutable
 create or replace function public.capture_tracked_market_event_pre_event_context(
   input_event_id uuid,
   input_pre_event_market_context jsonb,
+  input_market_timezone text,
   input_actor text
 )
 returns public.tracked_market_events
@@ -168,9 +185,14 @@ as $$
 declare
   existing_row public.tracked_market_events%rowtype;
   saved_row public.tracked_market_events%rowtype;
+  event_trading_date date;
+  snapshot_session_date date;
 begin
   if not public.is_valid_pre_event_market_context_v1(input_pre_event_market_context) then
     raise exception 'invalid_pre_event_market_context';
+  end if;
+  if nullif(btrim(input_market_timezone), '') is null then
+    raise exception 'input_market_timezone is required';
   end if;
   if nullif(btrim(input_actor), '') is null then
     raise exception 'input_actor is required';
@@ -183,6 +205,17 @@ begin
 
   if existing_row.id is null then
     raise exception 'tracked_market_event_not_found' using errcode = 'P0002';
+  end if;
+
+  begin
+    event_trading_date := (existing_row.event_at at time zone input_market_timezone)::date;
+    snapshot_session_date := (input_pre_event_market_context ->> 'session_date')::date;
+  exception when others then
+    raise exception 'invalid_market_timezone_or_session_date';
+  end;
+
+  if snapshot_session_date >= event_trading_date then
+    raise exception 'pre_event_market_context_not_before_event';
   end if;
 
   if existing_row.pre_event_market_context is not null then
