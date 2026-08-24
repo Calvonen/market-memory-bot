@@ -1,124 +1,186 @@
 from __future__ import annotations
 
 import unittest
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pandas as pd
 
-from trading_system.previous_trading_day import previous_trading_day_snapshot
+from trading_system.previous_trading_day import (
+    PreEventMarketContext,
+    pre_event_market_context,
+)
 
 
-class PreviousTradingDaySnapshotTests(unittest.TestCase):
-    def test_selects_actual_sessions_before_event_date(self):
-        frame = pd.DataFrame(
-            {"Close": [Decimal("100"), Decimal("103"), Decimal("106.09")]},
-            index=pd.to_datetime(["2026-08-20", "2026-08-21", "2026-08-24"]),
+def _frame(rows: list[tuple[str, str, str, str, str]]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Open": [Decimal(row[1]) for row in rows],
+            "High": [Decimal(row[2]) for row in rows],
+            "Low": [Decimal(row[3]) for row in rows],
+            "Close": [Decimal(row[4]) for row in rows],
+        },
+        index=pd.to_datetime([row[0] for row in rows]),
+    )
+
+
+class PreEventMarketContextTests(unittest.TestCase):
+    def test_builds_previous_session_ohlc_and_close_to_close_context(self):
+        frame = _frame(
+            [
+                ("2026-08-20", "99", "101", "98", "100"),
+                ("2026-08-21", "101", "104", "100", "103"),
+                ("2026-08-24", "106", "107", "105", "106.5"),
+            ]
         )
 
-        snapshot = previous_trading_day_snapshot(
+        context = pre_event_market_context(
             frame,
             event_trading_date=date(2026, 8, 24),
         )
 
-        self.assertIsNotNone(snapshot)
-        assert snapshot is not None
-        self.assertEqual(snapshot.trading_date, date(2026, 8, 21))
-        self.assertEqual(snapshot.prior_trading_date, date(2026, 8, 20))
-        self.assertEqual(snapshot.prior_close_price, Decimal("100"))
-        self.assertEqual(snapshot.close_price, Decimal("103"))
-        self.assertEqual(snapshot.return_pct, Decimal("3.00"))
-        self.assertEqual(snapshot.direction, "up")
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertEqual(context.session_date, date(2026, 8, 21))
+        self.assertEqual(context.previous_session_date, date(2026, 8, 20))
+        self.assertEqual(context.open_price, Decimal("101"))
+        self.assertEqual(context.high_price, Decimal("104"))
+        self.assertEqual(context.low_price, Decimal("100"))
+        self.assertEqual(context.close_price, Decimal("103"))
+        self.assertEqual(context.previous_close_price, Decimal("100"))
+        self.assertEqual(context.close_to_close_return_pct, Decimal("3.00"))
+        self.assertEqual(context.close_to_close_direction, "up")
 
-    def test_ignores_event_day_and_future_rows(self):
-        frame = pd.DataFrame(
-            {"Close": [Decimal("100"), Decimal("95"), Decimal("120"), Decimal("130")]},
-            index=pd.to_datetime(["2026-08-21", "2026-08-24", "2026-08-25", "2026-08-26"]),
+    def test_session_return_is_open_to_close(self):
+        frame = _frame(
+            [
+                ("2026-08-20", "99", "101", "98", "100"),
+                ("2026-08-21", "100", "105", "99", "102"),
+            ]
         )
 
-        snapshot = previous_trading_day_snapshot(
+        context = pre_event_market_context(
+            frame,
+            event_trading_date=date(2026, 8, 24),
+        )
+
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertEqual(context.session_return_pct, Decimal("2.00"))
+        self.assertEqual(context.close_to_close_return_pct, Decimal("2.00"))
+
+    def test_ignores_event_day_and_future_rows(self):
+        frame = _frame(
+            [
+                ("2026-08-21", "99", "101", "98", "100"),
+                ("2026-08-24", "100", "101", "94", "95"),
+                ("2026-08-25", "119", "121", "118", "120"),
+                ("2026-08-26", "129", "131", "128", "130"),
+            ]
+        )
+
+        context = pre_event_market_context(
             frame,
             event_trading_date=date(2026, 8, 25),
         )
 
-        self.assertIsNotNone(snapshot)
-        assert snapshot is not None
-        self.assertEqual(snapshot.trading_date, date(2026, 8, 24))
-        self.assertEqual(snapshot.prior_trading_date, date(2026, 8, 21))
-        self.assertEqual(snapshot.return_pct, Decimal("-5.00"))
-        self.assertEqual(snapshot.direction, "down")
-
-    def test_flat_close_is_flat(self):
-        frame = pd.DataFrame(
-            {"Close": [Decimal("7.25"), Decimal("7.25")]},
-            index=pd.to_datetime(["2026-08-20", "2026-08-21"]),
-        )
-
-        snapshot = previous_trading_day_snapshot(
-            frame,
-            event_trading_date=date(2026, 8, 24),
-        )
-
-        self.assertIsNotNone(snapshot)
-        assert snapshot is not None
-        self.assertEqual(snapshot.return_pct, Decimal("0"))
-        self.assertEqual(snapshot.direction, "flat")
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertEqual(context.session_date, date(2026, 8, 24))
+        self.assertEqual(context.previous_session_date, date(2026, 8, 21))
+        self.assertEqual(context.close_to_close_return_pct, Decimal("-5.00"))
+        self.assertEqual(context.close_to_close_direction, "down")
 
     def test_requires_two_completed_sessions(self):
-        frame = pd.DataFrame(
-            {"Close": [Decimal("100"), Decimal("101")]},
-            index=pd.to_datetime(["2026-08-21", "2026-08-24"]),
+        frame = _frame(
+            [
+                ("2026-08-21", "99", "101", "98", "100"),
+                ("2026-08-24", "100", "102", "99", "101"),
+            ]
         )
 
-        snapshot = previous_trading_day_snapshot(
-            frame,
-            event_trading_date=date(2026, 8, 24),
+        self.assertIsNone(
+            pre_event_market_context(frame, event_trading_date=date(2026, 8, 24))
         )
 
-        self.assertIsNone(snapshot)
+    def test_rejects_timezone_aware_index_before_session_selection(self):
+        frame = _frame(
+            [
+                ("2026-08-20", "99", "101", "98", "100"),
+                ("2026-08-21", "100", "104", "99", "103"),
+            ]
+        )
+        frame.index = frame.index.tz_localize("Europe/Helsinki").tz_convert("UTC")
 
-    def test_rejects_missing_close_column(self):
-        frame = pd.DataFrame(
-            {"Open": [Decimal("100"), Decimal("101")]},
-            index=pd.to_datetime(["2026-08-20", "2026-08-21"]),
+        with self.assertRaisesRegex(ValueError, "timezone-naive market session dates"):
+            pre_event_market_context(frame, event_trading_date=date(2026, 8, 24))
+
+    def test_rejects_duplicate_session_dates(self):
+        frame = _frame(
+            [
+                ("2026-08-20", "99", "101", "98", "100"),
+                ("2026-08-21", "100", "104", "99", "103"),
+                ("2026-08-21", "101", "105", "100", "104"),
+            ]
         )
 
-        with self.assertRaisesRegex(ValueError, "missing Close"):
-            previous_trading_day_snapshot(
-                frame,
-                event_trading_date=date(2026, 8, 24),
+        with self.assertRaisesRegex(ValueError, "duplicate market session dates"):
+            pre_event_market_context(frame, event_trading_date=date(2026, 8, 24))
+
+    def test_rejects_intraday_index_labels(self):
+        frame = _frame(
+            [
+                ("2026-08-20 00:00", "99", "101", "98", "100"),
+                ("2026-08-21 12:00", "100", "104", "99", "103"),
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "midnight market session dates"):
+            pre_event_market_context(frame, event_trading_date=date(2026, 8, 24))
+
+    def test_rejects_datetime_for_session_date_contract(self):
+        with self.assertRaisesRegex(ValueError, "session_date must be a date"):
+            PreEventMarketContext(
+                session_date=datetime(2026, 8, 21, tzinfo=UTC),
+                previous_session_date=date(2026, 8, 20),
+                open_price=Decimal("100"),
+                high_price=Decimal("104"),
+                low_price=Decimal("99"),
+                close_price=Decimal("103"),
+                previous_close_price=Decimal("100"),
+                session_return_pct=Decimal("3.00"),
+                close_to_close_return_pct=Decimal("3.00"),
             )
 
-    def test_rejects_non_positive_or_non_finite_close(self):
-        for bad_close in (Decimal("0"), Decimal("-1"), Decimal("NaN"), Decimal("Infinity")):
-            with self.subTest(bad_close=bad_close):
-                frame = pd.DataFrame(
-                    {"Close": [Decimal("100"), bad_close]},
-                    index=pd.to_datetime(["2026-08-20", "2026-08-21"]),
-                )
-
-                with self.assertRaisesRegex(ValueError, "finite positive"):
-                    previous_trading_day_snapshot(
-                        frame,
-                        event_trading_date=date(2026, 8, 24),
-                    )
-
-    def test_sorts_unsorted_daily_rows_before_selecting(self):
-        frame = pd.DataFrame(
-            {"Close": [Decimal("103"), Decimal("100"), Decimal("999")]},
-            index=pd.to_datetime(["2026-08-21", "2026-08-20", "2026-08-24"]),
+    def test_serializes_stable_context_without_late_session_metric(self):
+        context = PreEventMarketContext(
+            session_date=date(2026, 8, 21),
+            previous_session_date=date(2026, 8, 20),
+            open_price=Decimal("100"),
+            high_price=Decimal("104"),
+            low_price=Decimal("99"),
+            close_price=Decimal("103"),
+            previous_close_price=Decimal("100"),
+            session_return_pct=Decimal("3.00"),
+            close_to_close_return_pct=Decimal("3.00"),
         )
 
-        snapshot = previous_trading_day_snapshot(
-            frame,
-            event_trading_date=date(2026, 8, 24),
+        self.assertEqual(
+            context.to_dict(),
+            {
+                "schema_version": 1,
+                "session_date": "2026-08-21",
+                "previous_session_date": "2026-08-20",
+                "open_price": "100",
+                "high_price": "104",
+                "low_price": "99",
+                "close_price": "103",
+                "previous_close_price": "100",
+                "session_return_pct": "3.00",
+                "close_to_close_return_pct": "3.00",
+                "close_to_close_direction": "up",
+            },
         )
-
-        self.assertIsNotNone(snapshot)
-        assert snapshot is not None
-        self.assertEqual(snapshot.prior_close_price, Decimal("100"))
-        self.assertEqual(snapshot.close_price, Decimal("103"))
-        self.assertEqual(snapshot.return_pct, Decimal("3.00"))
 
 
 if __name__ == "__main__":
