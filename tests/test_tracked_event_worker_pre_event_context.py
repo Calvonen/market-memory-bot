@@ -489,6 +489,77 @@ class TrackedEventWorkerPreEventContextTests(unittest.TestCase):
         p.fail_deadline.assert_not_called()
         self.assertEqual(repository.failed, [])
 
+    def test_prepared_row_long_past_the_deadline_retries_until_the_dependency_returns(
+        self,
+    ) -> None:
+        # A prepared, unreferenced row whose event_at is far past max_past is
+        # deliberately kept runnable by list_runnable (see the repository
+        # tests), so this is the poll it gets. While the revalidation
+        # dependency is down it must stay retryable - never terminal-failed -
+        # and once the dependency returns the same row revalidates and proceeds
+        # into monitoring without any reacquisition.
+        current_event = _event(
+            event_at=datetime.now(UTC) - timedelta(hours=30),
+            pre_event_market_context=_SNAPSHOT,
+        )
+        confirmed_event = replace(
+            current_event, updated_at=current_event.updated_at + timedelta(seconds=1)
+        )
+
+        # Poll while the dependency is still down.
+        down_repository = _Repository(current_event=current_event)
+        with ExitStack() as stack:
+            down = _Patches(
+                stack,
+                is_current={"side_effect": RuntimeError("calendar provider unavailable")},
+                fail_deadline={
+                    "side_effect": RuntimeError(
+                        "tracked event 11111111-1111-1111-1111-111111111111 is no longer "
+                        "awaiting a pre-event baseline"
+                    )
+                },
+            )
+            with self.assertRaisesRegex(RuntimeError, "no longer awaiting a pre-event baseline"):
+                asyncio.run(_run(current_event, repository=down_repository))
+
+        down.monitor.assert_not_awaited()
+        self.assertEqual(down_repository.failed, [])
+
+        # Next poll, dependency recovered: the same row converges.
+        up_repository = _Repository(current_event=current_event)
+        with ExitStack() as stack:
+            up = _Patches(
+                stack,
+                is_current={"return_value": True},
+                validate={"return_value": confirmed_event},
+            )
+            asyncio.run(_run(current_event, repository=up_repository))
+
+        up.acquire.assert_not_called()
+        up.fail_deadline.assert_not_called()
+        up.monitor.assert_awaited_once()
+        self.assertEqual(up_repository.failed, [])
+
+    def test_prepared_row_long_past_the_deadline_still_fails_when_proven_stale(self) -> None:
+        # The escape from max_past must not make a genuinely stale prepared row
+        # immortal: a revalidation that proves the snapshot no longer matches
+        # still terminal-fails it, which also removes it from list_runnable.
+        current_event = _event(
+            event_at=datetime.now(UTC) - timedelta(hours=30),
+            pre_event_market_context=_SNAPSHOT,
+        )
+        repository = _Repository(current_event=current_event)
+
+        with ExitStack() as stack:
+            p = _Patches(stack, is_current={"return_value": False})
+            asyncio.run(_run(current_event, repository=repository))
+
+        p.validate.assert_not_called()
+        p.monitor.assert_not_awaited()
+        self.assertEqual(len(repository.failed), 1)
+        self.assertEqual(repository.failed[0][1], WORKER_ACTOR)
+        self.assertIn("pre-event market context", repository.failed[0][2])
+
     def test_revalidation_error_past_deadline_asks_to_fail_but_is_refused(self) -> None:
         # This row reaches the deadline decision with a context already
         # persisted, so the RPC's null-context invariant refuses the write: a
