@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import unittest
 
 
@@ -14,19 +15,59 @@ class TrackedEventEtoroMarketPrivilegeMigrationTests(unittest.TestCase):
             "revoke update on table public.tracked_market_events from service_role;",
             self.sql,
         )
-        self.assertIn("a.attname <> 'resolved_etoro_market'", self.sql)
-        self.assertIn("grant update (%s) on table public.tracked_market_events to service_role", self.sql)
-
-    def test_capture_uses_privileged_rpc_and_immutable_table_guard(self) -> None:
-        self.assertIn(
-            "create or replace function public.capture_tracked_market_event_resolved_market(",
+        self.assertNotRegex(
             self.sql,
+            re.compile(
+                r"grant\s+update\s+on\s+table\s+public\.tracked_market_events\s+to\s+service_role\s*;",
+                re.IGNORECASE,
+            ),
         )
-        self.assertIn("security definer", self.sql)
-        self.assertIn("set search_path = pg_catalog, public", self.sql)
-        self.assertIn(
-            "create trigger guard_tracked_market_event_resolved_market",
+
+        grant_builder = re.search(
+            r"select\s+string_agg\(pg_catalog\.format\('%I',\s*a\.attname\),"
+            r".*?from\s+pg_catalog\.pg_attribute\s+a"
+            r".*?where\s+a\.attrelid\s*=\s*'public\.tracked_market_events'::regclass"
+            r"(?P<predicates>.*?)"
+            r"execute\s+pg_catalog\.format\(\s*"
+            r"'grant update \(%s\) on table public\.tracked_market_events to service_role'",
             self.sql,
+            re.IGNORECASE | re.DOTALL,
+        )
+        self.assertIsNotNone(grant_builder)
+        assert grant_builder is not None
+        self.assertRegex(
+            grant_builder.group("predicates"),
+            re.compile(
+                r"and\s+a\.attname\s*<>\s*'resolved_etoro_market'\s*;",
+                re.IGNORECASE,
+            ),
+        )
+
+    def test_capture_rpc_is_security_definer_with_locked_search_path(self) -> None:
+        capture_header = re.search(
+            r"create\s+or\s+replace\s+function\s+public\.capture_tracked_market_event_resolved_market\s*\("
+            r".*?\)\s*"
+            r"returns\s+public\.tracked_market_events\s*"
+            r"language\s+plpgsql\s*"
+            r"security\s+definer\s*"
+            r"set\s+search_path\s*=\s*pg_catalog\s*,\s*public\s*"
+            r"as\s+\$\$",
+            self.sql,
+            re.IGNORECASE | re.DOTALL,
+        )
+        self.assertIsNotNone(capture_header)
+
+    def test_resolved_market_trigger_guards_insert_and_update_on_target_table(self) -> None:
+        self.assertRegex(
+            self.sql,
+            re.compile(
+                r"create\s+trigger\s+guard_tracked_market_event_resolved_market\s*"
+                r"before\s+insert\s+or\s+update\s+of\s+resolved_etoro_market\s*"
+                r"on\s+public\.tracked_market_events\s*"
+                r"for\s+each\s+row\s*"
+                r"execute\s+function\s+public\.guard_tracked_market_event_resolved_market\s*\(\s*\)\s*;",
+                re.IGNORECASE | re.DOTALL,
+            ),
         )
         self.assertIn(
             "tracked_market_event_resolved_market_immutable",
