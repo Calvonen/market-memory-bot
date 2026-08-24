@@ -38,7 +38,7 @@ class _TrackedEventRepository:
         self.get_calls.append(event_id)
         if self.get_error is not None:
             raise self.get_error
-        return self.event if event_id == EVENT_ID else None
+        return self.event if event_id.replace("-", "") == EVENT_ID.replace("-", "") else None
 
     def list_reactions(self, event_id: str) -> tuple[TrackedEventReactionRecord, ...]:
         self.reaction_calls.append(event_id)
@@ -144,6 +144,21 @@ class TrackedEventLatestReactionReadApiTests(unittest.TestCase):
                 },
             },
         )
+
+    def test_compact_uuid_returns_and_reads_with_canonical_event_id(self):
+        compact_event_id = EVENT_ID.replace("-", "")
+        repository = _TrackedEventRepository(event=_event(), reactions=(_reaction(),))
+        client = self._client(repository)
+
+        response = client.get(
+            f"/api/v1/tracked-events/{compact_event_id}/latest-reaction",
+            headers={"X-MarketAI-Key": "read-secret"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(repository.get_calls, [compact_event_id])
+        self.assertEqual(repository.reaction_calls, [EVENT_ID])
+        self.assertEqual(response.json()["event_id"], EVENT_ID)
 
     def test_existing_event_without_reactions_returns_null(self):
         repository = _TrackedEventRepository(event=_event())
