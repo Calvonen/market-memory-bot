@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,6 +20,18 @@ class SupabaseCalendarRuntimePromotionRepository:
 
     def __init__(self, client: Any) -> None:
         self.client = client
+
+    @classmethod
+    def from_env(cls) -> "SupabaseCalendarRuntimePromotionRepository":
+        from supabase import create_client
+
+        url = os.environ.get("MARKETAI_SUPABASE_URL")
+        key = os.environ.get("MARKETAI_SUPABASE_SECRET_KEY")
+        if not url or not key:
+            raise RuntimeError(
+                "MARKETAI_SUPABASE_URL and MARKETAI_SUPABASE_SECRET_KEY are required"
+            )
+        return cls(create_client(url, key))
 
     def promote(
         self,
