@@ -17,9 +17,10 @@ def _is_valid_host(hostname: str) -> bool:
     except ValueError:
         pass
 
-    if len(hostname) > 253:
+    if len(hostname) > 253 or hostname.endswith(".."):
         return False
-    labels = hostname.rstrip(".").split(".")
+    normalized_hostname = hostname[:-1] if hostname.endswith(".") else hostname
+    labels = normalized_hostname.split(".")
     if not labels or any(not label for label in labels):
         return False
     for label in labels:
