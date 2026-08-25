@@ -242,7 +242,7 @@ begin
 end;
 $$;
 
-revoke all on function public.set_event_official_release_source(text, text, text, text, integer) from public;
+revoke all on function public.set_event_official_release_source(text, text, text, text, integer) from public, anon, authenticated;
 grant execute on function public.set_event_official_release_source(text, text, text, text, integer) to service_role;
 
 create function public.clear_event_official_release_source(
@@ -290,7 +290,7 @@ begin
 end;
 $$;
 
-revoke all on function public.clear_event_official_release_source(text, integer) from public;
+revoke all on function public.clear_event_official_release_source(text, integer) from public, anon, authenticated;
 grant execute on function public.clear_event_official_release_source(text, integer) to service_role;
 
 commit;
