@@ -6,82 +6,145 @@ from decimal import Decimal
 
 import pandas as pd
 
-from trading_system.pre_event_market_context_acquisition import acquire_pre_event_market_context
+from trading_system.pre_event_market_context_acquisition import (
+    acquire_pre_event_market_context,
+)
 
 
 class PreEventMarketContextAcquisitionTests(unittest.TestCase):
-    @staticmethod
-    def _frame() -> pd.DataFrame:
-        return pd.DataFrame(
-            {
-                "Open": [Decimal("99"), Decimal("101"), Decimal("106")],
-                "High": [Decimal("101"), Decimal("104"), Decimal("108")],
-                "Low": [Decimal("98"), Decimal("100"), Decimal("105")],
-                "Close": [Decimal("100"), Decimal("103"), Decimal("107")],
-                "Volume": [1000, 1200, 900],
-            },
-            index=pd.to_datetime(["2026-08-20", "2026-08-21", "2026-08-24"]),
-        )
+    def test_fetches_daily_history_and_builds_context(self) -> None:
+        calls: list[tuple[str, str, str]] = []
 
-    def test_fetches_provider_symbol_and_builds_context(self) -> None:
-        calls = []
-
-        def fetcher(ticker, period, interval):
+        def fetcher(ticker: str, period: str, interval: str) -> pd.DataFrame:
             calls.append((ticker, period, interval))
-            return self._frame()
+            return pd.DataFrame(
+                {
+                    "Open": [Decimal("99"), Decimal("101"), Decimal("106")],
+                    "High": [Decimal("101"), Decimal("104"), Decimal("108")],
+                    "Low": [Decimal("98"), Decimal("100"), Decimal("105")],
+                    "Close": [Decimal("100"), Decimal("103"), Decimal("107")],
+                    "Volume": [1000, 1200, 900],
+                },
+                index=pd.to_datetime(["2026-08-20", "2026-08-21", "2026-08-24"]),
+            )
 
         context = acquire_pre_event_market_context(
-            provider_symbol=" wds.ax ",
+            provider_symbol=" nhf.ax ",
             event_trading_date=date(2026, 8, 24),
             last_confirmed_closed_session_date=date(2026, 8, 21),
             previous_confirmed_closed_session_date=date(2026, 8, 20),
             fetcher=fetcher,
         )
 
-        self.assertEqual(calls, [("WDS.AX", "1mo", "1d")])
+        self.assertEqual(calls, [("NHF.AX", "1mo", "1d")])
         self.assertEqual(context.session_date, date(2026, 8, 21))
         self.assertEqual(context.previous_session_date, date(2026, 8, 20))
+        self.assertEqual(context.close_price, Decimal("103"))
+        self.assertEqual(context.previous_close_price, Decimal("100"))
+        self.assertEqual(context.close_to_close_return_pct, Decimal("3.00"))
 
-    def test_same_day_closed_session_is_allowed(self) -> None:
+    def test_excludes_still_forming_daily_bar(self) -> None:
+        def fetcher(ticker: str, period: str, interval: str) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "Open": [Decimal("99"), Decimal("101"), Decimal("150")],
+                    "High": [Decimal("101"), Decimal("104"), Decimal("170")],
+                    "Low": [Decimal("98"), Decimal("100"), Decimal("140")],
+                    "Close": [Decimal("100"), Decimal("103"), Decimal("165")],
+                    "Volume": [1000, 1200, 100],
+                },
+                index=pd.to_datetime(["2026-08-20", "2026-08-21", "2026-08-24"]),
+            )
+
         context = acquire_pre_event_market_context(
-            provider_symbol="WDS.AX",
-            event_trading_date=date(2026, 8, 24),
-            last_confirmed_closed_session_date=date(2026, 8, 24),
-            previous_confirmed_closed_session_date=date(2026, 8, 21),
-            fetcher=lambda *_: self._frame(),
+            provider_symbol="NHF.AX",
+            event_trading_date=date(2026, 8, 25),
+            last_confirmed_closed_session_date=date(2026, 8, 21),
+            previous_confirmed_closed_session_date=date(2026, 8, 20),
+            fetcher=fetcher,
         )
-        self.assertEqual(context.session_date, date(2026, 8, 24))
-        self.assertEqual(context.previous_session_date, date(2026, 8, 21))
 
-    def test_rejects_session_after_event_trading_date_before_fetch(self) -> None:
-        called = False
+        self.assertEqual(context.session_date, date(2026, 8, 21))
+        self.assertEqual(context.previous_session_date, date(2026, 8, 20))
+        self.assertEqual(context.close_price, Decimal("103"))
 
-        def fetcher(*_):
-            nonlocal called
-            called = True
-            return self._frame()
+    def test_rejects_when_latest_confirmed_session_is_missing(self) -> None:
+        def fetcher(ticker: str, period: str, interval: str) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "Open": [Decimal("98"), Decimal("99"), Decimal("150")],
+                    "High": [Decimal("100"), Decimal("101"), Decimal("170")],
+                    "Low": [Decimal("97"), Decimal("98"), Decimal("140")],
+                    "Close": [Decimal("99"), Decimal("100"), Decimal("165")],
+                    "Volume": [1000, 1200, 100],
+                },
+                index=pd.to_datetime(["2026-08-19", "2026-08-20", "2026-08-24"]),
+            )
 
-        with self.assertRaisesRegex(ValueError, "must not be after"):
+        with self.assertRaisesRegex(ValueError, "confirmed closed session data is missing"):
             acquire_pre_event_market_context(
-                provider_symbol="WDS.AX",
-                event_trading_date=date(2026, 8, 21),
-                last_confirmed_closed_session_date=date(2026, 8, 24),
-                previous_confirmed_closed_session_date=date(2026, 8, 21),
+                provider_symbol="NHF.AX",
+                event_trading_date=date(2026, 8, 25),
+                last_confirmed_closed_session_date=date(2026, 8, 21),
+                previous_confirmed_closed_session_date=date(2026, 8, 20),
                 fetcher=fetcher,
             )
-        self.assertFalse(called)
 
-    def test_rejects_invalid_session_order_before_fetch(self) -> None:
+    def test_rejects_when_immediately_preceding_session_is_missing(self) -> None:
+        def fetcher(ticker: str, period: str, interval: str) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "Open": [Decimal("97"), Decimal("101"), Decimal("150")],
+                    "High": [Decimal("99"), Decimal("104"), Decimal("170")],
+                    "Low": [Decimal("96"), Decimal("100"), Decimal("140")],
+                    "Close": [Decimal("98"), Decimal("103"), Decimal("165")],
+                    "Volume": [1000, 1200, 100],
+                },
+                index=pd.to_datetime(["2026-08-19", "2026-08-21", "2026-08-24"]),
+            )
+
+        with self.assertRaisesRegex(ValueError, "previous confirmed closed session data is missing"):
+            acquire_pre_event_market_context(
+                provider_symbol="NHF.AX",
+                event_trading_date=date(2026, 8, 25),
+                last_confirmed_closed_session_date=date(2026, 8, 21),
+                previous_confirmed_closed_session_date=date(2026, 8, 20),
+                fetcher=fetcher,
+            )
+
+    def test_rejects_when_expected_previous_session_is_not_immediately_preceding(self) -> None:
+        def fetcher(ticker: str, period: str, interval: str) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "Open": [Decimal("97"), Decimal("99"), Decimal("101")],
+                    "High": [Decimal("99"), Decimal("101"), Decimal("104")],
+                    "Low": [Decimal("96"), Decimal("98"), Decimal("100")],
+                    "Close": [Decimal("98"), Decimal("100"), Decimal("103")],
+                    "Volume": [900, 1000, 1200],
+                },
+                index=pd.to_datetime(["2026-08-19", "2026-08-20", "2026-08-21"]),
+            )
+
+        with self.assertRaisesRegex(ValueError, "not immediately preceding"):
+            acquire_pre_event_market_context(
+                provider_symbol="NHF.AX",
+                event_trading_date=date(2026, 8, 24),
+                last_confirmed_closed_session_date=date(2026, 8, 21),
+                previous_confirmed_closed_session_date=date(2026, 8, 19),
+                fetcher=fetcher,
+            )
+
+    def test_rejects_invalid_confirmed_session_order_before_fetch(self) -> None:
         called = False
 
-        def fetcher(*_):
+        def fetcher(ticker: str, period: str, interval: str) -> pd.DataFrame:
             nonlocal called
             called = True
-            return self._frame()
+            raise AssertionError("fetcher must not be called")
 
         with self.assertRaisesRegex(ValueError, "previous confirmed session must precede"):
             acquire_pre_event_market_context(
-                provider_symbol="WDS.AX",
+                provider_symbol="DKS",
                 event_trading_date=date(2026, 8, 24),
                 last_confirmed_closed_session_date=date(2026, 8, 21),
                 previous_confirmed_closed_session_date=date(2026, 8, 21),
@@ -92,10 +155,10 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
     def test_rejects_blank_provider_symbol_before_fetch(self) -> None:
         called = False
 
-        def fetcher(*_):
+        def fetcher(ticker: str, period: str, interval: str) -> pd.DataFrame:
             nonlocal called
             called = True
-            return self._frame()
+            raise AssertionError("fetcher must not be called")
 
         with self.assertRaisesRegex(ValueError, "provider_symbol is required"):
             acquire_pre_event_market_context(
@@ -107,27 +170,28 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
             )
         self.assertFalse(called)
 
-    def test_missing_required_session_fails_closed(self) -> None:
-        frame = self._frame().drop(pd.Timestamp("2026-08-21"))
-        with self.assertRaisesRegex(ValueError, "confirmed closed session data is missing"):
-            acquire_pre_event_market_context(
-                provider_symbol="WDS.AX",
-                event_trading_date=date(2026, 8, 24),
-                last_confirmed_closed_session_date=date(2026, 8, 21),
-                previous_confirmed_closed_session_date=date(2026, 8, 20),
-                fetcher=lambda *_: frame,
+    def test_selector_validation_is_not_bypassed(self) -> None:
+        def fetcher(ticker: str, period: str, interval: str) -> pd.DataFrame:
+            frame = pd.DataFrame(
+                {
+                    "Open": [Decimal("100"), Decimal("101")],
+                    "High": [Decimal("102"), Decimal("103")],
+                    "Low": [Decimal("99"), Decimal("100")],
+                    "Close": [Decimal("101"), Decimal("102")],
+                    "Volume": [1000, 1200],
+                },
+                index=pd.to_datetime(["2026-08-20", "2026-08-21"]),
             )
+            frame.index = frame.index.tz_localize("UTC")
+            return frame
 
-    def test_timezone_aware_daily_index_is_rejected(self) -> None:
-        frame = self._frame()
-        frame.index = frame.index.tz_localize("UTC")
         with self.assertRaisesRegex(ValueError, "timezone-naive market session dates"):
             acquire_pre_event_market_context(
-                provider_symbol="WDS.AX",
+                provider_symbol="DKS",
                 event_trading_date=date(2026, 8, 24),
                 last_confirmed_closed_session_date=date(2026, 8, 21),
                 previous_confirmed_closed_session_date=date(2026, 8, 20),
-                fetcher=lambda *_: frame,
+                fetcher=fetcher,
             )
 
 
