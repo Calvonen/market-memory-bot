@@ -56,7 +56,9 @@ ALL_PRESENT_ROW = {
     "fail_tracked_market_event_stale_context_if_current_function_exists": True,
     "promote_calendar_event_to_tracked_runtime_function_exists": True,
     "calendar_runtime_untrack_guard_version_matches": True,
-    "runtime_schema_version": 9,
+    "ensure_calendar_release_shell_function_exists": True,
+    "calendar_release_shell_version_matches": True,
+    "runtime_schema_version": 10,
 }
 
 
@@ -98,12 +100,12 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertIn("SCHEMA GATE FAILED", err)
 
     def test_fails_closed_on_old_runtime_schema_version(self) -> None:
-        row = dict(ALL_PRESENT_ROW, runtime_schema_version=8)
+        row = dict(ALL_PRESENT_ROW, runtime_schema_version=9)
         exit_code, _out, err = self._run_with_client(
             _FakeClient(SimpleNamespace(data=[row]))
         )
         self.assertEqual(exit_code, 1)
-        self.assertIn("tracked-event runtime schema version 9", err)
+        self.assertIn("tracked-event runtime schema version 10", err)
 
     def test_fails_closed_when_stale_context_fail_rpc_is_missing(self) -> None:
         row = dict(
@@ -137,6 +139,28 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         )
         self.assertEqual(exit_code, 1)
         self.assertIn("calendar runtime-bound untrack guard", err)
+
+    def test_fails_closed_when_release_shell_function_is_missing(self) -> None:
+        row = dict(
+            ALL_PRESENT_ROW,
+            ensure_calendar_release_shell_function_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(SimpleNamespace(data=[row]))
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("ensure_calendar_release_shell() function", err)
+
+    def test_fails_closed_when_release_shell_version_is_missing(self) -> None:
+        row = dict(
+            ALL_PRESENT_ROW,
+            calendar_release_shell_version_matches=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(SimpleNamespace(data=[row]))
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("calendar release-pipeline shell", err)
 
     def test_fails_closed_when_existing_required_object_is_missing(self) -> None:
         row = dict(ALL_PRESENT_ROW, capture_tracked_market_event_reference_function_exists=False)
