@@ -276,26 +276,31 @@ class SupabaseTrackedEventRepository:
             .in_("status", [TrackedEventStatus.TRACKED.value, TrackedEventStatus.MONITORING.value])
             .lte("event_at", upper)
             # max_past normally drops events whose event_at is long gone, so a
-            # worker restart does not resurrect stale backlog. One case must
-            # survive that cutoff: a TRACKED row that already has a persisted
-            # pre_event_market_context but no reference yet. Its preparation
-            # succeeded, so the deadline RPC deliberately refuses to terminal-
-            # fail it (see 20260902096000); if a transient revalidation
-            # dependency stays down longer than max_past, dropping it here
-            # would strand it in TRACKED with nothing left to retry it.
+            # worker restart does not resurrect stale backlog. One class of row
+            # must survive that cutoff: a TRACKED event that has not captured a
+            # reference yet, because its pre-event lifecycle has not reached any
+            # durable outcome. Both shapes need it, for the same reason:
             #
-            # The exception is deliberately narrow and self-draining: the row
-            # leaves this set for good as soon as it captures a reference,
-            # starts monitoring, or is terminally failed (a proven-stale
-            # context still fails normally). Context-free TRACKED rows and
-            # MONITORING rows keep the plain max_past contract - the deadline
-            # RPC is what terminates those, so they can never accumulate here.
+            #   context persisted - preparation succeeded, so the deadline RPC
+            #     deliberately refuses to terminal-fail it (see 20260902096000).
+            #     If a transient revalidation dependency stays down past
+            #     max_past, dropping it here strands it in TRACKED forever.
+            #   context null - it still needs the deadline RPC to record a
+            #     terminal failure. A worker that was down from before event_at
+            #     until after the cutoff would otherwise never get the chance,
+            #     leaving the event silently stuck in TRACKED.
+            #
+            # So the invariant is simply "TRACKED and not yet referenced", and
+            # it is self-draining: the row leaves this set for good the moment
+            # it captures a reference, enters MONITORING, or is terminally
+            # failed - which is exactly what the next poll drives it to.
+            # MONITORING rows and terminal rows keep the plain max_past
+            # contract, so old backlog cannot accumulate here.
             .or_(
                 f"event_at.gte.{lower},"
                 "and("
                 f"status.eq.{TrackedEventStatus.TRACKED.value},"
-                "reference_price.is.null,"
-                "pre_event_market_context.not.is.null"
+                "reference_price.is.null"
                 ")"
             )
             .order("event_at")

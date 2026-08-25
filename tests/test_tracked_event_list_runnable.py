@@ -103,7 +103,7 @@ class ListRunnableFilterTests(unittest.TestCase):
         )
         self.assertEqual(recorder["order"], "event_at")
 
-    def test_lower_bound_moves_into_an_or_with_the_prepared_exception(self) -> None:
+    def test_lower_bound_moves_into_an_or_with_the_unfinished_exception(self) -> None:
         recorder = self._recorder()
 
         # The plain gte lower bound is gone; it is now one branch of the or.
@@ -112,26 +112,29 @@ class ListRunnableFilterTests(unittest.TestCase):
             recorder["or"],
             [
                 f"event_at.gte.{(NOW - MAX_PAST).isoformat()},"
-                "and(status.eq.tracked,reference_price.is.null,"
-                "pre_event_market_context.not.is.null)"
+                "and(status.eq.tracked,reference_price.is.null)"
             ],
         )
 
-    def test_prepared_exception_requires_all_three_conditions(self) -> None:
-        # Narrowness is the whole point: without every condition the exception
-        # would resurrect unbounded old TRACKED backlog on each poll.
+    def test_exception_is_exactly_tracked_and_unreferenced(self) -> None:
+        # One invariant, not a per-shape list: a TRACKED event that has not
+        # captured a reference has no durable pre-event outcome yet, so it must
+        # stay schedulable until it gets one. Anything more permissive would
+        # resurrect unbounded old backlog on each poll.
         expression = self._recorder()["or"][0]
-        _lower_branch, prepared_branch = expression.split(",and(", 1)
-        conditions = prepared_branch.rstrip(")").split(",")
+        _lower_branch, exception_branch = expression.split(",and(", 1)
+        conditions = exception_branch.rstrip(")").split(",")
 
         self.assertEqual(
             conditions,
-            [
-                "status.eq.tracked",
-                "reference_price.is.null",
-                "pre_event_market_context.not.is.null",
-            ],
+            ["status.eq.tracked", "reference_price.is.null"],
         )
+
+    def test_exception_does_not_discriminate_on_context(self) -> None:
+        # Both an unprepared row (needs the deadline RPC to record a terminal
+        # failure) and a prepared one (needs revalidation retries) must survive
+        # the cutoff, so the filter must not mention the context column.
+        self.assertNotIn("pre_event_market_context", self._recorder()["or"][0])
 
     def test_monitoring_rows_are_not_exempted_from_max_past(self) -> None:
         expression = self._recorder()["or"][0]
@@ -147,6 +150,24 @@ class ListRunnableFilterTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].status, TrackedEventStatus.TRACKED)
         self.assertEqual(events[0].pre_event_market_context, {"schema_version": 1})
+
+    def test_unprepared_missed_event_survives_a_long_worker_outage(self) -> None:
+        # The worker was down from before event_at until well past the cutoff.
+        # The context-free row must come back so the deadline RPC can finally
+        # record a terminal failure for it.
+        missed = _row(
+            event_at=NOW - timedelta(hours=30),
+            pre_event_market_context=None,
+            reference_price=None,
+        )
+        repository = SupabaseTrackedEventRepository(_Client([missed]))
+
+        events = repository.list_runnable(now=NOW, lookahead=LOOKAHEAD, max_past=MAX_PAST)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].status, TrackedEventStatus.TRACKED)
+        self.assertIsNone(events[0].pre_event_market_context)
+        self.assertIsNone(events[0].reference_price)
 
     def test_rejects_naive_now_before_querying(self) -> None:
         client = _Client()
@@ -226,7 +247,7 @@ class ListRunnablePostgrestSemanticsTests(unittest.TestCase):
         self.assertTrue(filters["or"].startswith("("))
         self.assertTrue(filters["or"].endswith(")"))
         self.assertIn("and(", filters["or"])
-        self.assertIn("pre_event_market_context.not.is.null", filters["or"])
+        self.assertIn("reference_price.is.null", filters["or"])
         self.assertEqual(filters["status"], "in.(tracked,monitoring)")
 
     def test_filter_selects_exactly_the_intended_rows(self) -> None:
@@ -238,31 +259,43 @@ class ListRunnablePostgrestSemanticsTests(unittest.TestCase):
 
         def matches(*, status, event_at, reference_price, context):
             # Mirrors the emitted filter: status IN (...) AND event_at <= upper
-            # AND (event_at >= lower OR prepared-exception).
+            # AND (event_at >= lower OR (tracked AND not yet referenced)).
             if status not in ("tracked", "monitoring"):
                 return False
             if event_at > upper:
                 return False
-            prepared = (
-                status == "tracked" and reference_price is None and context is not None
-            )
-            return event_at >= lower or prepared
+            unfinished = status == "tracked" and reference_price is None
+            return event_at >= lower or unfinished
 
         # 1. Prepared, unreferenced, older than max_past -> still runnable.
         self.assertTrue(
             matches(status="tracked", event_at=stale, reference_price=None, context={"v": 1})
         )
-        # 2. Context-free TRACKED older than max_past -> dropped.
-        self.assertFalse(
+        # 2. Context-free TRACKED older than max_past -> also still runnable,
+        # so a worker that was down across event_at can still record the
+        # terminal deadline failure.
+        self.assertTrue(
             matches(status="tracked", event_at=stale, reference_price=None, context=None)
+        )
+        # 3. Once that failure is persisted the row is no longer TRACKED and
+        # drops out for good.
+        self.assertFalse(
+            matches(status="failed", event_at=stale, reference_price=None, context=None)
         )
         # 4. A referenced row past max_past drops out, so the exception drains.
         self.assertFalse(
             matches(status="tracked", event_at=stale, reference_price=1, context={"v": 1})
         )
-        # MONITORING keeps the plain cutoff even with a context.
+        # MONITORING keeps the plain cutoff even with a context: it already has
+        # a durable in-progress outcome and is not awaiting a pre-event verdict.
         self.assertFalse(
             matches(status="monitoring", event_at=stale, reference_price=None, context={"v": 1})
+        )
+        self.assertFalse(
+            matches(status="completed", event_at=stale, reference_price=None, context=None)
+        )
+        self.assertFalse(
+            matches(status="cancelled", event_at=stale, reference_price=None, context=None)
         )
         # Terminal rows never come back regardless of context.
         self.assertFalse(
@@ -285,13 +318,13 @@ class ListRunnablePostgrestSemanticsTests(unittest.TestCase):
             )
         )
 
-    def test_no_other_old_tracked_rows_become_permanently_runnable(self) -> None:
-        # Only the prepared+unreferenced combination escapes max_past. Every
-        # other old TRACKED shape stays excluded.
+    def test_no_other_old_rows_become_permanently_runnable(self) -> None:
+        # Only TRACKED-and-unreferenced escapes max_past, and only until it
+        # reaches a durable outcome. Everything else keeps the plain cutoff.
         filters = self._built_filters()
         self.assertIn("reference_price.is.null", filters["or"])
         self.assertIn("status.eq.tracked", filters["or"])
-        self.assertIn("pre_event_market_context.not.is.null", filters["or"])
+        self.assertNotIn("monitoring", filters["or"])
         # No unconditional escape hatch snuck in.
         self.assertNotIn("or(", filters["or"].replace("and(", ""))
 
