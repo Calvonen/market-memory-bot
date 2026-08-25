@@ -45,6 +45,21 @@ def acquire_and_persist_pre_event_market_context(
     actor: str,
     fetcher: DailyOhlcvFetcher = fetch_ohlcv,
 ) -> PersistentTrackedEvent:
+    """Acquire and persist pre-event context from caller-grounded session inputs.
+
+    The caller remains responsible for resolving the market timezone, event
+    trading date, and the two confirmed closed session dates. This orchestration
+    layer deliberately performs no exchange/calendar/session inference. Before
+    acquisition, the supplied ``ticker`` is bound to the canonical persisted
+    event instrument so another instrument's prices cannot be captured by
+    mistake.
+
+    ``ticker`` is the broker instrument and is only used for that identity
+    check; ``provider_symbol`` is the separate market-data ticker actually sent
+    to the fetcher. This entrypoint is caller-grounded throughout, so the caller
+    supplies the translation (the automatic entrypoint below derives it from the
+    grounded market profile instead).
+    """
     event = repository.get(event_id)
     if event is None:
         raise RuntimeError(f"tracked event {event_id} was not found")
@@ -80,6 +95,26 @@ def persisted_pre_event_market_context_is_current(
     profiles: tuple[MarketSessionProfile, ...] = GROUNDED_MARKET_SESSION_PROFILES,
     calendar_loader: Any | None = None,
 ) -> bool:
+    """Revalidate a persisted pre-event context against the event's current event_at.
+
+    ``pre_event_market_context`` is immutable once captured, but ``event_at`` can
+    still be edited afterwards (see ``upsert_tracked_market_event``) while the
+    event stays TRACKED with no reference yet. The persisted snapshot's
+    ``session_date``/``previous_session_date`` are the exact two closed sessions
+    it was grounded on; this recomputes that same pair from the event's current
+    ``event_at`` using only calendar/session logic - no Yahoo fetch, no new
+    persistence write - and checks they still match. A mismatch means the
+    snapshot no longer corresponds to the sessions this event's current
+    ``event_at`` implies and must not be reused for monitoring.
+
+    It runs the same canonical selection acquisition does, off the same real
+    exchange close timestamps, so the two can never disagree about one
+    ``event_at`` - a post-close event resolves to its own same-day session in
+    both. The acquisition-time ``now`` gate is deliberately not applied here:
+    ``now`` only governs whether a candle is still forming at capture time,
+    which is settled once a snapshot exists. This asks purely which pair the
+    current ``event_at`` implies.
+    """
     snapshot = event.pre_event_market_context
     if snapshot is None:
         raise ValueError("tracked event has no persisted pre_event_market_context")
@@ -128,6 +163,26 @@ def acquire_and_persist_pre_event_market_context_for_event(
     profiles: tuple[MarketSessionProfile, ...] = GROUNDED_MARKET_SESSION_PROFILES,
     calendar_loader: Any | None = None,
 ) -> PersistentTrackedEvent:
+    """Resolve grounded market sessions, then acquire and persist event context.
+
+    The persisted exact ``resolved_etoro_market`` label selects one explicitly
+    grounded market-session profile, which supplies both the exchange calendar
+    and this market's broker-to-provider symbol policy. ``ticker`` is checked
+    against the canonical persisted broker instrument and never leaves that
+    role; the data provider is queried with the separate symbol derived from
+    the profile (eToro WDS.ASX -> Yahoo WDS.AX), and the event keeps its broker
+    identity untouched. The profile calendar supplies confirmed
+    exchange sessions with their real close timestamps, and
+    ``resolve_session_dates`` selects the last two sessions that had closed by
+    ``event_at`` - which includes the event's own session when the event falls
+    after that session's close. Both selected sessions must additionally have
+    closed by ``now``: a session already eligible by ``event_at`` but still
+    trading right now would otherwise freeze a partial daily candle into the
+    immutable snapshot. The final persistence is compare-and-swap bound to the
+    same tracked-event ``updated_at`` version that supplied event_at, instrument
+    and broker market, so concurrent event edits fail closed rather than locking
+    a stale immutable context.
+    """
     event = repository.get(event_id)
     if event is None:
         raise RuntimeError(f"tracked event {event_id} was not found")
@@ -149,6 +204,11 @@ def acquire_and_persist_pre_event_market_context_for_event(
         event.resolved_etoro_market,
         profiles=profiles,
     )
+    # The persisted broker instrument stays the authority on what is tracked;
+    # this only derives the data provider's ticker for it, from the same
+    # grounded profile the exact broker market label selected. An instrument
+    # that does not carry the profile's declared broker suffix fails closed
+    # here, before any provider call.
     provider_symbol = resolve_provider_symbol(canonical_instrument, profile=profile)
     event_local_date = event.event_at.astimezone(ZoneInfo(profile.market_timezone)).date()
     calendar_kwargs = {
@@ -164,6 +224,9 @@ def acquire_and_persist_pre_event_market_context_for_event(
             **calendar_kwargs,
         )
 
+    # The exchange calendar owns both the session list and each session's real
+    # close, so acquisition never has to guess whether the session immediately
+    # before the event has finished trading yet.
     resolution = resolve_session_dates(
         event.event_at,
         profile=profile,
@@ -177,6 +240,11 @@ def acquire_and_persist_pre_event_market_context_for_event(
         previous_confirmed_closed_session_date=resolution.previous_closed_session,
         fetcher=fetcher,
     )
+    # Carry the exchange calendar's close for the selected session into the
+    # capture as an explicit proof. It is what lets the database accept a
+    # snapshot dated on the event's own market day: it re-checks that close
+    # against the row's event_at and its own clock, so the same-day allowance
+    # is never available to a caller that has not done this calendar work.
     return capture_pre_event_market_context(
         repository,
         event_id=event_id,
