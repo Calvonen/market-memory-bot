@@ -14,6 +14,7 @@ class _Query:
         self.select_value: str | None = None
         self.filters: list[tuple[str, object]] = []
         self.orders: list[str] = []
+        self.limit_value: int | None = None
 
     def select(self, value: str):
         self.select_value = value
@@ -39,18 +40,81 @@ class _Query:
         self.orders.append(name)
         return self
 
+    def limit(self, value: int):
+        self.limit_value = value
+        return self
+
     def execute(self):
         return SimpleNamespace(data=self.rows)
 
 
+class _RpcCall:
+    def __init__(self, data) -> None:
+        self.data = data
+
+    def execute(self):
+        return SimpleNamespace(data=self.data)
+
+
 class _Client:
-    def __init__(self, rows) -> None:
+    def __init__(self, rows, *, rpc_data=None) -> None:
         self.query = _Query(rows)
         self.table_names: list[str] = []
+        self.rpc_data = rpc_data
+        self.rpc_calls: list[tuple[str, dict]] = []
 
     def table(self, name: str):
         self.table_names.append(name)
         return self.query
+
+    def rpc(self, name: str, payload: dict):
+        self.rpc_calls.append((name, payload))
+        return _RpcCall(self.rpc_data)
+
+
+def _event_row(
+    *,
+    reference_price,
+    reference_price_exact: str | None = None,
+) -> dict:
+    event_at = datetime(2026, 8, 25, 0, 0, tzinfo=UTC)
+    row = {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "tracked_instrument_id": "tracked-precision",
+        "calendar_event_id": None,
+        "company_name": "Precision Ltd",
+        "instrument": "PREC.ASX",
+        "market": "Australia",
+        "source": "manual",
+        "external_key": "precision-2026-08-25",
+        "kind": "earnings",
+        "title": "Results",
+        "event_at": event_at.isoformat(),
+        "event_time_status": "confirmed",
+        "status": "monitoring",
+        "resolved_etoro_instrument_id": 777,
+        "resolved_etoro_symbol": "PREC.ASX",
+        "resolved_etoro_display_name": "Precision Ltd",
+        "resolved_etoro_market": "Sydney",
+        "resolution_armed_at": (event_at - timedelta(hours=1)).isoformat(),
+        "resolution_armed_by": "test",
+        "reference_price": reference_price,
+        "reference_captured_at": (event_at - timedelta(seconds=30)).isoformat(),
+        "reference_kind": "etoro_last_execution_pre_event_snapshot",
+        "reaction_anchor_at": event_at.isoformat(),
+        "started_at": event_at.isoformat(),
+        "completed_at": None,
+        "last_error": None,
+        "created_by": "test",
+        "updated_by": "test",
+        "created_at": (event_at - timedelta(hours=2)).isoformat(),
+        "updated_at": event_at.isoformat(),
+        "tracking_config_snapshot": {"schema_version": 1},
+        "pre_event_market_context": None,
+    }
+    if reference_price_exact is not None:
+        row["reference_price_exact"] = reference_price_exact
+    return row
 
 
 class TrackedEventReactionPrecisionTests(unittest.TestCase):
@@ -99,41 +163,10 @@ class TrackedEventReactionPrecisionTests(unittest.TestCase):
         event_at = datetime(2026, 8, 25, 0, 0, tzinfo=UTC)
         client = _Client(
             [
-                {
-                    "id": "11111111-1111-1111-1111-111111111111",
-                    "tracked_instrument_id": "tracked-precision",
-                    "calendar_event_id": None,
-                    "company_name": "Precision Ltd",
-                    "instrument": "PREC.ASX",
-                    "market": "Australia",
-                    "source": "manual",
-                    "external_key": "precision-2026-08-25",
-                    "kind": "earnings",
-                    "title": "Results",
-                    "event_at": event_at.isoformat(),
-                    "event_time_status": "confirmed",
-                    "status": "monitoring",
-                    "resolved_etoro_instrument_id": 777,
-                    "resolved_etoro_symbol": "PREC.ASX",
-                    "resolved_etoro_display_name": "Precision Ltd",
-                    "resolved_etoro_market": "Sydney",
-                    "resolution_armed_at": (event_at - timedelta(hours=1)).isoformat(),
-                    "resolution_armed_by": "test",
-                    "reference_price": rounded_reference,
-                    "reference_price_exact": exact_reference,
-                    "reference_captured_at": (event_at - timedelta(seconds=30)).isoformat(),
-                    "reference_kind": "etoro_last_execution_pre_event_snapshot",
-                    "reaction_anchor_at": event_at.isoformat(),
-                    "started_at": event_at.isoformat(),
-                    "completed_at": None,
-                    "last_error": None,
-                    "created_by": "test",
-                    "updated_by": "test",
-                    "created_at": (event_at - timedelta(hours=2)).isoformat(),
-                    "updated_at": event_at.isoformat(),
-                    "tracking_config_snapshot": {"schema_version": 1},
-                    "pre_event_market_context": None,
-                }
+                _event_row(
+                    reference_price=rounded_reference,
+                    reference_price_exact=exact_reference,
+                )
             ]
         )
         repository = SupabaseTrackedEventRepository(client)
@@ -151,6 +184,45 @@ class TrackedEventReactionPrecisionTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].reference_price, Decimal(exact_reference))
         self.assertNotEqual(events[0].reference_price, Decimal(str(rounded_reference)))
+
+    def test_config_snapshot_rpc_refresh_preserves_exact_reference(self) -> None:
+        exact_reference = "1.234567890123456789"
+        rounded_reference = float(exact_reference)
+        rpc_row = _event_row(reference_price=rounded_reference)
+        exact_row = _event_row(
+            reference_price=rounded_reference,
+            reference_price_exact=exact_reference,
+        )
+        client = _Client([exact_row], rpc_data=[rpc_row])
+        repository = SupabaseTrackedEventRepository(client)
+
+        event = repository.capture_tracking_config_snapshot(
+            event_id=rpc_row["id"],
+            snapshot={"schema_version": 1},
+            actor="tracked-event-worker",
+        )
+
+        self.assertEqual(
+            client.rpc_calls,
+            [
+                (
+                    "capture_tracked_market_event_config_snapshot",
+                    {
+                        "input_event_id": rpc_row["id"],
+                        "input_tracking_config_snapshot": {"schema_version": 1},
+                        "input_actor": "tracked-event-worker",
+                    },
+                )
+            ],
+        )
+        self.assertIn(
+            "reference_price_exact:reference_price::text",
+            client.query.select_value or "",
+        )
+        self.assertEqual(client.query.limit_value, 1)
+        self.assertEqual(event.reference_price, Decimal(exact_reference))
+        self.assertNotEqual(event.reference_price, Decimal(str(rounded_reference)))
+        self.assertEqual(event.tracking_config_snapshot, {"schema_version": 1})
 
     def test_wds_return_would_not_survive_a_float_round_trip(self) -> None:
         exact_return = Decimal("1.377657981431566337226714585")
