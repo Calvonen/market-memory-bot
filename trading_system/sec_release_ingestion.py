@@ -131,7 +131,7 @@ class _SecVisibleTextParser(HTMLParser):
 
 
 class SecEdgarResultsProvider:
-    """Discover a US earnings release from an official SEC 8-K filing."""
+    """Discover a US-listed earnings release from an official SEC filing."""
 
     name = "sec_edgar_8k"
     COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -154,6 +154,7 @@ class SecEdgarResultsProvider:
         "access denied",
         "temporarily unavailable",
     )
+    _SUPPORTED_EARNINGS_FORMS = {"8-K", "6-K"}
 
     def __init__(
         self,
@@ -241,16 +242,27 @@ class SecEdgarResultsProvider:
         if not isinstance(files, list):
             raise RuntimeError("SEC submissions response has invalid historical files")
 
-        target = self.scheduled_date.isoformat()
+        target = self.scheduled_date
         matches: list[dict[str, str]] = []
         for row in files:
             if not isinstance(row, dict):
                 raise RuntimeError("SEC historical submissions metadata row is invalid")
             name = str(row.get("name") or "").strip()
-            filing_from = str(row.get("filingFrom") or "").strip()
-            filing_to = str(row.get("filingTo") or "").strip()
-            if not name or not filing_from or not filing_to:
+            filing_from_raw = str(row.get("filingFrom") or "").strip()
+            filing_to_raw = str(row.get("filingTo") or "").strip()
+            if not name or not filing_from_raw or not filing_to_raw:
                 raise RuntimeError("SEC historical submissions metadata is incomplete")
+            try:
+                filing_from = date.fromisoformat(filing_from_raw)
+                filing_to = date.fromisoformat(filing_to_raw)
+            except ValueError as exc:
+                raise RuntimeError(
+                    "SEC historical submissions metadata has invalid date range"
+                ) from exc
+            if filing_from > filing_to:
+                raise RuntimeError(
+                    "SEC historical submissions metadata has reversed date range"
+                )
             if not (filing_from <= target <= filing_to):
                 continue
             if "/" in name or "\\" in name or not name.lower().endswith(".json"):
@@ -286,14 +298,17 @@ class SecEdgarResultsProvider:
         target = self.scheduled_date.isoformat()
         matches: list[dict[str, str]] = []
         for index in range(len(forms)):
-            if str(forms[index]).upper() != "8-K":
+            filing_form = str(forms[index]).strip().upper()
+            if filing_form not in self._SUPPORTED_EARNINGS_FORMS:
                 continue
             if str(filing_dates[index]) != target:
                 continue
             accession = str(accessions[index]).strip()
             primary = str(primary_documents[index]).strip()
             if not accession or not primary:
-                continue
+                raise RuntimeError(
+                    "SEC matching filing row has empty accessionNumber or primaryDocument"
+                )
             accepted = (
                 str(acceptance_times[index])
                 if index < len(acceptance_times)
