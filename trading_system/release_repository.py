@@ -82,6 +82,28 @@ class SupabaseReleaseRepository:
         rows = response.data or []
         return rows[0] if rows else None
 
+    def has_analysis_for_event_version(
+        self,
+        *,
+        event_id: str,
+        expectation_version: int,
+    ) -> bool:
+        """Return whether any persisted analysis already owns this event version.
+
+        Calendar release polling uses this before touching SEC again. The normal
+        document-specific `find_analysis()` remains authoritative inside
+        EventReleaseMonitor for restart/reuse semantics once a document is found.
+        """
+        response = (
+            self.client.table("event_ai_analyses")
+            .select("id")
+            .eq("event_id", event_id)
+            .eq("expectation_version", expectation_version)
+            .limit(1)
+            .execute()
+        )
+        return bool(response.data or [])
+
     def save_analysis(
         self,
         *,
