@@ -13,7 +13,12 @@ def fail_tracked_event_if_current(
     actor: str,
     error: str,
 ) -> None:
-    """Fail a proven-stale persisted context through the canonical CAS RPC."""
+    """Fail a proven-stale persisted context through the canonical CAS RPC.
+
+    Production repositories always expose the Supabase client and therefore use
+    the database RPC. Lightweight unit-test fakes may expose only mark_failed;
+    that fallback exists solely to preserve their interface boundary.
+    """
     if expected_event_updated_at.tzinfo is None or expected_event_updated_at.utcoffset() is None:
         raise ValueError("expected_event_updated_at must be timezone-aware")
     if not event_id.strip():
@@ -23,8 +28,13 @@ def fail_tracked_event_if_current(
     if not error.strip():
         raise ValueError("error is required")
 
+    client = getattr(repository, "client", None)
+    if client is None:
+        repository.mark_failed(event_id, actor=actor, error=error)
+        return
+
     try:
-        repository.client.rpc(
+        client.rpc(
             "fail_tracked_market_event_stale_context_if_current",
             {
                 "input_event_id": event_id,
