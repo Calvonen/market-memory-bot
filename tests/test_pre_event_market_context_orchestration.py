@@ -71,7 +71,29 @@ def _daily_frame() -> pd.DataFrame:
 
 
 class PreEventMarketContextOrchestrationTests(unittest.TestCase):
-    def test_caller_grounded_entrypoint_keeps_broker_and_provider_symbols_separate(self) -> None:
+    def test_caller_grounded_same_day_fails_before_provider_fetch(self) -> None:
+        event = SimpleNamespace(instrument="WDS.ASX")
+        repository = _Repository(event)
+        fetch_calls = []
+
+        with self.assertRaisesRegex(ValueError, "same-day capture requires the validated canonical path"):
+            acquire_and_persist_pre_event_market_context(
+                repository,
+                event_id="event-1",
+                ticker="WDS.ASX",
+                provider_symbol="WDS.AX",
+                event_trading_date=date(2026, 8, 24),
+                last_confirmed_closed_session_date=date(2026, 8, 24),
+                previous_confirmed_closed_session_date=date(2026, 8, 21),
+                market_timezone="Australia/Sydney",
+                actor="tracked-event-worker",
+                fetcher=lambda ticker, period, interval: fetch_calls.append((ticker, period, interval)) or _daily_frame(),
+            )
+
+        self.assertEqual(fetch_calls, [])
+        self.assertEqual(repository.client.calls, [])
+
+    def test_caller_grounded_prior_day_keeps_broker_and_provider_symbols_separate(self) -> None:
         event = SimpleNamespace(instrument="WDS.ASX")
         repository = _Repository(event)
         fetch_calls = []
@@ -81,7 +103,7 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
             event_id="event-1",
             ticker="WDS.ASX",
             provider_symbol="WDS.AX",
-            event_trading_date=date(2026, 8, 24),
+            event_trading_date=date(2026, 8, 25),
             last_confirmed_closed_session_date=date(2026, 8, 24),
             previous_confirmed_closed_session_date=date(2026, 8, 21),
             market_timezone="Australia/Sydney",
