@@ -13,6 +13,12 @@ from trading_system.calendar_repository import (
     CalendarSyncResult,
     InvalidCalendarEventTransition,
 )
+from trading_system.calendar_runtime_promotion import SupabaseCalendarRuntimePromotionRepository
+from trading_system.calendar_runtime_timing import (
+    CalendarRuntimeTiming,
+    FinnhubCalendarRuntimeTimingResolver,
+)
+from trading_system.tracked_event_repository import TrackedEventTimeStatus
 
 # Supabase's Data API (PostgREST) caps a single response at this many rows
 # by default (`db-max-rows`). list_upcoming() must never assume one
@@ -27,10 +33,24 @@ class SupabaseCalendarEventRepository:
 
     Production code uses a backend-only secret/service-role key, same as
     SupabaseEventExpectationRepository. Expo must never receive that key.
+
+    `track()` is the production calendar -> persistent-runtime orchestration
+    boundary. It resolves a safe timing only when no runtime is already bound,
+    then delegates the actual calendar/runtime mutation to the atomic promotion
+    RPC. An existing canonical binding reuses its persisted timing so a retry
+    never depends on Finnhub still returning the same `hour` classification.
     """
 
-    def __init__(self, client: Any) -> None:
+    def __init__(
+        self,
+        client: Any,
+        *,
+        runtime_timing_resolver: Any | None = None,
+        runtime_promotion_repository: Any | None = None,
+    ) -> None:
         self.client = client
+        self._runtime_timing_resolver = runtime_timing_resolver
+        self._runtime_promotion_repository = runtime_promotion_repository
 
     @classmethod
     def from_env(cls) -> "SupabaseCalendarEventRepository":
@@ -199,12 +219,71 @@ class SupabaseCalendarEventRepository:
             raise RuntimeError("transition_calendar_event_status returned no rows")
         return self._row_to_event(rows[0], out_prefix=True)
 
-    def track(self, calendar_event_id: str) -> CalendarEvent:
-        return self._transition(
-            calendar_event_id,
-            from_status=CalendarEventStatus.CANDIDATE,
-            to_status=CalendarEventStatus.TRACKED,
+    def _get_bound_runtime_timing(self, event: CalendarEvent) -> CalendarRuntimeTiming | None:
+        response = (
+            self.client.table("tracked_market_events")
+            .select("instrument,kind,source,external_key,event_at,event_time_status")
+            .eq("calendar_event_id", event.calendar_event_id)
+            .limit(1)
+            .execute()
         )
+        rows = response.data or []
+        if not rows:
+            return None
+        row = rows[0]
+        expected_external_key = f"calendar:{event.calendar_event_id}"
+        if (
+            str(row.get("instrument") or "") != event.instrument.upper().replace(" ", "")
+            or str(row.get("kind") or "") != event.event_type
+            or str(row.get("source") or "") != event.source
+            or str(row.get("external_key") or "") != expected_external_key
+        ):
+            raise InvalidCalendarEventTransition(
+                "calendar runtime binding identity conflict"
+            )
+        event_at = self._parse_datetime(row.get("event_at"))
+        if event_at is None:
+            raise RuntimeError("bound tracked runtime event is missing event_at")
+        try:
+            event_time_status = TrackedEventTimeStatus(str(row.get("event_time_status") or ""))
+        except ValueError as exc:
+            raise RuntimeError("bound tracked runtime event has invalid event_time_status") from exc
+        return CalendarRuntimeTiming(
+            event_at=event_at,
+            event_time_status=event_time_status,
+            provider_timing="persisted",
+        )
+
+    def track(self, calendar_event_id: str) -> CalendarEvent:
+        canonical_calendar_event_id = str(uuid.UUID(calendar_event_id))
+        event = self.get(canonical_calendar_event_id)
+        if event is None:
+            raise CalendarEventNotFound(calendar_event_id)
+        if event.status not in (CalendarEventStatus.CANDIDATE, CalendarEventStatus.TRACKED):
+            raise InvalidCalendarEventTransition(
+                f"cannot track a calendar event with status {event.status.value!r}"
+            )
+
+        timing = self._get_bound_runtime_timing(event)
+        if timing is None:
+            resolver = self._runtime_timing_resolver
+            if resolver is None:
+                resolver = FinnhubCalendarRuntimeTimingResolver.from_env()
+                self._runtime_timing_resolver = resolver
+            timing = resolver.resolve(event)
+
+        promotion_repository = self._runtime_promotion_repository
+        if promotion_repository is None:
+            promotion_repository = SupabaseCalendarRuntimePromotionRepository(self.client)
+            self._runtime_promotion_repository = promotion_repository
+        promotion_repository.promote(event, timing, actor="calendar-track-api")
+
+        refreshed = self.get(canonical_calendar_event_id)
+        if refreshed is None:
+            raise RuntimeError("calendar event disappeared after runtime promotion")
+        if refreshed.status != CalendarEventStatus.TRACKED:
+            raise RuntimeError("calendar runtime promotion did not leave event tracked")
+        return refreshed
 
     def untrack(self, calendar_event_id: str) -> CalendarEvent:
         return self._transition(
