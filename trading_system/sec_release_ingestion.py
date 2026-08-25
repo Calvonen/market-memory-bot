@@ -4,9 +4,11 @@ import io
 import json
 import os
 import re
+import time
 from datetime import date
 from html.parser import HTMLParser
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
@@ -139,7 +141,9 @@ class SecEdgarResultsProvider:
     SUBMISSIONS_URL = SUBMISSIONS_BASE + "CIK{cik10}.json"
     ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data/"
     MIN_DOCUMENT_CHARS = 500
+    MIN_REQUEST_INTERVAL_SECONDS = 0.15
     _company_tickers_cache: dict[str, Any] | None = None
+    _last_request_at: float | None = None
 
     _EARNINGS_SIGNAL_RE = re.compile(
         r"(?:item\s+2\.02|results\s+of\s+operations\s+and\s+financial\s+condition|"
@@ -147,12 +151,9 @@ class SecEdgarResultsProvider:
         re.IGNORECASE,
     )
     _SEC_CHALLENGE_MARKERS = (
+        "sec.gov | your request originates from an undeclared automated tool",
         "your request originates from an undeclared automated tool",
         "request rate threshold exceeded",
-        "sec.gov | your request originates",
-        "automated tool",
-        "access denied",
-        "temporarily unavailable",
     )
     _SUPPORTED_EARNINGS_FORMS = {"8-K", "6-K"}
 
@@ -181,6 +182,7 @@ class SecEdgarResultsProvider:
     @classmethod
     def clear_company_ticker_cache(cls) -> None:
         cls._company_tickers_cache = None
+        cls._last_request_at = None
 
     def discover(self, event_id: str) -> ReleaseDocument | None:
         cik = self._resolve_cik()
@@ -333,6 +335,8 @@ class SecEdgarResultsProvider:
         accession_compact = accession.replace("-", "")
         filing_base = f"{self.ARCHIVES_BASE}{cik}/{accession_compact}/"
         primary_url = urljoin(filing_base, filing["primary_document"])
+        if not self._same_filing_directory(filing_base, primary_url):
+            raise RuntimeError("SEC primary document URL escaped the filing directory")
         primary_html = self._fetch_text(primary_url)
         self._assert_not_sec_challenge_page(primary_html, context="primary filing")
         primary_text = self._html_to_text(primary_html)
@@ -430,6 +434,16 @@ class SecEdgarResultsProvider:
         data, _content_type, charset = self._fetch_bytes(url)
         return data.decode(charset, errors="replace")
 
+    @classmethod
+    def _pace_sec_request(cls) -> None:
+        now = time.monotonic()
+        if cls._last_request_at is not None:
+            wait = cls.MIN_REQUEST_INTERVAL_SECONDS - (now - cls._last_request_at)
+            if wait > 0:
+                time.sleep(wait)
+                now += wait
+        cls._last_request_at = now
+
     def _fetch_bytes(self, url: str) -> tuple[bytes, str, str]:
         request = Request(
             url,
@@ -439,7 +453,21 @@ class SecEdgarResultsProvider:
                 "Accept-Encoding": "identity",
             },
         )
-        with urlopen(request, timeout=self.timeout_seconds) as response:
-            content_type = response.headers.get("Content-Type", "") or ""
-            charset = response.headers.get_content_charset() or "utf-8"
-            return response.read(), content_type, charset
+        for attempt in range(2):
+            type(self)._pace_sec_request()
+            try:
+                with urlopen(request, timeout=self.timeout_seconds) as response:
+                    content_type = response.headers.get("Content-Type", "") or ""
+                    charset = response.headers.get_content_charset() or "utf-8"
+                    return response.read(), content_type, charset
+            except HTTPError as exc:
+                if attempt == 0 and exc.code in {429, 503}:
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    try:
+                        backoff = max(1.0, float(retry_after)) if retry_after else 1.0
+                    except ValueError:
+                        backoff = 1.0
+                    time.sleep(backoff)
+                    continue
+                raise
+        raise RuntimeError("SEC request retry loop exhausted")
