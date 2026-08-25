@@ -141,7 +141,8 @@ class SecEdgarResultsProvider:
 
     name = "sec_edgar_8k"
     COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
-    SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik10}.json"
+    SUBMISSIONS_BASE = "https://data.sec.gov/submissions/"
+    SUBMISSIONS_URL = SUBMISSIONS_BASE + "CIK{cik10}.json"
     ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data/"
     MIN_DOCUMENT_CHARS = 500
 
@@ -177,6 +178,8 @@ class SecEdgarResultsProvider:
         cik = self._resolve_cik()
         submissions = self._fetch_json(self.SUBMISSIONS_URL.format(cik10=f"{cik:010d}"))
         filings = self._matching_filings(submissions)
+        if not filings:
+            filings = self._matching_historical_filings(submissions)
         for filing in filings:
             document = self._discover_from_filing(event_id, cik, filing)
             if document is not None:
@@ -212,12 +215,46 @@ class SecEdgarResultsProvider:
         recent = ((payload.get("filings") or {}).get("recent") or {})
         if not isinstance(recent, dict):
             raise RuntimeError("SEC submissions response has no recent filings")
+        return self._matching_filings_table(recent)
 
-        forms = recent.get("form") or []
-        filing_dates = recent.get("filingDate") or []
-        accessions = recent.get("accessionNumber") or []
-        primary_documents = recent.get("primaryDocument") or []
-        acceptance_times = recent.get("acceptanceDateTime") or []
+    def _matching_historical_filings(
+        self, payload: dict[str, Any]
+    ) -> list[dict[str, str]]:
+        filings = payload.get("filings") or {}
+        if not isinstance(filings, dict):
+            raise RuntimeError("SEC submissions response has invalid filings metadata")
+        files = filings.get("files") or []
+        if not isinstance(files, list):
+            raise RuntimeError("SEC submissions response has invalid historical files")
+
+        target = self.scheduled_date.isoformat()
+        matches: list[dict[str, str]] = []
+        for row in files:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "").strip()
+            filing_from = str(row.get("filingFrom") or "").strip()
+            filing_to = str(row.get("filingTo") or "").strip()
+            if not name or not filing_from or not filing_to:
+                continue
+            if not (filing_from <= target <= filing_to):
+                continue
+            if "/" in name or "\\" in name or not name.lower().endswith(".json"):
+                raise RuntimeError("SEC historical submissions filename is invalid")
+            shard = self._fetch_json(urljoin(self.SUBMISSIONS_BASE, name))
+            matches.extend(self._matching_filings_table(shard))
+
+        return sorted(matches, key=lambda row: row["accepted"], reverse=True)
+
+    def _matching_filings_table(self, rows: dict[str, Any]) -> list[dict[str, str]]:
+        if not isinstance(rows, dict):
+            raise RuntimeError("SEC filing table has unexpected shape")
+
+        forms = rows.get("form") or []
+        filing_dates = rows.get("filingDate") or []
+        accessions = rows.get("accessionNumber") or []
+        primary_documents = rows.get("primaryDocument") or []
+        acceptance_times = rows.get("acceptanceDateTime") or []
         count = min(
             len(forms),
             len(filing_dates),
