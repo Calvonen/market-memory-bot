@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any, Callable
 
 from trading_system.ai_event_analyzer import EventAnalyzer, build_default_event_analyzer
+from trading_system.models import EventExpectation
 from trading_system.release_repository import SupabaseReleaseRepository
 from trading_system.release_worker import EventReleaseMonitor, IngestionResult
 from trading_system.sec_release_ingestion import SecEdgarResultsProvider
@@ -80,6 +81,25 @@ class SupabaseCalendarReleaseTargetRepository:
         return tuple(targets)
 
 
+class _PinnedExpectationRepository:
+    """Expose exactly one already-validated expectation to one monitor run.
+
+    EventReleaseMonitor normally reloads the current expectation. Calendar
+    ingestion must instead keep the SEC provider and expectation on the same
+    validated ticker/date/version snapshot for the entire run so a concurrent
+    shell update cannot bind an old SEC document to a new expectation version.
+    """
+
+    def __init__(self, *, event_id: str, expectation: EventExpectation) -> None:
+        self.event_id = event_id
+        self.expectation = expectation
+
+    def get(self, event_id: str) -> EventExpectation | None:
+        if event_id != self.event_id:
+            return None
+        return self.expectation
+
+
 @dataclass(frozen=True)
 class CalendarReleaseWorkerResult:
     event_id: str
@@ -149,7 +169,10 @@ def run_calendar_release_ingestion_once(
                 scheduled_date=target.scheduled_date,
             )
             monitor = EventReleaseMonitor(
-                expectation_repository=expectations,
+                expectation_repository=_PinnedExpectationRepository(
+                    event_id=target.event_id,
+                    expectation=expectation,
+                ),
                 release_repository=releases,
                 analyzer=analyzer,
                 provider=provider,
