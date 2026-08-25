@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -154,7 +154,7 @@ class SupabaseTrackedEventRepository:
     def get(self, event_id: str) -> PersistentTrackedEvent | None:
         response = (
             self.client.table("tracked_market_events")
-            .select("*")
+            .select("*,reference_price_exact:reference_price::text")
             .eq("id", event_id)
             .limit(1)
             .execute()
@@ -272,7 +272,7 @@ class SupabaseTrackedEventRepository:
         upper = (now + lookahead).astimezone(UTC).isoformat()
         response = (
             self.client.table("tracked_market_events")
-            .select("*")
+            .select("*,reference_price_exact:reference_price::text")
             .in_("status", [TrackedEventStatus.TRACKED.value, TrackedEventStatus.MONITORING.value])
             .lte("event_at", upper)
             # max_past normally drops events whose event_at is long gone, so a
@@ -359,10 +359,11 @@ class SupabaseTrackedEventRepository:
                 "input_actor": actor,
             },
         ).execute()
-        return self._single_event_response(
+        saved = self._single_event_response(
             response.data,
             error_message="capture_tracked_market_event_reference returned invalid data",
         )
+        return replace(saved, reference_price=reference_price)
 
     def capture_resolved_etoro_market(
         self,
@@ -447,10 +448,19 @@ class SupabaseTrackedEventRepository:
                     f"tracked event {event_id} already has a different tracking_config_snapshot"
                 ) from exc
             raise
-        return self._single_event_response(
+        saved = self._single_event_response(
             response.data,
             error_message="capture_tracked_market_event_config_snapshot returned invalid data",
         )
+        if saved.reference_price is None:
+            return saved
+
+        exact = self.get(event_id)
+        if exact is None or exact.reference_price is None:
+            raise RuntimeError(
+                "tracked event reference disappeared after config snapshot capture"
+            )
+        return replace(saved, reference_price=exact.reference_price)
 
     def mark_monitoring(self, event_id: str, *, actor: str, started_at: datetime) -> None:
         (
@@ -524,9 +534,25 @@ class SupabaseTrackedEventRepository:
         )
 
     def list_reactions(self, event_id: str) -> tuple[TrackedEventReactionRecord, ...]:
+        # PostgREST serializes PostgreSQL numeric columns as JSON numbers. The
+        # Python JSON decoder would therefore round long reaction return_pct
+        # values through binary float before _row_to_reaction can construct a
+        # Decimal, making an otherwise exact restart replay fail closed. Cast
+        # the three Decimal fields to text at the REST boundary so their exact
+        # database representation reaches Decimal unchanged.
         response = (
             self.client.table("tracked_market_event_reactions")
-            .select("*")
+            .select(
+                "tracked_market_event_id,"
+                "interval_minutes,"
+                "candle_start,"
+                "reference_price::text,"
+                "close_price::text,"
+                "return_pct::text,"
+                "direction,"
+                "evolution,"
+                "observed_at"
+            )
             .eq("tracked_market_event_id", event_id)
             .order("candle_start")
             .order("interval_minutes")
@@ -552,6 +578,12 @@ class SupabaseTrackedEventRepository:
 
         def value(name: str, default: Any = None) -> Any:
             return row.get(f"{prefix}{name}", default)
+
+        exact_reference = (
+            row.get("reference_price_exact")
+            if not out_prefix and "reference_price_exact" in row
+            else value("reference_price")
+        )
 
         return PersistentTrackedEvent(
             event_id=str(value("id")),
@@ -583,7 +615,7 @@ class SupabaseTrackedEventRepository:
             ),
             resolution_armed_at=cls._parse_datetime_optional(value("resolution_armed_at")),
             resolution_armed_by=(str(value("resolution_armed_by")) if value("resolution_armed_by") else None),
-            reference_price=(Decimal(str(value("reference_price"))) if value("reference_price") is not None else None),
+            reference_price=(Decimal(str(exact_reference)) if exact_reference is not None else None),
             reference_captured_at=cls._parse_datetime_optional(value("reference_captured_at")),
             reference_kind=(str(value("reference_kind")) if value("reference_kind") else None),
             reaction_anchor_at=cls._parse_datetime_optional(value("reaction_anchor_at")),

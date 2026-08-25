@@ -1,0 +1,276 @@
+from __future__ import annotations
+
+import unittest
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from types import SimpleNamespace
+
+from trading_system.tracked_event_repository import SupabaseTrackedEventRepository
+
+
+class _Query:
+    def __init__(self, rows) -> None:
+        self.rows = rows
+        self.select_value: str | None = None
+        self.filters: list[tuple[str, object]] = []
+        self.orders: list[str] = []
+        self.limit_value: int | None = None
+
+    def select(self, value: str):
+        self.select_value = value
+        return self
+
+    def eq(self, name: str, value: object):
+        self.filters.append((f"eq:{name}", value))
+        return self
+
+    def in_(self, name: str, value: object):
+        self.filters.append((f"in:{name}", value))
+        return self
+
+    def lte(self, name: str, value: object):
+        self.filters.append((f"lte:{name}", value))
+        return self
+
+    def or_(self, value: str):
+        self.filters.append(("or", value))
+        return self
+
+    def order(self, name: str, **_kwargs):
+        self.orders.append(name)
+        return self
+
+    def limit(self, value: int):
+        self.limit_value = value
+        return self
+
+    def execute(self):
+        return SimpleNamespace(data=self.rows)
+
+
+class _RpcCall:
+    def __init__(self, data) -> None:
+        self.data = data
+
+    def execute(self):
+        return SimpleNamespace(data=self.data)
+
+
+class _Client:
+    def __init__(self, rows, *, rpc_data=None) -> None:
+        self.query = _Query(rows)
+        self.table_names: list[str] = []
+        self.rpc_data = rpc_data
+        self.rpc_calls: list[tuple[str, dict]] = []
+
+    def table(self, name: str):
+        self.table_names.append(name)
+        return self.query
+
+    def rpc(self, name: str, payload: dict):
+        self.rpc_calls.append((name, payload))
+        return _RpcCall(self.rpc_data)
+
+
+def _event_row(
+    *,
+    reference_price,
+    reference_price_exact: str | None = None,
+) -> dict:
+    event_at = datetime(2026, 8, 25, 0, 0, tzinfo=UTC)
+    row = {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "tracked_instrument_id": "tracked-precision",
+        "calendar_event_id": None,
+        "company_name": "Precision Ltd",
+        "instrument": "PREC.ASX",
+        "market": "Australia",
+        "source": "manual",
+        "external_key": "precision-2026-08-25",
+        "kind": "earnings",
+        "title": "Results",
+        "event_at": event_at.isoformat(),
+        "event_time_status": "confirmed",
+        "status": "monitoring",
+        "resolved_etoro_instrument_id": 777,
+        "resolved_etoro_symbol": "PREC.ASX",
+        "resolved_etoro_display_name": "Precision Ltd",
+        "resolved_etoro_market": "Sydney",
+        "resolution_armed_at": (event_at - timedelta(hours=1)).isoformat(),
+        "resolution_armed_by": "test",
+        "reference_price": reference_price,
+        "reference_captured_at": (event_at - timedelta(seconds=30)).isoformat(),
+        "reference_kind": "etoro_last_execution_pre_event_snapshot",
+        "reaction_anchor_at": event_at.isoformat(),
+        "started_at": event_at.isoformat(),
+        "completed_at": None,
+        "last_error": None,
+        "created_by": "test",
+        "updated_by": "test",
+        "created_at": (event_at - timedelta(hours=2)).isoformat(),
+        "updated_at": event_at.isoformat(),
+        "tracking_config_snapshot": {"schema_version": 1},
+        "pre_event_market_context": None,
+    }
+    if reference_price_exact is not None:
+        row["reference_price_exact"] = reference_price_exact
+    return row
+
+
+class TrackedEventReactionPrecisionTests(unittest.TestCase):
+    def test_list_reactions_preserves_postgres_numeric_precision_as_text(self) -> None:
+        event_id = "2346c3f3-f321-4b83-b3f4-bdbdb9f417d1"
+        exact_return = "1.377657981431566337226714585"
+        client = _Client(
+            [
+                {
+                    "tracked_market_event_id": event_id,
+                    "interval_minutes": 1,
+                    "candle_start": "2026-08-25T00:00:00+00:00",
+                    "reference_price": "33.39",
+                    "close_price": "33.85",
+                    "return_pct": exact_return,
+                    "direction": "positive",
+                    "evolution": "initial",
+                    "observed_at": "2026-08-25T00:01:00+00:00",
+                }
+            ]
+        )
+        repository = SupabaseTrackedEventRepository(client)
+
+        reactions = repository.list_reactions(event_id)
+
+        self.assertEqual(client.table_names, ["tracked_market_event_reactions"])
+        select_value = client.query.select_value or ""
+        self.assertIn("reference_price::text", select_value)
+        self.assertIn("close_price::text", select_value)
+        self.assertIn("return_pct::text", select_value)
+        self.assertEqual(client.query.orders, ["candle_start", "interval_minutes"])
+        self.assertEqual(len(reactions), 1)
+        self.assertEqual(reactions[0].reference_price, Decimal("33.39"))
+        self.assertEqual(reactions[0].close_price, Decimal("33.85"))
+        self.assertEqual(reactions[0].return_pct, Decimal(exact_return))
+        self.assertEqual(
+            ((reactions[0].close_price - reactions[0].reference_price)
+             / reactions[0].reference_price)
+            * Decimal("100"),
+            reactions[0].return_pct,
+        )
+
+    def test_list_runnable_prefers_exact_text_reference_for_restart_baseline(self) -> None:
+        exact_reference = "1.234567890123456789"
+        rounded_reference = float(exact_reference)
+        event_at = datetime(2026, 8, 25, 0, 0, tzinfo=UTC)
+        client = _Client(
+            [
+                _event_row(
+                    reference_price=rounded_reference,
+                    reference_price_exact=exact_reference,
+                )
+            ]
+        )
+        repository = SupabaseTrackedEventRepository(client)
+
+        events = repository.list_runnable(
+            now=event_at + timedelta(minutes=5),
+            lookahead=timedelta(hours=24),
+            max_past=timedelta(hours=12),
+        )
+
+        self.assertIn(
+            "reference_price_exact:reference_price::text",
+            client.query.select_value or "",
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].reference_price, Decimal(exact_reference))
+        self.assertNotEqual(events[0].reference_price, Decimal(str(rounded_reference)))
+
+    def test_config_snapshot_rpc_refresh_preserves_exact_reference(self) -> None:
+        exact_reference = "1.234567890123456789"
+        rounded_reference = float(exact_reference)
+        rpc_row = _event_row(reference_price=rounded_reference)
+        exact_row = _event_row(
+            reference_price=rounded_reference,
+            reference_price_exact=exact_reference,
+        )
+        client = _Client([exact_row], rpc_data=[rpc_row])
+        repository = SupabaseTrackedEventRepository(client)
+
+        event = repository.capture_tracking_config_snapshot(
+            event_id=rpc_row["id"],
+            snapshot={"schema_version": 1},
+            actor="tracked-event-worker",
+        )
+
+        self.assertEqual(
+            client.rpc_calls,
+            [
+                (
+                    "capture_tracked_market_event_config_snapshot",
+                    {
+                        "input_event_id": rpc_row["id"],
+                        "input_tracking_config_snapshot": {"schema_version": 1},
+                        "input_actor": "tracked-event-worker",
+                    },
+                )
+            ],
+        )
+        self.assertIn(
+            "reference_price_exact:reference_price::text",
+            client.query.select_value or "",
+        )
+        self.assertEqual(client.query.limit_value, 1)
+        self.assertEqual(event.reference_price, Decimal(exact_reference))
+        self.assertNotEqual(event.reference_price, Decimal(str(rounded_reference)))
+        self.assertEqual(event.tracking_config_snapshot, {"schema_version": 1})
+
+    def test_capture_reference_preserves_exact_submitted_decimal(self) -> None:
+        exact_reference = Decimal("1.234567890123456789")
+        rounded_reference = float(str(exact_reference))
+        rpc_row = _event_row(reference_price=rounded_reference)
+        client = _Client([], rpc_data=[rpc_row])
+        repository = SupabaseTrackedEventRepository(client)
+        captured_at = datetime(2026, 8, 24, 23, 59, 30, tzinfo=UTC)
+
+        event = repository.capture_reference(
+            event_id=rpc_row["id"],
+            reference_price=exact_reference,
+            captured_at=captured_at,
+            reference_kind="etoro_last_execution_pre_event_snapshot",
+            etoro_instrument_id=777,
+            etoro_symbol="PREC.ASX",
+            etoro_display_name="Precision Ltd",
+            actor="tracked-event-worker",
+        )
+
+        self.assertEqual(
+            client.rpc_calls,
+            [
+                (
+                    "capture_tracked_market_event_reference",
+                    {
+                        "input_event_id": rpc_row["id"],
+                        "input_reference_price": str(exact_reference),
+                        "input_reference_captured_at": captured_at.isoformat(),
+                        "input_reference_kind": "etoro_last_execution_pre_event_snapshot",
+                        "input_etoro_instrument_id": 777,
+                        "input_etoro_symbol": "PREC.ASX",
+                        "input_etoro_display_name": "Precision Ltd",
+                        "input_actor": "tracked-event-worker",
+                    },
+                )
+            ],
+        )
+        self.assertEqual(event.reference_price, exact_reference)
+        self.assertNotEqual(event.reference_price, Decimal(str(rounded_reference)))
+        self.assertEqual(event.tracking_config_snapshot, {"schema_version": 1})
+
+    def test_wds_return_would_not_survive_a_float_round_trip(self) -> None:
+        exact_return = Decimal("1.377657981431566337226714585")
+        rounded_through_json_float = Decimal(str(float(str(exact_return))))
+
+        self.assertNotEqual(rounded_through_json_float, exact_return)
+
+
+if __name__ == "__main__":
+    unittest.main()
