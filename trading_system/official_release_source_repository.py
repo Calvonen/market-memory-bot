@@ -85,13 +85,18 @@ class SupabaseOfficialReleaseSourceRepository:
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError("official release source row is malformed") from exc
 
-    def get(self, event_id: str) -> OfficialReleaseSource | None:
+    @staticmethod
+    def _canonical_event_id(event_id: str) -> str:
         canonical_event_id = event_id.strip()
         if not canonical_event_id:
             raise ValueError("event_id is required")
+        return canonical_event_id
+
+    def _get_state_row(self, event_id: str) -> dict[str, Any] | None:
+        canonical_event_id = self._canonical_event_id(event_id)
         response = (
             self.client.table(self.TABLE)
-            .select("event_id,source_kind,source_url,source_title,version")
+            .select("event_id,source_kind,source_url,source_title,is_active,version")
             .eq("event_id", canonical_event_id)
             .limit(1)
             .execute()
@@ -101,7 +106,29 @@ class SupabaseOfficialReleaseSourceRepository:
             return None
         if len(rows) != 1 or not isinstance(rows[0], dict):
             raise RuntimeError("official release source repository returned an invalid canonical row")
-        return self._from_row(rows[0])
+        return rows[0]
+
+    def get(self, event_id: str) -> OfficialReleaseSource | None:
+        row = self._get_state_row(event_id)
+        if row is None:
+            return None
+        if row.get("is_active") is not True:
+            if row.get("is_active") is False and row.get("source_kind") is None and row.get("source_url") is None:
+                return None
+            raise RuntimeError("official release source row is malformed")
+        return self._from_row(row)
+
+    def get_version(self, event_id: str) -> int:
+        row = self._get_state_row(event_id)
+        if row is None:
+            return 0
+        try:
+            version = int(row["version"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("official release source row is malformed") from exc
+        if version < 1:
+            raise RuntimeError("official release source row is malformed")
+        return version
 
     def set(
         self,
@@ -134,10 +161,8 @@ class SupabaseOfficialReleaseSourceRepository:
         }
         return self._from_row(canonical_row)
 
-    def clear(self, event_id: str, *, expected_version: int) -> None:
-        canonical_event_id = event_id.strip()
-        if not canonical_event_id:
-            raise ValueError("event_id is required")
+    def clear(self, event_id: str, *, expected_version: int) -> int:
+        canonical_event_id = self._canonical_event_id(event_id)
         if expected_version < 1:
             raise ValueError("expected_version must be positive")
         response = self.client.rpc(
@@ -147,5 +172,10 @@ class SupabaseOfficialReleaseSourceRepository:
                 "input_expected_version": expected_version,
             },
         ).execute()
-        if response.data is not True:
-            raise RuntimeError("official release source clear did not confirm deletion")
+        try:
+            new_version = int(response.data)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("official release source clear did not return the new version") from exc
+        if new_version <= expected_version:
+            raise RuntimeError("official release source clear did not advance the version")
+        return new_version
