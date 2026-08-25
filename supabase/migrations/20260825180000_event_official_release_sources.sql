@@ -14,6 +14,7 @@ declare
   port_text text;
   port_value integer;
   ipv6_text text;
+  label text;
 begin
   if input_url is null or input_url !~ '^https://[^[:space:]]+$' then
     return false;
@@ -57,9 +58,33 @@ begin
       host_part := host_port;
       port_text := '';
     end if;
-    if host_part = '' or host_part !~ '^[A-Za-z0-9.-]+$' then
+    if host_part = '' then
       return false;
     end if;
+
+    begin
+      if family(host_part::inet) = 4 then
+        null;
+      else
+        return false;
+      end if;
+    exception
+      when others then
+        if length(host_part) > 253 then
+          return false;
+        end if;
+        foreach label in array string_to_array(rtrim(host_part, '.'), '.') loop
+          if label = '' or length(label) > 63 then
+            return false;
+          end if;
+          if left(label, 1) = '-' or right(label, 1) = '-' then
+            return false;
+          end if;
+          if label !~ '^[A-Za-z0-9-]+$' then
+            return false;
+          end if;
+        end loop;
+      end;
   end if;
 
   if port_text <> '' then
