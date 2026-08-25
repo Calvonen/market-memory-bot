@@ -248,6 +248,27 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
 
         self.assertIsNone(document)
 
+    def test_pdf_extraction_failure_is_retried_as_retrieval_error(self) -> None:
+        pdf_index = self.index_html.replace("opaque-document.htm", "opaque-document.pdf")
+        with patch.object(
+            self.provider,
+            "_fetch_json",
+            side_effect=[self.tickers, self.submissions],
+        ), patch.object(
+            self.provider,
+            "_fetch_text",
+            side_effect=[self.primary_html, pdf_index],
+        ), patch.object(
+            self.provider,
+            "_fetch_bytes",
+            return_value=(b"not-a-readable-pdf", "application/pdf", "utf-8"),
+        ), patch(
+            "trading_system.sec_release_ingestion.PdfReader",
+            side_effect=RuntimeError("encrypted PDF"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "EX-99.1 retrieval failed"):
+                self.provider.discover("calendar:event-id")
+
     def test_ticker_must_resolve_to_exactly_one_cik(self) -> None:
         ambiguous = {
             "0": {"cik_str": 1, "ticker": "DKS"},
