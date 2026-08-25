@@ -76,6 +76,60 @@ def acquire_and_persist_pre_event_market_context(
     )
 
 
+def persisted_pre_event_market_context_is_current(
+    event: PersistentTrackedEvent,
+    *,
+    profiles: tuple[MarketSessionProfile, ...] = GROUNDED_MARKET_SESSION_PROFILES,
+    calendar_loader: Any | None = None,
+) -> bool:
+    """Revalidate a persisted pre-event context against the event's current event_at.
+
+    ``pre_event_market_context`` is immutable once captured, but ``event_at`` can
+    still be edited afterwards (see ``upsert_tracked_market_event``) while the
+    event stays TRACKED with no reference yet. The persisted snapshot's
+    ``session_date``/``previous_session_date`` are the exact two closed sessions
+    it was grounded on; this recomputes that same pair from the event's current
+    ``event_at`` using only calendar/session logic - no Yahoo fetch, no new
+    persistence write - and checks they still match. A mismatch means the
+    snapshot no longer corresponds to the sessions before this event's current
+    trading date and must not be reused for monitoring.
+    """
+    snapshot = event.pre_event_market_context
+    if snapshot is None:
+        raise ValueError("tracked event has no persisted pre_event_market_context")
+    if event.event_at.tzinfo is None or event.event_at.utcoffset() is None:
+        raise ValueError("event_at must be timezone-aware")
+    if not event.resolved_etoro_market:
+        raise ValueError("tracked event has no resolved_etoro_market")
+
+    try:
+        snapshot_session_date = date.fromisoformat(str(snapshot["session_date"]))
+        snapshot_previous_session_date = date.fromisoformat(str(snapshot["previous_session_date"]))
+    except (KeyError, ValueError) as exc:
+        raise ValueError("persisted pre_event_market_context is missing session-date metadata") from exc
+
+    profile = resolve_market_session_profile(event.resolved_etoro_market, profiles=profiles)
+    event_local_date = event.event_at.astimezone(ZoneInfo(profile.market_timezone)).date()
+    calendar_kwargs = {
+        "start_date": event_local_date - timedelta(days=_SESSION_CALENDAR_LOOKBACK_DAYS),
+        "end_date": event_local_date + timedelta(days=_SESSION_CALENDAR_LOOKAHEAD_DAYS),
+    }
+    if calendar_loader is None:
+        sessions = confirmed_session_dates(profile, **calendar_kwargs)
+    else:
+        sessions = confirmed_session_dates(profile, calendar_loader=calendar_loader, **calendar_kwargs)
+
+    resolution = resolve_session_dates(
+        event.event_at,
+        profile=profile,
+        confirmed_session_dates=sessions,
+    )
+    return (
+        resolution.latest_closed_session == snapshot_session_date
+        and resolution.previous_closed_session == snapshot_previous_session_date
+    )
+
+
 def acquire_and_persist_pre_event_market_context_for_event(
     repository: SupabaseTrackedEventRepository,
     *,
