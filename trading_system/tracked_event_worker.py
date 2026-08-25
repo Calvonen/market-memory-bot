@@ -169,7 +169,7 @@ def _validate_persisted_reference_identity(
     event: PersistentTrackedEvent,
     resolved: TrackedEtoroInstrument,
 ) -> None:
-    if event.reference_price is not None:
+    if event.reference_price is None:
         return
     if event.resolved_etoro_instrument_id != resolved.etoro_instrument_id:
         raise RuntimeError("persisted reference eToro instrument id does not match armed identity")
