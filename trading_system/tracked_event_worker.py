@@ -21,6 +21,7 @@ from trading_system.pre_event_market_context_persistence import (
 )
 from trading_system.reaction_monitoring_profile import DEFAULT_EVENT_REACTION_MONITORING_PROFILE
 from trading_system.tracked_candle_pipeline import TrackedMarketCandle
+from trading_system.tracked_event_cas import fail_tracked_event_if_current
 from trading_system.tracked_event_config import snapshot_effective_tracking_config
 from trading_system.tracked_event_reaction_live import stream_tracked_event_reaction_runtime
 from trading_system.tracked_event_reaction_runtime import TrackedEventReactionRuntime
@@ -168,7 +169,7 @@ def _validate_persisted_reference_identity(
     event: PersistentTrackedEvent,
     resolved: TrackedEtoroInstrument,
 ) -> None:
-    if event.reference_price is None:
+    if event.reference_price is not None:
         return
     if event.resolved_etoro_instrument_id != resolved.etoro_instrument_id:
         raise RuntimeError("persisted reference eToro instrument id does not match armed identity")
@@ -601,8 +602,9 @@ async def _prepare_and_monitor_one_event(
     starts; a version conflict there is retryable rather than terminal, since it
     just means a later poll must re-evaluate against whatever the event now is.
     A stale snapshot (event_at moved to a different trading date since capture)
-    fails the event closed rather than monitoring on it - that is a proven-
-    invalid snapshot, not a deadline decision, so it goes through mark_failed.
+    fails closed through a version/status/reference-bound UPDATE, so a worker
+    that races with reference capture, MONITORING, or another row edit cannot
+    terminal-fail a version it did not validate.
 
     The deadline RPC additionally refuses to fail any row whose
     pre_event_market_context is already set: a committed capture is proof the
@@ -687,8 +689,10 @@ async def _prepare_and_monitor_one_event(
                 return
             raise
         if not is_current:
-            repository.mark_failed(
-                current_event.event_id,
+            fail_tracked_event_if_current(
+                repository,
+                event_id=current_event.event_id,
+                expected_event_updated_at=current_event.updated_at,
                 actor=WORKER_ACTOR,
                 error="persisted pre-event market context no longer matches the event's current event_at",
             )
