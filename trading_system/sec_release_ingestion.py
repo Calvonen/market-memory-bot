@@ -24,6 +24,7 @@ class _SecIndexDocumentParser(HTMLParser):
         super().__init__()
         self.documents: list[tuple[str, str, str]] = []
         self.authoritative_table_recognized = False
+        self.malformed_ex991_rows = 0
         self._in_row = False
         self._in_cell = False
         self._in_link = False
@@ -97,9 +98,12 @@ class _SecIndexDocumentParser(HTMLParser):
                 type_text = self._cells[self._type_index][0].strip().upper()
                 document_cell = self._cells[self._document_index]
                 href = document_cell[1]
-                if type_text == "EX-99.1" and href:
-                    label = document_cell[2] or document_cell[0] or href
-                    self.documents.append((href, label, type_text))
+                if type_text == "EX-99.1":
+                    if not href:
+                        self.malformed_ex991_rows += 1
+                    else:
+                        label = document_cell[2] or document_cell[0] or href
+                        self.documents.append((href, label, type_text))
         self._in_row = False
         self._cells = []
 
@@ -290,10 +294,18 @@ class SecEdgarResultsProvider:
         target = self.scheduled_date
         matches: list[dict[str, str]] = []
         for index in range(len(forms)):
-            filing_form = str(forms[index]).strip().upper()
+            filing_form = str(forms[index] or "").strip().upper()
+            filing_date_raw = str(filing_dates[index] or "").strip()
+            if not filing_form:
+                try:
+                    filing_date = date.fromisoformat(filing_date_raw)
+                except ValueError as exc:
+                    raise RuntimeError("SEC filing row with empty form has invalid filingDate") from exc
+                if filing_date == target:
+                    raise RuntimeError("SEC target-date filing row has empty form")
+                continue
             if filing_form not in self._SUPPORTED_EARNINGS_FORMS:
                 continue
-            filing_date_raw = str(filing_dates[index] or "").strip()
             try:
                 filing_date = date.fromisoformat(filing_date_raw)
             except ValueError as exc:
@@ -327,6 +339,8 @@ class SecEdgarResultsProvider:
         parser.feed(index_html)
         if not parser.authoritative_table_recognized:
             raise RuntimeError("SEC filing index authoritative DOCUMENT/TYPE layout was not recognized")
+        if parser.malformed_ex991_rows:
+            raise RuntimeError("SEC filing index contains EX-99.1 row without a document link")
         candidates: list[tuple[str, str]] = []
         for href, label, document_type in parser.documents:
             source_url = urljoin(index_url, href)
