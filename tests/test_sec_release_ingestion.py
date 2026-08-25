@@ -178,6 +178,18 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "DOCUMENT/TYPE layout"):
                 self.provider.discover("calendar:event-id")
 
+    def test_ex991_row_without_document_link_fails_closed(self) -> None:
+        index = """
+            <table><tr><th>Seq</th><th>Description</th><th>Document</th><th>Type</th></tr>
+            <tr><td>2</td><td>earnings</td><td>earnings.htm</td><td>EX-99.1</td></tr></table>
+        """
+        with patch.object(self.provider, "_fetch_json", side_effect=[self.tickers, self.submissions]), patch.object(
+            self.provider, "_fetch_text", side_effect=[self.primary_html, index]
+        ), patch.object(self.provider, "_fetch_release_text") as fetch_release:
+            with self.assertRaisesRegex(RuntimeError, "EX-99.1 row without a document link"):
+                self.provider.discover("calendar:event-id")
+        fetch_release.assert_not_called()
+
     def test_rejects_external_ex991_link_from_index(self) -> None:
         index = """
             <table><tr><th>Seq</th><th>Description</th><th>Document</th><th>Type</th></tr>
@@ -233,6 +245,16 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
             "accessionNumber": ["0001089063-26-000098"], "primaryDocument": ["old.htm", "target.htm"],
         }
         with self.assertRaisesRegex(RuntimeError, "required arrays are misaligned"):
+            self.provider._matching_filings_table(malformed)
+
+    def test_target_date_filing_with_empty_form_fails_closed(self) -> None:
+        malformed = {
+            "form": [None],
+            "filingDate": ["2026-08-25"],
+            "accessionNumber": ["0001089063-26-000099"],
+            "primaryDocument": ["target.htm"],
+        }
+        with self.assertRaisesRegex(RuntimeError, "target-date filing row has empty form"):
             self.provider._matching_filings_table(malformed)
 
     def test_matching_filing_with_empty_identifier_fails_closed(self) -> None:
