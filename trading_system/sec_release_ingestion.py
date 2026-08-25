@@ -70,8 +70,9 @@ class SecEdgarResultsProvider:
     Discovery is intentionally conservative. The provider resolves the exact
     ticker to one CIK, considers only 8-K filings whose filingDate equals the
     calendar event's scheduled date, verifies an earnings/results signal in the
-    filing, and then selects an EX-99.1-style linked exhibit. It never falls back
-    to a nearby filing date or an unrelated exhibit merely because one exists.
+    primary filing, and then selects an EX-99.1-style exhibit from that exact
+    filing's SEC index page. It never falls back to a nearby filing date or an
+    unrelated exhibit merely because one exists.
     """
 
     name = "sec_edgar_8k"
@@ -194,7 +195,8 @@ class SecEdgarResultsProvider:
         cik: int,
         filing: dict[str, str],
     ) -> ReleaseDocument | None:
-        accession_compact = filing["accession"].replace("-", "")
+        accession = filing["accession"]
+        accession_compact = accession.replace("-", "")
         filing_base = f"{self.ARCHIVES_BASE}{cik}/{accession_compact}/"
         primary_url = urljoin(filing_base, filing["primary_document"])
         primary_html = self._fetch_text(primary_url)
@@ -202,11 +204,15 @@ class SecEdgarResultsProvider:
         if not self._EARNINGS_SIGNAL_RE.search(primary_text):
             return None
 
+        # SEC's filing index is the canonical document table for an accession;
+        # the primary 8-K itself does not reliably link every exhibit.
+        index_url = urljoin(filing_base, f"{accession}-index.html")
+        index_html = self._fetch_text(index_url)
         parser = _SecLinkParser()
-        parser.feed(primary_html)
+        parser.feed(index_html)
         candidates: list[tuple[int, str, str]] = []
         for href, label in parser.links:
-            source_url = urljoin(primary_url, href)
+            source_url = urljoin(index_url, href)
             if not self._same_filing_directory(filing_base, source_url):
                 continue
             haystack = f"{label} {href}"
