@@ -54,7 +54,8 @@ ALL_PRESENT_ROW = {
     "validate_tracked_market_event_pre_event_context_if_current_function_exists": True,
     "fail_tracked_market_event_pre_event_deadline_if_current_function_exists": True,
     "fail_tracked_market_event_stale_context_if_current_function_exists": True,
-    "runtime_schema_version": 7,
+    "promote_calendar_event_to_tracked_runtime_function_exists": True,
+    "runtime_schema_version": 8,
 }
 
 
@@ -96,12 +97,12 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertIn("SCHEMA GATE FAILED", err)
 
     def test_fails_closed_on_old_runtime_schema_version(self) -> None:
-        row = dict(ALL_PRESENT_ROW, runtime_schema_version=6)
+        row = dict(ALL_PRESENT_ROW, runtime_schema_version=7)
         exit_code, _out, err = self._run_with_client(
             _FakeClient(SimpleNamespace(data=[row]))
         )
         self.assertEqual(exit_code, 1)
-        self.assertIn("tracked-event runtime schema version 7", err)
+        self.assertIn("tracked-event runtime schema version 8", err)
 
     def test_fails_closed_when_stale_context_fail_rpc_is_missing(self) -> None:
         row = dict(
@@ -113,6 +114,17 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         )
         self.assertEqual(exit_code, 1)
         self.assertIn("fail_tracked_market_event_stale_context_if_current() function", err)
+
+    def test_fails_closed_when_calendar_promotion_rpc_is_missing(self) -> None:
+        row = dict(
+            ALL_PRESENT_ROW,
+            promote_calendar_event_to_tracked_runtime_function_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(SimpleNamespace(data=[row]))
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("promote_calendar_event_to_tracked_runtime() function", err)
 
     def test_fails_closed_when_existing_required_object_is_missing(self) -> None:
         row = dict(ALL_PRESENT_ROW, capture_tracked_market_event_reference_function_exists=False)
