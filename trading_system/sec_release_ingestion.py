@@ -307,7 +307,7 @@ class SecEdgarResultsProvider:
         for href, label, document_type in parser.documents:
             source_url = urljoin(index_url, href)
             if not self._same_filing_directory(filing_base, source_url):
-                continue
+                raise RuntimeError("SEC EX-99.1 document URL escaped the filing directory")
             title = " ".join(part for part in (document_type, label) if part).strip()
             candidates.append((source_url, title))
         retrieval_errors: list[Exception] = []
