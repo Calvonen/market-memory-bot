@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from trading_system.calendar_release_worker import (
     TARGET_PAGE_SIZE,
+    US_MARKET_LABELS,
     SupabaseCalendarReleaseTargetRepository,
 )
 
@@ -21,6 +22,10 @@ class _Query:
 
     def eq(self, key, value):
         self.calls.append(("eq", key, value))
+        return self
+
+    def in_(self, key, value):
+        self.calls.append(("in", key, tuple(value)))
         return self
 
     def gte(self, key, value):
@@ -63,12 +68,12 @@ class _Client:
 
 
 class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
-    def test_requests_tracked_usa_earnings_through_end_date_without_lower_bound(self):
+    def test_requests_tracked_us_market_labels_through_end_date_without_lower_bound(self):
         client = _Client(
             [[
                 {
                     "id": "22648076-6e43-40fc-ac6e-f57a79ceee31",
-                    "instrument": "dks",
+                    "instrument": "aapl",
                     "scheduled_date": "2026-08-23",
                 }
             ]]
@@ -83,14 +88,15 @@ class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
         self.assertEqual(client.table_names, ["calendar_events"])
         calls = client.queries[0].calls
         self.assertIn(("eq", "status", "tracked"), calls)
-        self.assertIn(("eq", "market", "USA"), calls)
+        self.assertIn(("in", "market", US_MARKET_LABELS), calls)
+        self.assertIn("NASDAQ", US_MARKET_LABELS)
         self.assertIn(("eq", "event_type", "earnings"), calls)
         self.assertNotIn(("gte", "scheduled_date", "2026-08-24"), calls)
         self.assertIn(("lte", "scheduled_date", "2026-08-25"), calls)
         self.assertIn(("order", "id"), calls)
         self.assertIn(("limit", TARGET_PAGE_SIZE), calls)
         self.assertEqual(len(targets), 1)
-        self.assertEqual(targets[0].ticker, "DKS")
+        self.assertEqual(targets[0].ticker, "AAPL")
         self.assertEqual(targets[0].scheduled_date, date(2026, 8, 23))
         self.assertEqual(
             targets[0].event_id,
