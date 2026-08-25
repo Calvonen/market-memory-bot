@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll official US earnings releases for tracked calendar events
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=120s
+AccuracySec=5s
+Persistent=true
+Unit=marketai-calendar-release.service
+
+[Install]
+WantedBy=timers.target
