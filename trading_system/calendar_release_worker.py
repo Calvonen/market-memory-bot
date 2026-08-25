@@ -73,16 +73,26 @@ class SupabaseCalendarReleaseTargetRepository:
             rows = list(response.data or [])
 
             for row in rows:
+                if not isinstance(row, dict):
+                    raise RuntimeError("calendar release target row is not an object")
                 calendar_id = str(row.get("id") or "").strip()
                 ticker = str(row.get("instrument") or "").strip().upper()
                 scheduled = row.get("scheduled_date")
                 if not calendar_id or not ticker or not scheduled:
-                    continue
-                parsed_date = (
-                    scheduled
-                    if isinstance(scheduled, date)
-                    else date.fromisoformat(str(scheduled))
-                )
+                    row_identity = calendar_id or "<missing-id>"
+                    raise RuntimeError(
+                        f"calendar release target {row_identity} is missing required canonical data"
+                    )
+                try:
+                    parsed_date = (
+                        scheduled
+                        if isinstance(scheduled, date)
+                        else date.fromisoformat(str(scheduled))
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"calendar release target {calendar_id} has invalid scheduled_date"
+                    ) from exc
                 targets.append(
                     CalendarReleaseTarget(
                         calendar_event_id=calendar_id,
