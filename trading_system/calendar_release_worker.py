@@ -16,7 +16,7 @@ from trading_system.supabase_event_repository import SupabaseEventExpectationRep
 DEFAULT_LOOKBACK_DAYS = 1
 DEFAULT_LOOKAHEAD_DAYS = 0
 TARGET_PAGE_SIZE = 1000
-US_MARKET_LABELS = ("USA", "NASDAQ", "NYSE", "AMEX")
+US_MARKET_LABELS = ("US", "USA", "NASDAQ", "NYSE", "AMEX")
 DATE_ONLY_OVERDUE_GRACE_HOURS = 24.0
 
 
