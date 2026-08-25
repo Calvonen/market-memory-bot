@@ -71,10 +71,10 @@ begin
       end if;
     exception
       when others then
-        if length(host_part) > 253 then
+        if length(host_part) > 253 or host_part ~ '\.\.$' then
           return false;
         end if;
-        trimmed_host := rtrim(host_part, '.');
+        trimmed_host := case when right(host_part, 1) = '.' then left(host_part, length(host_part) - 1) else host_part end;
         if trimmed_host = '' then
           return false;
         end if;
