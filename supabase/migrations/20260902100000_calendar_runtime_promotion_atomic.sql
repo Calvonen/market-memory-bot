@@ -27,6 +27,7 @@ security invoker
 as $$
 declare
   calendar_row public.calendar_events%rowtype;
+  existing_runtime public.tracked_market_events%rowtype;
   promoted_event_id uuid;
   promoted_action text;
 begin
@@ -62,6 +63,35 @@ begin
      or calendar_row.occurrence_key is distinct from input_expected_occurrence_key
      or calendar_row.scheduled_date is distinct from input_expected_scheduled_date then
     raise exception 'calendar_event_changed_before_promotion';
+  end if;
+
+  -- A retry after a successful promotion must be a true no-op. In particular,
+  -- a later Finnhub hour change must not silently move the already-created
+  -- runtime event through upsert_tracked_market_event while it is still in
+  -- TRACKED/reference-null state. Explicit rescheduling belongs in a separate
+  -- lifecycle operation, not in an idempotent watchlist button retry.
+  select * into existing_runtime
+  from public.tracked_market_events
+  where calendar_event_id = calendar_row.id
+  for update;
+
+  if existing_runtime.id is not null then
+    if existing_runtime.instrument is distinct from upper(replace(calendar_row.instrument, ' ', ''))
+       or existing_runtime.kind is distinct from calendar_row.event_type
+       or existing_runtime.source is distinct from calendar_row.source then
+      raise exception 'calendar_runtime_binding_identity_conflict';
+    end if;
+
+    if calendar_row.status = 'candidate' then
+      update public.calendar_events
+      set status = 'tracked',
+          updated_at = now()
+      where id = calendar_row.id;
+      calendar_row.status := 'tracked';
+    end if;
+
+    return query select existing_runtime.id, 'noop_existing'::text, calendar_row.status;
+    return;
   end if;
 
   select u.out_id, u.out_action
