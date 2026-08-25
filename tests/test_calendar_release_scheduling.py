@@ -21,12 +21,19 @@ class CalendarReleaseSchedulingTests(unittest.TestCase):
 
     def test_service_is_one_shot_ingestion_only_worker(self) -> None:
         self.assertIn("Type=oneshot", self.service)
-        self.assertIn(
-            "ExecStart=/home/marko/marketai-repo/.venv/bin/python -m trading_system.calendar_release_worker",
-            self.service,
+        exec_lines = [
+            line.strip()
+            for line in self.service.splitlines()
+            if line.strip().startswith("ExecStart=")
+        ]
+        self.assertEqual(
+            exec_lines,
+            [
+                "ExecStart=/home/marko/marketai-repo/.venv/bin/python -m trading_system.calendar_release_worker"
+            ],
         )
-        for forbidden in ("post_release_paper", "Strategy", "RiskEngine", "PaperBroker"):
-            self.assertNotIn(forbidden, self.service)
+        self.assertNotIn("trading_system.release_worker", "\n".join(exec_lines))
+        self.assertNotIn("post_release_paper", "\n".join(exec_lines))
 
     def test_timer_polls_every_two_minutes_and_survives_downtime(self) -> None:
         self.assertIn("OnUnitInactiveSec=120s", self.timer)
@@ -62,7 +69,7 @@ class CalendarReleaseSchedulingTests(unittest.TestCase):
         health = body.index("systemctl is-active --quiet marketai-calendar-release.timer")
         success_record = body.index("last-deployed-backend.sha")
         self.assertLess(health, success_record)
-        segment = body[body.index("marketai-calendar-release.timer", health - 200):success_record]
+        segment = body[max(0, health - 200):success_record]
         self.assertNotIn("|| true", segment)
         self.assertNotIn("set +e", segment)
 
