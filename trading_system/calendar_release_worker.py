@@ -146,8 +146,6 @@ def run_calendar_release_ingestion_once(
         try:
             expectation = expectations.get(target.event_id)
             if expectation is None:
-                # A tracked calendar event without the v10 release shell is not a
-                # valid ingestion target. Do not invent a parallel event identity.
                 results.append(
                     CalendarReleaseWorkerResult(
                         target.event_id,
@@ -203,11 +201,6 @@ def run_calendar_release_ingestion_once(
             )
             ingestion: IngestionResult = monitor.run_once(target.event_id)
         except Exception as exc:
-            # Isolate the entire target workflow. This includes repository reads,
-            # shell validation, persisted-analysis checks, provider construction,
-            # SEC discovery and EventReleaseMonitor persistence/analysis. A single
-            # malformed row or transient provider/repository failure must never
-            # starve later tracked events in the same one-shot batch.
             results.append(
                 CalendarReleaseWorkerResult(
                     target.event_id,
@@ -228,6 +221,12 @@ def run_calendar_release_ingestion_once(
 
 
 def main() -> None:
+    sec_user_agent = os.environ.get("MARKETAI_SEC_USER_AGENT", "").strip()
+    if not sec_user_agent:
+        raise RuntimeError("MARKETAI_SEC_USER_AGENT is required for SEC release ingestion")
+    if "@" not in sec_user_agent:
+        raise RuntimeError("MARKETAI_SEC_USER_AGENT must include a contact email address")
+
     lookback_days = int(
         os.environ.get(
             "MARKETAI_CALENDAR_RELEASE_LOOKBACK_DAYS",
