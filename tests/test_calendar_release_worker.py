@@ -23,20 +23,26 @@ class _Targets:
 
 
 class _Expectations:
-    def __init__(self, by_id):
+    def __init__(self, by_id, *, fail_event_id=None):
         self.by_id = dict(by_id)
+        self.fail_event_id = fail_event_id
 
     def get(self, event_id):
+        if event_id == self.fail_event_id:
+            raise RuntimeError("expectation repository transient failure")
         return self.by_id.get(event_id)
 
 
 class _Releases:
-    def __init__(self, analyzed=False):
+    def __init__(self, analyzed=False, *, fail_event_id=None):
         self.analyzed = analyzed
+        self.fail_event_id = fail_event_id
         self.analysis_checks = []
 
     def has_analysis_for_event_version(self, *, event_id, expectation_version):
         self.analysis_checks.append((event_id, expectation_version))
+        if event_id == self.fail_event_id:
+            raise RuntimeError("analysis repository transient failure")
         return self.analyzed
 
 
@@ -60,6 +66,23 @@ class CalendarReleaseWorkerTests(unittest.TestCase):
             source_name="calendar:finnhub:automatic-release-shell",
             version=1,
         )
+
+    @staticmethod
+    def _second_target_and_expectation():
+        second_id = "calendar:00000000-0000-0000-0000-000000000002"
+        second = CalendarReleaseTarget(
+            calendar_event_id="00000000-0000-0000-0000-000000000002",
+            event_id=second_id,
+            ticker="ABC",
+            scheduled_date=date(2026, 8, 25),
+        )
+        expectation = EventExpectation(
+            event_id=second_id,
+            instrument="ABC",
+            event_name="ABC earnings",
+            scheduled_date=date(2026, 8, 25),
+        )
+        return second_id, second, expectation
 
     def test_runs_sec_monitor_for_valid_us_calendar_shell(self):
         targets = _Targets([self._target()])
@@ -149,24 +172,12 @@ class CalendarReleaseWorkerTests(unittest.TestCase):
         provider_cls.assert_not_called()
         monitor_cls.assert_not_called()
 
-    def test_one_event_error_does_not_starve_later_targets(self):
-        second_id = "calendar:00000000-0000-0000-0000-000000000002"
-        first = self._target()
-        second = CalendarReleaseTarget(
-            calendar_event_id="00000000-0000-0000-0000-000000000002",
-            event_id=second_id,
-            ticker="ABC",
-            scheduled_date=date(2026, 8, 25),
-        )
+    def test_monitor_error_does_not_starve_later_targets(self):
+        second_id, second, second_expectation = self._second_target_and_expectation()
         expectations = _Expectations(
             {
                 self.EVENT_ID: self._expectation(),
-                second_id: EventExpectation(
-                    event_id=second_id,
-                    instrument="ABC",
-                    event_name="ABC earnings",
-                    scheduled_date=date(2026, 8, 25),
-                ),
+                second_id: second_expectation,
             }
         )
         first_monitor = MagicMock()
@@ -181,7 +192,7 @@ class CalendarReleaseWorkerTests(unittest.TestCase):
             side_effect=[first_monitor, second_monitor],
         ):
             results = run_calendar_release_ingestion_once(
-                targets=_Targets([first, second]),
+                targets=_Targets([self._target(), second]),
                 expectations=expectations,
                 releases=_Releases(),
                 analyzer=MagicMock(),
@@ -189,6 +200,62 @@ class CalendarReleaseWorkerTests(unittest.TestCase):
             )
 
         self.assertEqual([row.status for row in results], ["error", "no_release"])
+        second_monitor.run_once.assert_called_once_with(second_id)
+
+    def test_expectation_lookup_error_does_not_starve_later_targets(self):
+        second_id, second, second_expectation = self._second_target_and_expectation()
+        expectations = _Expectations(
+            {second_id: second_expectation},
+            fail_event_id=self.EVENT_ID,
+        )
+        second_monitor = MagicMock()
+        second_monitor.run_once.return_value = IngestionResult(status="no_release")
+
+        with patch(
+            "trading_system.calendar_release_worker.SecEdgarResultsProvider"
+        ), patch(
+            "trading_system.calendar_release_worker.EventReleaseMonitor",
+            return_value=second_monitor,
+        ):
+            results = run_calendar_release_ingestion_once(
+                targets=_Targets([self._target(), second]),
+                expectations=expectations,
+                releases=_Releases(),
+                analyzer=MagicMock(),
+                clock=lambda: datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+            )
+
+        self.assertEqual([row.status for row in results], ["error", "no_release"])
+        self.assertIn("expectation repository", results[0].message or "")
+        second_monitor.run_once.assert_called_once_with(second_id)
+
+    def test_analysis_lookup_error_does_not_starve_later_targets(self):
+        second_id, second, second_expectation = self._second_target_and_expectation()
+        expectations = _Expectations(
+            {
+                self.EVENT_ID: self._expectation(),
+                second_id: second_expectation,
+            }
+        )
+        second_monitor = MagicMock()
+        second_monitor.run_once.return_value = IngestionResult(status="no_release")
+
+        with patch(
+            "trading_system.calendar_release_worker.SecEdgarResultsProvider"
+        ), patch(
+            "trading_system.calendar_release_worker.EventReleaseMonitor",
+            return_value=second_monitor,
+        ):
+            results = run_calendar_release_ingestion_once(
+                targets=_Targets([self._target(), second]),
+                expectations=expectations,
+                releases=_Releases(fail_event_id=self.EVENT_ID),
+                analyzer=MagicMock(),
+                clock=lambda: datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+            )
+
+        self.assertEqual([row.status for row in results], ["error", "no_release"])
+        self.assertIn("analysis repository", results[0].message or "")
         second_monitor.run_once.assert_called_once_with(second_id)
 
 
