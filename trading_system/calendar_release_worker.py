@@ -87,23 +87,6 @@ class CalendarReleaseWorkerResult:
     message: str | None = None
 
 
-def _already_analyzed(
-    releases: SupabaseReleaseRepository,
-    *,
-    event_id: str,
-    expectation_version: int,
-) -> bool:
-    response = (
-        releases.client.table("event_ai_analyses")
-        .select("id")
-        .eq("event_id", event_id)
-        .eq("expectation_version", expectation_version)
-        .limit(1)
-        .execute()
-    )
-    return bool(response.data or [])
-
-
 def run_calendar_release_ingestion_once(
     *,
     targets: SupabaseCalendarReleaseTargetRepository,
@@ -151,8 +134,7 @@ def run_calendar_release_ingestion_once(
             )
             continue
 
-        if _already_analyzed(
-            releases,
+        if releases.has_analysis_for_event_version(
             event_id=target.event_id,
             expectation_version=expectation.version,
         ):
