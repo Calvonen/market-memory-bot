@@ -16,6 +16,7 @@ from trading_system.supabase_event_repository import SupabaseEventExpectationRep
 DEFAULT_LOOKBACK_DAYS = 1
 DEFAULT_LOOKAHEAD_DAYS = 0
 TARGET_PAGE_SIZE = 1000
+US_MARKET_LABELS = ("USA", "NASDAQ", "NYSE", "AMEX")
 
 
 @dataclass(frozen=True)
@@ -60,7 +61,7 @@ class SupabaseCalendarReleaseTargetRepository:
                 self.client.table("calendar_events")
                 .select("id,instrument,scheduled_date")
                 .eq("status", "tracked")
-                .eq("market", "USA")
+                .in_("market", US_MARKET_LABELS)
                 .eq("event_type", "earnings")
                 .lte("scheduled_date", end_date.isoformat())
                 .order("id")
@@ -102,13 +103,7 @@ class SupabaseCalendarReleaseTargetRepository:
 
 
 class _PinnedExpectationRepository:
-    """Expose exactly one already-validated expectation to one monitor run.
-
-    EventReleaseMonitor normally reloads the current expectation. Calendar
-    ingestion must instead keep the SEC provider and expectation on the same
-    validated ticker/date/version snapshot for the entire run so a concurrent
-    shell update cannot bind an old SEC document to a new expectation version.
-    """
+    """Expose exactly one already-validated expectation to one monitor run."""
 
     def __init__(self, *, event_id: str, expectation: EventExpectation) -> None:
         self.event_id = event_id
