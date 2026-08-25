@@ -118,9 +118,6 @@ class ResolveProviderSymbolTests(unittest.TestCase):
         )
 
     def test_policy_covers_every_sydney_instrument_not_just_the_first_one(self) -> None:
-        # The policy is declared once for the grounded market, so any instrument
-        # carrying the market's broker suffix resolves - a per-instrument table
-        # would silently fail closed on the second tracked ASX event.
         for broker, provider in (
             ("WDS.ASX", "WDS.AX"),
             ("NHF.ASX", "NHF.AX"),
@@ -134,8 +131,6 @@ class ResolveProviderSymbolTests(unittest.TestCase):
                 )
 
     def test_symbol_without_the_declared_broker_suffix_fails_closed(self) -> None:
-        # No guessing: a symbol from another namespace is refused outright
-        # rather than being passed through or patched up.
         for broker in ("WDS", "WDS.AX", "WDS.L", "WDS.NASDAQ", "WDS."):
             with self.subTest(broker=broker):
                 with self.assertRaises(ValueError):
@@ -154,8 +149,6 @@ class ResolveProviderSymbolTests(unittest.TestCase):
                     resolve_provider_symbol(broker, profile=SYDNEY_MARKET_SESSION_PROFILE)
 
     def test_translation_is_driven_only_by_the_supplied_profile(self) -> None:
-        # Nothing is inferred from the ticker, the country, or the calendar id:
-        # the same base resolves differently under a different declared policy.
         other = MarketSessionProfile(
             etoro_market="Observed Market Label",
             market_timezone="Europe/London",
@@ -192,9 +185,6 @@ class HasGroundedMarketSessionProfileTests(unittest.TestCase):
         self.assertTrue(has_grounded_market_session_profile("Sydney"))
 
     def test_markets_awaiting_grounding_report_false_instead_of_raising(self) -> None:
-        # London/NASDAQ tracked events already run the existing reaction
-        # monitor; they simply have no grounded session profile yet, which the
-        # predicate must report as "not rolled out" rather than as an error.
         for label in ("London", "NASDAQ", "NYSE", "Helsinki"):
             with self.subTest(label=label):
                 self.assertFalse(has_grounded_market_session_profile(label))
@@ -209,7 +199,7 @@ class HasGroundedMarketSessionProfileTests(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertFalse(has_grounded_market_session_profile(label))
 
-    def test_ambiguously_registered_label_is_not_grounded(self) -> None:
+    def test_ambiguously_registered_label_fails_closed(self) -> None:
         first = MarketSessionProfile(
             etoro_market="Observed Market Label",
             market_timezone="Europe/London",
@@ -225,13 +215,12 @@ class HasGroundedMarketSessionProfileTests(unittest.TestCase):
             provider_symbol_suffix=".OB",
         )
 
-        self.assertFalse(
+        with self.assertRaisesRegex(ValueError, "ambiguous eToro market profile"):
             has_grounded_market_session_profile(
                 "Observed Market Label", profiles=(first, second)
             )
-        )
 
-    def test_agrees_exactly_with_resolve_market_session_profile(self) -> None:
+    def test_agrees_with_resolver_for_supported_and_unsupported_labels(self) -> None:
         profile = MarketSessionProfile(
             etoro_market="Observed Market Label",
             market_timezone="Europe/London",
@@ -241,17 +230,12 @@ class HasGroundedMarketSessionProfileTests(unittest.TestCase):
         )
         profiles = (profile,)
 
-        for label in ("Observed Market Label", "observed market label", "Other", "", " "):
+        self.assertTrue(
+            has_grounded_market_session_profile("Observed Market Label", profiles=profiles)
+        )
+        for label in ("observed market label", "Other", "", " "):
             with self.subTest(label=label):
-                try:
-                    resolve_market_session_profile(label, profiles=profiles)
-                except ValueError:
-                    resolvable = False
-                else:
-                    resolvable = True
-                self.assertEqual(
-                    has_grounded_market_session_profile(label, profiles=profiles), resolvable
-                )
+                self.assertFalse(has_grounded_market_session_profile(label, profiles=profiles))
 
 
 if __name__ == "__main__":
