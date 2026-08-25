@@ -28,8 +28,18 @@ class OfficialReleaseSource:
         if source_kind not in _ALLOWED_SOURCE_KINDS:
             raise ValueError("official release source_kind must be direct_url or results_page")
         parsed = urlparse(source_url)
-        if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
-            raise ValueError("official release source_url must be an absolute HTTPS URL without credentials")
+        try:
+            parsed_port = parsed.port
+        except ValueError as exc:
+            raise ValueError("official release source_url must use a valid port") from exc
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or (parsed_port is not None and not 1 <= parsed_port <= 65535)
+        ):
+            raise ValueError("official release source_url must be an absolute HTTPS URL with a valid host and no credentials")
         if self.version is not None and self.version < 1:
             raise ValueError("official release source version must be positive")
 
@@ -44,6 +54,7 @@ class SupabaseOfficialReleaseSourceRepository:
 
     TABLE = "event_official_release_sources"
     SET_RPC = "set_event_official_release_source"
+    CLEAR_RPC = "clear_event_official_release_source"
 
     def __init__(self, client: Any) -> None:
         self.client = client
@@ -123,8 +134,18 @@ class SupabaseOfficialReleaseSourceRepository:
         }
         return self._from_row(canonical_row)
 
-    def clear(self, event_id: str) -> None:
+    def clear(self, event_id: str, *, expected_version: int) -> None:
         canonical_event_id = event_id.strip()
         if not canonical_event_id:
             raise ValueError("event_id is required")
-        self.client.table(self.TABLE).delete().eq("event_id", canonical_event_id).execute()
+        if expected_version < 1:
+            raise ValueError("expected_version must be positive")
+        response = self.client.rpc(
+            self.CLEAR_RPC,
+            {
+                "input_event_id": canonical_event_id,
+                "input_expected_version": expected_version,
+            },
+        ).execute()
+        if response.data is not True:
+            raise RuntimeError("official release source clear did not confirm deletion")
