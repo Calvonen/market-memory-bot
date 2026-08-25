@@ -72,7 +72,10 @@ def _daily_frame() -> pd.DataFrame:
 
 class PreEventMarketContextOrchestrationTests(unittest.TestCase):
     def test_caller_grounded_same_day_fails_before_provider_fetch(self) -> None:
-        event = SimpleNamespace(instrument="WDS.ASX")
+        event = SimpleNamespace(
+            instrument="WDS.ASX",
+            event_at=datetime(2026, 8, 24, 7, 0, tzinfo=UTC),
+        )
         repository = _Repository(event)
         fetch_calls = []
 
@@ -93,8 +96,39 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
         self.assertEqual(fetch_calls, [])
         self.assertEqual(repository.client.calls, [])
 
+    def test_caller_grounded_inconsistent_later_trading_date_still_fails_before_fetch(self) -> None:
+        # The caller cannot make a same-day snapshot look like a prior-day one
+        # simply by supplying a later event_trading_date. The persisted event_at
+        # remains the authority, matching the base RPC's own event-local-date gate.
+        event = SimpleNamespace(
+            instrument="WDS.ASX",
+            event_at=datetime(2026, 8, 24, 7, 0, tzinfo=UTC),
+        )
+        repository = _Repository(event)
+        fetch_calls = []
+
+        with self.assertRaisesRegex(ValueError, "persisted event local date"):
+            acquire_and_persist_pre_event_market_context(
+                repository,
+                event_id="event-1",
+                ticker="WDS.ASX",
+                provider_symbol="WDS.AX",
+                event_trading_date=date(2026, 8, 25),
+                last_confirmed_closed_session_date=date(2026, 8, 24),
+                previous_confirmed_closed_session_date=date(2026, 8, 21),
+                market_timezone="Australia/Sydney",
+                actor="tracked-event-worker",
+                fetcher=lambda ticker, period, interval: fetch_calls.append((ticker, period, interval)) or _daily_frame(),
+            )
+
+        self.assertEqual(fetch_calls, [])
+        self.assertEqual(repository.client.calls, [])
+
     def test_caller_grounded_prior_day_keeps_broker_and_provider_symbols_separate(self) -> None:
-        event = SimpleNamespace(instrument="WDS.ASX")
+        event = SimpleNamespace(
+            instrument="WDS.ASX",
+            event_at=datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
+        )
         repository = _Repository(event)
         fetch_calls = []
 
