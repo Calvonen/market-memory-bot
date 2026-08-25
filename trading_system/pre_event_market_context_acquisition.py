@@ -23,21 +23,25 @@ def acquire_pre_event_market_context(
     previous_confirmed_closed_session_date: date,
     fetcher: DailyOhlcvFetcher = fetch_ohlcv,
 ) -> PreEventMarketContext:
-    """Fetch provider daily OHLCV for two independently confirmed closed sessions.
+    """Fetch Yahoo daily OHLCV for two independently confirmed closed sessions.
 
     ``provider_symbol`` is the market-data provider's ticker, not the broker
     instrument. Broker and provider are separate namespaces (eToro WDS.ASX is
     Yahoo WDS.AX), so the caller must translate through the grounded market
-    profile first. This adapter performs no translation of its own.
+    profile first - see market_session_profile.resolve_provider_symbol. This
+    adapter performs no translation of its own.
 
-    The caller owns the exchange-calendar/session-close decision and supplies
-    the exact latest and immediately preceding closed session dates. Both rows
-    must be present; stale substitution fails closed.
+    The caller owns the exchange calendar/session-close decision and supplies the
+    exact latest and immediately preceding closed session dates. This adapter
+    never infers exchange timezone, holidays, weekends, or close time. Both
+    required session rows must be present; stale substitution fails closed.
 
-    ``last_confirmed_closed_session_date`` may equal ``event_trading_date`` for
-    a genuine post-close event. It can never be later than the event trading
-    date.
+    ``last_confirmed_closed_session_date`` may equal ``event_trading_date``: an
+    event after its own session's close takes that complete same-day session as
+    its latest reference. It can never be later than the event's trading date,
+    which is checked here rather than assumed.
     """
+
     normalized_symbol = provider_symbol.strip().upper()
     if not normalized_symbol:
         raise ValueError("provider_symbol is required")
@@ -61,6 +65,10 @@ def acquire_pre_event_market_context(
     if previous_session not in daily_ohlcv.index:
         raise ValueError("previous confirmed closed session data is missing")
 
+    # The session pair was already resolved from real close timestamps, so the
+    # selector's boundary is "up to and including the confirmed latest closed
+    # session" - not the event trading date, which would drop a same-day
+    # session that closed before the event.
     confirmed = daily_ohlcv.loc[daily_ohlcv.index <= latest_session]
     context = pre_event_market_context(
         confirmed,
