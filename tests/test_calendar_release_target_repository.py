@@ -47,13 +47,13 @@ class _Client:
 
 
 class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
-    def test_only_requests_tracked_us_earnings_in_date_window(self):
+    def test_requests_tracked_usa_earnings_through_end_date_without_lower_bound(self):
         client = _Client(
             [
                 {
                     "id": "22648076-6e43-40fc-ac6e-f57a79ceee31",
                     "instrument": "dks",
-                    "scheduled_date": "2026-08-25",
+                    "scheduled_date": "2026-08-23",
                 }
             ]
         )
@@ -66,12 +66,13 @@ class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
 
         self.assertEqual(client.table_names, ["calendar_events"])
         self.assertIn(("eq", "status", "tracked"), client.query.calls)
-        self.assertIn(("eq", "market", "US"), client.query.calls)
+        self.assertIn(("eq", "market", "USA"), client.query.calls)
         self.assertIn(("eq", "event_type", "earnings"), client.query.calls)
-        self.assertIn(("gte", "scheduled_date", "2026-08-24"), client.query.calls)
+        self.assertNotIn(("gte", "scheduled_date", "2026-08-24"), client.query.calls)
         self.assertIn(("lte", "scheduled_date", "2026-08-25"), client.query.calls)
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0].ticker, "DKS")
+        self.assertEqual(targets[0].scheduled_date, date(2026, 8, 23))
         self.assertEqual(
             targets[0].event_id,
             "calendar:22648076-6e43-40fc-ac6e-f57a79ceee31",
