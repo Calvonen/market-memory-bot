@@ -56,6 +56,26 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
         self.assertIn("opaque-document.htm", document.source_url)
         self.assertEqual(fetch_text.call_count, 2)
 
+    def test_supports_exact_date_6k_earnings_filing(self) -> None:
+        submissions = {
+            "filings": {
+                "recent": {
+                    "form": ["6-K"],
+                    "filingDate": ["2026-08-25"],
+                    "accessionNumber": ["0001234567-26-000099"],
+                    "primaryDocument": ["foreign-issuer-6k.htm"],
+                    "acceptanceDateTime": ["2026-08-25T07:01:00.000Z"],
+                }
+            }
+        }
+        with patch.object(self.provider, "_fetch_json", side_effect=[self.tickers, submissions]), patch.object(
+            self.provider, "_fetch_text", side_effect=[self.primary_html, self.index_html]
+        ), patch.object(
+            self.provider, "_fetch_release_text", return_value=(self.release_text, "company_results")
+        ):
+            document = self.provider.discover("calendar:event-id")
+        self.assertIsNotNone(document)
+
     def test_loads_historical_submission_shard_when_target_is_not_recent(self) -> None:
         submissions = {
             "filings": {
@@ -195,10 +215,37 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "required arrays are misaligned"):
             self.provider._matching_filings_table(malformed)
 
+    def test_matching_filing_with_empty_identifier_fails_closed(self) -> None:
+        malformed = {
+            "form": ["8-K"],
+            "filingDate": ["2026-08-25"],
+            "accessionNumber": [""],
+            "primaryDocument": ["target.htm"],
+        }
+        with self.assertRaisesRegex(RuntimeError, "empty accessionNumber or primaryDocument"):
+            self.provider._matching_filings_table(malformed)
+
     def test_malformed_historical_metadata_fails_closed(self) -> None:
         payload = {"filings": {"files": [{"name": "CIK0001089063-submissions-001.json", "filingFrom": "2025-01-01"}]}}
         with self.assertRaisesRegex(RuntimeError, "metadata is incomplete"):
             self.provider._matching_historical_filings(payload)
+
+    def test_historical_metadata_invalid_or_reversed_dates_fail_closed(self) -> None:
+        invalid = {"filings": {"files": [{
+            "name": "CIK0001089063-submissions-001.json",
+            "filingFrom": "not-a-date",
+            "filingTo": "2026-08-25",
+        }]}}
+        with self.assertRaisesRegex(RuntimeError, "invalid date range"):
+            self.provider._matching_historical_filings(invalid)
+
+        reversed_range = {"filings": {"files": [{
+            "name": "CIK0001089063-submissions-001.json",
+            "filingFrom": "2026-08-26",
+            "filingTo": "2026-08-25",
+        }]}}
+        with self.assertRaisesRegex(RuntimeError, "reversed date range"):
+            self.provider._matching_historical_filings(reversed_range)
 
     def test_company_ticker_map_is_reused_across_providers(self) -> None:
         other = SecEdgarResultsProvider(ticker="DKS", scheduled_date=date(2026, 8, 25), user_agent="MarketAI test@example.invalid")
