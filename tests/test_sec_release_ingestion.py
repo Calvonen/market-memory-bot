@@ -115,15 +115,38 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
         self.assertEqual(fetch_text.call_count, 1)
         fetch_release.assert_not_called()
 
-    def test_rejects_misleading_earnings_link_when_row_type_is_not_ex991(self) -> None:
+    def test_type_must_come_from_authoritative_type_column(self) -> None:
         index = """
             <html><body><table>
-              <tr><td>1</td><td>earnings results</td>
-                  <td><a href="earnings-results.htm">earnings results</a></td>
+              <tr><th>Seq</th><th>Description</th><th>Document</th><th>Type</th></tr>
+              <tr><td>1</td><td>EX-99.1 quarterly earnings results</td>
+                  <td><a href="earnings-results.htm">EX-99.1 earnings results</a></td>
                   <td>8-K</td></tr>
-              <tr><td>2</td><td>press release</td>
+              <tr><td>2</td><td>EX-99.1 press release</td>
                   <td><a href="other.htm">other.htm</a></td>
                   <td>EX-99.2</td></tr>
+            </table></body></html>
+        """
+        with patch.object(
+            self.provider,
+            "_fetch_json",
+            side_effect=[self.tickers, self.submissions],
+        ), patch.object(
+            self.provider,
+            "_fetch_text",
+            side_effect=[self.primary_html, index],
+        ), patch.object(self.provider, "_fetch_release_text") as fetch_release:
+            document = self.provider.discover("calendar:event-id")
+
+        self.assertIsNone(document)
+        fetch_release.assert_not_called()
+
+    def test_missing_document_type_headers_fail_closed(self) -> None:
+        index = """
+            <html><body><table>
+              <tr><th>Seq</th><th>Description</th><th>File</th><th>Kind</th></tr>
+              <tr><td>2</td><td>earnings</td>
+                  <td><a href="opaque.htm">opaque.htm</a></td><td>EX-99.1</td></tr>
             </table></body></html>
         """
         with patch.object(
@@ -143,6 +166,7 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
     def test_rejects_external_ex991_link_from_index(self) -> None:
         index = """
             <html><body><table>
+              <tr><th>Seq</th><th>Description</th><th>Document</th><th>Type</th></tr>
               <tr><td>2</td><td>earnings release</td>
                   <td><a href="https://example.com/opaque.htm">opaque.htm</a></td>
                   <td>EX-99.1</td></tr>
@@ -176,6 +200,49 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
             self.provider,
             "_fetch_release_text",
             return_value=(unrelated, "company_results"),
+        ):
+            document = self.provider.discover("calendar:event-id")
+
+        self.assertIsNone(document)
+
+    def test_all_qualifying_ex991_retrieval_failures_are_errors(self) -> None:
+        with patch.object(
+            self.provider,
+            "_fetch_json",
+            side_effect=[self.tickers, self.submissions],
+        ), patch.object(
+            self.provider,
+            "_fetch_text",
+            side_effect=[self.primary_html, self.index_html],
+        ), patch.object(
+            self.provider,
+            "_fetch_release_text",
+            side_effect=TimeoutError("SEC exhibit timeout"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "EX-99.1 retrieval failed"):
+                self.provider.discover("calendar:event-id")
+
+    def test_one_retrieved_non_results_candidate_allows_no_release_despite_other_failure(self) -> None:
+        index = """
+            <html><body><table>
+              <tr><th>Seq</th><th>Description</th><th>Document</th><th>Type</th></tr>
+              <tr><td>2</td><td>first</td><td><a href="first.htm">first</a></td><td>EX-99.1</td></tr>
+              <tr><td>3</td><td>second</td><td><a href="second.htm">second</a></td><td>EX-99.1</td></tr>
+            </table></body></html>
+        """
+        unrelated = "Corporate governance exhibit. " * 50
+        with patch.object(
+            self.provider,
+            "_fetch_json",
+            side_effect=[self.tickers, self.submissions],
+        ), patch.object(
+            self.provider,
+            "_fetch_text",
+            side_effect=[self.primary_html, index],
+        ), patch.object(
+            self.provider,
+            "_fetch_release_text",
+            side_effect=[TimeoutError("first failed"), (unrelated, "company_results")],
         ):
             document = self.provider.discover("calendar:event-id")
 
