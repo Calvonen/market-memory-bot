@@ -16,12 +16,7 @@ from trading_system.release_ingestion import ReleaseDocument
 
 
 class _SecIndexDocumentParser(HTMLParser):
-    """Extract linked SEC filing documents together with their row Type cell.
-
-    SEC filing index pages expose the authoritative document type in a table
-    row. A filename/title containing words such as "earnings" or "results" is
-    not sufficient evidence that a link is the results exhibit.
-    """
+    """Extract SEC filing documents from authoritative index columns only."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -29,10 +24,13 @@ class _SecIndexDocumentParser(HTMLParser):
         self._in_row = False
         self._in_cell = False
         self._in_link = False
-        self._cells: list[tuple[str, str | None, str]] = []
+        self._cell_tag: str | None = None
+        self._cells: list[tuple[str, str | None, str, str]] = []
         self._cell_parts: list[str] = []
         self._cell_href: str | None = None
         self._link_parts: list[str] = []
+        self._document_index: int | None = None
+        self._type_index: int | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lowered = tag.lower()
@@ -42,6 +40,7 @@ class _SecIndexDocumentParser(HTMLParser):
             return
         if lowered in {"td", "th"} and self._in_row:
             self._in_cell = True
+            self._cell_tag = lowered
             self._cell_parts = []
             self._cell_href = None
             self._link_parts = []
@@ -71,35 +70,40 @@ class _SecIndexDocumentParser(HTMLParser):
         if lowered in {"td", "th"} and self._in_cell:
             text = " ".join(" ".join(self._cell_parts).split())
             link_text = " ".join(" ".join(self._link_parts).split())
-            self._cells.append((text, self._cell_href, link_text))
+            self._cells.append(
+                (text, self._cell_href, link_text, self._cell_tag or lowered)
+            )
             self._in_cell = False
             self._in_link = False
+            self._cell_tag = None
             self._cell_parts = []
             self._cell_href = None
             self._link_parts = []
             return
-        if lowered == "tr" and self._in_row:
-            document_type = next(
-                (
-                    text.strip().upper()
-                    for text, _href, _label in self._cells
-                    if text.strip().upper() == "EX-99.1"
-                ),
-                None,
-            )
-            linked = next(
-                (
-                    (href, label or text)
-                    for text, href, label in self._cells
-                    if href
-                ),
-                None,
-            )
-            if document_type is not None and linked is not None:
-                href, label = linked
-                self.documents.append((href, label, document_type))
-            self._in_row = False
-            self._cells = []
+        if lowered != "tr" or not self._in_row:
+            return
+
+        normalized = [cell[0].strip().upper() for cell in self._cells]
+        is_header = any(cell[3] == "th" for cell in self._cells)
+        if is_header:
+            try:
+                self._document_index = normalized.index("DOCUMENT")
+                self._type_index = normalized.index("TYPE")
+            except ValueError:
+                self._document_index = None
+                self._type_index = None
+        elif self._document_index is not None and self._type_index is not None:
+            highest = max(self._document_index, self._type_index)
+            if highest < len(self._cells):
+                type_text = self._cells[self._type_index][0].strip().upper()
+                document_cell = self._cells[self._document_index]
+                href = document_cell[1]
+                if type_text == "EX-99.1" and href:
+                    label = document_cell[2] or document_cell[0] or href
+                    self.documents.append((href, label, type_text))
+
+        self._in_row = False
+        self._cells = []
 
 
 class _SecVisibleTextParser(HTMLParser):
@@ -130,8 +134,8 @@ class SecEdgarResultsProvider:
     Discovery is intentionally conservative. The provider resolves the exact
     ticker to one CIK, considers only 8-K filings whose filingDate equals the
     calendar event's scheduled date, verifies an earnings/results signal in the
-    primary filing, and then selects only a document whose SEC filing-index row
-    is explicitly typed EX-99.1. It never falls back to a nearby filing date or
+    primary filing, and then selects only a document whose SEC filing-index Type
+    column is explicitly EX-99.1. It never falls back to a nearby filing date or
     an unrelated exhibit merely because one exists.
     """
 
@@ -260,8 +264,6 @@ class SecEdgarResultsProvider:
         if not self._EARNINGS_SIGNAL_RE.search(primary_text):
             return None
 
-        # The filing index is authoritative for exhibit type. Do not infer
-        # EX-99.1 from a filename, link label or an "earnings/results" keyword.
         index_url = urljoin(filing_base, f"{accession}-index.html")
         index_html = self._fetch_text(index_url)
         parser = _SecIndexDocumentParser()
@@ -269,19 +271,21 @@ class SecEdgarResultsProvider:
 
         candidates: list[tuple[str, str]] = []
         for href, label, document_type in parser.documents:
-            if document_type != "EX-99.1":
-                continue
             source_url = urljoin(index_url, href)
             if not self._same_filing_directory(filing_base, source_url):
                 continue
             title = " ".join(part for part in (document_type, label) if part).strip()
             candidates.append((source_url, title))
 
+        retrieval_errors: list[Exception] = []
+        evaluated_candidate = False
         for source_url, title in candidates:
             try:
                 raw_text, source_type = self._fetch_release_text(source_url)
-            except Exception:
+            except Exception as exc:
+                retrieval_errors.append(exc)
                 continue
+            evaluated_candidate = True
             if len(raw_text) < self.MIN_DOCUMENT_CHARS:
                 continue
             if not self._EARNINGS_SIGNAL_RE.search(raw_text):
@@ -295,6 +299,12 @@ class SecEdgarResultsProvider:
                 source_title=title,
                 raw_text=raw_text,
             )
+
+        if candidates and not evaluated_candidate and retrieval_errors:
+            first = retrieval_errors[0]
+            raise RuntimeError(
+                f"SEC EX-99.1 retrieval failed for {len(retrieval_errors)} candidate(s): {first}"
+            ) from first
         return None
 
     @staticmethod
