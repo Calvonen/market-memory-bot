@@ -36,7 +36,7 @@ CALENDAR_SCHEMA_GATE_MIGRATION = Path(
     "supabase/migrations/20260825090000_calendar_schema_gate.sql"
 )
 CALENDAR_UPSERT_VERSION_GATE_MIGRATION = Path(
-    "supabase/migrations/20260829090000_distinct_atomic_calendar_candidate_upsert_version.sql"
+    "supabase/migrations/20260902099000_calendar_tracked_date_refresh_gate.sql"
 )
 VERIFY_SCRIPT = Path("scripts/verify_supabase_schema.py")
 
@@ -143,14 +143,6 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
         cls.calendar_gate_source = CALENDAR_UPSERT_VERSION_GATE_MIGRATION.read_text(
             encoding="utf-8"
         )
-        # The live verify_strategy_draft_schema() is the one (re)declared by
-        # CALENDAR_SCHEMA_GATE_MIGRATION, not the one in
-        # EXPECTATION_WRITE_V2_MIGRATION - it's the newest of the two
-        # `create function` declarations for this same function name, each
-        # of which (again) needed an explicit `drop function` first since
-        # its RETURNS TABLE shape grew (4 columns -> 7). It's declared alone
-        # in its own file, so slicing to "everything from `create function`
-        # to the closing `$$;`" is unambiguous here.
         verify_start = cls.calendar_gate_source.index(
             "create function public.verify_strategy_draft_schema()"
         )
@@ -160,10 +152,6 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
 
     @staticmethod
     def _declared_param_types(source: str, function_name: str) -> list[str]:
-        # Matches both `create or replace function ...` (used where the
-        # return shape is unchanged) and a plain `create function ...`
-        # (used, after an explicit `drop function`, where it isn't - see
-        # 20260823090000_expectation_write_atomic_response_and_schema_version.sql).
         match = re.search(
             rf"create (?:or replace )?function public\.{re.escape(function_name)}\(\s*(.*?)\)\s*\n",
             source,
@@ -176,7 +164,6 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
             line = line.strip().rstrip(",")
             if not line:
                 continue
-            # "input_event_id text" -> "text"; "input_source_as_of date" -> "date"
             param_types.append(line.split()[-1])
         return param_types
 
@@ -187,37 +174,22 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
         expected_signature = (
             "public.approve_strategy_draft(" + ", ".join(declared_types) + ")"
         )
-
         self.assertIn(expected_signature, self.verify_source)
 
     def test_verify_function_checks_the_real_insert_next_expectation_version_signature(
         self,
     ) -> None:
-        # Checked against the live declaration (EXPECTATION_WRITE_V2_MIGRATION),
-        # not the original one in SHARED_LOCK_MIGRATION - the two happen to
-        # declare the same parameter list today (only the body/return type
-        # changed), but this test's job is to confirm the gate matches
-        # whatever is actually live, not merely whatever the function was
-        # first declared as.
         declared_types = self._declared_param_types(
             self.write_v2_source, "insert_next_expectation_version"
         )
         expected_signature = (
             "public.insert_next_expectation_version(" + ", ".join(declared_types) + ")"
         )
-
         self.assertIn(expected_signature, self.verify_source)
-
-        # And the two files must not have silently drifted apart on the
-        # parameter list either - if they ever did, that would itself be a
-        # sign this same-signature "no new migration needed" assumption
-        # had quietly broken.
         self.assertEqual(
             declared_types,
             self._declared_param_types(self.shared_lock_source, "insert_next_expectation_version"),
         )
-
-    # -- calendar/watchlist schema gate (P2 regression) ----------------------
 
     def test_verify_function_checks_the_real_upsert_calendar_candidate_signature(
         self,
@@ -242,11 +214,6 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
         self.assertIn(expected_signature, self.verify_source)
 
     def test_calendar_schema_gate_drops_verify_function_before_recreating(self) -> None:
-        # Same "cannot change return type of existing function" constraint
-        # as EXPECTATION_WRITE_V2_MIGRATION - verify_strategy_draft_schema()
-        # grows again here (4 columns -> 7), so this migration needs its
-        # own explicit drop immediately before its own create, not a bare
-        # `create or replace`.
         drop_statement = "drop function if exists public.verify_strategy_draft_schema();"
         self.assertIn(drop_statement, self.calendar_gate_source)
         drop_index = self.calendar_gate_source.index(drop_statement)
@@ -271,9 +238,6 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
         self.assertTrue(stripped.strip().lower().endswith("commit;"))
 
     def test_verify_function_only_performs_catalog_lookups(self) -> None:
-        # No data read/write of any kind - safe to call from an
-        # unauthenticated-by-RLS-bypass service-role context on every
-        # deploy without side effects.
         self.assertIn("to_regclass(", self.verify_source)
         self.assertIn("to_regprocedure(", self.verify_source)
         self.assertNotIn("insert into", self.verify_source.lower())
@@ -315,15 +279,7 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
         self.assertIn("calendar_candidate_upsert_implementation_version", self.verify_source)
         self.assertIn("calendar_candidate_upsert_implementation_version", self.verify_script_source)
 
-    # -- implementation-version marker: same signature, different body ----
-
     def _declared_schema_version_constant(self) -> str:
-        # strategy_draft_schema_version() body is exactly `select N;` -
-        # pull N out so the two places that must agree on it (the marker
-        # function itself, and verify_strategy_draft_schema()'s comparison
-        # against it) can be checked against each other dynamically,
-        # rather than as two independently hand-typed literals that could
-        # drift apart.
         match = re.search(
             r"create or replace function public\.strategy_draft_schema_version\(\).*?"
             r"select\s+(\d+)\s*;",
@@ -342,8 +298,6 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
         )
 
     def test_schema_version_marker_is_immutable_and_takes_no_lock(self) -> None:
-        # Called on every deploy, so it must be cheap and side-effect-free -
-        # exactly like verify_strategy_draft_schema() itself.
         marker_start = self.write_v2_source.index(
             "create or replace function public.strategy_draft_schema_version()"
         )
@@ -355,19 +309,12 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
     def test_insert_next_expectation_version_returns_the_full_written_row(
         self,
     ) -> None:
-        # Regression guard for the write -> reread race: the function's
-        # return table must carry every field a caller needs to build a
-        # complete EventExpectation - including the event's own identity,
-        # which lives on market_events, not event_expectation_versions -
-        # so nothing calling this RPC ever needs a separate, unlocked
-        # follow-up read to get a full result back.
         declare_start = self.write_v2_source.index(
             "create function public.insert_next_expectation_version("
         )
         returns_start = self.write_v2_source.index("returns table (", declare_start)
         returns_end = self.write_v2_source.index(")", returns_start)
         returns_block = self.write_v2_source[returns_start:returns_end]
-
         for column in (
             "out_version",
             "out_created_at",
@@ -390,10 +337,6 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
     def test_insert_next_expectation_version_return_values_are_not_re_selected(
         self,
     ) -> None:
-        # The `return query select ...` must use the same merged_* local
-        # variables the insert itself used, never a fresh `select ... from
-        # event_expectation_versions`/`market_events` - a fresh select
-        # here is exactly the reread race this migration exists to close.
         return_start = self.write_v2_source.index("return query select")
         return_end = self.write_v2_source.index(";", return_start)
         return_block = self.write_v2_source[return_start:return_end]
@@ -402,21 +345,9 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
         self.assertIn("merged_consensus", return_block)
         self.assertIn("event_row.instrument", return_block)
 
-    # -- same-signature return-shape change: drop-then-create, one transaction --
-
     def test_functions_with_a_changed_return_shape_are_dropped_before_recreating(
         self,
     ) -> None:
-        # `create or replace function` cannot change an existing
-        # function's return type, and a RETURNS TABLE(...)/OUT-parameter
-        # shape change counts as one - Postgres rejects it outright
-        # ("cannot change return type of existing function"). Both
-        # functions below change shape versus their prior migration
-        # (insert_next_expectation_version: 2 columns -> 15;
-        # verify_strategy_draft_schema: 3 columns -> 4), so both need an
-        # explicit drop for their exact prior signature immediately before
-        # being recreated - a bare `create or replace` for either would
-        # fail this migration outright when actually applied.
         for function_name, signature in (
             (
                 "insert_next_expectation_version",
@@ -431,9 +362,6 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
                 create_index = self.write_v2_source.index(
                     f"create function public.{function_name}(", drop_index
                 )
-                # The create must immediately follow its own drop, not
-                # some unrelated statement in between (and not the drop
-                # for the *other* function landing between them either).
                 between = self.write_v2_source[drop_index + len(drop_statement) : create_index]
                 self.assertNotIn("drop function", between)
                 self.assertNotIn("create function", between)
@@ -443,14 +371,6 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
                 )
 
     def test_migration_runs_as_one_explicit_transaction(self) -> None:
-        # The drop-then-create pattern above is only safe from a
-        # concurrent caller's perspective because Postgres DDL is
-        # transactional - reproduced directly in manual testing: run
-        # without this wrapper, a failure partway through this file left
-        # strategy_draft_schema_version() (the schema-gate marker) created
-        # and committed even though insert_next_expectation_version()
-        # itself was never actually updated, which is exactly the
-        # half-applied state the marker exists to make impossible.
         stripped = "\n".join(
             line
             for line in self.write_v2_source.splitlines()
@@ -460,12 +380,6 @@ class SchemaGateFileConsistencyTests(unittest.TestCase):
         self.assertTrue(stripped.strip().lower().endswith("commit;"))
 
     def test_schema_version_marker_is_created_after_the_rpc_it_gates(self) -> None:
-        # Defense in depth on top of the transaction wrapper above: even
-        # statement order alone should reflect "the marker means both RPCs
-        # already changed," not the reverse - so a marker created before
-        # insert_next_expectation_version() would misdescribe the intent
-        # even though the transaction wrapper is what actually enforces
-        # atomicity.
         insert_index = self.write_v2_source.index(
             "create function public.insert_next_expectation_version("
         )
@@ -480,13 +394,6 @@ CALENDAR_SYNC_TIMER_UNIT = Path("deploy/systemd/marketai-calendar-sync.timer")
 
 
 class CalendarSyncSchedulingTests(unittest.TestCase):
-    """Regression coverage for "the calendar worker must never end up
-    without a schedule": trading_system/calendar_sync_worker.py only ever
-    populates public.calendar_events if something actually invokes it in
-    production - nothing does that unless a timer is both defined and
-    wired into the deploy workflow. See docs/calendar_watchlist.md,
-    "Production scheduling"."""
-
     @classmethod
     def setUpClass(cls) -> None:
         cls.workflow_source = WORKFLOW.read_text(encoding="utf-8")
@@ -498,13 +405,8 @@ class CalendarSyncSchedulingTests(unittest.TestCase):
         next_step = self.workflow_source.index("\n  publish-ota:", start)
         return self.workflow_source[start:next_step]
 
-    # -- the unit files themselves: one-shot + timer, never a long-lived loop
-
     def test_service_unit_is_a_one_shot_not_a_long_running_worker(self) -> None:
         self.assertIn("Type=oneshot", self.service_source)
-        # A long-lived worker would use Type=simple/notify/forking, or
-        # restart itself indefinitely - neither belongs on a scheduled
-        # sync job that is supposed to run once and exit.
         for forbidden in ("Type=simple", "Type=notify", "Type=forking", "Restart=always"):
             self.assertNotIn(forbidden, self.service_source)
 
@@ -522,15 +424,10 @@ class CalendarSyncSchedulingTests(unittest.TestCase):
         self.assertIn("WantedBy=timers.target", self.timer_source)
 
     def test_timer_fires_at_most_a_few_times_a_day(self) -> None:
-        # "1-2 times a day is enough for this MVP" - a plain source check
-        # that the schedule isn't something far more frequent (e.g. every
-        # few minutes), which candidate/tracked calendar data has no need
-        # for and would just add load for no benefit.
         match = re.search(r"OnCalendar=(.+)", self.timer_source)
         assert match is not None
         schedule = match.group(1).strip()
         self.assertNotIn("/", schedule, f"schedule {schedule!r} looks like a sub-daily repeat")
-        # Exactly the two times documented in docs/calendar_watchlist.md.
         self.assertIn("06", schedule)
         self.assertIn("18", schedule)
 
@@ -549,11 +446,8 @@ class CalendarSyncSchedulingTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Next elapse", result.stdout)
 
-    # -- the deploy workflow must actually install + enable the timer -------
-
     def test_deploy_step_installs_and_enables_the_calendar_sync_timer(self) -> None:
         body = self._deploy_step_body()
-
         self.assertIn(
             "install -m 0644 deploy/systemd/marketai-calendar-sync.service "
             "/etc/systemd/system/marketai-calendar-sync.service",
@@ -566,31 +460,20 @@ class CalendarSyncSchedulingTests(unittest.TestCase):
         )
         self.assertIn("systemctl daemon-reload", body)
         self.assertIn("systemctl enable --now marketai-calendar-sync.timer", body)
-
-        # Only the timer is enabled directly - enabling the one-shot
-        # service itself would start it at boot outside the timer's own
-        # schedule, defeating the point of using a timer at all.
         self.assertNotIn("enable --now marketai-calendar-sync.service", body)
         self.assertNotIn("enable marketai-calendar-sync.service", body)
 
     def test_calendar_sync_wiring_runs_after_the_schema_gate_and_before_restarts(self) -> None:
-        # Same fail-closed ordering as the two systemctl restarts: a
-        # missing calendar migration must stop this too, not just the
-        # API/release-worker restarts.
         body = self._deploy_step_body()
-
         gate_index = body.index("scripts/verify_supabase_schema.py")
         install_index = body.index("systemctl daemon-reload")
         enable_index = body.index("systemctl enable --now marketai-calendar-sync.timer")
         api_restart_index = body.index("systemctl restart marketai-api.service")
-
         self.assertLess(gate_index, install_index)
         self.assertLess(install_index, enable_index)
         self.assertLess(enable_index, api_restart_index)
 
     def test_calendar_sync_wiring_is_not_silently_ignorable_on_failure(self) -> None:
-        # Same fail-closed guarantee as the schema gate itself - no local
-        # `set +e` or `|| true` around any of these commands.
         body = self._deploy_step_body()
         install_index = body.index("systemctl daemon-reload")
         enable_index = body.index("systemctl enable --now marketai-calendar-sync.timer")
