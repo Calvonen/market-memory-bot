@@ -222,7 +222,7 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "EX-99.1 retrieval failed"):
                 self.provider.discover("calendar:event-id")
 
-    def test_one_retrieved_non_results_candidate_allows_no_release_despite_other_failure(self) -> None:
+    def test_mixed_retrieved_and_failed_candidates_remain_retryable(self) -> None:
         index = """
             <html><body><table>
               <tr><th>Seq</th><th>Description</th><th>Document</th><th>Type</th></tr>
@@ -244,9 +244,8 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
             "_fetch_release_text",
             side_effect=[TimeoutError("first failed"), (unrelated, "company_results")],
         ):
-            document = self.provider.discover("calendar:event-id")
-
-        self.assertIsNone(document)
+            with self.assertRaisesRegex(RuntimeError, "EX-99.1 retrieval failed"):
+                self.provider.discover("calendar:event-id")
 
     def test_pdf_extraction_failure_is_retried_as_retrieval_error(self) -> None:
         pdf_index = self.index_html.replace("opaque-document.htm", "opaque-document.pdf")
