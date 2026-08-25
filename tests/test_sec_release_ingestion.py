@@ -138,6 +138,24 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "challenge/access page"):
                 self.provider.discover("calendar:event-id")
 
+    def test_generic_operational_phrases_are_not_sec_challenge_markers(self) -> None:
+        legitimate = (
+            "<html><body>Our automated tool was temporarily unavailable after an internal "
+            "access denied error, but quarterly results were unaffected.</body></html>"
+        )
+        self.provider._assert_not_sec_challenge_page(legitimate, context="primary filing")
+
+    def test_primary_document_must_stay_inside_filing_directory(self) -> None:
+        filing = {
+            "accession": "0001089063-26-000099",
+            "primary_document": "https://example.com/escape.htm",
+            "accepted": "",
+        }
+        with patch.object(self.provider, "_fetch_text") as fetch_text:
+            with self.assertRaisesRegex(RuntimeError, "primary document URL escaped"):
+                self.provider._discover_from_filing("calendar:event-id", 1089063, filing)
+        fetch_text.assert_not_called()
+
     def test_type_must_come_from_authoritative_type_column(self) -> None:
         index = """
             <table><tr><th>Seq</th><th>Description</th><th>Document</th><th>Type</th></tr>
@@ -255,6 +273,20 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
             self.assertEqual(other._resolve_cik(), 1089063)
         first_fetch.assert_called_once_with(self.provider.COMPANY_TICKERS_URL)
         second_fetch.assert_not_called()
+
+    def test_sec_request_pacing_is_shared_across_provider_instances(self) -> None:
+        other = SecEdgarResultsProvider(
+            ticker="DKS",
+            scheduled_date=date(2026, 8, 25),
+            user_agent="MarketAI test@example.invalid",
+        )
+        with patch("trading_system.sec_release_ingestion.time.monotonic", side_effect=[100.0, 100.01]), patch(
+            "trading_system.sec_release_ingestion.time.sleep"
+        ) as sleep:
+            self.provider._pace_sec_request()
+            other._pace_sec_request()
+        sleep.assert_called_once()
+        self.assertAlmostEqual(sleep.call_args.args[0], 0.14, places=6)
 
     def test_sec_user_agent_is_required_and_must_include_contact_email(self) -> None:
         with patch.dict(os.environ, {"MARKETAI_SEC_USER_AGENT": ""}, clear=False):
