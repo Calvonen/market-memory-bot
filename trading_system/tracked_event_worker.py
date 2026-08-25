@@ -775,11 +775,27 @@ async def run_forever() -> None:
             if event.event_id in active or event.event_id in preflight:
                 continue
 
+            is_past_context_free = (
+                event.status == TrackedEventStatus.TRACKED
+                and event.reference_price is None
+                and event.pre_event_market_context is None
+                and now >= event.event_at
+            )
+            if is_past_context_free:
+                await asyncio.to_thread(
+                    _fail_pre_event_deadline,
+                    repository,
+                    event=event,
+                    error="event reached event_at before the pre-event lifecycle completed",
+                )
+                continue
+
             if _needs_resolution_preflight(event):
                 if now >= event.event_at:
-                    repository.mark_failed(
-                        event.event_id,
-                        actor=WORKER_ACTOR,
+                    await asyncio.to_thread(
+                        _fail_pre_event_deadline,
+                        repository,
+                        event=event,
                         error="event reached event_at before eToro identity was fully armed",
                     )
                     continue
