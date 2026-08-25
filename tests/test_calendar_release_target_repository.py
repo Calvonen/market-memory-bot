@@ -89,6 +89,7 @@ class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
         calls = client.queries[0].calls
         self.assertIn(("eq", "status", "tracked"), calls)
         self.assertIn(("in", "market", US_MARKET_LABELS), calls)
+        self.assertIn("US", US_MARKET_LABELS)
         self.assertIn("NASDAQ", US_MARKET_LABELS)
         self.assertIn(("eq", "event_type", "earnings"), calls)
         self.assertNotIn(("gte", "scheduled_date", "2026-08-24"), calls)
