@@ -209,7 +209,7 @@ class FailPreEventDeadlineIfCurrentTests(unittest.TestCase):
         repository = _Repository(event=object())
         version = datetime(2026, 8, 24, 14, 47, tzinfo=UTC)
 
-        fail_pre_event_deadline_if_current(
+        result = fail_pre_event_deadline_if_current(
             repository,
             event_id="event-1",
             expected_event_updated_at=version,
@@ -217,6 +217,7 @@ class FailPreEventDeadlineIfCurrentTests(unittest.TestCase):
             error="event reached event_at before pre-event market context was prepared",
         )
 
+        self.assertTrue(result)
         self.assertEqual(
             repository.client.calls,
             [
@@ -248,38 +249,53 @@ class FailPreEventDeadlineIfCurrentTests(unittest.TestCase):
 
         self.assertEqual(repository.client.calls, [])
 
-    def test_version_conflict_is_retryable_runtime_error(self) -> None:
+    def test_version_conflict_is_retryable_no_write(self) -> None:
         repository = _Repository(error=Exception("tracked_market_event_version_conflict"))
 
-        with self.assertRaisesRegex(RuntimeError, "changed before its pre-event deadline failure"):
-            fail_pre_event_deadline_if_current(
-                repository,
-                event_id="event-1",
-                expected_event_updated_at=datetime(2026, 8, 24, 14, 47, tzinfo=UTC),
-                actor="tracked-event-worker",
-                error="deadline passed",
-            )
+        result = fail_pre_event_deadline_if_current(
+            repository,
+            event_id="event-1",
+            expected_event_updated_at=datetime(2026, 8, 24, 14, 47, tzinfo=UTC),
+            actor="tracked-event-worker",
+            error="deadline passed",
+        )
 
-    def test_reschedule_past_the_deadline_is_retryable_runtime_error(self) -> None:
+        self.assertFalse(result)
+
+    def test_reschedule_past_the_deadline_is_retryable_no_write(self) -> None:
         repository = _Repository(
             error=Exception("tracked_market_event_pre_event_deadline_not_reached")
         )
 
-        with self.assertRaisesRegex(RuntimeError, "rescheduled past its pre-event deadline"):
-            fail_pre_event_deadline_if_current(
-                repository,
-                event_id="event-1",
-                expected_event_updated_at=datetime(2026, 8, 24, 14, 47, tzinfo=UTC),
-                actor="tracked-event-worker",
-                error="deadline passed",
-            )
+        result = fail_pre_event_deadline_if_current(
+            repository,
+            event_id="event-1",
+            expected_event_updated_at=datetime(2026, 8, 24, 14, 47, tzinfo=UTC),
+            actor="tracked-event-worker",
+            error="deadline passed",
+        )
 
-    def test_event_no_longer_awaiting_a_baseline_is_retryable_runtime_error(self) -> None:
+        self.assertFalse(result)
+
+    def test_event_no_longer_awaiting_a_baseline_is_retryable_no_write(self) -> None:
         repository = _Repository(
             error=Exception("tracked_market_event_not_pre_event_failable")
         )
 
-        with self.assertRaisesRegex(RuntimeError, "no longer awaiting a pre-event baseline"):
+        result = fail_pre_event_deadline_if_current(
+            repository,
+            event_id="event-1",
+            expected_event_updated_at=datetime(2026, 8, 24, 14, 47, tzinfo=UTC),
+            actor="tracked-event-worker",
+            error="deadline passed",
+        )
+
+        self.assertFalse(result)
+
+    def test_unexpected_rpc_failure_still_raises(self) -> None:
+        repository = _Repository(error=Exception("connection terminated"))
+
+        with self.assertRaisesRegex(Exception, "connection terminated"):
             fail_pre_event_deadline_if_current(
                 repository,
                 event_id="event-1",
