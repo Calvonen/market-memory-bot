@@ -13,7 +13,12 @@ create table if not exists public.event_official_release_sources (
     check (length(btrim(event_id)) > 0),
   constraint event_official_release_sources_active_shape_check
     check (
-      (is_active and source_kind in ('direct_url', 'results_page') and source_url is not null)
+      (
+        is_active
+        and source_kind is not null
+        and source_kind in ('direct_url', 'results_page')
+        and source_url is not null
+      )
       or
       (not is_active and source_kind is null and source_url is null and source_title is null)
     ),
