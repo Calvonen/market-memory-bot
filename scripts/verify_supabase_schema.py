@@ -3,7 +3,7 @@
 
 The existing strategy-draft and calendar/watchlist checks stay in place. The
 persistent tracked-event worker additionally requires the tracked-event runtime
-migrations through the eToro-resolution preflight version. Migrations are
+migrations through the calendar-runtime promotion version. Migrations are
 applied out-of-band; this script only verifies them before backend/systemd
 processes are restarted.
 """
@@ -89,10 +89,14 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
         "fail_tracked_market_event_stale_context_if_current_function_exists",
         "fail_tracked_market_event_stale_context_if_current() function",
     ),
+    (
+        "promote_calendar_event_to_tracked_runtime_function_exists",
+        "promote_calendar_event_to_tracked_runtime() function",
+    ),
 )
 
 REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 3
-REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 7
+REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 8
 POSTGRES_IDENTIFIER_MAX_BYTES = 63
 
 
@@ -217,7 +221,7 @@ def main() -> int:
 
     print(
         "Supabase schema gate passed: strategy-draft/calendar dependencies and "
-        "persistent tracked-event runtime preflight tables/RPCs are present."
+        "persistent tracked-event runtime promotion tables/RPCs are present."
     )
     return 0
 
