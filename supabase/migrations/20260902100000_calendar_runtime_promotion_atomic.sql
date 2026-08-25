@@ -78,7 +78,8 @@ begin
   if existing_runtime.id is not null then
     if existing_runtime.instrument is distinct from upper(replace(calendar_row.instrument, ' ', ''))
        or existing_runtime.kind is distinct from calendar_row.event_type
-       or existing_runtime.source is distinct from calendar_row.source then
+       or existing_runtime.source is distinct from calendar_row.source
+       or existing_runtime.external_key is distinct from ('calendar:' || calendar_row.id::text) then
       raise exception 'calendar_runtime_binding_identity_conflict';
     end if;
 
