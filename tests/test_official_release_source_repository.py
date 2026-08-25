@@ -26,11 +26,6 @@ class _Query:
         self.calls.append(("limit", value))
         return self
 
-    def upsert(self, payload, on_conflict=None):
-        self.calls.append(("upsert", payload, on_conflict))
-        self.response_rows = [dict(payload)]
-        return self
-
     def delete(self):
         self.calls.append(("delete",))
         return self
@@ -40,16 +35,32 @@ class _Query:
         return SimpleNamespace(data=self.response_rows)
 
 
-class _Client:
-    def __init__(self, *, response_rows=None):
+class _RpcQuery:
+    def __init__(self, response_rows):
         self.response_rows = response_rows
+        self.calls = []
+
+    def execute(self):
+        self.calls.append(("execute",))
+        return SimpleNamespace(data=self.response_rows)
+
+
+class _Client:
+    def __init__(self, *, response_rows=None, rpc_rows=None):
+        self.response_rows = response_rows
+        self.rpc_rows = [] if rpc_rows is None else rpc_rows
         self.queries = []
+        self.rpc_calls = []
 
     def table(self, name):
         query = _Query(response_rows=self.response_rows)
         query.calls.append(("table", name))
         self.queries.append(query)
         return query
+
+    def rpc(self, name, payload):
+        self.rpc_calls.append((name, payload))
+        return _RpcQuery(self.rpc_rows)
 
 
 class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
@@ -73,6 +84,8 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "http://example.com/results")
         with self.assertRaisesRegex(ValueError, "without credentials"):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://user:pass@example.com/results")
+        with self.assertRaisesRegex(ValueError, "version must be positive"):
+            OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://example.com/results", version=0)
 
     def test_get_returns_validated_canonical_source(self):
         client = _Client(response_rows=[{
@@ -80,6 +93,7 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
             "source_kind": "results_page",
             "source_url": "https://investor.example.com/results",
             "source_title": "Investor results",
+            "version": 3,
         }])
         repository = SupabaseOfficialReleaseSourceRepository(client)
 
@@ -88,6 +102,7 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
         self.assertIsNotNone(source)
         assert source is not None
         self.assertEqual(source.source_kind, "results_page")
+        self.assertEqual(source.version, 3)
         self.assertIn(("eq", "event_id", self.EVENT_ID), client.queries[0].calls)
         self.assertIn(("limit", 1), client.queries[0].calls)
 
@@ -101,12 +116,21 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
             "source_kind": "direct_url",
             "source_url": "not-a-url",
             "source_title": None,
+            "version": 1,
         }]))
         with self.assertRaisesRegex(RuntimeError, "row is malformed"):
             repository.get(self.EVENT_ID)
 
-    def test_set_upserts_exact_user_approved_values_by_event_id(self):
-        client = _Client()
+    def test_set_uses_atomic_rpc_with_expected_version(self):
+        client = _Client(rpc_rows=[{
+            "out_event_id": self.EVENT_ID,
+            "out_source_kind": "direct_url",
+            "out_source_url": "https://investor.example.com/fy2026.pdf",
+            "out_source_title": "FY2026",
+            "out_version": 2,
+            "out_created_at": "2026-08-25T17:00:00+00:00",
+            "out_updated_at": "2026-08-25T18:00:00+00:00",
+        }])
         repository = SupabaseOfficialReleaseSourceRepository(client)
         source = OfficialReleaseSource(
             event_id=self.EVENT_ID,
@@ -115,16 +139,26 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
             source_title="FY2026",
         )
 
-        saved = repository.set(source)
+        saved = repository.set(source, expected_version=1)
 
-        self.assertEqual(saved, source)
-        upsert_calls = [call for call in client.queries[0].calls if call[0] == "upsert"]
-        self.assertEqual(len(upsert_calls), 1)
-        payload = upsert_calls[0][1]
-        self.assertEqual(payload["event_id"], self.EVENT_ID)
-        self.assertEqual(payload["source_kind"], "direct_url")
-        self.assertEqual(payload["source_url"], "https://investor.example.com/fy2026.pdf")
-        self.assertEqual(upsert_calls[0][2], "event_id")
+        self.assertEqual(saved.version, 2)
+        self.assertEqual(len(client.rpc_calls), 1)
+        rpc_name, payload = client.rpc_calls[0]
+        self.assertEqual(rpc_name, "set_event_official_release_source")
+        self.assertEqual(payload["input_event_id"], self.EVENT_ID)
+        self.assertEqual(payload["input_source_kind"], "direct_url")
+        self.assertEqual(payload["input_source_url"], "https://investor.example.com/fy2026.pdf")
+        self.assertEqual(payload["input_expected_version"], 1)
+
+    def test_set_requires_explicit_nonnegative_expected_version(self):
+        repository = SupabaseOfficialReleaseSourceRepository(_Client())
+        source = OfficialReleaseSource(
+            self.EVENT_ID,
+            "direct_url",
+            "https://investor.example.com/fy2026.pdf",
+        )
+        with self.assertRaisesRegex(ValueError, "zero or positive"):
+            repository.set(source, expected_version=-1)
 
     def test_clear_deletes_only_the_canonical_event_source(self):
         client = _Client()
