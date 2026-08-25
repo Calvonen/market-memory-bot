@@ -62,20 +62,17 @@ begin
     raise exception 'calendar_event_upsert_race_unresolved';
   end if;
 
-  -- Candidate rows remain freely correctable. A TRACKED row is still only
-  -- a watchlist selection until persistent runtime binding exists, so the
-  -- same occurrence may still receive provider date/metadata corrections.
-  -- Once runtime binding exists, fail closed and retain the exact fields the
-  -- worker lifecycle was created against. Later lifecycle stages are always
-  -- locked as before.
+  -- Candidate and TRACKED rows are provider-correctable only while the
+  -- calendar occurrence has not entered persistent runtime. Binding wins
+  -- independently of the current watchlist status: an already-bound row can
+  -- be untracked back to candidate, but it must still remain frozen because
+  -- the runtime lifecycle was created against these exact fields. Later
+  -- lifecycle stages are always locked as before.
   if existing_row.status not in ('candidate', 'tracked')
-     or (
-       existing_row.status = 'tracked'
-       and exists (
-         select 1
-         from public.tracked_market_events t
-         where t.calendar_event_id = existing_row.id
-       )
+     or exists (
+       select 1
+       from public.tracked_market_events t
+       where t.calendar_event_id = existing_row.id
      ) then
     return query select
       existing_row.id, existing_row.company_name, existing_row.instrument, existing_row.market,
