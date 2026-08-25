@@ -1,5 +1,79 @@
 begin;
 
+create function public.is_valid_official_release_https_url(input_url text)
+returns boolean
+language plpgsql
+immutable
+security invoker
+set search_path = public
+as $$
+declare
+  authority text;
+  host_port text;
+  host_part text;
+  port_text text;
+  port_value integer;
+begin
+  if input_url is null or input_url !~ '^https://[^[:space:]]+$' then
+    return false;
+  end if;
+
+  authority := split_part(substr(input_url, 9), '/', 1);
+  if authority = '' or position('@' in authority) > 0 then
+    return false;
+  end if;
+
+  host_port := authority;
+  if left(host_port, 1) = '[' then
+    if position(']' in host_port) = 0 then
+      return false;
+    end if;
+    host_part := split_part(host_port, ']', 1) || ']';
+    port_text := substr(host_port, length(host_part) + 1);
+    if length(host_part) <= 2 then
+      return false;
+    end if;
+    if port_text <> '' then
+      if left(port_text, 1) <> ':' then
+        return false;
+      end if;
+      port_text := substr(port_text, 2);
+    end if;
+  else
+    if host_port ~ ':[^:]*$' then
+      host_part := regexp_replace(host_port, ':[^:]*$', '');
+      port_text := regexp_replace(host_port, '^.*:', '');
+    else
+      host_part := host_port;
+      port_text := '';
+    end if;
+    if host_part = '' or host_part !~ '^[A-Za-z0-9.-]+$' then
+      return false;
+    end if;
+  end if;
+
+  if port_text <> '' then
+    if port_text !~ '^[0-9]{1,5}$' then
+      return false;
+    end if;
+    port_value := port_text::integer;
+    if port_value < 1 or port_value > 65535 then
+      return false;
+    end if;
+  elsif right(authority, 1) = ':' then
+    return false;
+  end if;
+
+  return true;
+exception
+  when others then
+    return false;
+end;
+$$;
+
+revoke all on function public.is_valid_official_release_https_url(text) from public;
+grant execute on function public.is_valid_official_release_https_url(text) to service_role;
+
 create table if not exists public.event_official_release_sources (
   event_id text primary key references public.market_events(event_id) on delete cascade,
   source_kind text,
@@ -23,7 +97,7 @@ create table if not exists public.event_official_release_sources (
       (not is_active and source_kind is null and source_url is null and source_title is null)
     ),
   constraint event_official_release_sources_url_https
-    check (source_url is null or source_url ~ '^https://[^[:space:]]+$'),
+    check (source_url is null or public.is_valid_official_release_https_url(source_url)),
   constraint event_official_release_sources_version_positive
     check (version > 0)
 );
@@ -70,6 +144,12 @@ declare
 begin
   if input_expected_version is null or input_expected_version < 0 then
     raise exception 'invalid_expected_version' using errcode = '22023';
+  end if;
+  if input_source_kind is null or input_source_kind not in ('direct_url', 'results_page') then
+    raise exception 'invalid_source_kind' using errcode = '22023';
+  end if;
+  if not public.is_valid_official_release_https_url(input_source_url) then
+    raise exception 'invalid_source_url' using errcode = '22023';
   end if;
 
   perform pg_advisory_xact_lock(hashtextextended(input_event_id, 2));
