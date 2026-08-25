@@ -27,7 +27,8 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
                     "accessionNumber": ["0001089063-26-000099", "0001089063-26-000098"],
                     "primaryDocument": ["dks-20260825.htm", "dks-20260824.htm"],
                     "acceptanceDateTime": ["2026-08-25T07:01:00.000Z", "2026-08-24T17:00:00.000Z"],
-                }
+                },
+                "files": [],
             }
         }
         self.primary_html = "<html><body><p>Item 2.02 Results of Operations and Financial Condition</p></body></html>"
@@ -65,7 +66,8 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
                     "accessionNumber": ["0001234567-26-000099"],
                     "primaryDocument": ["foreign-issuer-6k.htm"],
                     "acceptanceDateTime": ["2026-08-25T07:01:00.000Z"],
-                }
+                },
+                "files": [],
             }
         }
         with patch.object(self.provider, "_fetch_json", side_effect=[self.tickers, submissions]), patch.object(
@@ -112,7 +114,7 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
             "accessionNumber": ["0001089063-26-000098"],
             "primaryDocument": ["dks-20260824.htm"],
             "acceptanceDateTime": ["2026-08-24T17:00:00.000Z"],
-        }}}
+        }, "files": []}}
         with patch.object(self.provider, "_fetch_json", side_effect=[self.tickers, submissions]), patch.object(
             self.provider, "_fetch_text"
         ) as fetch_text:
@@ -184,8 +186,8 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
         with patch.object(self.provider, "_fetch_json", side_effect=[self.tickers, self.submissions]), patch.object(
             self.provider, "_fetch_text", side_effect=[self.primary_html, index]
         ), patch.object(self.provider, "_fetch_release_text") as fetch_release:
-            document = self.provider.discover("calendar:event-id")
-        self.assertIsNone(document)
+            with self.assertRaisesRegex(RuntimeError, "EX-99.1 document URL escaped"):
+                self.provider.discover("calendar:event-id")
         fetch_release.assert_not_called()
 
     def test_ex991_must_independently_look_like_results(self) -> None:
