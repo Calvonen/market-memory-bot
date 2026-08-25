@@ -17,6 +17,7 @@ DEFAULT_LOOKBACK_DAYS = 1
 DEFAULT_LOOKAHEAD_DAYS = 0
 TARGET_PAGE_SIZE = 1000
 US_MARKET_LABELS = ("USA", "NASDAQ", "NYSE", "AMEX")
+DATE_ONLY_OVERDUE_GRACE_HOURS = 24.0
 
 
 @dataclass(frozen=True)
@@ -199,9 +200,12 @@ def run_calendar_release_ingestion_once(
                 release_repository=releases,
                 analyzer=analyzer,
                 provider=provider,
-                overdue_grace_hours=float(
-                    os.environ.get("MARKETAI_RELEASE_OVERDUE_GRACE_HOURS", "8")
-                ),
+                # Calendar release shells contain only a date, not a confirmed
+                # release time. Do not mark a legitimate same-day after-hours
+                # release overdue from the shared midnight+8h default. Until an
+                # exchange-aware release boundary exists, the end of the UTC
+                # calendar date is the earliest defensible generic boundary.
+                overdue_grace_hours=DATE_ONLY_OVERDUE_GRACE_HOURS,
                 clock=clock,
             )
             ingestion: IngestionResult = monitor.run_once(target.event_id)
