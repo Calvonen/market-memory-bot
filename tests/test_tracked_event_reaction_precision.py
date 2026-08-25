@@ -224,6 +224,47 @@ class TrackedEventReactionPrecisionTests(unittest.TestCase):
         self.assertNotEqual(event.reference_price, Decimal(str(rounded_reference)))
         self.assertEqual(event.tracking_config_snapshot, {"schema_version": 1})
 
+    def test_capture_reference_preserves_exact_submitted_decimal(self) -> None:
+        exact_reference = Decimal("1.234567890123456789")
+        rounded_reference = float(str(exact_reference))
+        rpc_row = _event_row(reference_price=rounded_reference)
+        client = _Client([], rpc_data=[rpc_row])
+        repository = SupabaseTrackedEventRepository(client)
+        captured_at = datetime(2026, 8, 24, 23, 59, 30, tzinfo=UTC)
+
+        event = repository.capture_reference(
+            event_id=rpc_row["id"],
+            reference_price=exact_reference,
+            captured_at=captured_at,
+            reference_kind="etoro_last_execution_pre_event_snapshot",
+            etoro_instrument_id=777,
+            etoro_symbol="PREC.ASX",
+            etoro_display_name="Precision Ltd",
+            actor="tracked-event-worker",
+        )
+
+        self.assertEqual(
+            client.rpc_calls,
+            [
+                (
+                    "capture_tracked_market_event_reference",
+                    {
+                        "input_event_id": rpc_row["id"],
+                        "input_reference_price": str(exact_reference),
+                        "input_reference_captured_at": captured_at.isoformat(),
+                        "input_reference_kind": "etoro_last_execution_pre_event_snapshot",
+                        "input_etoro_instrument_id": 777,
+                        "input_etoro_symbol": "PREC.ASX",
+                        "input_etoro_display_name": "Precision Ltd",
+                        "input_actor": "tracked-event-worker",
+                    },
+                )
+            ],
+        )
+        self.assertEqual(event.reference_price, exact_reference)
+        self.assertNotEqual(event.reference_price, Decimal(str(rounded_reference)))
+        self.assertEqual(event.tracking_config_snapshot, {"schema_version": 1})
+
     def test_wds_return_would_not_survive_a_float_round_trip(self) -> None:
         exact_return = Decimal("1.377657981431566337226714585")
         rounded_through_json_float = Decimal(str(float(str(exact_return))))
