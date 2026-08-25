@@ -13,12 +13,13 @@ declare
   host_part text;
   port_text text;
   port_value integer;
+  ipv6_text text;
 begin
   if input_url is null or input_url !~ '^https://[^[:space:]]+$' then
     return false;
   end if;
 
-  authority := split_part(substr(input_url, 9), '/', 1);
+  authority := regexp_replace(substr(input_url, 9), '[/\?#].*$', '');
   if authority = '' or position('@' in authority) > 0 then
     return false;
   end if;
@@ -30,9 +31,18 @@ begin
     end if;
     host_part := split_part(host_port, ']', 1) || ']';
     port_text := substr(host_port, length(host_part) + 1);
-    if length(host_part) <= 2 then
+    ipv6_text := substr(host_part, 2, length(host_part) - 2);
+    if ipv6_text = '' then
       return false;
     end if;
+    begin
+      if family(ipv6_text::inet) <> 6 then
+        return false;
+      end if;
+    exception
+      when others then
+        return false;
+    end;
     if port_text <> '' then
       if left(port_text, 1) <> ':' then
         return false;
