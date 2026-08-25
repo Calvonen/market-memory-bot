@@ -274,30 +274,8 @@ class SupabaseTrackedEventRepository:
             self.client.table("tracked_market_events")
             .select("*")
             .in_("status", [TrackedEventStatus.TRACKED.value, TrackedEventStatus.MONITORING.value])
+            .gte("event_at", lower)
             .lte("event_at", upper)
-            # max_past normally drops events whose event_at is long gone, so a
-            # worker restart does not resurrect stale backlog. One case must
-            # survive that cutoff: a TRACKED row that already has a persisted
-            # pre_event_market_context but no reference yet. Its preparation
-            # succeeded, so the deadline RPC deliberately refuses to terminal-
-            # fail it (see 20260902096000); if a transient revalidation
-            # dependency stays down longer than max_past, dropping it here
-            # would strand it in TRACKED with nothing left to retry it.
-            #
-            # The exception is deliberately narrow and self-draining: the row
-            # leaves this set for good as soon as it captures a reference,
-            # starts monitoring, or is terminally failed (a proven-stale
-            # context still fails normally). Context-free TRACKED rows and
-            # MONITORING rows keep the plain max_past contract - the deadline
-            # RPC is what terminates those, so they can never accumulate here.
-            .or_(
-                f"event_at.gte.{lower},"
-                "and("
-                f"status.eq.{TrackedEventStatus.TRACKED.value},"
-                "reference_price.is.null,"
-                "pre_event_market_context.not.is.null"
-                ")"
-            )
             .order("event_at")
             .execute()
         )
