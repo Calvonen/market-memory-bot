@@ -65,10 +65,22 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
         "capture_tracked_market_event_config_snapshot_function_exists",
         "capture_tracked_market_event_config_snapshot() function",
     ),
+    (
+        "capture_tracked_market_event_pre_event_context_function_exists",
+        "capture_tracked_market_event_pre_event_context() function",
+    ),
+    (
+        "capture_tracked_market_event_pre_event_context_if_current_function_exists",
+        "capture_tracked_market_event_pre_event_context_if_current() function",
+    ),
+    (
+        "validate_tracked_market_event_pre_event_context_if_current_function_exists",
+        "validate_tracked_market_event_pre_event_context_if_current() function",
+    ),
 )
 
 REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 2
-REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 3
+REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 4
 
 
 def main() -> int:

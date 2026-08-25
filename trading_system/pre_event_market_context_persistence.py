@@ -69,3 +69,43 @@ def capture_pre_event_market_context(
     if event is None:
         raise RuntimeError("captured pre-event market context event could not be re-read")
     return event
+
+
+def validate_pre_event_market_context_if_current(
+    repository: SupabaseTrackedEventRepository,
+    *,
+    event_id: str,
+    expected_event_updated_at: datetime,
+) -> PersistentTrackedEvent:
+    """Atomically confirm the tracked event is still at the expected version.
+
+    Calendar/session revalidation of an already-persisted pre_event_market_context
+    snapshot happens in the worker against a row read moments earlier. Nothing
+    stops event_at from being edited (see upsert_tracked_market_event) in the
+    gap between that read and the decision to proceed to monitoring. This locks
+    the current row and enforces an exact updated_at match in one transaction,
+    so a concurrent edit during revalidation is guaranteed to be observed as a
+    version conflict instead of letting monitoring start on a stale read.
+    """
+    if expected_event_updated_at.tzinfo is None or expected_event_updated_at.utcoffset() is None:
+        raise ValueError("expected_event_updated_at must be timezone-aware")
+
+    try:
+        repository.client.rpc(
+            "validate_tracked_market_event_pre_event_context_if_current",
+            {
+                "input_event_id": event_id,
+                "input_expected_updated_at": expected_event_updated_at.astimezone(UTC).isoformat(),
+            },
+        ).execute()
+    except Exception as exc:
+        if "tracked_market_event_version_conflict" in str(exc):
+            raise RuntimeError(
+                f"tracked event {event_id} changed before pre-event context revalidation completed"
+            ) from exc
+        raise
+
+    event = repository.get(event_id)
+    if event is None:
+        raise RuntimeError("revalidated tracked event could not be re-read")
+    return event

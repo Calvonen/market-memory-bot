@@ -44,7 +44,10 @@ ALL_PRESENT_ROW = {
     "capture_tracked_market_event_reference_function_exists": True,
     "capture_tracked_market_event_reaction_anchor_function_exists": True,
     "capture_tracked_market_event_config_snapshot_function_exists": True,
-    "runtime_schema_version": 3,
+    "capture_tracked_market_event_pre_event_context_function_exists": True,
+    "capture_tracked_market_event_pre_event_context_if_current_function_exists": True,
+    "validate_tracked_market_event_pre_event_context_if_current_function_exists": True,
+    "runtime_schema_version": 4,
 }
 
 
@@ -175,16 +178,40 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertIn("arm_tracked_market_event_resolution() function", err)
 
     def test_fails_closed_on_old_tracked_event_runtime_schema_version(self) -> None:
-        row = dict(ALL_PRESENT_ROW, runtime_schema_version=2)
+        row = dict(ALL_PRESENT_ROW, runtime_schema_version=3)
         exit_code, _out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[row])))
         self.assertEqual(exit_code, 1)
-        self.assertIn("tracked-event runtime schema version 3", err)
+        self.assertIn("tracked-event runtime schema version 4", err)
 
     def test_fails_closed_when_config_snapshot_rpc_is_missing(self) -> None:
         row = dict(ALL_PRESENT_ROW, capture_tracked_market_event_config_snapshot_function_exists=False)
         exit_code, _out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[row])))
         self.assertEqual(exit_code, 1)
         self.assertIn("capture_tracked_market_event_config_snapshot() function", err)
+
+    def test_fails_closed_when_pre_event_context_capture_rpc_is_missing(self) -> None:
+        row = dict(ALL_PRESENT_ROW, capture_tracked_market_event_pre_event_context_function_exists=False)
+        exit_code, _out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[row])))
+        self.assertEqual(exit_code, 1)
+        self.assertIn("capture_tracked_market_event_pre_event_context() function", err)
+
+    def test_fails_closed_when_pre_event_context_cas_capture_rpc_is_missing(self) -> None:
+        row = dict(
+            ALL_PRESENT_ROW,
+            capture_tracked_market_event_pre_event_context_if_current_function_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[row])))
+        self.assertEqual(exit_code, 1)
+        self.assertIn("capture_tracked_market_event_pre_event_context_if_current() function", err)
+
+    def test_fails_closed_when_pre_event_context_revalidation_rpc_is_missing(self) -> None:
+        row = dict(
+            ALL_PRESENT_ROW,
+            validate_tracked_market_event_pre_event_context_if_current_function_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[row])))
+        self.assertEqual(exit_code, 1)
+        self.assertIn("validate_tracked_market_event_pre_event_context_if_current() function", err)
 
     def test_passes_when_every_required_object_is_present(self) -> None:
         exit_code, out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[ALL_PRESENT_ROW])))
