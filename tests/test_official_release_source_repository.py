@@ -93,6 +93,7 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
             "source_kind": "results_page",
             "source_url": "https://investor.example.com/results",
             "source_title": "Investor results",
+            "is_active": True,
             "version": 3,
         }])
         repository = SupabaseOfficialReleaseSourceRepository(client)
@@ -106,9 +107,23 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
         self.assertIn(("eq", "event_id", self.EVENT_ID), client.queries[0].calls)
         self.assertIn(("limit", 1), client.queries[0].calls)
 
-    def test_get_missing_source_returns_none(self):
+    def test_get_missing_source_returns_none_and_version_zero(self):
         repository = SupabaseOfficialReleaseSourceRepository(_Client(response_rows=[]))
         self.assertIsNone(repository.get(self.EVENT_ID))
+        self.assertEqual(repository.get_version(self.EVENT_ID), 0)
+
+    def test_get_tombstone_returns_none_but_preserves_version(self):
+        repository = SupabaseOfficialReleaseSourceRepository(_Client(response_rows=[{
+            "event_id": self.EVENT_ID,
+            "source_kind": None,
+            "source_url": None,
+            "source_title": None,
+            "is_active": False,
+            "version": 4,
+        }]))
+
+        self.assertIsNone(repository.get(self.EVENT_ID))
+        self.assertEqual(repository.get_version(self.EVENT_ID), 4)
 
     def test_get_malformed_persisted_source_fails_closed(self):
         repository = SupabaseOfficialReleaseSourceRepository(_Client(response_rows=[{
@@ -116,6 +131,7 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
             "source_kind": "direct_url",
             "source_url": "not-a-url",
             "source_title": None,
+            "is_active": True,
             "version": 1,
         }]))
         with self.assertRaisesRegex(RuntimeError, "row is malformed"):
@@ -160,12 +176,13 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "zero or positive"):
             repository.set(source, expected_version=-1)
 
-    def test_clear_uses_atomic_rpc_with_expected_version(self):
-        client = _Client(rpc_rows=True)
+    def test_clear_uses_atomic_rpc_and_returns_advanced_version(self):
+        client = _Client(rpc_rows=4)
         repository = SupabaseOfficialReleaseSourceRepository(client)
 
-        repository.clear(self.EVENT_ID, expected_version=3)
+        new_version = repository.clear(self.EVENT_ID, expected_version=3)
 
+        self.assertEqual(new_version, 4)
         self.assertEqual(client.rpc_calls, [(
             "clear_event_official_release_source",
             {
@@ -178,6 +195,11 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
         repository = SupabaseOfficialReleaseSourceRepository(_Client())
         with self.assertRaisesRegex(ValueError, "expected_version must be positive"):
             repository.clear(self.EVENT_ID, expected_version=0)
+
+    def test_clear_must_advance_version(self):
+        repository = SupabaseOfficialReleaseSourceRepository(_Client(rpc_rows=3))
+        with self.assertRaisesRegex(RuntimeError, "advance the version"):
+            repository.clear(self.EVENT_ID, expected_version=3)
 
 
 if __name__ == "__main__":
