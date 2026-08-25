@@ -250,17 +250,26 @@ class SecEdgarResultsProvider:
         if not isinstance(rows, dict):
             raise RuntimeError("SEC filing table has unexpected shape")
 
-        forms = rows.get("form") or []
-        filing_dates = rows.get("filingDate") or []
-        accessions = rows.get("accessionNumber") or []
-        primary_documents = rows.get("primaryDocument") or []
-        acceptance_times = rows.get("acceptanceDateTime") or []
-        count = min(
-            len(forms),
-            len(filing_dates),
-            len(accessions),
-            len(primary_documents),
-        )
+        required_names = ("form", "filingDate", "accessionNumber", "primaryDocument")
+        required: dict[str, list[Any]] = {}
+        for name in required_names:
+            value = rows.get(name)
+            if not isinstance(value, list):
+                raise RuntimeError(f"SEC filing table field {name} is not an array")
+            required[name] = value
+        lengths = {len(value) for value in required.values()}
+        if len(lengths) != 1:
+            raise RuntimeError("SEC filing table required arrays are misaligned")
+
+        acceptance_times = rows.get("acceptanceDateTime", [])
+        if not isinstance(acceptance_times, list):
+            raise RuntimeError("SEC filing table field acceptanceDateTime is not an array")
+
+        forms = required["form"]
+        filing_dates = required["filingDate"]
+        accessions = required["accessionNumber"]
+        primary_documents = required["primaryDocument"]
+        count = len(forms)
         target = self.scheduled_date.isoformat()
         matches: list[dict[str, str]] = []
         for index in range(count):
