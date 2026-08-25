@@ -153,24 +153,14 @@ def fail_pre_event_deadline_if_current(
     expected_event_updated_at: datetime,
     actor: str,
     error: str,
-) -> None:
-    """Terminal-fail an event whose pre-event deadline passed, version-bound.
+) -> bool:
+    """Attempt a version-bound terminal pre-event deadline failure.
 
-    'failed' is terminal, so this decision must never be made from a stale copy
-    of event_at: upsert_tracked_market_event can reschedule a TRACKED,
-    reference-free event at any time, and a plain read-then-mark_failed would
-    still terminal-fail an event whose deadline no longer applies.
-
-    The RPC locks the row, requires this exact version, re-checks the deadline
-    against the locked row's own event_at, and confirms the event is still
-    awaiting its pre-event baseline before writing. "Still awaiting" includes
-    pre_event_market_context being null: a committed capture proves preparation
-    succeeded even when the caller only saw an exception, so a prepared event
-    is never terminal-failed for a missed preparation deadline. Every way this
-    can fail - a concurrent write, a reschedule into the future, an event that
-    already moved on, or one that turns out to be prepared - raises instead of
-    failing the event, and is retryable: the next poll re-evaluates whatever
-    the event now is.
+    Returns ``True`` only when the canonical RPC records FAILED. Returns
+    ``False`` when the row changed, was rescheduled so the deadline is no longer
+    reached, or already progressed/prepared. Those outcomes are expected CAS
+    rejections, not worker-fatal errors: the next poll must re-read the current
+    row and decide again. Unexpected RPC/transport failures still raise.
     """
     if expected_event_updated_at.tzinfo is None or expected_event_updated_at.utcoffset() is None:
         raise ValueError("expected_event_updated_at must be timezone-aware")
@@ -187,18 +177,12 @@ def fail_pre_event_deadline_if_current(
         ).execute()
     except Exception as exc:
         message = str(exc)
-        if "tracked_market_event_version_conflict" in message:
-            raise RuntimeError(
-                f"tracked event {event_id} changed before its pre-event deadline failure "
-                "could be recorded"
-            ) from exc
-        if "tracked_market_event_pre_event_deadline_not_reached" in message:
-            raise RuntimeError(
-                f"tracked event {event_id} was rescheduled past its pre-event deadline "
-                "before the failure could be recorded"
-            ) from exc
-        if "tracked_market_event_not_pre_event_failable" in message:
-            raise RuntimeError(
-                f"tracked event {event_id} is no longer awaiting a pre-event baseline"
-            ) from exc
+        if (
+            "tracked_market_event_version_conflict" in message
+            or "tracked_market_event_pre_event_deadline_not_reached" in message
+            or "tracked_market_event_not_pre_event_failable" in message
+        ):
+            return False
         raise
+
+    return True
