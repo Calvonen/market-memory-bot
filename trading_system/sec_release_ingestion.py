@@ -15,31 +15,91 @@ from pypdf import PdfReader
 from trading_system.release_ingestion import ReleaseDocument
 
 
-class _SecLinkParser(HTMLParser):
+class _SecIndexDocumentParser(HTMLParser):
+    """Extract linked SEC filing documents together with their row Type cell.
+
+    SEC filing index pages expose the authoritative document type in a table
+    row. A filename/title containing words such as "earnings" or "results" is
+    not sufficient evidence that a link is the results exhibit.
+    """
+
     def __init__(self) -> None:
         super().__init__()
-        self.links: list[tuple[str, str]] = []
-        self._href: str | None = None
-        self._parts: list[str] = []
+        self.documents: list[tuple[str, str, str]] = []
+        self._in_row = False
+        self._in_cell = False
+        self._in_link = False
+        self._cells: list[tuple[str, str | None, str]] = []
+        self._cell_parts: list[str] = []
+        self._cell_href: str | None = None
+        self._link_parts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.lower() != "a":
+        lowered = tag.lower()
+        if lowered == "tr":
+            self._in_row = True
+            self._cells = []
             return
-        values = dict(attrs)
-        self._href = values.get("href")
-        self._parts = [values.get("title") or "", values.get("aria-label") or ""]
+        if lowered in {"td", "th"} and self._in_row:
+            self._in_cell = True
+            self._cell_parts = []
+            self._cell_href = None
+            self._link_parts = []
+            return
+        if lowered == "a" and self._in_cell:
+            values = dict(attrs)
+            href = values.get("href")
+            if href and self._cell_href is None:
+                self._cell_href = href
+                self._link_parts.extend(
+                    [values.get("title") or "", values.get("aria-label") or ""]
+                )
+            self._in_link = True
 
     def handle_data(self, data: str) -> None:
-        if self._href is not None:
-            self._parts.append(data)
+        if not self._in_cell:
+            return
+        self._cell_parts.append(data)
+        if self._in_link:
+            self._link_parts.append(data)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() != "a" or self._href is None:
+        lowered = tag.lower()
+        if lowered == "a":
+            self._in_link = False
             return
-        text = " ".join(" ".join(self._parts).split())
-        self.links.append((self._href, text))
-        self._href = None
-        self._parts = []
+        if lowered in {"td", "th"} and self._in_cell:
+            text = " ".join(" ".join(self._cell_parts).split())
+            link_text = " ".join(" ".join(self._link_parts).split())
+            self._cells.append((text, self._cell_href, link_text))
+            self._in_cell = False
+            self._in_link = False
+            self._cell_parts = []
+            self._cell_href = None
+            self._link_parts = []
+            return
+        if lowered == "tr" and self._in_row:
+            document_type = next(
+                (
+                    text.strip().upper()
+                    for text, _href, _label in self._cells
+                    if text.strip().upper() == "EX-99.1"
+                ),
+                None,
+            )
+            linked = next(
+                (
+                    (href, label or text)
+                    for text, href, label in self._cells
+                    if href
+                ),
+                None,
+            )
+            if document_type is not None and linked is not None:
+                href, label = linked
+                self.documents.append((href, label, document_type))
+            self._in_row = False
+            self._cells = []
 
 
 class _SecVisibleTextParser(HTMLParser):
@@ -70,9 +130,9 @@ class SecEdgarResultsProvider:
     Discovery is intentionally conservative. The provider resolves the exact
     ticker to one CIK, considers only 8-K filings whose filingDate equals the
     calendar event's scheduled date, verifies an earnings/results signal in the
-    primary filing, and then selects an EX-99.1-style exhibit from that exact
-    filing's SEC index page. It never falls back to a nearby filing date or an
-    unrelated exhibit merely because one exists.
+    primary filing, and then selects only a document whose SEC filing-index row
+    is explicitly typed EX-99.1. It never falls back to a nearby filing date or
+    an unrelated exhibit merely because one exists.
     """
 
     name = "sec_edgar_8k"
@@ -84,10 +144,6 @@ class SecEdgarResultsProvider:
     _EARNINGS_SIGNAL_RE = re.compile(
         r"(?:item\s+2\.02|results\s+of\s+operations\s+and\s+financial\s+condition|"
         r"earnings\s+release|financial\s+results|quarterly\s+results)",
-        re.IGNORECASE,
-    )
-    _EXHIBIT_SIGNAL_RE = re.compile(
-        r"(?:ex(?:hibit)?[\s._-]*99[\s._-]*1|99[\s._-]*1|earnings|results)",
         re.IGNORECASE,
     )
 
@@ -204,24 +260,24 @@ class SecEdgarResultsProvider:
         if not self._EARNINGS_SIGNAL_RE.search(primary_text):
             return None
 
-        # SEC's filing index is the canonical document table for an accession;
-        # the primary 8-K itself does not reliably link every exhibit.
+        # The filing index is authoritative for exhibit type. Do not infer
+        # EX-99.1 from a filename, link label or an "earnings/results" keyword.
         index_url = urljoin(filing_base, f"{accession}-index.html")
         index_html = self._fetch_text(index_url)
-        parser = _SecLinkParser()
+        parser = _SecIndexDocumentParser()
         parser.feed(index_html)
-        candidates: list[tuple[int, str, str]] = []
-        for href, label in parser.links:
+
+        candidates: list[tuple[str, str]] = []
+        for href, label, document_type in parser.documents:
+            if document_type != "EX-99.1":
+                continue
             source_url = urljoin(index_url, href)
             if not self._same_filing_directory(filing_base, source_url):
                 continue
-            haystack = f"{label} {href}"
-            if not self._EXHIBIT_SIGNAL_RE.search(haystack):
-                continue
-            priority = self._exhibit_priority(haystack)
-            candidates.append((priority, source_url, label or href))
+            title = " ".join(part for part in (document_type, label) if part).strip()
+            candidates.append((source_url, title))
 
-        for _priority, source_url, title in sorted(candidates, reverse=True):
+        for source_url, title in candidates:
             try:
                 raw_text, source_type = self._fetch_release_text(source_url)
             except Exception:
@@ -229,9 +285,8 @@ class SecEdgarResultsProvider:
             if len(raw_text) < self.MIN_DOCUMENT_CHARS:
                 continue
             if not self._EARNINGS_SIGNAL_RE.search(raw_text):
-                # The filing itself is earnings-related, but a generic 99.1 can
-                # still be an unrelated attachment. Require the exhibit text to
-                # independently carry an earnings/results signal.
+                # Even an actual EX-99.1 can be unrelated to results. Require
+                # the exhibit itself to independently carry an earnings signal.
                 continue
             return ReleaseDocument(
                 event_id=event_id,
@@ -241,15 +296,6 @@ class SecEdgarResultsProvider:
                 raw_text=raw_text,
             )
         return None
-
-    @classmethod
-    def _exhibit_priority(cls, haystack: str) -> int:
-        lowered = haystack.lower()
-        if re.search(r"ex(?:hibit)?[\s._-]*99[\s._-]*1|99[\s._-]*1", lowered):
-            return 3
-        if "earnings" in lowered:
-            return 2
-        return 1
 
     @staticmethod
     def _same_filing_directory(filing_base: str, candidate_url: str) -> bool:
