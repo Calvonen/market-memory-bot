@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import unittest
 from datetime import UTC, date, datetime
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from trading_system.calendar_release_worker import (
@@ -31,36 +30,14 @@ class _Expectations:
         return self.by_id.get(event_id)
 
 
-class _Query:
-    def __init__(self, rows):
-        self.rows = rows
-
-    def select(self, *_args, **_kwargs):
-        return self
-
-    def eq(self, *_args, **_kwargs):
-        return self
-
-    def limit(self, *_args, **_kwargs):
-        return self
-
-    def execute(self):
-        return SimpleNamespace(data=self.rows)
-
-
-class _Client:
-    def __init__(self, analysis_rows=None):
-        self.analysis_rows = analysis_rows or []
-
-    def table(self, name):
-        if name != "event_ai_analyses":
-            raise AssertionError(name)
-        return _Query(self.analysis_rows)
-
-
 class _Releases:
-    def __init__(self, analysis_rows=None):
-        self.client = _Client(analysis_rows)
+    def __init__(self, analyzed=False):
+        self.analyzed = analyzed
+        self.analysis_checks = []
+
+    def has_analysis_for_event_version(self, *, event_id, expectation_version):
+        self.analysis_checks.append((event_id, expectation_version))
+        return self.analyzed
 
 
 class CalendarReleaseWorkerTests(unittest.TestCase):
@@ -119,6 +96,7 @@ class CalendarReleaseWorkerTests(unittest.TestCase):
             targets.calls,
             [(date(2026, 8, 24), date(2026, 8, 25))],
         )
+        self.assertEqual(releases.analysis_checks, [(self.EVENT_ID, 1)])
 
     def test_missing_release_shell_fails_closed_without_provider(self):
         with patch(
@@ -153,7 +131,7 @@ class CalendarReleaseWorkerTests(unittest.TestCase):
         provider_cls.assert_not_called()
 
     def test_already_analyzed_version_skips_sec_and_ai_work(self):
-        releases = _Releases([{"id": "analysis-1"}])
+        releases = _Releases(analyzed=True)
         with patch(
             "trading_system.calendar_release_worker.SecEdgarResultsProvider"
         ) as provider_cls, patch(
