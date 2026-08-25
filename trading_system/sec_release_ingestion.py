@@ -321,11 +321,8 @@ class SecEdgarResultsProvider:
         data, content_type, charset = self._fetch_bytes(url)
         path = url.split("?", 1)[0].lower()
         if path.endswith(".pdf") or "pdf" in content_type.lower():
-            try:
-                reader = PdfReader(io.BytesIO(data))
-                text = "\n".join(page.extract_text() or "" for page in reader.pages)
-            except Exception:
-                text = ""
+            reader = PdfReader(io.BytesIO(data))
+            text = "\n".join(page.extract_text() or "" for page in reader.pages)
             return text.strip(), "company_results_pdf"
         html = data.decode(charset, errors="replace")
         return self._html_to_text(html).strip(), "company_results"
