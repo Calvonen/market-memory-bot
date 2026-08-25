@@ -3,7 +3,7 @@
 
 The existing strategy-draft and calendar/watchlist checks stay in place. The
 persistent tracked-event worker additionally requires the tracked-event runtime
-migrations through the calendar-runtime untrack guard version. Migrations are
+migrations through the calendar release-pipeline shell version. Migrations are
 applied out-of-band; this script only verifies them before backend/systemd
 processes are restarted.
 """
@@ -97,10 +97,18 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
         "calendar_runtime_untrack_guard_version_matches",
         "calendar runtime-bound untrack guard implementation version",
     ),
+    (
+        "ensure_calendar_release_shell_function_exists",
+        "ensure_calendar_release_shell() function",
+    ),
+    (
+        "calendar_release_shell_version_matches",
+        "calendar release-pipeline shell implementation version",
+    ),
 )
 
 REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 3
-REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 9
+REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 10
 POSTGRES_IDENTIFIER_MAX_BYTES = 63
 
 
@@ -225,7 +233,7 @@ def main() -> int:
 
     print(
         "Supabase schema gate passed: strategy-draft/calendar dependencies and "
-        "persistent tracked-event runtime promotion/untrack guards are present."
+        "persistent tracked-event runtime promotion/release-shell guards are present."
     )
     return 0
 
