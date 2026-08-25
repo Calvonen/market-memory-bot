@@ -278,14 +278,12 @@ class SecEdgarResultsProvider:
             candidates.append((source_url, title))
 
         retrieval_errors: list[Exception] = []
-        evaluated_candidate = False
         for source_url, title in candidates:
             try:
                 raw_text, source_type = self._fetch_release_text(source_url)
             except Exception as exc:
                 retrieval_errors.append(exc)
                 continue
-            evaluated_candidate = True
             if len(raw_text) < self.MIN_DOCUMENT_CHARS:
                 continue
             if not self._EARNINGS_SIGNAL_RE.search(raw_text):
@@ -300,7 +298,10 @@ class SecEdgarResultsProvider:
                 raw_text=raw_text,
             )
 
-        if candidates and not evaluated_candidate and retrieval_errors:
+        # Any unevaluated qualifying EX-99.1 means we cannot safely conclude
+        # that the filing has no earnings release. Retry instead of allowing a
+        # successfully fetched but unrelated sibling exhibit to mask the error.
+        if retrieval_errors:
             first = retrieval_errors[0]
             raise RuntimeError(
                 f"SEC EX-99.1 retrieval failed for {len(retrieval_errors)} candidate(s): {first}"
