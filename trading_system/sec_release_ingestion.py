@@ -21,6 +21,7 @@ class _SecIndexDocumentParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.documents: list[tuple[str, str, str]] = []
+        self.authoritative_table_recognized = False
         self._in_row = False
         self._in_cell = False
         self._in_link = False
@@ -89,6 +90,7 @@ class _SecIndexDocumentParser(HTMLParser):
             try:
                 self._document_index = normalized.index("DOCUMENT")
                 self._type_index = normalized.index("TYPE")
+                self.authoritative_table_recognized = True
             except ValueError:
                 self._document_index = None
                 self._type_index = None
@@ -167,12 +169,12 @@ class SecEdgarResultsProvider:
         self.scheduled_date = scheduled_date
         self.timeout_seconds = timeout_seconds
         self.user_agent = (
-            user_agent
-            or os.environ.get("MARKETAI_SEC_USER_AGENT")
-            or "MarketAI/0.1 market-memory-bot"
+            user_agent or os.environ.get("MARKETAI_SEC_USER_AGENT") or ""
         ).strip()
         if not self.user_agent:
-            raise ValueError("SEC user agent is required")
+            raise ValueError("MARKETAI_SEC_USER_AGENT is required for SEC access")
+        if "@" not in self.user_agent:
+            raise ValueError("SEC user agent must include a contact email address")
 
     def discover(self, event_id: str) -> ReleaseDocument | None:
         cik = self._resolve_cik()
@@ -314,6 +316,10 @@ class SecEdgarResultsProvider:
         index_html = self._fetch_text(index_url)
         parser = _SecIndexDocumentParser()
         parser.feed(index_html)
+        if not parser.authoritative_table_recognized:
+            raise RuntimeError(
+                "SEC filing index authoritative DOCUMENT/TYPE layout was not recognized"
+            )
 
         candidates: list[tuple[str, str]] = []
         for href, label, document_type in parser.documents:
