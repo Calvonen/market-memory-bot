@@ -40,7 +40,7 @@ ALL_PRESENT_ROW = {
     "upsert_calendar_candidate_function_exists": True,
     "transition_calendar_event_status_function_exists": True,
     "calendar_candidate_upsert_version_matches": True,
-    "calendar_candidate_upsert_implementation_version": 2,
+    "calendar_candidate_upsert_implementation_version": 3,
     "tracked_market_events_table_exists": True,
     "tracked_market_event_reactions_table_exists": True,
     "upsert_tracked_market_event_function_exists": True,
