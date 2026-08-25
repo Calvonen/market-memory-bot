@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Pre-deploy Supabase schema gate for MarketAI backend runtime dependencies."""
+"""Pre-deploy Supabase schema gate for MarketAI backend runtime dependencies.
+
+The existing strategy-draft and calendar/watchlist checks stay in place. The
+persistent tracked-event worker additionally requires the tracked-event runtime
+migrations through the eToro-resolution preflight version. Migrations are
+applied out-of-band; this script only verifies them before backend/systemd
+processes are restarted.
+"""
 
 from __future__ import annotations
 
@@ -10,30 +17,74 @@ from typing import Any
 REQUIRED_CHECKS: tuple[tuple[str, str], ...] = (
     ("event_strategy_approvals_table_exists", "event_strategy_approvals table"),
     ("approve_strategy_draft_function_exists", "approve_strategy_draft() function"),
-    ("insert_next_expectation_version_function_exists", "insert_next_expectation_version() function"),
+    (
+        "insert_next_expectation_version_function_exists",
+        "insert_next_expectation_version() function",
+    ),
     (
         "schema_version_matches",
-        "insert_next_expectation_version() implementation version (strategy_draft_schema_version() mismatch or missing - a same-signature but outdated function body is deployed)",
+        "insert_next_expectation_version() implementation version "
+        "(strategy_draft_schema_version() mismatch or missing - a "
+        "same-signature but outdated function body is deployed)",
     ),
     ("calendar_events_table_exists", "calendar_events table"),
     ("upsert_calendar_candidate_function_exists", "upsert_calendar_candidate() function"),
-    ("calendar_candidate_upsert_version_matches", "upsert_calendar_candidate() placeholder-preserving implementation version"),
-    ("transition_calendar_event_status_function_exists", "transition_calendar_event_status() function"),
+    (
+        "calendar_candidate_upsert_version_matches",
+        "upsert_calendar_candidate() placeholder-preserving implementation version",
+    ),
+    (
+        "transition_calendar_event_status_function_exists",
+        "transition_calendar_event_status() function",
+    ),
 )
 
 REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
     ("tracked_market_events_table_exists", "tracked_market_events table"),
-    ("tracked_market_event_reactions_table_exists", "tracked_market_event_reactions table"),
-    ("upsert_tracked_market_event_function_exists", "upsert_tracked_market_event() function"),
-    ("arm_tracked_market_event_resolution_function_exists", "arm_tracked_market_event_resolution() function"),
-    ("capture_tracked_market_event_reference_function_exists", "capture_tracked_market_event_reference() function"),
-    ("capture_tracked_market_event_reaction_anchor_function_exists", "capture_tracked_market_event_reaction_anchor() function"),
-    ("capture_tracked_market_event_config_snapshot_function_exists", "capture_tracked_market_event_config_snapshot() function"),
-    ("capture_tracked_market_event_pre_event_context_function_exists", "capture_tracked_market_event_pre_event_context() function"),
-    ("capture_tracked_market_event_pre_event_context_if_current_function_exists", "capture_tracked_market_event_pre_event_context_if_current() function"),
-    ("capture_tracked_market_event_pre_event_context_validated_function_exists", "capture_tracked_market_event_pre_event_context_validated() function"),
-    ("validate_tracked_market_event_pre_event_context_if_current_function_exists", "validate_tracked_market_event_pre_event_context_if_current() function"),
-    ("fail_tracked_market_event_pre_event_deadline_if_current_function_exists", "fail_tracked_market_event_pre_event_deadline_if_current() function"),
+    (
+        "tracked_market_event_reactions_table_exists",
+        "tracked_market_event_reactions table",
+    ),
+    (
+        "upsert_tracked_market_event_function_exists",
+        "upsert_tracked_market_event() function",
+    ),
+    (
+        "arm_tracked_market_event_resolution_function_exists",
+        "arm_tracked_market_event_resolution() function",
+    ),
+    (
+        "capture_tracked_market_event_reference_function_exists",
+        "capture_tracked_market_event_reference() function",
+    ),
+    (
+        "capture_tracked_market_event_reaction_anchor_function_exists",
+        "capture_tracked_market_event_reaction_anchor() function",
+    ),
+    (
+        "capture_tracked_market_event_config_snapshot_function_exists",
+        "capture_tracked_market_event_config_snapshot() function",
+    ),
+    (
+        "capture_tracked_market_event_pre_event_context_function_exists",
+        "capture_tracked_market_event_pre_event_context() function",
+    ),
+    (
+        "capture_tracked_market_event_pre_event_context_if_current_function_exists",
+        "capture_tracked_market_event_pre_event_context_if_current() function",
+    ),
+    (
+        "capture_tracked_market_event_pre_event_context_validated_function_exists",
+        "capture_tracked_market_event_pre_event_context_validated() function",
+    ),
+    (
+        "validate_tracked_market_event_pre_event_context_if_current_function_exists",
+        "validate_tracked_market_event_pre_event_context_if_current() function",
+    ),
+    (
+        "fail_tracked_market_event_pre_event_deadline_if_current_function_exists",
+        "fail_tracked_market_event_pre_event_deadline_if_current() function",
+    ),
 )
 
 REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 2
@@ -45,15 +96,20 @@ def main() -> int:
     key = os.environ.get("MARKETAI_SUPABASE_SECRET_KEY")
     if not url or not key:
         print(
-            "SCHEMA GATE FAILED: MARKETAI_SUPABASE_URL and MARKETAI_SUPABASE_SECRET_KEY must both be set to verify the Supabase schema before deploying. Refusing to proceed - the backend will not be restarted.",
+            "SCHEMA GATE FAILED: MARKETAI_SUPABASE_URL and MARKETAI_SUPABASE_SECRET_KEY "
+            "must both be set to verify the Supabase schema before deploying. Refusing "
+            "to proceed - the backend will not be restarted.",
             file=sys.stderr,
         )
         return 1
 
     try:
         from supabase import create_client
-    except Exception as exc:
-        print(f"SCHEMA GATE FAILED: could not import the supabase client: {exc}", file=sys.stderr)
+    except Exception as exc:  # pragma: no cover - environment/import failure
+        print(
+            f"SCHEMA GATE FAILED: could not import the supabase client: {exc}",
+            file=sys.stderr,
+        )
         return 1
 
     try:
@@ -61,7 +117,8 @@ def main() -> int:
         response = client.rpc("verify_strategy_draft_schema", {}).execute()
     except Exception as exc:
         print(
-            "SCHEMA GATE FAILED: could not call verify_strategy_draft_schema(). Apply the pending strategy/calendar migrations before deploying. "
+            "SCHEMA GATE FAILED: could not call verify_strategy_draft_schema(). "
+            "Apply the pending strategy/calendar migrations before deploying. "
             f"Underlying error: {exc}",
             file=sys.stderr,
         )
@@ -69,7 +126,10 @@ def main() -> int:
 
     rows = getattr(response, "data", None) or []
     if not rows:
-        print("SCHEMA GATE FAILED: verify_strategy_draft_schema() returned no rows.", file=sys.stderr)
+        print(
+            "SCHEMA GATE FAILED: verify_strategy_draft_schema() returned no rows.",
+            file=sys.stderr,
+        )
         return 1
 
     row: dict[str, Any] = rows[0]
@@ -79,14 +139,16 @@ def main() -> int:
     if deployed_upsert_version != REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION:
         missing.append(
             "upsert_calendar_candidate() atomic implementation version "
-            f"{REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION} (deployed: {deployed_upsert_version!r})"
+            f"{REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION} "
+            f"(deployed: {deployed_upsert_version!r})"
         )
 
     try:
         tracked_response = client.rpc("verify_tracked_event_runtime_schema", {}).execute()
     except Exception as exc:
         print(
-            "SCHEMA GATE FAILED: could not call verify_tracked_event_runtime_schema(). Apply the pending tracked-event migrations before deploying. "
+            "SCHEMA GATE FAILED: could not call verify_tracked_event_runtime_schema(). "
+            "Apply the pending tracked-event migrations before deploying. "
             f"Underlying error: {exc}",
             file=sys.stderr,
         )
@@ -94,7 +156,10 @@ def main() -> int:
 
     tracked_rows = getattr(tracked_response, "data", None) or []
     if not tracked_rows:
-        print("SCHEMA GATE FAILED: verify_tracked_event_runtime_schema() returned no rows.", file=sys.stderr)
+        print(
+            "SCHEMA GATE FAILED: verify_tracked_event_runtime_schema() returned no rows.",
+            file=sys.stderr,
+        )
         return 1
     tracked_row: dict[str, Any] = tracked_rows[0]
     missing.extend(
@@ -104,19 +169,24 @@ def main() -> int:
     if deployed_runtime_version != REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION:
         missing.append(
             "tracked-event runtime schema version "
-            f"{REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION} (deployed: {deployed_runtime_version!r})"
+            f"{REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION} "
+            f"(deployed: {deployed_runtime_version!r})"
         )
 
     if missing:
         print(
             "SCHEMA GATE FAILED: the following required Supabase objects are missing: "
             + ", ".join(missing)
-            + ". Apply the pending migrations under supabase/migrations/ to this Supabase project before deploying this commit.",
+            + ". Apply the pending migrations under supabase/migrations/ to this "
+            "Supabase project before deploying this commit.",
             file=sys.stderr,
         )
         return 1
 
-    print("Supabase schema gate passed: strategy-draft/calendar dependencies and persistent tracked-event runtime preflight tables/RPCs are present.")
+    print(
+        "Supabase schema gate passed: strategy-draft/calendar dependencies and "
+        "persistent tracked-event runtime preflight tables/RPCs are present."
+    )
     return 0
 
 
