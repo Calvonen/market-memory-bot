@@ -57,14 +57,14 @@ class CalendarReleaseWorkerTests(unittest.TestCase):
             scheduled_date=scheduled,
         )
 
-    def _expectation(self, *, ticker="DKS", scheduled=date(2026, 8, 25)):
+    def _expectation(self, *, ticker="DKS", scheduled=date(2026, 8, 25), version=1):
         return EventExpectation(
             event_id=self.EVENT_ID,
             instrument=ticker,
             event_name="DICK'S SPORTING GOODS INC earnings",
             scheduled_date=scheduled,
             source_name="calendar:finnhub:automatic-release-shell",
-            version=1,
+            version=version,
         )
 
     @staticmethod
@@ -114,11 +114,50 @@ class CalendarReleaseWorkerTests(unittest.TestCase):
             scheduled_date=date(2026, 8, 25),
         )
         monitor_cls.assert_called_once()
+        pinned = monitor_cls.call_args.kwargs["expectation_repository"]
+        self.assertEqual(pinned.get(self.EVENT_ID).version, 1)
         fake_monitor.run_once.assert_called_once_with(self.EVENT_ID)
         self.assertEqual(
             targets.calls,
             [(date(2026, 8, 24), date(2026, 8, 25))],
         )
+        self.assertEqual(releases.analysis_checks, [(self.EVENT_ID, 1)])
+
+    def test_monitor_keeps_validated_expectation_if_source_changes_mid_run(self):
+        original = self._expectation(version=1)
+        expectations = _Expectations({self.EVENT_ID: original})
+        releases = _Releases()
+        captured_versions = []
+
+        def monitor_factory(**kwargs):
+            pinned = kwargs["expectation_repository"]
+            fake_monitor = MagicMock()
+
+            def run_once(event_id):
+                expectations.by_id[event_id] = self._expectation(version=2)
+                captured_versions.append(pinned.get(event_id).version)
+                return IngestionResult(status="no_release")
+
+            fake_monitor.run_once.side_effect = run_once
+            return fake_monitor
+
+        with patch(
+            "trading_system.calendar_release_worker.SecEdgarResultsProvider"
+        ), patch(
+            "trading_system.calendar_release_worker.EventReleaseMonitor",
+            side_effect=monitor_factory,
+        ):
+            results = run_calendar_release_ingestion_once(
+                targets=_Targets([self._target()]),
+                expectations=expectations,
+                releases=releases,
+                analyzer=MagicMock(),
+                clock=lambda: datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+            )
+
+        self.assertEqual(results[0].status, "no_release")
+        self.assertEqual(expectations.by_id[self.EVENT_ID].version, 2)
+        self.assertEqual(captured_versions, [1])
         self.assertEqual(releases.analysis_checks, [(self.EVENT_ID, 1)])
 
     def test_missing_release_shell_fails_closed_without_provider(self):
