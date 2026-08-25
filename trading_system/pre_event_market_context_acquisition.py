@@ -68,11 +68,14 @@ def acquire_pre_event_market_context(
     # The session pair was already resolved from real close timestamps, so the
     # selector's boundary is "up to and including the confirmed latest closed
     # session" - not the event trading date, which would drop a same-day
-    # session that closed before the event.
+    # session that closed before the event. The pure selector's supported
+    # boundary parameter is event_trading_date and it selects rows strictly
+    # before that date, so pass the following calendar day to include the
+    # confirmed latest session itself.
     confirmed = daily_ohlcv.loc[daily_ohlcv.index <= latest_session]
     context = pre_event_market_context(
         confirmed,
-        sessions_before=last_confirmed_closed_session_date + timedelta(days=1),
+        event_trading_date=last_confirmed_closed_session_date + timedelta(days=1),
     )
     if context is None:
         raise ValueError("confirmed closed session history is incomplete")
