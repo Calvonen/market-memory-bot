@@ -777,9 +777,9 @@ async def run_forever() -> None:
 
             if _needs_resolution_preflight(event):
                 if now >= event.event_at:
-                    repository.mark_failed(
-                        event.event_id,
-                        actor=WORKER_ACTOR,
+                    _fail_pre_event_deadline(
+                        repository,
+                        event=event,
                         error="event reached event_at before eToro identity was fully armed",
                     )
                     continue
