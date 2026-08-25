@@ -74,6 +74,10 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
         "capture_tracked_market_event_pre_event_context_if_current() function",
     ),
     (
+        "capture_tracked_market_event_pre_event_context_validated_function_exists",
+        "capture_tracked_market_event_pre_event_context_validated() function",
+    ),
+    (
         "validate_tracked_market_event_pre_event_context_if_current_function_exists",
         "validate_tracked_market_event_pre_event_context_if_current() function",
     ),

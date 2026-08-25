@@ -240,6 +240,11 @@ def acquire_and_persist_pre_event_market_context_for_event(
         previous_confirmed_closed_session_date=resolution.previous_closed_session,
         fetcher=fetcher,
     )
+    # Carry the exchange calendar's close for the selected session into the
+    # capture as an explicit proof. It is what lets the database accept a
+    # snapshot dated on the event's own market day: it re-checks that close
+    # against the row's event_at and its own clock, so the same-day allowance
+    # is never available to a caller that has not done this calendar work.
     return capture_pre_event_market_context(
         repository,
         event_id=event_id,
@@ -247,4 +252,5 @@ def acquire_and_persist_pre_event_market_context_for_event(
         market_timezone=profile.market_timezone,
         actor=actor,
         expected_event_updated_at=event.updated_at,
+        session_close=dict(session_closes)[resolution.latest_closed_session],
     )

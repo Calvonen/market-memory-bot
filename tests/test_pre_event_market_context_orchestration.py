@@ -195,7 +195,13 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
         rpc_name, payload = repository.client.calls[0]
         self.assertEqual(
             rpc_name,
-            "capture_tracked_market_event_pre_event_context_if_current",
+            "capture_tracked_market_event_pre_event_context_validated",
+        )
+        # The canonical path always carries the close-time proof for the
+        # session it selected - that is what unlocks the same-day allowance.
+        self.assertEqual(
+            payload["input_session_close"],
+            datetime(2026, 8, 24, 6, 0, tzinfo=UTC).isoformat(),
         )
         self.assertEqual(payload["input_market_timezone"], "Australia/Sydney")
         self.assertEqual(payload["input_expected_updated_at"], version.isoformat())
@@ -541,6 +547,70 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
         self.assertEqual(calendar_calls, [])
         self.assertEqual(repository.client.calls, [])
         self.assertFalse(repository.rpc_executed)
+
+    def test_same_day_capture_carries_the_event_day_close_as_its_proof(self) -> None:
+        # A post-close same-day snapshot is only persistable through the
+        # validated RPC, and the proof it carries must be that same-day
+        # session's own close - which the database then re-checks against
+        # event_at and its own clock.
+        repository, _ = self._acquire_at(
+            event_at=datetime(2026, 8, 24, 7, 0, tzinfo=UTC),
+            sessions=["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25"],
+            now=datetime(2026, 8, 24, 7, 0, tzinfo=UTC),
+            ohlcv_dates=["2026-08-21", "2026-08-24"],
+        )
+
+        rpc_name, payload = repository.client.calls[0]
+        self.assertEqual(rpc_name, "capture_tracked_market_event_pre_event_context_validated")
+        self.assertEqual(payload["input_pre_event_market_context"]["session_date"], "2026-08-24")
+        self.assertEqual(
+            payload["input_session_close"],
+            datetime(2026, 8, 24, 6, 0, tzinfo=UTC).isoformat(),
+        )
+
+    def test_pre_close_same_day_event_never_reaches_persistence_with_that_session(self) -> None:
+        # The pre-close case falls back to Friday/Thursday before persistence,
+        # so the still-forming event-day candle is never offered to the RPC at
+        # all - and the proof carried is Friday's close, not Monday's.
+        repository, _ = self._acquire_at(
+            event_at=datetime(2026, 8, 24, 5, 0, tzinfo=UTC),
+            sessions=["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25"],
+            now=datetime(2026, 8, 24, 5, 0, tzinfo=UTC),
+            ohlcv_dates=["2026-08-20", "2026-08-21"],
+        )
+
+        _rpc_name, payload = repository.client.calls[0]
+        self.assertEqual(payload["input_pre_event_market_context"]["session_date"], "2026-08-21")
+        self.assertEqual(
+            payload["input_session_close"],
+            datetime(2026, 8, 21, 6, 0, tzinfo=UTC).isoformat(),
+        )
+
+    def test_the_proof_always_matches_the_selected_session(self) -> None:
+        # The database rejects a close that does not fall on the snapshot's own
+        # session date, so the orchestration must never send a mismatched pair.
+        sessions = ["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25"]
+
+        for event_at, expected_session, ohlcv_dates in (
+            (datetime(2026, 8, 24, 7, 0, tzinfo=UTC), "2026-08-24", ["2026-08-21", "2026-08-24"]),
+            (datetime(2026, 8, 24, 5, 0, tzinfo=UTC), "2026-08-21", ["2026-08-20", "2026-08-21"]),
+            (datetime(2026, 8, 25, 0, 0, tzinfo=UTC), "2026-08-24", ["2026-08-21", "2026-08-24"]),
+        ):
+            with self.subTest(event_at=event_at):
+                repository, _ = self._acquire_at(
+                    event_at=event_at,
+                    sessions=sessions,
+                    now=event_at,
+                    ohlcv_dates=ohlcv_dates,
+                )
+                _rpc_name, payload = repository.client.calls[0]
+                snapshot_session = payload["input_pre_event_market_context"]["session_date"]
+                self.assertEqual(snapshot_session, expected_session)
+                # Proof is that session's close, and it precedes event_at.
+                self.assertTrue(payload["input_session_close"].startswith(snapshot_session))
+                self.assertLessEqual(
+                    datetime.fromisoformat(payload["input_session_close"]), event_at
+                )
 
     def test_only_a_post_close_event_can_emit_a_same_day_snapshot(self) -> None:
         # The DB capture RPC permits session_date == the event's local market

@@ -142,6 +142,114 @@ class PreEventMarketContextPersistenceTests(unittest.TestCase):
             )
 
 
+class CapturePreEventMarketContextRoutingTests(unittest.TestCase):
+    """Which RPC a capture is routed to is the trust boundary itself."""
+
+    SNAPSHOT = {
+        "schema_version": 1,
+        "session_date": "2026-08-24",
+        "previous_session_date": "2026-08-21",
+    }
+    VERSION = datetime(2026, 8, 24, 14, 47, tzinfo=UTC)
+    CLOSE = datetime(2026, 8, 24, 6, 0, tzinfo=UTC)
+
+    def test_a_session_close_proof_selects_the_validated_rpc(self) -> None:
+        repository = _Repository(event=object())
+
+        capture_pre_event_market_context(
+            repository,
+            event_id="event-1",
+            snapshot=self.SNAPSHOT,
+            market_timezone="Australia/Sydney",
+            actor="tracked-event-worker",
+            expected_event_updated_at=self.VERSION,
+            session_close=self.CLOSE,
+        )
+
+        rpc_name, payload = repository.client.calls[0]
+        self.assertEqual(
+            rpc_name, "capture_tracked_market_event_pre_event_context_validated"
+        )
+        self.assertEqual(payload["input_session_close"], self.CLOSE.isoformat())
+        self.assertEqual(payload["input_expected_updated_at"], self.VERSION.isoformat())
+
+    def test_without_a_proof_the_legacy_cas_rpc_is_used(self) -> None:
+        repository = _Repository(event=object())
+
+        capture_pre_event_market_context(
+            repository,
+            event_id="event-1",
+            snapshot=self.SNAPSHOT,
+            market_timezone="Australia/Sydney",
+            actor="tracked-event-worker",
+            expected_event_updated_at=self.VERSION,
+        )
+
+        rpc_name, payload = repository.client.calls[0]
+        self.assertEqual(
+            rpc_name, "capture_tracked_market_event_pre_event_context_if_current"
+        )
+        self.assertNotIn("input_session_close", payload)
+
+    def test_a_proof_without_a_version_is_refused_before_any_rpc(self) -> None:
+        repository = _Repository(event=object())
+
+        with self.assertRaisesRegex(ValueError, "requires expected_event_updated_at"):
+            capture_pre_event_market_context(
+                repository,
+                event_id="event-1",
+                snapshot=self.SNAPSHOT,
+                market_timezone="Australia/Sydney",
+                actor="tracked-event-worker",
+                session_close=self.CLOSE,
+            )
+
+        self.assertEqual(repository.client.calls, [])
+
+    def test_rejects_a_timezone_naive_session_close(self) -> None:
+        repository = _Repository(event=object())
+
+        with self.assertRaisesRegex(ValueError, "session_close must be timezone-aware"):
+            capture_pre_event_market_context(
+                repository,
+                event_id="event-1",
+                snapshot=self.SNAPSHOT,
+                market_timezone="Australia/Sydney",
+                actor="tracked-event-worker",
+                expected_event_updated_at=self.VERSION,
+                session_close=datetime(2026, 8, 24, 6, 0),
+            )
+
+        self.assertEqual(repository.client.calls, [])
+
+    def test_proof_rejections_surface_as_clear_runtime_errors(self) -> None:
+        for db_error, expected in (
+            ("pre_event_market_context_session_not_closed_yet", "had not closed when capture ran"),
+            (
+                "pre_event_market_context_session_not_closed_before_event",
+                "does not close before event_at",
+            ),
+            (
+                "pre_event_market_context_session_close_mismatch",
+                "does not belong to the snapshot session",
+            ),
+            ("pre_event_market_context_not_before_event", "is not before the event"),
+        ):
+            with self.subTest(db_error=db_error):
+                repository = _Repository(error=Exception(db_error))
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    capture_pre_event_market_context(
+                        repository,
+                        event_id="event-1",
+                        snapshot=self.SNAPSHOT,
+                        market_timezone="Australia/Sydney",
+                        actor="tracked-event-worker",
+                        expected_event_updated_at=self.VERSION,
+                        session_close=self.CLOSE,
+                    )
+                self.assertEqual(repository.get_calls, [])
+
+
 class ValidatePreEventMarketContextIfCurrentTests(unittest.TestCase):
     def test_calls_cas_rpc_with_exact_timestamp_and_rereads_event(self) -> None:
         confirmed_event = object()
