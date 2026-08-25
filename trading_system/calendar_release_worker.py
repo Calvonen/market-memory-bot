@@ -15,6 +15,7 @@ from trading_system.supabase_event_repository import SupabaseEventExpectationRep
 
 DEFAULT_LOOKBACK_DAYS = 1
 DEFAULT_LOOKAHEAD_DAYS = 0
+TARGET_PAGE_SIZE = 1000
 
 
 @dataclass(frozen=True)
@@ -51,36 +52,52 @@ class SupabaseCalendarReleaseTargetRepository:
         # Supabase or AI processing must remain eligible for a later timer run
         # until an analysis exists for its current expectation version. The
         # caller's start_date is retained for API compatibility and observability.
-        response = (
-            self.client.table("calendar_events")
-            .select("id,instrument,scheduled_date")
-            .eq("status", "tracked")
-            .eq("market", "USA")
-            .eq("event_type", "earnings")
-            .lte("scheduled_date", end_date.isoformat())
-            .order("scheduled_date")
-            .execute()
-        )
         targets: list[CalendarReleaseTarget] = []
-        for row in response.data or []:
-            calendar_id = str(row.get("id") or "").strip()
-            ticker = str(row.get("instrument") or "").strip().upper()
-            scheduled = row.get("scheduled_date")
-            if not calendar_id or not ticker or not scheduled:
-                continue
-            parsed_date = (
-                scheduled
-                if isinstance(scheduled, date)
-                else date.fromisoformat(str(scheduled))
+        cursor: str | None = None
+
+        while True:
+            query = (
+                self.client.table("calendar_events")
+                .select("id,instrument,scheduled_date")
+                .eq("status", "tracked")
+                .eq("market", "USA")
+                .eq("event_type", "earnings")
+                .lte("scheduled_date", end_date.isoformat())
+                .order("id")
+                .limit(TARGET_PAGE_SIZE)
             )
-            targets.append(
-                CalendarReleaseTarget(
-                    calendar_event_id=calendar_id,
-                    event_id=f"calendar:{calendar_id}",
-                    ticker=ticker,
-                    scheduled_date=parsed_date,
+            if cursor is not None:
+                query = query.gt("id", cursor)
+            response = query.execute()
+            rows = list(response.data or [])
+
+            for row in rows:
+                calendar_id = str(row.get("id") or "").strip()
+                ticker = str(row.get("instrument") or "").strip().upper()
+                scheduled = row.get("scheduled_date")
+                if not calendar_id or not ticker or not scheduled:
+                    continue
+                parsed_date = (
+                    scheduled
+                    if isinstance(scheduled, date)
+                    else date.fromisoformat(str(scheduled))
                 )
-            )
+                targets.append(
+                    CalendarReleaseTarget(
+                        calendar_event_id=calendar_id,
+                        event_id=f"calendar:{calendar_id}",
+                        ticker=ticker,
+                        scheduled_date=parsed_date,
+                    )
+                )
+
+            if len(rows) < TARGET_PAGE_SIZE:
+                break
+            next_cursor = str(rows[-1].get("id") or "").strip()
+            if not next_cursor or next_cursor == cursor:
+                raise RuntimeError("calendar release target pagination cursor did not advance")
+            cursor = next_cursor
+
         return tuple(targets)
 
 
