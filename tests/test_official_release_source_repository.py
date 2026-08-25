@@ -82,6 +82,12 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://user:pass@example.com/results")
         with self.assertRaisesRegex(ValueError, "valid host"):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://:")
+        with self.assertRaisesRegex(ValueError, "valid host"):
+            OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://example..com/release")
+        with self.assertRaisesRegex(ValueError, "valid host"):
+            OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://-example.com/release")
+        with self.assertRaisesRegex(ValueError, "valid host"):
+            OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://./release")
         with self.assertRaisesRegex(ValueError, "valid port"):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://example.com:99999/results")
         with self.assertRaisesRegex(ValueError, "version must be positive"):
