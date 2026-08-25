@@ -131,15 +131,7 @@ class _SecVisibleTextParser(HTMLParser):
 
 
 class SecEdgarResultsProvider:
-    """Discover a US earnings release from an official SEC 8-K filing.
-
-    Discovery is intentionally conservative. The provider resolves the exact
-    ticker to one CIK, considers only 8-K filings whose filingDate equals the
-    calendar event's scheduled date, verifies an earnings/results signal in the
-    primary filing, and then selects only a document whose SEC filing-index Type
-    column is explicitly EX-99.1. It never falls back to a nearby filing date or
-    an unrelated exhibit merely because one exists.
-    """
+    """Discover a US earnings release from an official SEC 8-K filing."""
 
     name = "sec_edgar_8k"
     COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -147,11 +139,20 @@ class SecEdgarResultsProvider:
     SUBMISSIONS_URL = SUBMISSIONS_BASE + "CIK{cik10}.json"
     ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data/"
     MIN_DOCUMENT_CHARS = 500
+    _company_tickers_cache: dict[str, Any] | None = None
 
     _EARNINGS_SIGNAL_RE = re.compile(
         r"(?:item\s+2\.02|results\s+of\s+operations\s+and\s+financial\s+condition|"
         r"earnings\s+release|financial\s+results|quarterly\s+results)",
         re.IGNORECASE,
+    )
+    _SEC_CHALLENGE_MARKERS = (
+        "your request originates from an undeclared automated tool",
+        "request rate threshold exceeded",
+        "sec.gov | your request originates",
+        "automated tool",
+        "access denied",
+        "temporarily unavailable",
     )
 
     def __init__(
@@ -176,6 +177,10 @@ class SecEdgarResultsProvider:
         if "@" not in self.user_agent:
             raise ValueError("SEC user agent must include a contact email address")
 
+    @classmethod
+    def clear_company_ticker_cache(cls) -> None:
+        cls._company_tickers_cache = None
+
     def discover(self, event_id: str) -> ReleaseDocument | None:
         cik = self._resolve_cik()
         submissions = self._fetch_json(self.SUBMISSIONS_URL.format(cik10=f"{cik:010d}"))
@@ -188,11 +193,18 @@ class SecEdgarResultsProvider:
                 return document
         return None
 
-    def _resolve_cik(self) -> int:
+    def _company_tickers(self) -> dict[str, Any]:
+        cached = type(self)._company_tickers_cache
+        if cached is not None:
+            return cached
         payload = self._fetch_json(self.COMPANY_TICKERS_URL)
         if not isinstance(payload, dict):
             raise RuntimeError("SEC company ticker response has unexpected shape")
+        type(self)._company_tickers_cache = payload
+        return payload
 
+    def _resolve_cik(self) -> int:
+        payload = self._company_tickers()
         accepted_tickers = {self.ticker, self.ticker.replace(".", "-")}
         matches: list[int] = []
         for row in payload.values():
@@ -233,12 +245,12 @@ class SecEdgarResultsProvider:
         matches: list[dict[str, str]] = []
         for row in files:
             if not isinstance(row, dict):
-                continue
+                raise RuntimeError("SEC historical submissions metadata row is invalid")
             name = str(row.get("name") or "").strip()
             filing_from = str(row.get("filingFrom") or "").strip()
             filing_to = str(row.get("filingTo") or "").strip()
             if not name or not filing_from or not filing_to:
-                continue
+                raise RuntimeError("SEC historical submissions metadata is incomplete")
             if not (filing_from <= target <= filing_to):
                 continue
             if "/" in name or "\\" in name or not name.lower().endswith(".json"):
@@ -271,10 +283,9 @@ class SecEdgarResultsProvider:
         filing_dates = required["filingDate"]
         accessions = required["accessionNumber"]
         primary_documents = required["primaryDocument"]
-        count = len(forms)
         target = self.scheduled_date.isoformat()
         matches: list[dict[str, str]] = []
-        for index in range(count):
+        for index in range(len(forms)):
             if str(forms[index]).upper() != "8-K":
                 continue
             if str(filing_dates[index]) != target:
@@ -308,12 +319,14 @@ class SecEdgarResultsProvider:
         filing_base = f"{self.ARCHIVES_BASE}{cik}/{accession_compact}/"
         primary_url = urljoin(filing_base, filing["primary_document"])
         primary_html = self._fetch_text(primary_url)
+        self._assert_not_sec_challenge_page(primary_html, context="primary filing")
         primary_text = self._html_to_text(primary_html)
         if not self._EARNINGS_SIGNAL_RE.search(primary_text):
             return None
 
         index_url = urljoin(filing_base, f"{accession}-index.html")
         index_html = self._fetch_text(index_url)
+        self._assert_not_sec_challenge_page(index_html, context="filing index")
         parser = _SecIndexDocumentParser()
         parser.feed(index_html)
         if not parser.authoritative_table_recognized:
@@ -339,8 +352,6 @@ class SecEdgarResultsProvider:
             if len(raw_text) < self.MIN_DOCUMENT_CHARS:
                 continue
             if not self._EARNINGS_SIGNAL_RE.search(raw_text):
-                # Even an actual EX-99.1 can be unrelated to results. Require
-                # the exhibit itself to independently carry an earnings signal.
                 continue
             return ReleaseDocument(
                 event_id=event_id,
@@ -350,15 +361,18 @@ class SecEdgarResultsProvider:
                 raw_text=raw_text,
             )
 
-        # Any unevaluated qualifying EX-99.1 means we cannot safely conclude
-        # that the filing has no earnings release. Retry instead of allowing a
-        # successfully fetched but unrelated sibling exhibit to mask the error.
         if retrieval_errors:
             first = retrieval_errors[0]
             raise RuntimeError(
                 f"SEC EX-99.1 retrieval failed for {len(retrieval_errors)} candidate(s): {first}"
             ) from first
         return None
+
+    @classmethod
+    def _assert_not_sec_challenge_page(cls, html: str, *, context: str) -> None:
+        lowered = html.lower()
+        if any(marker in lowered for marker in cls._SEC_CHALLENGE_MARKERS):
+            raise RuntimeError(f"SEC returned a challenge/access page for {context}")
 
     @staticmethod
     def _same_filing_directory(filing_base: str, candidate_url: str) -> bool:
@@ -378,6 +392,7 @@ class SecEdgarResultsProvider:
             text = "\n".join(page.extract_text() or "" for page in reader.pages)
             return text.strip(), "company_results_pdf"
         html = data.decode(charset, errors="replace")
+        self._assert_not_sec_challenge_page(html, context="EX-99.1 exhibit")
         return self._html_to_text(html).strip(), "company_results"
 
     @staticmethod
