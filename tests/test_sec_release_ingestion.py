@@ -34,16 +34,21 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
             </body></html>
         """
         self.index_html = """
-            <html><body>
-            <a href="dks-20260825xex991earnings.htm">EX-99.1 earnings release</a>
-            </body></html>
+            <html><body><table class="tableFile">
+              <tr><th>Seq</th><th>Description</th><th>Document</th><th>Type</th></tr>
+              <tr>
+                <td>2</td><td>Quarterly earnings release</td>
+                <td><a href="opaque-document.htm">opaque-document.htm</a></td>
+                <td>EX-99.1</td>
+              </tr>
+            </table></body></html>
         """
         self.release_text = (
             "DICK'S SPORTING GOODS reports second quarter financial results and earnings. "
             + "Revenue and outlook information. " * 60
         )
 
-    def test_discovers_exact_date_earnings_exhibit_from_filing_index(self) -> None:
+    def test_discovers_exact_date_ex991_from_filing_index_even_with_opaque_filename(self) -> None:
         with patch.object(
             self.provider,
             "_fetch_json",
@@ -63,7 +68,8 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
         assert document is not None
         self.assertEqual(document.event_id, "calendar:event-id")
         self.assertEqual(document.source_type, "company_results")
-        self.assertIn("dks-20260825xex991earnings.htm", document.source_url)
+        self.assertIn("opaque-document.htm", document.source_url)
+        self.assertTrue(document.source_title.startswith("EX-99.1"))
         self.assertEqual(fetch_text.call_count, 2)
         primary_url = fetch_text.call_args_list[0].args[0]
         index_url = fetch_text.call_args_list[1].args[0]
@@ -109,11 +115,16 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
         self.assertEqual(fetch_text.call_count, 1)
         fetch_release.assert_not_called()
 
-    def test_rejects_external_exhibit_link_from_index(self) -> None:
+    def test_rejects_misleading_earnings_link_when_row_type_is_not_ex991(self) -> None:
         index = """
-            <html><body>
-            <a href="https://example.com/ex99-1.htm">EX-99.1 earnings release</a>
-            </body></html>
+            <html><body><table>
+              <tr><td>1</td><td>earnings results</td>
+                  <td><a href="earnings-results.htm">earnings results</a></td>
+                  <td>8-K</td></tr>
+              <tr><td>2</td><td>press release</td>
+                  <td><a href="other.htm">other.htm</a></td>
+                  <td>EX-99.2</td></tr>
+            </table></body></html>
         """
         with patch.object(
             self.provider,
@@ -129,7 +140,29 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
         self.assertIsNone(document)
         fetch_release.assert_not_called()
 
-    def test_exhibit_must_independently_look_like_results(self) -> None:
+    def test_rejects_external_ex991_link_from_index(self) -> None:
+        index = """
+            <html><body><table>
+              <tr><td>2</td><td>earnings release</td>
+                  <td><a href="https://example.com/opaque.htm">opaque.htm</a></td>
+                  <td>EX-99.1</td></tr>
+            </table></body></html>
+        """
+        with patch.object(
+            self.provider,
+            "_fetch_json",
+            side_effect=[self.tickers, self.submissions],
+        ), patch.object(
+            self.provider,
+            "_fetch_text",
+            side_effect=[self.primary_html, index],
+        ), patch.object(self.provider, "_fetch_release_text") as fetch_release:
+            document = self.provider.discover("calendar:event-id")
+
+        self.assertIsNone(document)
+        fetch_release.assert_not_called()
+
+    def test_ex991_must_independently_look_like_results(self) -> None:
         unrelated = "Corporate governance exhibit. " * 50
         with patch.object(
             self.provider,
