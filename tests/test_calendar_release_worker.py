@@ -5,6 +5,7 @@ from datetime import UTC, date, datetime
 from unittest.mock import MagicMock, patch
 
 from trading_system.calendar_release_worker import (
+    DATE_ONLY_OVERDUE_GRACE_HOURS,
     CalendarReleaseTarget,
     run_calendar_release_ingestion_once,
 )
@@ -114,6 +115,11 @@ class CalendarReleaseWorkerTests(unittest.TestCase):
             scheduled_date=date(2026, 8, 25),
         )
         monitor_cls.assert_called_once()
+        self.assertEqual(
+            monitor_cls.call_args.kwargs["overdue_grace_hours"],
+            DATE_ONLY_OVERDUE_GRACE_HOURS,
+        )
+        self.assertEqual(DATE_ONLY_OVERDUE_GRACE_HOURS, 24.0)
         pinned = monitor_cls.call_args.kwargs["expectation_repository"]
         self.assertEqual(pinned.get(self.EVENT_ID).version, 1)
         fake_monitor.run_once.assert_called_once_with(self.EVENT_ID)
