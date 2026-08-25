@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from trading_system.etoro_market_data import EtoroMarketDataProvider
@@ -12,17 +13,43 @@ from trading_system.tracked_event_repository import (
     TrackedEventStatus,
     TrackedEventTimeStatus,
 )
-from trading_system.tracked_event_worker import WORKER_ACTOR, run_forever
+from trading_system.tracked_event_worker import run_forever
 
 
 class _StopLoop(Exception):
     pass
 
 
+class _RpcCall:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+
+    def execute(self):
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(data=[])
+
+
+class _Client:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls = []
+
+    def rpc(self, name, payload):
+        self.calls.append((name, payload))
+        return _RpcCall(self.error)
+
+
 class _Repository:
-    def __init__(self, event: PersistentTrackedEvent) -> None:
+    def __init__(
+        self,
+        event: PersistentTrackedEvent,
+        *,
+        rpc_error: Exception | None = None,
+    ) -> None:
         self.event = event
         self.list_calls = 0
+        self.client = _Client(rpc_error)
 
     def list_runnable(self, *, now, lookahead, max_past):
         self.list_calls += 1
@@ -76,6 +103,33 @@ class TrackedEventPreflightDeadlineCasTests(unittest.TestCase):
             error="event reached event_at before eToro identity was fully armed",
         )
         self.assertEqual(repository.list_calls, 1)
+
+    def test_version_conflict_does_not_terminate_worker_loop(self) -> None:
+        event = _past_unarmed_event()
+        repository = _Repository(
+            event,
+            rpc_error=Exception("tracked_market_event_version_conflict"),
+        )
+
+        async def stop_after_first_poll(_seconds):
+            raise _StopLoop
+
+        with (
+            patch.object(SupabaseTrackedEventRepository, "from_env", return_value=repository),
+            patch.object(EtoroMarketDataProvider, "from_env", return_value=object()),
+            patch(
+                "trading_system.tracked_event_worker.asyncio.sleep",
+                new=AsyncMock(side_effect=stop_after_first_poll),
+            ),
+        ):
+            with self.assertRaises(_StopLoop):
+                asyncio.run(run_forever())
+
+        self.assertEqual(repository.list_calls, 1)
+        self.assertEqual(
+            repository.client.calls[0][0],
+            "fail_tracked_market_event_pre_event_deadline_if_current",
+        )
 
 
 if __name__ == "__main__":
