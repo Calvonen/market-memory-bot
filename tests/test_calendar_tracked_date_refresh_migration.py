@@ -12,11 +12,13 @@ class CalendarTrackedDateRefreshMigrationTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.sql = MIGRATION.read_text(encoding="utf-8")
 
-    def test_tracked_watchlist_row_is_only_locked_after_runtime_binding(self) -> None:
-        self.assertIn("existing_row.status not in ('candidate', 'tracked')", self.sql)
-        self.assertIn("existing_row.status = 'tracked'", self.sql)
-        self.assertIn("from public.tracked_market_events t", self.sql)
-        self.assertIn("where t.calendar_event_id = existing_row.id", self.sql)
+    def test_candidate_and_tracked_rows_share_the_runtime_binding_lock(self) -> None:
+        gate_start = self.sql.index("if existing_row.status not in ('candidate', 'tracked')")
+        gate_end = self.sql.index("end if;", gate_start)
+        gate = self.sql[gate_start:gate_end]
+        self.assertIn("from public.tracked_market_events t", gate)
+        self.assertIn("where t.calendar_event_id = existing_row.id", gate)
+        self.assertNotIn("existing_row.status = 'tracked'", gate)
 
     def test_runtime_bound_row_returns_skipped_locked(self) -> None:
         gate_start = self.sql.index("if existing_row.status not in ('candidate', 'tracked')")
