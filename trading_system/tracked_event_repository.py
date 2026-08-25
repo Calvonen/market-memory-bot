@@ -524,9 +524,25 @@ class SupabaseTrackedEventRepository:
         )
 
     def list_reactions(self, event_id: str) -> tuple[TrackedEventReactionRecord, ...]:
+        # PostgREST serializes PostgreSQL numeric columns as JSON numbers. The
+        # Python JSON decoder would therefore round long reaction return_pct
+        # values through binary float before _row_to_reaction can construct a
+        # Decimal, making an otherwise exact restart replay fail closed. Cast
+        # the three Decimal fields to text at the REST boundary so their exact
+        # database representation reaches Decimal unchanged.
         response = (
             self.client.table("tracked_market_event_reactions")
-            .select("*")
+            .select(
+                "tracked_market_event_id,"
+                "interval_minutes,"
+                "candle_start,"
+                "reference_price::text,"
+                "close_price::text,"
+                "return_pct::text,"
+                "direction,"
+                "evolution,"
+                "observed_at"
+            )
             .eq("tracked_market_event_id", event_id)
             .order("candle_start")
             .order("interval_minutes")
