@@ -66,12 +66,23 @@ class CalendarReleaseSchedulingTests(unittest.TestCase):
 
     def test_timer_health_is_fail_closed_before_success_is_recorded(self) -> None:
         body = self._deploy_body()
-        health = body.index("systemctl is-active --quiet marketai-calendar-release.timer")
+        guard = "if ! /usr/bin/systemctl is-active --quiet marketai-calendar-release.timer; then"
+        start = body.index(guard)
+        end = body.index("\n          fi", start) + len("\n          fi")
+        block = body[start:end]
+
+        self.assertIn(
+            'echo "::error::marketai-calendar-release.timer is not active after deploy"',
+            block,
+        )
+        self.assertIn(
+            "systemctl status marketai-calendar-release.timer --no-pager -l || true",
+            block,
+        )
+        self.assertIn("exit 1", block)
+
         success_record = body.index("last-deployed-backend.sha")
-        self.assertLess(health, success_record)
-        segment = body[max(0, health - 200):success_record]
-        self.assertNotIn("|| true", segment)
-        self.assertNotIn("set +e", segment)
+        self.assertLess(start, success_record)
 
 
 if __name__ == "__main__":
