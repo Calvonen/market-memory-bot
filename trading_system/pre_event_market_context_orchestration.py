@@ -66,6 +66,25 @@ def acquire_and_persist_pre_event_market_context(
     if not normalized_provider_symbol:
         raise ValueError("provider_symbol is required")
 
+    if event.event_at.tzinfo is None or event.event_at.utcoffset() is None:
+        raise ValueError("event_at must be timezone-aware")
+    try:
+        event_local_date = event.event_at.astimezone(ZoneInfo(market_timezone)).date()
+    except Exception as exc:
+        raise ValueError("invalid market_timezone") from exc
+
+    # The base persistence RPC derives the event-local date from the persisted
+    # row's event_at. Mirror that authority here before any provider call so a
+    # caller cannot bypass the no-same-day trust boundary by supplying a later
+    # event_trading_date. Same-day capture requires the canonical validated path.
+    if last_confirmed_closed_session_date >= event_local_date:
+        raise ValueError(
+            "caller-grounded pre-event context requires a session strictly before "
+            "the persisted event local date; same-day capture requires the validated canonical path"
+        )
+
+    # Keep the caller's own trading-date contract as a secondary consistency
+    # check, but it is not the authority for the same-day trust boundary.
     if last_confirmed_closed_session_date >= event_trading_date:
         raise ValueError(
             "caller-grounded pre-event context requires a session strictly before "
