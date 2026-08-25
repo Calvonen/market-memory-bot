@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 
-from trading_system.tracked_event_repository import (
-    SupabaseTrackedEventRepository,
-    TrackedEventStatus,
-)
+from trading_system.tracked_event_repository import SupabaseTrackedEventRepository
 
 
 def fail_tracked_event_if_current(
@@ -16,48 +13,33 @@ def fail_tracked_event_if_current(
     actor: str,
     error: str,
 ) -> None:
-    """Fail an unreferenced TRACKED row only if its exact version is unchanged.
-
-    The filtered UPDATE is one database statement, so a concurrent reference
-    capture, MONITORING transition, reschedule, or any other version-changing
-    write makes the predicate miss instead of terminal-failing a row that has
-    already progressed.
-
-    Lightweight repository fakes used by worker unit tests do not expose the
-    Supabase client; for those interface-only fakes we preserve the historical
-    ``mark_failed`` behavior. Production ``SupabaseTrackedEventRepository``
-    instances always expose ``client`` and therefore always take the CAS path.
-    """
+    """Fail a proven-stale persisted context through the canonical CAS RPC."""
     if expected_event_updated_at.tzinfo is None or expected_event_updated_at.utcoffset() is None:
         raise ValueError("expected_event_updated_at must be timezone-aware")
     if not event_id.strip():
         raise ValueError("event_id is required")
     if not actor.strip():
         raise ValueError("actor is required")
+    if not error.strip():
+        raise ValueError("error is required")
 
-    client = getattr(repository, "client", None)
-    if client is None:
-        repository.mark_failed(event_id, actor=actor, error=error)
-        return
-
-    response = (
-        client.table("tracked_market_events")
-        .update(
+    try:
+        repository.client.rpc(
+            "fail_tracked_market_event_stale_context_if_current",
             {
-                "status": TrackedEventStatus.FAILED.value,
-                "last_error": error[:1000],
-                "updated_by": actor,
-                "updated_at": datetime.now(UTC).isoformat(),
-            }
-        )
-        .eq("id", event_id)
-        .eq("updated_at", expected_event_updated_at.astimezone(UTC).isoformat())
-        .eq("status", TrackedEventStatus.TRACKED.value)
-        .is_("reference_price", "null")
-        .execute()
-    )
-    rows = response.data or []
-    if len(rows) != 1:
-        raise RuntimeError(
-            "tracked event changed before the version-bound failure could be recorded"
-        )
+                "input_event_id": event_id,
+                "input_expected_updated_at": expected_event_updated_at.isoformat(),
+                "input_actor": actor,
+                "input_error": error,
+            },
+        ).execute()
+    except Exception as exc:
+        message = str(exc)
+        if (
+            "tracked_market_event_version_conflict" in message
+            or "tracked_market_event_not_stale_context_failable" in message
+        ):
+            raise RuntimeError(
+                "tracked event changed before the version-bound stale-context failure could be recorded"
+            ) from exc
+        raise
