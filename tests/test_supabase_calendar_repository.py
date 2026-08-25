@@ -352,34 +352,106 @@ class SupabaseCalendarRepositoryPaginationTests(unittest.TestCase):
 
 
 class SupabaseCalendarRepositoryUuidNormalizationTests(unittest.TestCase):
-    def test_track_and_untrack_send_canonical_uuid_text_to_rpc(self) -> None:
-        class RpcClient:
+    def test_track_and_untrack_use_canonical_uuid_through_current_runtime_contract(self) -> None:
+        dashless = "550e8400e29b41d4a716446655440000"
+        canonical = "550e8400-e29b-41d4-a716-446655440000"
+
+        def calendar_row(status: str) -> dict:
+            return {
+                "id": canonical,
+                "company_name": "DICK'S SPORTING GOODS INC",
+                "instrument": "DKS",
+                "market": "USA",
+                "event_type": "earnings",
+                "occurrence_key": "2027Q2",
+                "scheduled_date": "2026-08-25",
+                "source": "finnhub",
+                "status": status,
+                "created_at": "2026-08-24T10:00:00+00:00",
+                "updated_at": "2026-08-25T10:00:00+00:00",
+            }
+
+        class Query:
+            def __init__(self, client, table_name: str) -> None:
+                self.client = client
+                self.table_name = table_name
+
+            def select(self, *_args, **_kwargs):
+                return self
+
+            def eq(self, column: str, value: str):
+                self.client.filters.append((self.table_name, column, value))
+                return self
+
+            def limit(self, *_args, **_kwargs):
+                return self
+
+            def execute(self) -> SimpleNamespace:
+                if self.table_name == "tracked_market_events":
+                    return SimpleNamespace(data=[])
+                self.client.calendar_reads += 1
+                status = "candidate" if self.client.calendar_reads == 1 else "tracked"
+                return SimpleNamespace(data=[calendar_row(status)])
+
+        class Client:
             def __init__(self) -> None:
-                self.payloads: list[dict[str, str]] = []
+                self.filters: list[tuple[str, str, str]] = []
+                self.payloads: list[tuple[str, dict[str, str]]] = []
+                self.calendar_reads = 0
+
+            def table(self, name: str):
+                return Query(self, name)
 
             def rpc(self, name: str, payload: dict[str, str]):
-                self.assert_rpc_name = name
-                self.payloads.append(payload)
+                self.payloads.append((name, payload))
                 return self
 
             def execute(self) -> SimpleNamespace:
                 return SimpleNamespace(data=[])
 
-        dashless = "550e8400e29b41d4a716446655440000"
-        canonical = "550e8400-e29b-41d4-a716-446655440000"
-        client = RpcClient()
-        repo = SupabaseCalendarEventRepository(client)
+        class Resolver:
+            def resolve(self, event):
+                self.event_id = event.calendar_event_id
+                return SimpleNamespace(
+                    event_at=datetime(2026, 8, 25, 13, 30, tzinfo=UTC),
+                    event_time_status=SimpleNamespace(value="estimated"),
+                    provider_timing="bmo",
+                )
 
-        for transition in (repo.track, repo.untrack):
-            with self.subTest(transition=transition.__name__):
-                with self.assertRaises(RuntimeError):
-                    transition(dashless)
+        class Promotion:
+            def promote(self, event, timing, *, actor: str):
+                self.event_id = event.calendar_event_id
+                self.actor = actor
+                self.timing = timing
+                return SimpleNamespace(event_id="22222222-2222-2222-2222-222222222222")
 
-        self.assertEqual(client.assert_rpc_name, "transition_calendar_event_status")
+        client = Client()
+        resolver = Resolver()
+        promotion = Promotion()
+        repo = SupabaseCalendarEventRepository(
+            client,
+            runtime_timing_resolver=resolver,
+            runtime_promotion_repository=promotion,
+        )
+
+        tracked = repo.track(dashless)
+        self.assertEqual(tracked.status, CalendarEventStatus.TRACKED)
+        self.assertEqual(resolver.event_id, canonical)
+        self.assertEqual(promotion.event_id, canonical)
+        self.assertEqual(promotion.actor, "calendar-track-api")
         self.assertEqual(
-            [payload["input_calendar_event_id"] for payload in client.payloads],
+            [value for table, column, value in client.filters if table == "calendar_events" and column == "id"],
             [canonical, canonical],
         )
+        self.assertEqual(
+            [value for table, column, value in client.filters if table == "tracked_market_events" and column == "calendar_event_id"],
+            [canonical],
+        )
+
+        with self.assertRaises(RuntimeError):
+            repo.untrack(dashless)
+        self.assertEqual(client.payloads[-1][0], "transition_calendar_event_status")
+        self.assertEqual(client.payloads[-1][1]["input_calendar_event_id"], canonical)
 
 
 if __name__ == "__main__":
