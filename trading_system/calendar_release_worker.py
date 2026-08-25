@@ -103,64 +103,68 @@ def run_calendar_release_ingestion_once(
 
     results: list[CalendarReleaseWorkerResult] = []
     for target in targets.list_targets(start_date=start_date, end_date=end_date):
-        expectation = expectations.get(target.event_id)
-        if expectation is None:
-            # A tracked calendar event without the v10 release shell is not a
-            # valid ingestion target. Do not invent a parallel event identity.
-            results.append(
-                CalendarReleaseWorkerResult(
-                    target.event_id,
-                    "missing_release_shell",
-                    "current_event_expectations row is missing",
-                )
-            )
-            continue
-        if expectation.instrument.strip().upper() != target.ticker:
-            results.append(
-                CalendarReleaseWorkerResult(
-                    target.event_id,
-                    "identity_conflict",
-                    "release-shell instrument differs from calendar instrument",
-                )
-            )
-            continue
-        if expectation.scheduled_date != target.scheduled_date:
-            results.append(
-                CalendarReleaseWorkerResult(
-                    target.event_id,
-                    "identity_conflict",
-                    "release-shell date differs from calendar date",
-                )
-            )
-            continue
-
-        if releases.has_analysis_for_event_version(
-            event_id=target.event_id,
-            expectation_version=expectation.version,
-        ):
-            results.append(CalendarReleaseWorkerResult(target.event_id, "already_analyzed"))
-            continue
-
-        provider = SecEdgarResultsProvider(
-            ticker=target.ticker,
-            scheduled_date=target.scheduled_date,
-        )
-        monitor = EventReleaseMonitor(
-            expectation_repository=expectations,
-            release_repository=releases,
-            analyzer=analyzer,
-            provider=provider,
-            overdue_grace_hours=float(
-                os.environ.get("MARKETAI_RELEASE_OVERDUE_GRACE_HOURS", "8")
-            ),
-            clock=clock,
-        )
         try:
+            expectation = expectations.get(target.event_id)
+            if expectation is None:
+                # A tracked calendar event without the v10 release shell is not a
+                # valid ingestion target. Do not invent a parallel event identity.
+                results.append(
+                    CalendarReleaseWorkerResult(
+                        target.event_id,
+                        "missing_release_shell",
+                        "current_event_expectations row is missing",
+                    )
+                )
+                continue
+            if expectation.instrument.strip().upper() != target.ticker:
+                results.append(
+                    CalendarReleaseWorkerResult(
+                        target.event_id,
+                        "identity_conflict",
+                        "release-shell instrument differs from calendar instrument",
+                    )
+                )
+                continue
+            if expectation.scheduled_date != target.scheduled_date:
+                results.append(
+                    CalendarReleaseWorkerResult(
+                        target.event_id,
+                        "identity_conflict",
+                        "release-shell date differs from calendar date",
+                    )
+                )
+                continue
+
+            if releases.has_analysis_for_event_version(
+                event_id=target.event_id,
+                expectation_version=expectation.version,
+            ):
+                results.append(
+                    CalendarReleaseWorkerResult(target.event_id, "already_analyzed")
+                )
+                continue
+
+            provider = SecEdgarResultsProvider(
+                ticker=target.ticker,
+                scheduled_date=target.scheduled_date,
+            )
+            monitor = EventReleaseMonitor(
+                expectation_repository=expectations,
+                release_repository=releases,
+                analyzer=analyzer,
+                provider=provider,
+                overdue_grace_hours=float(
+                    os.environ.get("MARKETAI_RELEASE_OVERDUE_GRACE_HOURS", "8")
+                ),
+                clock=clock,
+            )
             ingestion: IngestionResult = monitor.run_once(target.event_id)
         except Exception as exc:
-            # EventReleaseMonitor already records the failed ingestion attempt.
-            # Continue with other tracked companies so one malformed SEC filing
-            # or transient network error never starves the whole batch.
+            # Isolate the entire target workflow. This includes repository reads,
+            # shell validation, persisted-analysis checks, provider construction,
+            # SEC discovery and EventReleaseMonitor persistence/analysis. A single
+            # malformed row or transient provider/repository failure must never
+            # starve later tracked events in the same one-shot batch.
             results.append(
                 CalendarReleaseWorkerResult(
                     target.event_id,
@@ -169,6 +173,7 @@ def run_calendar_release_ingestion_once(
                 )
             )
             continue
+
         results.append(
             CalendarReleaseWorkerResult(
                 target.event_id,
