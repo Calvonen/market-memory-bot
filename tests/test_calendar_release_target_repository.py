@@ -136,6 +136,27 @@ class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
             client.queries[1].calls,
         )
 
+    def test_incomplete_target_row_fails_closed(self):
+        client = _Client(
+            [[
+                {
+                    "id": "22648076-6e43-40fc-ac6e-f57a79ceee31",
+                    "instrument": "",
+                    "scheduled_date": "2026-08-25",
+                }
+            ]]
+        )
+        repository = SupabaseCalendarReleaseTargetRepository(client)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "22648076-6e43-40fc-ac6e-f57a79ceee31.*missing required canonical data",
+        ):
+            repository.list_targets(
+                start_date=date(2026, 8, 24),
+                end_date=date(2026, 8, 25),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
