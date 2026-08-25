@@ -83,6 +83,13 @@ jobs:
           sudo /usr/bin/install -m 0644 deploy/systemd/marketai-calendar-sync.service /etc/systemd/system/marketai-calendar-sync.service
           sudo /usr/bin/install -m 0644 deploy/systemd/marketai-calendar-sync.timer /etc/systemd/system/marketai-calendar-sync.timer
 
+          # US calendar release ingestion is also a scheduled one-shot job.
+          # It discovers official SEC earnings releases and persists the
+          # source document + AI analysis only; it does not execute Strategy,
+          # Risk or Broker code.
+          sudo /usr/bin/install -m 0644 deploy/systemd/marketai-calendar-release.service /etc/systemd/system/marketai-calendar-release.service
+          sudo /usr/bin/install -m 0644 deploy/systemd/marketai-calendar-release.timer /etc/systemd/system/marketai-calendar-release.timer
+
           # Persistent tracked-event monitoring is a long-running observation
           # worker. It reads canonical tracked_market_events, resolves eToro
           # identity, captures a pre-event baseline and persists reactions. It
@@ -91,7 +98,13 @@ jobs:
 
           sudo /usr/bin/systemctl daemon-reload
           sudo /usr/bin/systemctl enable --now marketai-calendar-sync.timer
+          sudo /usr/bin/systemctl enable --now marketai-calendar-release.timer
           sudo /usr/bin/systemctl enable marketai-tracked-events.service
+
+          # Run one release-discovery pass immediately on deploy instead of
+          # waiting for the first timer interval. The worker handles per-event
+          # provider errors independently and exits after this single batch.
+          sudo /usr/bin/systemctl start marketai-calendar-release.service
 
           sudo /usr/bin/systemctl restart marketai-api.service
           sudo /usr/bin/systemctl restart marketai-hays-release.service
@@ -113,6 +126,12 @@ jobs:
           if ! /usr/bin/systemctl is-active --quiet marketai-tracked-events.service; then
             echo "::error::marketai-tracked-events.service is not active after restart"
             sudo /usr/bin/systemctl status marketai-tracked-events.service --no-pager -l || true
+            exit 1
+          fi
+
+          if ! /usr/bin/systemctl is-active --quiet marketai-calendar-release.timer; then
+            echo "::error::marketai-calendar-release.timer is not active after deploy"
+            sudo /usr/bin/systemctl status marketai-calendar-release.timer --no-pager -l || true
             exit 1
           fi
 
