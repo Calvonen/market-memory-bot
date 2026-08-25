@@ -47,13 +47,16 @@ class SupabaseCalendarReleaseTargetRepository:
         start_date: date,
         end_date: date,
     ) -> tuple[CalendarReleaseTarget, ...]:
+        # Do not apply a lower date bound here. An event that failed SEC,
+        # Supabase or AI processing must remain eligible for a later timer run
+        # until an analysis exists for its current expectation version. The
+        # caller's start_date is retained for API compatibility and observability.
         response = (
             self.client.table("calendar_events")
             .select("id,instrument,scheduled_date")
             .eq("status", "tracked")
-            .eq("market", "US")
+            .eq("market", "USA")
             .eq("event_type", "earnings")
-            .gte("scheduled_date", start_date.isoformat())
             .lte("scheduled_date", end_date.isoformat())
             .order("scheduled_date")
             .execute()
