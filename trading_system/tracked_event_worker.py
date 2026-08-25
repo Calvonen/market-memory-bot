@@ -10,8 +10,18 @@ from trading_system.event_market_reaction import (
     EventMarketReactionBaseline,
     EventMarketReactionPipeline,
 )
+from trading_system.market_session_profile import has_grounded_market_session_profile
+from trading_system.pre_event_market_context_orchestration import (
+    acquire_and_persist_pre_event_market_context_for_event,
+    persisted_pre_event_market_context_is_current,
+)
+from trading_system.pre_event_market_context_persistence import (
+    fail_pre_event_deadline_if_current,
+    validate_pre_event_market_context_if_current,
+)
 from trading_system.reaction_monitoring_profile import DEFAULT_EVENT_REACTION_MONITORING_PROFILE
 from trading_system.tracked_candle_pipeline import TrackedMarketCandle
+from trading_system.tracked_event_cas import fail_tracked_event_if_current
 from trading_system.tracked_event_config import snapshot_effective_tracking_config
 from trading_system.tracked_event_reaction_live import stream_tracked_event_reaction_runtime
 from trading_system.tracked_event_reaction_runtime import TrackedEventReactionRuntime
@@ -513,6 +523,197 @@ async def monitor_one_event(
     repository.mark_completed(event.event_id, actor=WORKER_ACTOR, completed_at=datetime.now(UTC))
 
 
+def _fail_pre_event_deadline(
+    repository: SupabaseTrackedEventRepository,
+    *,
+    event: PersistentTrackedEvent,
+    error: str,
+) -> None:
+    """Terminal-fail a missed pre-event deadline, bound to ``event``'s version.
+
+    ``event`` supplies only the version this decision was made from; the RPC is
+    the authority on whether the deadline actually passed. If the row changed -
+    a reschedule above all - it raises instead of writing, which surfaces as a
+    retryable task failure so the next poll re-decides from the current row.
+    """
+    if event.updated_at is None:
+        raise RuntimeError("tracked event has no updated_at version")
+    fail_pre_event_deadline_if_current(
+        repository,
+        event_id=event.event_id,
+        expected_event_updated_at=event.updated_at,
+        actor=WORKER_ACTOR,
+        error=error,
+    )
+
+
+async def _prepare_and_monitor_one_event(
+    event: PersistentTrackedEvent,
+    *,
+    repository: SupabaseTrackedEventRepository,
+    provider: EtoroMarketDataProvider,
+    monitor_hours: float,
+    reference_lead_seconds: float,
+    max_wait_for_market_hours: float,
+) -> None:
+    """Prepare grounded pre-event context before entering the live monitor.
+
+    Only new TRACKED events without a reference are prepared here, and only on
+    markets that already have a grounded exact eToro market session profile.
+    Preparation needs a real exchange calendar and market timezone for the
+    broker's exact market label, and those are registered one grounded market at
+    a time (see market_session_profile.py). An event on a market that has not
+    been grounded yet keeps exactly its existing reaction-monitoring behavior:
+    it is never prepared, and never fails for the absence of a profile - that
+    absence means "not rolled out here yet", not "misconfigured event". The
+    predicate is deliberately an explicit exact-label lookup rather than a
+    caught resolve_market_session_profile() error, so rollout scope can never be
+    widened by alias, ticker, country, or calendar-market inference.
+
+    MONITORING rows and already-referenced legacy TRACKED rows predate this
+    worker wiring and continue through the existing monitor path unchanged.
+    External calendar and Yahoo work runs off the asyncio loop. Preparation
+    failures raised before the event's deadline stay retryable at the
+    run_forever task boundary; a failure - including one from an acquisition
+    call that was still running when event_at passed - discovered at or after
+    that deadline terminal-fails the event instead, so a slow or
+    repeatedly-failing acquisition can never keep it stuck retrying in TRACKED
+    past max_past. Every such terminal failure goes
+    through _fail_pre_event_deadline, which is compare-and-swap bound to the
+    version the decision was made from: the RPC re-checks the deadline against
+    the locked current row, so an event rescheduled into the future is never
+    terminal-failed on a stale event_at - that surfaces as a retryable conflict.
+
+    A restart after context was already captured but before the reference was
+    taken must not blindly repeat the calendar/Yahoo work, but it also must not
+    blindly trust a persisted snapshot. upsert_tracked_market_event freezes
+    event_at (and market/event_time_status/title) once pre_event_market_context
+    is non-null, the same way it already freezes them once reference_price is
+    set, so a newly captured or already-persisted context cannot be outlived by
+    a later event_at edit going forward. Revalidation stays in place as a second,
+    independent layer for rows unprotected by that freeze (captured before this
+    invariant existed) and as defense in depth: it re-reads the row fresh from
+    the repository - never trusting the possibly-stale event this coroutine was
+    called with - and confirms, with local calendar/session logic and no Yahoo
+    fetch, that its persisted session_date/previous_session_date still match
+    that fresh event_at. The revalidated row is then re-confirmed atomically
+    (row lock + exact version match in one transaction, via
+    validate_pre_event_market_context_if_current) immediately before monitoring
+    starts; a version conflict there is retryable rather than terminal, since it
+    just means a later poll must re-evaluate against whatever the event now is.
+    A stale snapshot (event_at moved to a different trading date since capture)
+    fails closed through a version/status/reference-bound UPDATE, so a worker
+    that races with reference capture, MONITORING, or another row edit cannot
+    terminal-fail a version it did not validate.
+
+    The deadline RPC additionally refuses to fail any row whose
+    pre_event_market_context is already set: a committed capture is proof the
+    preparation succeeded, even when the caller only saw an exception (a lost
+    response, or the acquisition thread raising after the capture committed).
+    Such an attempt raises instead of writing, which is retryable, and the next
+    poll continues down the persisted-context path above. The practical
+    consequence is that once a context exists, only a revalidation that
+    *proves* it stale can terminally fail the event; a transient revalidation
+    error past event_at retries rather than recording a terminal outcome that
+    would misdescribe what happened.
+    """
+    is_unreferenced_tracked_event = (
+        event.status == TrackedEventStatus.TRACKED
+        and event.reference_price is None
+        and bool(event.resolved_etoro_market)
+        and has_grounded_market_session_profile(event.resolved_etoro_market)
+    )
+    if is_unreferenced_tracked_event and event.pre_event_market_context is None:
+        if datetime.now(UTC) >= event.event_at:
+            # This event object can be stale (list_runnable read it earlier), so
+            # its event_at only decides whether to *attempt* the terminal
+            # failure. The RPC re-checks the deadline against the locked current
+            # row and refuses if the event was rescheduled in the meantime.
+            _fail_pre_event_deadline(
+                repository,
+                event=event,
+                error="event reached event_at before pre-event market context was prepared",
+            )
+            return
+        try:
+            event = await asyncio.to_thread(
+                acquire_and_persist_pre_event_market_context_for_event,
+                repository,
+                event_id=event.event_id,
+                ticker=event.instrument,
+                actor=WORKER_ACTOR,
+            )
+        except Exception as exc:
+            # Acquisition ran off-loop and can block for a while (Yahoo fetch,
+            # exchange-calendar resolution); event_at may have been reached
+            # during that call even though the pre-check above passed. Decide
+            # retryable vs terminal from a fresh read bound to its own version,
+            # never the event_at this coroutine started with, so a slow
+            # acquisition can neither leave the event stuck retrying TRACKED
+            # past max_past nor terminal-fail one that was rescheduled.
+            current_event = repository.get(event.event_id)
+            if current_event is None:
+                raise RuntimeError(f"tracked event {event.event_id} was not found") from exc
+            if datetime.now(UTC) >= current_event.event_at:
+                _fail_pre_event_deadline(
+                    repository,
+                    event=current_event,
+                    error=(
+                        "event reached event_at during pre-event market context "
+                        f"acquisition: {exc}"
+                    ),
+                )
+                return
+            raise
+    elif is_unreferenced_tracked_event:
+        current_event = repository.get(event.event_id)
+        if current_event is None:
+            raise RuntimeError(f"tracked event {event.event_id} was not found")
+        if current_event.updated_at is None:
+            raise RuntimeError("tracked event has no updated_at version")
+
+        try:
+            is_current = await asyncio.to_thread(
+                persisted_pre_event_market_context_is_current, current_event
+            )
+        except Exception as exc:
+            if datetime.now(UTC) >= current_event.event_at:
+                _fail_pre_event_deadline(
+                    repository,
+                    event=current_event,
+                    error=(
+                        "pre-event market context revalidation failed at or after "
+                        f"event_at: {exc}"
+                    ),
+                )
+                return
+            raise
+        if not is_current:
+            fail_tracked_event_if_current(
+                repository,
+                event_id=current_event.event_id,
+                expected_event_updated_at=current_event.updated_at,
+                actor=WORKER_ACTOR,
+                error="persisted pre-event market context no longer matches the event's current event_at",
+            )
+            return
+
+        event = validate_pre_event_market_context_if_current(
+            repository,
+            event_id=current_event.event_id,
+            expected_event_updated_at=current_event.updated_at,
+        )
+
+    await monitor_one_event(
+        event,
+        repository=repository,
+        provider=provider,
+        monitor_hours=monitor_hours,
+        reference_lead_seconds=reference_lead_seconds,
+        max_wait_for_market_hours=max_wait_for_market_hours,
+    )
+
+
 async def run_forever() -> None:
     repository = SupabaseTrackedEventRepository.from_env()
     provider = EtoroMarketDataProvider.from_env()
@@ -598,7 +799,7 @@ async def run_forever() -> None:
                 continue
 
             active[event.event_id] = asyncio.create_task(
-                monitor_one_event(
+                _prepare_and_monitor_one_event(
                     event,
                     repository=repository,
                     provider=provider,

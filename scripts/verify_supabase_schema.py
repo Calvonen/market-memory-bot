@@ -85,10 +85,14 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
         "fail_tracked_market_event_pre_event_deadline_if_current_function_exists",
         "fail_tracked_market_event_pre_event_deadline_if_current() function",
     ),
+    (
+        "fail_tracked_market_event_stale_context_if_current_function_exists",
+        "fail_tracked_market_event_stale_context_if_current() function",
+    ),
 )
 
 REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 2
-REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 6
+REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 7
 
 
 def main() -> int:
