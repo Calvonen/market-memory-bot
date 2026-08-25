@@ -22,6 +22,9 @@ class TrackedEventStatus(str, Enum):
     FAILED = "failed"
 
 
+# Active/history split for GET /api/v1/tracked-events (view=active|history):
+# tracked/monitoring are always active; a terminal status stays active for
+# this long past its terminal updated_at before it becomes history.
 _ACTIVE_HISTORY_WINDOW = timedelta(hours=24)
 _ALWAYS_ACTIVE_STATUSES = (
     TrackedEventStatus.TRACKED.value,
@@ -66,7 +69,15 @@ class PersistentTrackedEvent:
     updated_by: str = ""
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    # Immutable snapshot of the effective reaction-monitoring settings this
+    # event was actually tracked with (see tracked_event_config.py). None for
+    # rows captured before this column existed - never fabricated here from
+    # today's defaults, since that would silently misrepresent history.
     tracking_config_snapshot: dict[str, Any] | None = None
+    # Persisted immutable pre-event context snapshot (see
+    # pre_event_market_context_persistence.py). None until captured; the
+    # worker uses this to skip redundant calendar/Yahoo reacquisition on
+    # restart rather than issuing a separate lookup.
     pre_event_market_context: dict[str, Any] | None = None
 
 
@@ -171,6 +182,12 @@ class SupabaseTrackedEventRepository:
     def list_active(
         self, *, limit: int = 20, now: datetime
     ) -> tuple[PersistentTrackedEvent, ...]:
+        # tracked/monitoring are always active; a terminal event (completed/
+        # failed/cancelled) stays active until 24h past its terminal
+        # updated_at, then falls into list_history() - see mark_completed/
+        # mark_failed above, which both bump updated_at on the terminal
+        # transition. completed_at is not shared by failed/cancelled, so
+        # updated_at is the only timestamp common to all three.
         if limit < 1 or limit > 100:
             raise ValueError("limit must be between 1 and 100")
         if now.tzinfo is None or now.utcoffset() is None:
@@ -190,6 +207,12 @@ class SupabaseTrackedEventRepository:
                 .select("*")
                 .in_("status", list(_TERMINAL_STATUSES))
                 .gte("updated_at", cutoff)
+                # updated_at is only the 24h cutoff filter above, never the
+                # ranking: preselection must order by the same key (event_at)
+                # as the merged result below, or a terminal row with an
+                # older updated_at but a newer event_at than `limit` other
+                # rows could be dropped here before it ever reaches the
+                # final event_at top-N.
                 .order("event_at", desc=True)
                 .limit(limit)
                 .execute()
@@ -252,6 +275,27 @@ class SupabaseTrackedEventRepository:
             .select("*,reference_price_exact:reference_price::text")
             .in_("status", [TrackedEventStatus.TRACKED.value, TrackedEventStatus.MONITORING.value])
             .lte("event_at", upper)
+            # max_past normally drops events whose event_at is long gone, so a
+            # worker restart does not resurrect stale backlog. One class of row
+            # must survive that cutoff: a TRACKED event that has not captured a
+            # reference yet, because its pre-event lifecycle has not reached any
+            # durable outcome. Both shapes need it, for the same reason:
+            #
+            #   context persisted - preparation succeeded, so the deadline RPC
+            #     deliberately refuses to terminal-fail it (see 20260902096000).
+            #     If a transient revalidation dependency stays down past
+            #     max_past, dropping it here strands it in TRACKED forever.
+            #   context null - it still needs the deadline RPC to record a
+            #     terminal failure. A worker that was down from before event_at
+            #     until after the cutoff would otherwise never get the chance,
+            #     leaving the event silently stuck in TRACKED.
+            #
+            # So the invariant is simply "TRACKED and not yet referenced", and
+            # it is self-draining: the row leaves this set for good the moment
+            # it captures a reference, enters MONITORING, or is terminally
+            # failed - which is exactly what the next poll drives it to.
+            # MONITORING rows and terminal rows keep the plain max_past
+            # contract, so old backlog cannot accumulate here.
             .or_(
                 f"event_at.gte.{lower},"
                 "and("
@@ -392,6 +436,12 @@ class SupabaseTrackedEventRepository:
                 },
             ).execute()
         except Exception as exc:
+            # capture_tracked_market_event_config_snapshot() raises this exact
+            # message (no dedicated errcode, same as the sibling
+            # capture_tracked_market_event_reference()'s _locked conflict) when
+            # a *different* snapshot is already stored - never overwritten.
+            # Translate it to RuntimeError so callers can distinguish this
+            # permanent, non-retryable conflict from a transient RPC failure.
             if "tracked_market_event_config_snapshot_locked" in str(exc):
                 raise RuntimeError(
                     f"tracked event {event_id} already has a different tracking_config_snapshot"
@@ -474,6 +524,12 @@ class SupabaseTrackedEventRepository:
         )
 
     def list_reactions(self, event_id: str) -> tuple[TrackedEventReactionRecord, ...]:
+        # PostgREST serializes PostgreSQL numeric columns as JSON numbers. The
+        # Python JSON decoder would therefore round long reaction return_pct
+        # values through binary float before _row_to_reaction can construct a
+        # Decimal, making an otherwise exact restart replay fail closed. Cast
+        # the three Decimal fields to text at the REST boundary so their exact
+        # database representation reaches Decimal unchanged.
         response = (
             self.client.table("tracked_market_event_reactions")
             .select(
@@ -560,7 +616,12 @@ class SupabaseTrackedEventRepository:
             updated_by=str(value("updated_by") or ""),
             created_at=cls._parse_datetime_optional(value("created_at")),
             updated_at=cls._parse_datetime_optional(value("updated_at")),
+            # NULL stays None here - a missing/NULL snapshot must never be
+            # defaulted to {} or invented from current settings, or history
+            # would silently look like it was tracked with today's config.
             tracking_config_snapshot=value("tracking_config_snapshot"),
+            # NULL stays None here for the same reason as tracking_config_snapshot
+            # above - a not-yet-captured context must never be defaulted to {}.
             pre_event_market_context=value("pre_event_market_context"),
         )
 
