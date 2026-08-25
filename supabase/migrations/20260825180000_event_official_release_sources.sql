@@ -112,4 +112,44 @@ $$;
 revoke all on function public.set_event_official_release_source(text, text, text, text, integer) from public;
 grant execute on function public.set_event_official_release_source(text, text, text, text, integer) to service_role;
 
+create function public.clear_event_official_release_source(
+  input_event_id text,
+  input_expected_version integer
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  current_version integer;
+begin
+  if input_expected_version is null or input_expected_version < 1 then
+    raise exception 'invalid_expected_version' using errcode = '22023';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended(input_event_id, 2));
+
+  select version into current_version
+  from public.event_official_release_sources
+  where event_id = input_event_id;
+
+  if not found then
+    raise exception 'version_conflict: expected %, current 0', input_expected_version using errcode = '40001';
+  end if;
+
+  if current_version <> input_expected_version then
+    raise exception 'version_conflict: expected %, current %', input_expected_version, current_version using errcode = '40001';
+  end if;
+
+  delete from public.event_official_release_sources
+  where event_id = input_event_id;
+
+  return true;
+end;
+$$;
+
+revoke all on function public.clear_event_official_release_source(text, integer) from public;
+grant execute on function public.clear_event_official_release_source(text, integer) to service_role;
+
 commit;
