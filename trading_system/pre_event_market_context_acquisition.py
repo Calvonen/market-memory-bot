@@ -17,13 +17,19 @@ DailyOhlcvFetcher = Callable[[str, str, str], pd.DataFrame]
 
 def acquire_pre_event_market_context(
     *,
-    ticker: str,
+    provider_symbol: str,
     event_trading_date: date,
     last_confirmed_closed_session_date: date,
     previous_confirmed_closed_session_date: date,
     fetcher: DailyOhlcvFetcher = fetch_ohlcv,
 ) -> PreEventMarketContext:
     """Fetch Yahoo daily OHLCV for two independently confirmed closed sessions.
+
+    ``provider_symbol`` is the market-data provider's ticker, not the broker
+    instrument. Broker and provider are separate namespaces (eToro WDS.ASX is
+    Yahoo WDS.AX), so the caller must translate through the grounded market
+    profile first - see market_session_profile.resolve_provider_symbol. This
+    adapter performs no translation of its own.
 
     The caller owns the exchange calendar/session-close decision and supplies the
     exact latest and immediately preceding closed session dates. This adapter
@@ -36,15 +42,15 @@ def acquire_pre_event_market_context(
     which is checked here rather than assumed.
     """
 
-    normalized_ticker = ticker.strip().upper()
-    if not normalized_ticker:
-        raise ValueError("ticker is required")
+    normalized_symbol = provider_symbol.strip().upper()
+    if not normalized_symbol:
+        raise ValueError("provider_symbol is required")
     if previous_confirmed_closed_session_date >= last_confirmed_closed_session_date:
         raise ValueError("previous confirmed session must precede last confirmed session")
     if last_confirmed_closed_session_date > event_trading_date:
         raise ValueError("confirmed closed session must not be after the event trading date")
 
-    daily_ohlcv = fetcher(normalized_ticker, "1mo", "1d")
+    daily_ohlcv = fetcher(normalized_symbol, "1mo", "1d")
     if not isinstance(daily_ohlcv.index, pd.DatetimeIndex):
         raise ValueError("daily_ohlcv index must be a DatetimeIndex")
     if daily_ohlcv.index.tz is not None:

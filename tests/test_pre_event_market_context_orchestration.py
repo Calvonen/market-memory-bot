@@ -108,6 +108,7 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
             repository,
             event_id="event-1",
             ticker=" exm.l ",
+            provider_symbol="EXM.L",
             event_trading_date=date(2026, 8, 24),
             last_confirmed_closed_session_date=date(2026, 8, 21),
             previous_confirmed_closed_session_date=date(2026, 8, 20),
@@ -189,7 +190,7 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
 
         self.assertIs(saved, event)
         self.assertEqual(calendar_ids, ["XASX"])
-        self.assertEqual(fetch_calls, [("WDS.ASX", "1mo", "1d")])
+        self.assertEqual(fetch_calls, [("WDS.AX", "1mo", "1d")])
         self.assertEqual(repository.get_calls, ["event-1", "event-1"])
         rpc_name, payload = repository.client.calls[0]
         self.assertEqual(
@@ -269,7 +270,7 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
             ohlcv_dates=["2026-08-21", "2026-08-24"],
         )
 
-        self.assertEqual(fetch_calls, [("WDS.ASX", "1mo", "1d")])
+        self.assertEqual(fetch_calls, [("WDS.AX", "1mo", "1d")])
         _rpc_name, payload = repository.client.calls[0]
         self.assertEqual(payload["input_pre_event_market_context"]["session_date"], "2026-08-24")
         self.assertEqual(
@@ -428,6 +429,7 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
                 repository,
                 event_id="event-1",
                 ticker="OTHER.L",
+                provider_symbol="OTHER.L",
                 event_trading_date=date(2026, 8, 24),
                 last_confirmed_closed_session_date=date(2026, 8, 21),
                 previous_confirmed_closed_session_date=date(2026, 8, 20),
@@ -459,6 +461,86 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
         )
 
         self.assertTrue(is_current)
+
+    def test_yahoo_is_queried_with_the_provider_symbol_not_the_broker_symbol(self) -> None:
+        # eToro WDS.ASX is Yahoo WDS.AX. The persisted broker instrument must
+        # never be handed to the data provider as if it were a provider ticker.
+        repository, fetch_calls = self._acquire_at(
+            event_at=datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
+            sessions=["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25"],
+            now=datetime(2026, 8, 24, 23, 0, tzinfo=UTC),
+            ohlcv_dates=["2026-08-21", "2026-08-24"],
+        )
+
+        self.assertEqual(fetch_calls, [("WDS.AX", "1mo", "1d")])
+        self.assertNotIn("WDS.ASX", [symbol for symbol, _p, _i in fetch_calls])
+        # The event itself keeps its broker identity - translation is for the
+        # provider call only and never rewrites what is tracked or persisted.
+        self.assertEqual(repository.saved_event.instrument, "WDS.ASX")
+        _name, payload = repository.client.calls[0]
+        self.assertNotIn("WDS.AX", str(payload["input_pre_event_market_context"]))
+
+    def test_a_second_sydney_instrument_resolves_through_the_same_policy(self) -> None:
+        # Guards against a WDS-only mapping: the grounded Sydney profile must
+        # translate every instrument carrying the market's broker suffix.
+        event = SimpleNamespace(
+            instrument="NHF.ASX",
+            resolved_etoro_market="Sydney",
+            event_at=datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 8, 24, 14, 47, tzinfo=UTC),
+        )
+        repository = _Repository(event=event)
+        fetch_calls = []
+
+        def fetcher(ticker, period, interval):
+            fetch_calls.append((ticker, period, interval))
+            return self._ohlcv(["2026-08-21", "2026-08-24"])
+
+        with patch(
+            "trading_system.pre_event_market_context_orchestration.datetime",
+            _FrozenNow(datetime(2026, 8, 24, 23, 0, tzinfo=UTC)),
+        ):
+            acquire_and_persist_pre_event_market_context_for_event(
+                repository,
+                event_id="event-1",
+                ticker="NHF.ASX",
+                actor="tracked-event-worker",
+                fetcher=fetcher,
+                calendar_loader=lambda calendar_id: _Calendar(
+                    ["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25"]
+                ),
+            )
+
+        self.assertEqual(fetch_calls, [("NHF.AX", "1mo", "1d")])
+        self.assertEqual(repository.saved_event.instrument, "NHF.ASX")
+
+    def test_unmappable_broker_symbol_fails_closed_before_any_fetch(self) -> None:
+        # An instrument that does not carry the grounded market's broker suffix
+        # is refused before the provider is contacted - never guessed at.
+        event = SimpleNamespace(
+            instrument="WDS.XYZ",
+            resolved_etoro_market="Sydney",
+            event_at=datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 8, 24, 14, 47, tzinfo=UTC),
+        )
+        repository = _Repository(event=event)
+        fetch_calls = []
+        calendar_calls = []
+
+        with self.assertRaisesRegex(ValueError, "does not carry the Sydney broker suffix"):
+            acquire_and_persist_pre_event_market_context_for_event(
+                repository,
+                event_id="event-1",
+                ticker="WDS.XYZ",
+                actor="tracked-event-worker",
+                fetcher=lambda *args: fetch_calls.append(args),
+                calendar_loader=lambda calendar_id: calendar_calls.append(calendar_id),
+            )
+
+        self.assertEqual(fetch_calls, [])
+        self.assertEqual(calendar_calls, [])
+        self.assertEqual(repository.client.calls, [])
+        self.assertFalse(repository.rpc_executed)
 
     def test_only_a_post_close_event_can_emit_a_same_day_snapshot(self) -> None:
         # The DB capture RPC permits session_date == the event's local market
@@ -616,6 +698,7 @@ class PreEventMarketContextOrchestrationTests(unittest.TestCase):
                 repository,
                 event_id="event-1",
                 ticker="EXM.L",
+                provider_symbol="EXM.L",
                 event_trading_date=date(2026, 8, 24),
                 last_confirmed_closed_session_date=date(2026, 8, 21),
                 previous_confirmed_closed_session_date=date(2026, 8, 20),

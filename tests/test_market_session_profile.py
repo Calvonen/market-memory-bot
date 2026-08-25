@@ -8,6 +8,7 @@ from trading_system.market_session_profile import (
     MarketSessionProfile,
     has_grounded_market_session_profile,
     resolve_market_session_profile,
+    resolve_provider_symbol,
 )
 
 
@@ -17,6 +18,8 @@ class MarketSessionProfileTests(unittest.TestCase):
             etoro_market="Observed Market Label",
             market_timezone="Europe/London",
             calendar_id="OBSERVED_CALENDAR",
+            broker_symbol_suffix=".OBS",
+            provider_symbol_suffix=".OB",
         )
 
         resolved = resolve_market_session_profile(
@@ -52,6 +55,8 @@ class MarketSessionProfileTests(unittest.TestCase):
             etoro_market="Observed Market Label",
             market_timezone="Europe/London",
             calendar_id="OBSERVED_CALENDAR",
+            broker_symbol_suffix=".OBS",
+            provider_symbol_suffix=".OB",
         )
 
         with self.assertRaisesRegex(ValueError, "unsupported eToro market"):
@@ -62,11 +67,15 @@ class MarketSessionProfileTests(unittest.TestCase):
             etoro_market="Observed Market Label",
             market_timezone="Europe/London",
             calendar_id="CALENDAR_A",
+            broker_symbol_suffix=".OBS",
+            provider_symbol_suffix=".OB",
         )
         second = MarketSessionProfile(
             etoro_market="Observed Market Label",
             market_timezone="Europe/London",
             calendar_id="CALENDAR_B",
+            broker_symbol_suffix=".OBS",
+            provider_symbol_suffix=".OB",
         )
 
         with self.assertRaisesRegex(ValueError, "ambiguous eToro market profile"):
@@ -81,6 +90,8 @@ class MarketSessionProfileTests(unittest.TestCase):
                 etoro_market="Observed Market Label",
                 market_timezone="Not/A_Timezone",
                 calendar_id="OBSERVED_CALENDAR",
+                broker_symbol_suffix=".OBS",
+                provider_symbol_suffix=".OB",
             )
 
     def test_profile_and_lookup_require_trimmed_nonblank_values(self) -> None:
@@ -89,10 +100,91 @@ class MarketSessionProfileTests(unittest.TestCase):
                 etoro_market=" Observed Market Label ",
                 market_timezone="Europe/London",
                 calendar_id="OBSERVED_CALENDAR",
+                broker_symbol_suffix=".OBS",
+                provider_symbol_suffix=".OB",
             )
 
         with self.assertRaisesRegex(ValueError, "etoro_market"):
             resolve_market_session_profile(" ", profiles=())
+
+
+class ResolveProviderSymbolTests(unittest.TestCase):
+    def test_sydney_translates_the_asx_broker_suffix_to_the_yahoo_one(self) -> None:
+        self.assertEqual(SYDNEY_MARKET_SESSION_PROFILE.broker_symbol_suffix, ".ASX")
+        self.assertEqual(SYDNEY_MARKET_SESSION_PROFILE.provider_symbol_suffix, ".AX")
+        self.assertEqual(
+            resolve_provider_symbol("WDS.ASX", profile=SYDNEY_MARKET_SESSION_PROFILE),
+            "WDS.AX",
+        )
+
+    def test_policy_covers_every_sydney_instrument_not_just_the_first_one(self) -> None:
+        # The policy is declared once for the grounded market, so any instrument
+        # carrying the market's broker suffix resolves - a per-instrument table
+        # would silently fail closed on the second tracked ASX event.
+        for broker, provider in (
+            ("WDS.ASX", "WDS.AX"),
+            ("NHF.ASX", "NHF.AX"),
+            ("BHP.ASX", "BHP.AX"),
+            ("A2M.ASX", "A2M.AX"),
+        ):
+            with self.subTest(broker=broker):
+                self.assertEqual(
+                    resolve_provider_symbol(broker, profile=SYDNEY_MARKET_SESSION_PROFILE),
+                    provider,
+                )
+
+    def test_symbol_without_the_declared_broker_suffix_fails_closed(self) -> None:
+        # No guessing: a symbol from another namespace is refused outright
+        # rather than being passed through or patched up.
+        for broker in ("WDS", "WDS.AX", "WDS.L", "WDS.NASDAQ", "WDS."):
+            with self.subTest(broker=broker):
+                with self.assertRaises(ValueError):
+                    resolve_provider_symbol(broker, profile=SYDNEY_MARKET_SESSION_PROFILE)
+
+    def test_never_case_folds_the_broker_symbol(self) -> None:
+        for broker in ("wds.asx", "WDS.asx", "Wds.Asx"):
+            with self.subTest(broker=broker):
+                with self.assertRaises(ValueError):
+                    resolve_provider_symbol(broker, profile=SYDNEY_MARKET_SESSION_PROFILE)
+
+    def test_blank_untrimmed_or_baseless_symbols_fail_closed(self) -> None:
+        for broker in ("", "   ", " WDS.ASX", "WDS.ASX ", ".ASX", "A.B.ASX"):
+            with self.subTest(broker=broker):
+                with self.assertRaises(ValueError):
+                    resolve_provider_symbol(broker, profile=SYDNEY_MARKET_SESSION_PROFILE)
+
+    def test_translation_is_driven_only_by_the_supplied_profile(self) -> None:
+        # Nothing is inferred from the ticker, the country, or the calendar id:
+        # the same base resolves differently under a different declared policy.
+        other = MarketSessionProfile(
+            etoro_market="Observed Market Label",
+            market_timezone="Europe/London",
+            calendar_id="XASX",
+            broker_symbol_suffix=".ASX",
+            provider_symbol_suffix=".OTHER",
+        )
+
+        self.assertEqual(resolve_provider_symbol("WDS.ASX", profile=other), "WDS.OTHER")
+
+    def test_profile_rejects_a_malformed_symbol_policy(self) -> None:
+        for broker_suffix, provider_suffix in (
+            ("", ".AX"),
+            (".ASX", ""),
+            ("ASX", ".AX"),
+            (".ASX", "AX"),
+            (" .ASX", ".AX"),
+            (".asx", ".AX"),
+            (".ASX", ".ax"),
+        ):
+            with self.subTest(broker=broker_suffix, provider=provider_suffix):
+                with self.assertRaises(ValueError):
+                    MarketSessionProfile(
+                        etoro_market="Observed Market Label",
+                        market_timezone="Europe/London",
+                        calendar_id="OBSERVED_CALENDAR",
+                        broker_symbol_suffix=broker_suffix,
+                        provider_symbol_suffix=provider_suffix,
+                    )
 
 
 class HasGroundedMarketSessionProfileTests(unittest.TestCase):
@@ -122,11 +214,15 @@ class HasGroundedMarketSessionProfileTests(unittest.TestCase):
             etoro_market="Observed Market Label",
             market_timezone="Europe/London",
             calendar_id="CALENDAR_A",
+            broker_symbol_suffix=".OBS",
+            provider_symbol_suffix=".OB",
         )
         second = MarketSessionProfile(
             etoro_market="Observed Market Label",
             market_timezone="Europe/London",
             calendar_id="CALENDAR_B",
+            broker_symbol_suffix=".OBS",
+            provider_symbol_suffix=".OB",
         )
 
         self.assertFalse(
@@ -140,6 +236,8 @@ class HasGroundedMarketSessionProfileTests(unittest.TestCase):
             etoro_market="Observed Market Label",
             market_timezone="Europe/London",
             calendar_id="OBSERVED_CALENDAR",
+            broker_symbol_suffix=".OBS",
+            provider_symbol_suffix=".OB",
         )
         profiles = (profile,)
 

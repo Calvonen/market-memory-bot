@@ -9,6 +9,7 @@ from trading_system.market_session_profile import (
     GROUNDED_MARKET_SESSION_PROFILES,
     MarketSessionProfile,
     resolve_market_session_profile,
+    resolve_provider_symbol,
 )
 from trading_system.pre_event_market_context_acquisition import (
     DailyOhlcvFetcher,
@@ -36,6 +37,7 @@ def acquire_and_persist_pre_event_market_context(
     *,
     event_id: str,
     ticker: str,
+    provider_symbol: str,
     event_trading_date: date,
     last_confirmed_closed_session_date: date,
     previous_confirmed_closed_session_date: date,
@@ -48,8 +50,15 @@ def acquire_and_persist_pre_event_market_context(
     The caller remains responsible for resolving the market timezone, event
     trading date, and the two confirmed closed session dates. This orchestration
     layer deliberately performs no exchange/calendar/session inference. Before
-    acquisition, the supplied ticker is bound to the canonical persisted event
-    instrument so another instrument's prices cannot be captured by mistake.
+    acquisition, the supplied ``ticker`` is bound to the canonical persisted
+    event instrument so another instrument's prices cannot be captured by
+    mistake.
+
+    ``ticker`` is the broker instrument and is only used for that identity
+    check; ``provider_symbol`` is the separate market-data ticker actually sent
+    to the fetcher. This entrypoint is caller-grounded throughout, so the caller
+    supplies the translation (the automatic entrypoint below derives it from the
+    grounded market profile instead).
     """
     event = repository.get(event_id)
     if event is None:
@@ -60,8 +69,12 @@ def acquire_and_persist_pre_event_market_context(
     if not normalized_ticker or normalized_ticker != canonical_instrument:
         raise ValueError("ticker does not match tracked event instrument")
 
+    normalized_provider_symbol = _normalise_ticker(provider_symbol)
+    if not normalized_provider_symbol:
+        raise ValueError("provider_symbol is required")
+
     context = acquire_pre_event_market_context(
-        ticker=normalized_ticker,
+        provider_symbol=normalized_provider_symbol,
         event_trading_date=event_trading_date,
         last_confirmed_closed_session_date=last_confirmed_closed_session_date,
         previous_confirmed_closed_session_date=previous_confirmed_closed_session_date,
@@ -153,7 +166,12 @@ def acquire_and_persist_pre_event_market_context_for_event(
     """Resolve grounded market sessions, then acquire and persist event context.
 
     The persisted exact ``resolved_etoro_market`` label selects one explicitly
-    grounded market-session profile. The profile calendar supplies confirmed
+    grounded market-session profile, which supplies both the exchange calendar
+    and this market's broker-to-provider symbol policy. ``ticker`` is checked
+    against the canonical persisted broker instrument and never leaves that
+    role; the data provider is queried with the separate symbol derived from
+    the profile (eToro WDS.ASX -> Yahoo WDS.AX), and the event keeps its broker
+    identity untouched. The profile calendar supplies confirmed
     exchange sessions with their real close timestamps, and
     ``resolve_session_dates`` selects the last two sessions that had closed by
     ``event_at`` - which includes the event's own session when the event falls
@@ -186,6 +204,12 @@ def acquire_and_persist_pre_event_market_context_for_event(
         event.resolved_etoro_market,
         profiles=profiles,
     )
+    # The persisted broker instrument stays the authority on what is tracked;
+    # this only derives the data provider's ticker for it, from the same
+    # grounded profile the exact broker market label selected. An instrument
+    # that does not carry the profile's declared broker suffix fails closed
+    # here, before any provider call.
+    provider_symbol = resolve_provider_symbol(canonical_instrument, profile=profile)
     event_local_date = event.event_at.astimezone(ZoneInfo(profile.market_timezone)).date()
     calendar_kwargs = {
         "start_date": event_local_date - timedelta(days=_SESSION_CALENDAR_LOOKBACK_DAYS),
@@ -210,7 +234,7 @@ def acquire_and_persist_pre_event_market_context_for_event(
         now=datetime.now(UTC),
     )
     context = acquire_pre_event_market_context(
-        ticker=normalized_ticker,
+        provider_symbol=provider_symbol,
         event_trading_date=resolution.event_trading_date,
         last_confirmed_closed_session_date=resolution.latest_closed_session,
         previous_confirmed_closed_session_date=resolution.previous_closed_session,
