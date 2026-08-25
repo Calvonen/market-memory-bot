@@ -53,9 +53,7 @@ class _SecIndexDocumentParser(HTMLParser):
             href = values.get("href")
             if href and self._cell_href is None:
                 self._cell_href = href
-                self._link_parts.extend(
-                    [values.get("title") or "", values.get("aria-label") or ""]
-                )
+                self._link_parts.extend([values.get("title") or "", values.get("aria-label") or ""])
             self._in_link = True
 
     def handle_data(self, data: str) -> None:
@@ -73,9 +71,7 @@ class _SecIndexDocumentParser(HTMLParser):
         if lowered in {"td", "th"} and self._in_cell:
             text = " ".join(" ".join(self._cell_parts).split())
             link_text = " ".join(" ".join(self._link_parts).split())
-            self._cells.append(
-                (text, self._cell_href, link_text, self._cell_tag or lowered)
-            )
+            self._cells.append((text, self._cell_href, link_text, self._cell_tag or lowered))
             self._in_cell = False
             self._in_link = False
             self._cell_tag = None
@@ -85,7 +81,6 @@ class _SecIndexDocumentParser(HTMLParser):
             return
         if lowered != "tr" or not self._in_row:
             return
-
         normalized = [cell[0].strip().upper() for cell in self._cells]
         is_header = any(cell[3] == "th" for cell in self._cells)
         if is_header:
@@ -105,7 +100,6 @@ class _SecIndexDocumentParser(HTMLParser):
                 if type_text == "EX-99.1" and href:
                     label = document_cell[2] or document_cell[0] or href
                     self.documents.append((href, label, type_text))
-
         self._in_row = False
         self._cells = []
 
@@ -144,12 +138,7 @@ class SecEdgarResultsProvider:
     MIN_REQUEST_INTERVAL_SECONDS = 0.15
     _company_tickers_cache: dict[str, Any] | None = None
     _last_request_at: float | None = None
-
-    _EARNINGS_SIGNAL_RE = re.compile(
-        r"(?:item\s+2\.02|results\s+of\s+operations\s+and\s+financial\s+condition|"
-        r"earnings\s+release|financial\s+results|quarterly\s+results)",
-        re.IGNORECASE,
-    )
+    _EARNINGS_SIGNAL_RE = re.compile(r"(?:item\s+2\.02|results\s+of\s+operations\s+and\s+financial\s+condition|earnings\s+release|financial\s+results|quarterly\s+results)", re.IGNORECASE)
     _SEC_CHALLENGE_MARKERS = (
         "sec.gov | your request originates from an undeclared automated tool",
         "your request originates from an undeclared automated tool",
@@ -157,23 +146,14 @@ class SecEdgarResultsProvider:
     )
     _SUPPORTED_EARNINGS_FORMS = {"8-K", "6-K"}
 
-    def __init__(
-        self,
-        *,
-        ticker: str,
-        scheduled_date: date,
-        timeout_seconds: float = 15.0,
-        user_agent: str | None = None,
-    ) -> None:
+    def __init__(self, *, ticker: str, scheduled_date: date, timeout_seconds: float = 15.0, user_agent: str | None = None) -> None:
         normalized = ticker.strip().upper()
         if not normalized:
             raise ValueError("SEC ticker is required")
         self.ticker = normalized
         self.scheduled_date = scheduled_date
         self.timeout_seconds = timeout_seconds
-        self.user_agent = (
-            user_agent or os.environ.get("MARKETAI_SEC_USER_AGENT") or ""
-        ).strip()
+        self.user_agent = (user_agent or os.environ.get("MARKETAI_SEC_USER_AGENT") or "").strip()
         if not self.user_agent:
             raise ValueError("MARKETAI_SEC_USER_AGENT is required for SEC access")
         if "@" not in self.user_agent:
@@ -186,13 +166,8 @@ class SecEdgarResultsProvider:
 
     def discover(self, event_id: str) -> ReleaseDocument | None:
         cik = self._resolve_cik()
-        submissions = self._fetch_json(
-            self.SUBMISSIONS_URL.format(cik10=f"{cik:010d}")
-        )
-        filings = self._merge_filings(
-            self._matching_filings(submissions),
-            self._matching_historical_filings(submissions),
-        )
+        submissions = self._fetch_json(self.SUBMISSIONS_URL.format(cik10=f"{cik:010d}"))
+        filings = self._merge_filings(self._matching_filings(submissions), self._matching_historical_filings(submissions))
         filing_errors: list[Exception] = []
         for filing in filings:
             try:
@@ -204,15 +179,11 @@ class SecEdgarResultsProvider:
                 return document
         if filing_errors:
             first = filing_errors[0]
-            raise RuntimeError(
-                f"SEC filing evaluation failed for {len(filing_errors)} candidate(s): {first}"
-            ) from first
+            raise RuntimeError(f"SEC filing evaluation failed for {len(filing_errors)} candidate(s): {first}") from first
         return None
 
     @staticmethod
-    def _merge_filings(
-        *groups: list[dict[str, str]],
-    ) -> list[dict[str, str]]:
+    def _merge_filings(*groups: list[dict[str, str]]) -> list[dict[str, str]]:
         by_accession: dict[str, dict[str, str]] = {}
         for group in groups:
             for filing in group:
@@ -221,20 +192,11 @@ class SecEdgarResultsProvider:
                 if existing is None:
                     by_accession[accession] = filing
                     continue
-                if (
-                    existing.get("form") != filing.get("form")
-                    or existing.get("primary_document") != filing.get("primary_document")
-                ):
-                    raise RuntimeError(
-                        "SEC duplicate accession has conflicting filing metadata"
-                    )
+                if existing.get("form") != filing.get("form") or existing.get("primary_document") != filing.get("primary_document"):
+                    raise RuntimeError("SEC duplicate accession has conflicting filing metadata")
                 if filing.get("accepted", "") > existing.get("accepted", ""):
                     by_accession[accession] = filing
-        return sorted(
-            by_accession.values(),
-            key=lambda row: row.get("accepted", ""),
-            reverse=True,
-        )
+        return sorted(by_accession.values(), key=lambda row: row.get("accepted", ""), reverse=True)
 
     def _company_tickers(self) -> dict[str, Any]:
         cached = type(self)._company_tickers_cache
@@ -260,12 +222,9 @@ class SecEdgarResultsProvider:
                 matches.append(int(row["cik_str"]))
             except (KeyError, TypeError, ValueError) as exc:
                 raise RuntimeError("SEC ticker row has invalid CIK") from exc
-
         unique = sorted(set(matches))
         if len(unique) != 1:
-            raise RuntimeError(
-                f"SEC ticker {self.ticker} did not resolve to exactly one CIK"
-            )
+            raise RuntimeError(f"SEC ticker {self.ticker} did not resolve to exactly one CIK")
         return unique[0]
 
     def _matching_filings(self, payload: dict[str, Any]) -> list[dict[str, str]]:
@@ -274,16 +233,15 @@ class SecEdgarResultsProvider:
             raise RuntimeError("SEC submissions response has no recent filings")
         return self._matching_filings_table(recent)
 
-    def _matching_historical_filings(
-        self, payload: dict[str, Any]
-    ) -> list[dict[str, str]]:
+    def _matching_historical_filings(self, payload: dict[str, Any]) -> list[dict[str, str]]:
         filings = payload.get("filings") or {}
         if not isinstance(filings, dict):
             raise RuntimeError("SEC submissions response has invalid filings metadata")
-        files = filings.get("files") or []
+        if "files" not in filings or filings.get("files") is None:
+            raise RuntimeError("SEC submissions response is missing historical files")
+        files = filings["files"]
         if not isinstance(files, list):
             raise RuntimeError("SEC submissions response has invalid historical files")
-
         target = self.scheduled_date
         matches: list[dict[str, str]] = []
         for row in files:
@@ -298,26 +256,20 @@ class SecEdgarResultsProvider:
                 filing_from = date.fromisoformat(filing_from_raw)
                 filing_to = date.fromisoformat(filing_to_raw)
             except ValueError as exc:
-                raise RuntimeError(
-                    "SEC historical submissions metadata has invalid date range"
-                ) from exc
+                raise RuntimeError("SEC historical submissions metadata has invalid date range") from exc
             if filing_from > filing_to:
-                raise RuntimeError(
-                    "SEC historical submissions metadata has reversed date range"
-                )
+                raise RuntimeError("SEC historical submissions metadata has reversed date range")
             if not (filing_from <= target <= filing_to):
                 continue
             if "/" in name or "\\" in name or not name.lower().endswith(".json"):
                 raise RuntimeError("SEC historical submissions filename is invalid")
             shard = self._fetch_json(urljoin(self.SUBMISSIONS_BASE, name))
             matches.extend(self._matching_filings_table(shard))
-
         return sorted(matches, key=lambda row: row["accepted"], reverse=True)
 
     def _matching_filings_table(self, rows: dict[str, Any]) -> list[dict[str, str]]:
         if not isinstance(rows, dict):
             raise RuntimeError("SEC filing table has unexpected shape")
-
         required_names = ("form", "filingDate", "accessionNumber", "primaryDocument")
         required: dict[str, list[Any]] = {}
         for name in required_names:
@@ -328,11 +280,9 @@ class SecEdgarResultsProvider:
         lengths = {len(value) for value in required.values()}
         if len(lengths) != 1:
             raise RuntimeError("SEC filing table required arrays are misaligned")
-
         acceptance_times = rows.get("acceptanceDateTime", [])
         if not isinstance(acceptance_times, list):
             raise RuntimeError("SEC filing table field acceptanceDateTime is not an array")
-
         forms = required["form"]
         filing_dates = required["filingDate"]
         accessions = required["accessionNumber"]
@@ -347,38 +297,18 @@ class SecEdgarResultsProvider:
             try:
                 filing_date = date.fromisoformat(filing_date_raw)
             except ValueError as exc:
-                raise RuntimeError(
-                    "SEC supported filing row has invalid filingDate"
-                ) from exc
+                raise RuntimeError("SEC supported filing row has invalid filingDate") from exc
             if filing_date != target:
                 continue
             accession = str(accessions[index]).strip()
             primary = str(primary_documents[index]).strip()
             if not accession or not primary:
-                raise RuntimeError(
-                    "SEC matching filing row has empty accessionNumber or primaryDocument"
-                )
-            accepted = (
-                str(acceptance_times[index])
-                if index < len(acceptance_times)
-                else ""
-            )
-            matches.append(
-                {
-                    "form": filing_form,
-                    "accession": accession,
-                    "primary_document": primary,
-                    "accepted": accepted,
-                }
-            )
+                raise RuntimeError("SEC matching filing row has empty accessionNumber or primaryDocument")
+            accepted = str(acceptance_times[index]) if index < len(acceptance_times) else ""
+            matches.append({"form": filing_form, "accession": accession, "primary_document": primary, "accepted": accepted})
         return sorted(matches, key=lambda row: row["accepted"], reverse=True)
 
-    def _discover_from_filing(
-        self,
-        event_id: str,
-        cik: int,
-        filing: dict[str, str],
-    ) -> ReleaseDocument | None:
+    def _discover_from_filing(self, event_id: str, cik: int, filing: dict[str, str]) -> ReleaseDocument | None:
         accession = filing["accession"]
         accession_compact = accession.replace("-", "")
         filing_base = f"{self.ARCHIVES_BASE}{cik}/{accession_compact}/"
@@ -388,31 +318,22 @@ class SecEdgarResultsProvider:
         primary_html = self._fetch_text(primary_url)
         self._assert_not_sec_challenge_page(primary_html, context="primary filing")
         primary_text = self._html_to_text(primary_html)
-        if filing.get("form") == "8-K" and not self._EARNINGS_SIGNAL_RE.search(
-            primary_text
-        ):
+        if filing.get("form") == "8-K" and not self._EARNINGS_SIGNAL_RE.search(primary_text):
             return None
-
         index_url = urljoin(filing_base, f"{accession}-index.html")
         index_html = self._fetch_text(index_url)
         self._assert_not_sec_challenge_page(index_html, context="filing index")
         parser = _SecIndexDocumentParser()
         parser.feed(index_html)
         if not parser.authoritative_table_recognized:
-            raise RuntimeError(
-                "SEC filing index authoritative DOCUMENT/TYPE layout was not recognized"
-            )
-
+            raise RuntimeError("SEC filing index authoritative DOCUMENT/TYPE layout was not recognized")
         candidates: list[tuple[str, str]] = []
         for href, label, document_type in parser.documents:
             source_url = urljoin(index_url, href)
             if not self._same_filing_directory(filing_base, source_url):
-                raise RuntimeError(
-                    "SEC EX-99.1 document URL escaped the filing directory"
-                )
+                raise RuntimeError("SEC EX-99.1 document URL escaped the filing directory")
             title = " ".join(part for part in (document_type, label) if part).strip()
             candidates.append((source_url, title))
-
         retrieval_errors: list[Exception] = []
         for source_url, title in candidates:
             try:
@@ -424,19 +345,10 @@ class SecEdgarResultsProvider:
                 continue
             if not self._EARNINGS_SIGNAL_RE.search(raw_text):
                 continue
-            return ReleaseDocument(
-                event_id=event_id,
-                source_type=source_type,
-                source_url=source_url,
-                source_title=title,
-                raw_text=raw_text,
-            )
-
+            return ReleaseDocument(event_id=event_id, source_type=source_type, source_url=source_url, source_title=title, raw_text=raw_text)
         if retrieval_errors:
             first = retrieval_errors[0]
-            raise RuntimeError(
-                f"SEC EX-99.1 retrieval failed for {len(retrieval_errors)} candidate(s): {first}"
-            ) from first
+            raise RuntimeError(f"SEC EX-99.1 retrieval failed for {len(retrieval_errors)} candidate(s): {first}") from first
         return None
 
     @classmethod
@@ -449,11 +361,7 @@ class SecEdgarResultsProvider:
     def _same_filing_directory(filing_base: str, candidate_url: str) -> bool:
         base = urlparse(filing_base)
         candidate = urlparse(candidate_url)
-        return (
-            candidate.scheme == "https"
-            and candidate.netloc == "www.sec.gov"
-            and candidate.path.startswith(base.path)
-        )
+        return candidate.scheme == "https" and candidate.netloc == "www.sec.gov" and candidate.path.startswith(base.path)
 
     def _fetch_release_text(self, url: str) -> tuple[str, str]:
         data, content_type, charset = self._fetch_bytes(url)
@@ -497,14 +405,7 @@ class SecEdgarResultsProvider:
         cls._last_request_at = now
 
     def _fetch_bytes(self, url: str) -> tuple[bytes, str, str]:
-        request = Request(
-            url,
-            headers={
-                "User-Agent": self.user_agent,
-                "Accept": "application/json,text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8",
-                "Accept-Encoding": "identity",
-            },
-        )
+        request = Request(url, headers={"User-Agent": self.user_agent, "Accept": "application/json,text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8", "Accept-Encoding": "identity"})
         for attempt in range(2):
             type(self)._pace_sec_request()
             try:
@@ -516,9 +417,7 @@ class SecEdgarResultsProvider:
                 if attempt == 0 and exc.code in {429, 503}:
                     retry_after = exc.headers.get("Retry-After") if exc.headers else None
                     try:
-                        backoff = (
-                            max(1.0, float(retry_after)) if retry_after else 1.0
-                        )
+                        backoff = max(1.0, float(retry_after)) if retry_after else 1.0
                     except ValueError:
                         backoff = 1.0
                     time.sleep(backoff)
