@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -7,6 +8,28 @@ from urllib.parse import urlparse
 
 
 _ALLOWED_SOURCE_KINDS = {"direct_url", "results_page"}
+
+
+def _is_valid_host(hostname: str) -> bool:
+    try:
+        ipaddress.ip_address(hostname)
+        return True
+    except ValueError:
+        pass
+
+    if len(hostname) > 253:
+        return False
+    labels = hostname.rstrip(".").split(".")
+    if not labels or any(not label for label in labels):
+        return False
+    for label in labels:
+        if len(label) > 63:
+            return False
+        if label[0] == "-" or label[-1] == "-":
+            return False
+        if not all(ch.isalnum() or ch == "-" for ch in label):
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -35,6 +58,7 @@ class OfficialReleaseSource:
         if (
             parsed.scheme != "https"
             or not parsed.hostname
+            or not _is_valid_host(parsed.hostname)
             or parsed.username
             or parsed.password
             or (parsed_port is not None and not 1 <= parsed_port <= 65535)
