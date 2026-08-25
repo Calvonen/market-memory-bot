@@ -93,6 +93,32 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
 
 REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 2
 REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 7
+POSTGRES_IDENTIFIER_MAX_BYTES = 63
+
+
+def _postgres_response_key(key_name: str) -> str:
+    """Return the key PostgreSQL exposes for an unquoted result-column name.
+
+    PostgreSQL identifiers are limited to 63 bytes. SQL function OUT/TABLE
+    column names longer than that are silently truncated when the function is
+    created, and PostgREST consequently serializes the truncated name. All
+    verifier identifiers are ASCII today, but truncate by bytes to match the
+    database rule rather than assuming a character limit.
+    """
+    encoded = key_name.encode("utf-8")
+    if len(encoded) <= POSTGRES_IDENTIFIER_MAX_BYTES:
+        return key_name
+    return encoded[:POSTGRES_IDENTIFIER_MAX_BYTES].decode("utf-8", errors="ignore")
+
+
+def _check_value(row: dict[str, Any], key_name: str) -> Any:
+    """Read an exact verifier key, falling back only to PostgreSQL truncation."""
+    if key_name in row:
+        return row[key_name]
+    truncated = _postgres_response_key(key_name)
+    if truncated != key_name and truncated in row:
+        return row[truncated]
+    return None
 
 
 def main() -> int:
@@ -137,9 +163,9 @@ def main() -> int:
         return 1
 
     row: dict[str, Any] = rows[0]
-    missing = [label for key_name, label in REQUIRED_CHECKS if not row.get(key_name)]
+    missing = [label for key_name, label in REQUIRED_CHECKS if not _check_value(row, key_name)]
 
-    deployed_upsert_version = row.get("calendar_candidate_upsert_implementation_version")
+    deployed_upsert_version = _check_value(row, "calendar_candidate_upsert_implementation_version")
     if deployed_upsert_version != REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION:
         missing.append(
             "upsert_calendar_candidate() atomic implementation version "
@@ -167,9 +193,11 @@ def main() -> int:
         return 1
     tracked_row: dict[str, Any] = tracked_rows[0]
     missing.extend(
-        label for key_name, label in REQUIRED_TRACKED_EVENT_CHECKS if not tracked_row.get(key_name)
+        label
+        for key_name, label in REQUIRED_TRACKED_EVENT_CHECKS
+        if not _check_value(tracked_row, key_name)
     )
-    deployed_runtime_version = tracked_row.get("runtime_schema_version")
+    deployed_runtime_version = _check_value(tracked_row, "runtime_schema_version")
     if deployed_runtime_version != REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION:
         missing.append(
             "tracked-event runtime schema version "

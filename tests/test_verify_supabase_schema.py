@@ -4,7 +4,11 @@ from contextlib import redirect_stderr, redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts.verify_supabase_schema import main
+from scripts.verify_supabase_schema import (
+    REQUIRED_TRACKED_EVENT_CHECKS,
+    _postgres_response_key,
+    main,
+)
 
 
 class _RpcCall:
@@ -52,6 +56,11 @@ ALL_PRESENT_ROW = {
     "fail_tracked_market_event_stale_context_if_current_function_exists": True,
     "runtime_schema_version": 7,
 }
+
+
+def _as_postgres_rpc_row(row):
+    """Mirror PostgreSQL's 63-byte output-column identifier truncation."""
+    return {_postgres_response_key(key): value for key, value in row.items()}
 
 
 class VerifySupabaseSchemaGateTests(unittest.TestCase):
@@ -126,6 +135,33 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
                 ("verify_tracked_event_runtime_schema", {}),
             ],
         )
+
+    def test_passes_with_real_postgres_truncated_rpc_column_names(self) -> None:
+        truncated_row = _as_postgres_rpc_row(ALL_PRESENT_ROW)
+        long_keys = [key for key, _label in REQUIRED_TRACKED_EVENT_CHECKS if len(key.encode()) > 63]
+
+        self.assertTrue(long_keys)
+        self.assertTrue(all(key not in truncated_row for key in long_keys))
+
+        exit_code, out, err = self._run_with_client(
+            _FakeClient(SimpleNamespace(data=[truncated_row]))
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(err, "")
+        self.assertIn("passed", out.lower())
+
+    def test_truncated_false_value_still_fails_closed(self) -> None:
+        row = _as_postgres_rpc_row(ALL_PRESENT_ROW)
+        key = "fail_tracked_market_event_stale_context_if_current_function_exists"
+        row[_postgres_response_key(key)] = False
+
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(SimpleNamespace(data=[row]))
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("fail_tracked_market_event_stale_context_if_current() function", err)
 
 
 if __name__ == "__main__":
