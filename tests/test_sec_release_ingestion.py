@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from datetime import date
 from unittest.mock import patch
@@ -208,9 +209,9 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
             "_fetch_text",
             side_effect=[self.primary_html, index],
         ), patch.object(self.provider, "_fetch_release_text") as fetch_release:
-            document = self.provider.discover("calendar:event-id")
+            with self.assertRaisesRegex(RuntimeError, "DOCUMENT/TYPE layout"):
+                self.provider.discover("calendar:event-id")
 
-        self.assertIsNone(document)
         fetch_release.assert_not_called()
 
     def test_rejects_external_ex991_link_from_index(self) -> None:
@@ -327,6 +328,21 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(RuntimeError, "required arrays are misaligned"):
             self.provider._matching_filings_table(malformed)
+
+    def test_sec_user_agent_is_required_and_must_include_contact_email(self) -> None:
+        with patch.dict(os.environ, {"MARKETAI_SEC_USER_AGENT": ""}, clear=False):
+            with self.assertRaisesRegex(ValueError, "MARKETAI_SEC_USER_AGENT is required"):
+                SecEdgarResultsProvider(
+                    ticker="DKS",
+                    scheduled_date=date(2026, 8, 25),
+                )
+
+        with self.assertRaisesRegex(ValueError, "contact email address"):
+            SecEdgarResultsProvider(
+                ticker="DKS",
+                scheduled_date=date(2026, 8, 25),
+                user_agent="MarketAI/0.1 market-memory-bot",
+            )
 
     def test_ticker_must_resolve_to_exactly_one_cik(self) -> None:
         ambiguous = {
