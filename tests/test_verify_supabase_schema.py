@@ -55,7 +55,8 @@ ALL_PRESENT_ROW = {
     "fail_tracked_market_event_pre_event_deadline_if_current_function_exists": True,
     "fail_tracked_market_event_stale_context_if_current_function_exists": True,
     "promote_calendar_event_to_tracked_runtime_function_exists": True,
-    "runtime_schema_version": 8,
+    "calendar_runtime_untrack_guard_version_matches": True,
+    "runtime_schema_version": 9,
 }
 
 
@@ -97,12 +98,12 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertIn("SCHEMA GATE FAILED", err)
 
     def test_fails_closed_on_old_runtime_schema_version(self) -> None:
-        row = dict(ALL_PRESENT_ROW, runtime_schema_version=7)
+        row = dict(ALL_PRESENT_ROW, runtime_schema_version=8)
         exit_code, _out, err = self._run_with_client(
             _FakeClient(SimpleNamespace(data=[row]))
         )
         self.assertEqual(exit_code, 1)
-        self.assertIn("tracked-event runtime schema version 8", err)
+        self.assertIn("tracked-event runtime schema version 9", err)
 
     def test_fails_closed_when_stale_context_fail_rpc_is_missing(self) -> None:
         row = dict(
@@ -125,6 +126,17 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         )
         self.assertEqual(exit_code, 1)
         self.assertIn("promote_calendar_event_to_tracked_runtime() function", err)
+
+    def test_fails_closed_when_runtime_untrack_guard_is_missing(self) -> None:
+        row = dict(
+            ALL_PRESENT_ROW,
+            calendar_runtime_untrack_guard_version_matches=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(SimpleNamespace(data=[row]))
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("calendar runtime-bound untrack guard", err)
 
     def test_fails_closed_when_existing_required_object_is_missing(self) -> None:
         row = dict(ALL_PRESENT_ROW, capture_tracked_market_event_reference_function_exists=False)
