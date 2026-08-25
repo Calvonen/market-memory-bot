@@ -80,7 +80,8 @@ class SameDaySecFilingTests(unittest.TestCase):
                         "2026-08-25T18:00:00Z",
                         "2026-08-25T07:00:00Z",
                     ],
-                }
+                },
+                "files": [],
             }
         }
         expected = ReleaseDocument(
@@ -104,6 +105,22 @@ class SameDaySecFilingTests(unittest.TestCase):
 
         self.assertEqual(result, expected)
         self.assertEqual(discover_filing.call_count, 2)
+
+    def test_missing_historical_files_collection_fails_closed(self) -> None:
+        missing = {"filings": {"recent": {
+            "form": [],
+            "filingDate": [],
+            "accessionNumber": [],
+            "primaryDocument": [],
+        }}}
+        with self.assertRaisesRegex(RuntimeError, "missing historical files"):
+            self.provider._matching_historical_filings(missing)
+
+        null_files = {"filings": {"recent": {}, "files": None}}
+        with self.assertRaisesRegex(RuntimeError, "missing historical files"):
+            self.provider._matching_historical_filings(null_files)
+
+        self.assertEqual(self.provider._matching_historical_filings({"filings": {"files": []}}), [])
 
 
 if __name__ == "__main__":
