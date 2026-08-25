@@ -29,14 +29,14 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
             )
 
         context = acquire_pre_event_market_context(
-            ticker=" nhf.asx ",
+            provider_symbol=" nhf.ax ",
             event_trading_date=date(2026, 8, 24),
             last_confirmed_closed_session_date=date(2026, 8, 21),
             previous_confirmed_closed_session_date=date(2026, 8, 20),
             fetcher=fetcher,
         )
 
-        self.assertEqual(calls, [("NHF.ASX", "1mo", "1d")])
+        self.assertEqual(calls, [("NHF.AX", "1mo", "1d")])
         self.assertEqual(context.session_date, date(2026, 8, 21))
         self.assertEqual(context.previous_session_date, date(2026, 8, 20))
         self.assertEqual(context.close_price, Decimal("103"))
@@ -57,7 +57,7 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
             )
 
         context = acquire_pre_event_market_context(
-            ticker="NHF.ASX",
+            provider_symbol="NHF.AX",
             event_trading_date=date(2026, 8, 25),
             last_confirmed_closed_session_date=date(2026, 8, 21),
             previous_confirmed_closed_session_date=date(2026, 8, 20),
@@ -83,7 +83,7 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "confirmed closed session data is missing"):
             acquire_pre_event_market_context(
-                ticker="NHF.ASX",
+                provider_symbol="NHF.AX",
                 event_trading_date=date(2026, 8, 25),
                 last_confirmed_closed_session_date=date(2026, 8, 21),
                 previous_confirmed_closed_session_date=date(2026, 8, 20),
@@ -105,7 +105,7 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "previous confirmed closed session data is missing"):
             acquire_pre_event_market_context(
-                ticker="NHF.ASX",
+                provider_symbol="NHF.AX",
                 event_trading_date=date(2026, 8, 25),
                 last_confirmed_closed_session_date=date(2026, 8, 21),
                 previous_confirmed_closed_session_date=date(2026, 8, 20),
@@ -127,7 +127,7 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "not immediately preceding"):
             acquire_pre_event_market_context(
-                ticker="NHF.ASX",
+                provider_symbol="NHF.AX",
                 event_trading_date=date(2026, 8, 24),
                 last_confirmed_closed_session_date=date(2026, 8, 21),
                 previous_confirmed_closed_session_date=date(2026, 8, 19),
@@ -144,7 +144,7 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "previous confirmed session must precede"):
             acquire_pre_event_market_context(
-                ticker="DKS",
+                provider_symbol="DKS",
                 event_trading_date=date(2026, 8, 24),
                 last_confirmed_closed_session_date=date(2026, 8, 21),
                 previous_confirmed_closed_session_date=date(2026, 8, 21),
@@ -152,7 +152,7 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
             )
         self.assertFalse(called)
 
-    def test_rejects_blank_ticker_before_fetch(self) -> None:
+    def test_rejects_blank_provider_symbol_before_fetch(self) -> None:
         called = False
 
         def fetcher(ticker: str, period: str, interval: str) -> pd.DataFrame:
@@ -160,9 +160,9 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
             called = True
             raise AssertionError("fetcher must not be called")
 
-        with self.assertRaisesRegex(ValueError, "ticker is required"):
+        with self.assertRaisesRegex(ValueError, "provider_symbol is required"):
             acquire_pre_event_market_context(
-                ticker="   ",
+                provider_symbol="   ",
                 event_trading_date=date(2026, 8, 24),
                 last_confirmed_closed_session_date=date(2026, 8, 21),
                 previous_confirmed_closed_session_date=date(2026, 8, 20),
@@ -187,7 +187,7 @@ class PreEventMarketContextAcquisitionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "timezone-naive market session dates"):
             acquire_pre_event_market_context(
-                ticker="DKS",
+                provider_symbol="DKS",
                 event_trading_date=date(2026, 8, 24),
                 last_confirmed_closed_session_date=date(2026, 8, 21),
                 previous_confirmed_closed_session_date=date(2026, 8, 20),

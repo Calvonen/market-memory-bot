@@ -46,9 +46,10 @@ ALL_PRESENT_ROW = {
     "capture_tracked_market_event_config_snapshot_function_exists": True,
     "capture_tracked_market_event_pre_event_context_function_exists": True,
     "capture_tracked_market_event_pre_event_context_if_current_function_exists": True,
+    "capture_tracked_market_event_pre_event_context_validated_function_exists": True,
     "validate_tracked_market_event_pre_event_context_if_current_function_exists": True,
     "fail_tracked_market_event_pre_event_deadline_if_current_function_exists": True,
-    "runtime_schema_version": 5,
+    "runtime_schema_version": 6,
 }
 
 
@@ -79,20 +80,14 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertIn("MARKETAI_SUPABASE_SECRET_KEY", err.getvalue())
 
     def test_fails_closed_when_only_the_url_is_set(self) -> None:
-        with patch.dict(
-            "os.environ",
-            {"MARKETAI_SUPABASE_URL": "https://example.supabase.co"},
-            clear=True,
-        ):
+        with patch.dict("os.environ", {"MARKETAI_SUPABASE_URL": "https://example.supabase.co"}, clear=True):
             err = io.StringIO()
             with redirect_stderr(err):
                 exit_code = main()
         self.assertEqual(exit_code, 1)
 
     def test_fails_closed_when_only_the_secret_key_is_set(self) -> None:
-        with patch.dict(
-            "os.environ", {"MARKETAI_SUPABASE_SECRET_KEY": "secret-key"}, clear=True
-        ):
+        with patch.dict("os.environ", {"MARKETAI_SUPABASE_SECRET_KEY": "secret-key"}, clear=True):
             err = io.StringIO()
             with redirect_stderr(err):
                 exit_code = main()
@@ -179,16 +174,13 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertIn("arm_tracked_market_event_resolution() function", err)
 
     def test_fails_closed_on_old_tracked_event_runtime_schema_version(self) -> None:
-        row = dict(ALL_PRESENT_ROW, runtime_schema_version=4)
+        row = dict(ALL_PRESENT_ROW, runtime_schema_version=5)
         exit_code, _out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[row])))
         self.assertEqual(exit_code, 1)
-        self.assertIn("tracked-event runtime schema version 5", err)
+        self.assertIn("tracked-event runtime schema version 6", err)
 
     def test_fails_closed_when_pre_event_deadline_fail_rpc_is_missing(self) -> None:
-        row = dict(
-            ALL_PRESENT_ROW,
-            fail_tracked_market_event_pre_event_deadline_if_current_function_exists=False,
-        )
+        row = dict(ALL_PRESENT_ROW, fail_tracked_market_event_pre_event_deadline_if_current_function_exists=False)
         exit_code, _out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[row])))
         self.assertEqual(exit_code, 1)
         self.assertIn("fail_tracked_market_event_pre_event_deadline_if_current() function", err)
@@ -206,19 +198,19 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertIn("capture_tracked_market_event_pre_event_context() function", err)
 
     def test_fails_closed_when_pre_event_context_cas_capture_rpc_is_missing(self) -> None:
-        row = dict(
-            ALL_PRESENT_ROW,
-            capture_tracked_market_event_pre_event_context_if_current_function_exists=False,
-        )
+        row = dict(ALL_PRESENT_ROW, capture_tracked_market_event_pre_event_context_if_current_function_exists=False)
         exit_code, _out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[row])))
         self.assertEqual(exit_code, 1)
         self.assertIn("capture_tracked_market_event_pre_event_context_if_current() function", err)
 
+    def test_fails_closed_when_validated_capture_rpc_is_missing(self) -> None:
+        row = dict(ALL_PRESENT_ROW, capture_tracked_market_event_pre_event_context_validated_function_exists=False)
+        exit_code, _out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[row])))
+        self.assertEqual(exit_code, 1)
+        self.assertIn("capture_tracked_market_event_pre_event_context_validated() function", err)
+
     def test_fails_closed_when_pre_event_context_revalidation_rpc_is_missing(self) -> None:
-        row = dict(
-            ALL_PRESENT_ROW,
-            validate_tracked_market_event_pre_event_context_if_current_function_exists=False,
-        )
+        row = dict(ALL_PRESENT_ROW, validate_tracked_market_event_pre_event_context_if_current_function_exists=False)
         exit_code, _out, err = self._run_with_client(_FakeClient(SimpleNamespace(data=[row])))
         self.assertEqual(exit_code, 1)
         self.assertIn("validate_tracked_market_event_pre_event_context_if_current() function", err)
@@ -232,13 +224,7 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
     def test_calls_the_expected_rpcs_with_no_parameters(self) -> None:
         fake_client = _FakeClient(SimpleNamespace(data=[ALL_PRESENT_ROW]))
         self._run_with_client(fake_client)
-        self.assertEqual(
-            fake_client.calls,
-            [
-                ("verify_strategy_draft_schema", {}),
-                ("verify_tracked_event_runtime_schema", {}),
-            ],
-        )
+        self.assertEqual(fake_client.calls, [("verify_strategy_draft_schema", {}), ("verify_tracked_event_runtime_schema", {})])
 
 
 if __name__ == "__main__":
