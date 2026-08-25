@@ -15,6 +15,7 @@ class OfficialReleaseSource:
     source_kind: str
     source_url: str
     source_title: str | None = None
+    version: int | None = None
 
     def __post_init__(self) -> None:
         event_id = self.event_id.strip()
@@ -29,6 +30,8 @@ class OfficialReleaseSource:
         parsed = urlparse(source_url)
         if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
             raise ValueError("official release source_url must be an absolute HTTPS URL without credentials")
+        if self.version is not None and self.version < 1:
+            raise ValueError("official release source version must be positive")
 
         object.__setattr__(self, "event_id", event_id)
         object.__setattr__(self, "source_kind", source_kind)
@@ -40,6 +43,7 @@ class SupabaseOfficialReleaseSourceRepository:
     """Canonical control surface for user-approved official release sources."""
 
     TABLE = "event_official_release_sources"
+    SET_RPC = "set_event_official_release_source"
 
     def __init__(self, client: Any) -> None:
         self.client = client
@@ -56,13 +60,27 @@ class SupabaseOfficialReleaseSourceRepository:
             )
         return cls(create_client(url, key))
 
+    @staticmethod
+    def _from_row(row: dict[str, Any]) -> OfficialReleaseSource:
+        try:
+            version = int(row["version"])
+            return OfficialReleaseSource(
+                event_id=str(row["event_id"]),
+                source_kind=str(row["source_kind"]),
+                source_url=str(row["source_url"]),
+                source_title=(str(row["source_title"]) if row.get("source_title") is not None else None),
+                version=version,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("official release source row is malformed") from exc
+
     def get(self, event_id: str) -> OfficialReleaseSource | None:
         canonical_event_id = event_id.strip()
         if not canonical_event_id:
             raise ValueError("event_id is required")
         response = (
             self.client.table(self.TABLE)
-            .select("event_id,source_kind,source_url,source_title")
+            .select("event_id,source_kind,source_url,source_title,version")
             .eq("event_id", canonical_event_id)
             .limit(1)
             .execute()
@@ -72,39 +90,38 @@ class SupabaseOfficialReleaseSourceRepository:
             return None
         if len(rows) != 1 or not isinstance(rows[0], dict):
             raise RuntimeError("official release source repository returned an invalid canonical row")
-        row = rows[0]
-        try:
-            return OfficialReleaseSource(
-                event_id=str(row["event_id"]),
-                source_kind=str(row["source_kind"]),
-                source_url=str(row["source_url"]),
-                source_title=(str(row["source_title"]) if row.get("source_title") is not None else None),
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError("official release source row is malformed") from exc
+        return self._from_row(rows[0])
 
-    def set(self, source: OfficialReleaseSource) -> OfficialReleaseSource:
-        payload = {
-            "event_id": source.event_id,
-            "source_kind": source.source_kind,
-            "source_url": source.source_url,
-            "source_title": source.source_title,
-        }
-        response = (
-            self.client.table(self.TABLE)
-            .upsert(payload, on_conflict="event_id")
-            .select("event_id,source_kind,source_url,source_title")
-            .execute()
-        )
+    def set(
+        self,
+        source: OfficialReleaseSource,
+        *,
+        expected_version: int,
+    ) -> OfficialReleaseSource:
+        if expected_version < 0:
+            raise ValueError("expected_version must be zero or positive")
+        response = self.client.rpc(
+            self.SET_RPC,
+            {
+                "input_event_id": source.event_id,
+                "input_source_kind": source.source_kind,
+                "input_source_url": source.source_url,
+                "input_source_title": source.source_title,
+                "input_expected_version": expected_version,
+            },
+        ).execute()
         rows = response.data or []
         if len(rows) != 1 or not isinstance(rows[0], dict):
             raise RuntimeError("official release source write did not return exactly one canonical row")
-        return OfficialReleaseSource(
-            event_id=str(rows[0]["event_id"]),
-            source_kind=str(rows[0]["source_kind"]),
-            source_url=str(rows[0]["source_url"]),
-            source_title=(str(rows[0]["source_title"]) if rows[0].get("source_title") is not None else None),
-        )
+        row = rows[0]
+        canonical_row = {
+            "event_id": row.get("out_event_id"),
+            "source_kind": row.get("out_source_kind"),
+            "source_url": row.get("out_source_url"),
+            "source_title": row.get("out_source_title"),
+            "version": row.get("out_version"),
+        }
+        return self._from_row(canonical_row)
 
     def clear(self, event_id: str) -> None:
         canonical_event_id = event_id.strip()
