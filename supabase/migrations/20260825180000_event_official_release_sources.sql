@@ -11,6 +11,7 @@ declare
   authority text;
   host_port text;
   host_part text;
+  trimmed_host text;
   port_text text;
   port_value integer;
   ipv6_text text;
@@ -37,7 +38,7 @@ begin
       return false;
     end if;
     begin
-      if family(ipv6_text::inet) <> 6 then
+      if family(ipv6_text::inet) <> 6 or masklen(ipv6_text::inet) <> 128 then
         return false;
       end if;
     exception
@@ -63,7 +64,7 @@ begin
     end if;
 
     begin
-      if family(host_part::inet) = 4 then
+      if family(host_part::inet) = 4 and masklen(host_part::inet) = 32 then
         null;
       else
         return false;
@@ -73,7 +74,11 @@ begin
         if length(host_part) > 253 then
           return false;
         end if;
-        foreach label in array string_to_array(rtrim(host_part, '.'), '.') loop
+        trimmed_host := rtrim(host_part, '.');
+        if trimmed_host = '' then
+          return false;
+        end if;
+        foreach label in array string_to_array(trimmed_host, '.') loop
           if label = '' or length(label) > 63 then
             return false;
           end if;
@@ -150,7 +155,7 @@ comment on column public.event_official_release_sources.version is
 
 alter table public.event_official_release_sources enable row level security;
 
-revoke all on table public.event_official_release_sources from anon, authenticated;
+revoke all on table public.event_official_release_sources from anon, authenticated, service_role;
 grant select on table public.event_official_release_sources to service_role;
 
 create function public.set_event_official_release_source(
