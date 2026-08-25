@@ -78,6 +78,56 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
         self.assertNotIn("000108906326000098", primary_url)
         self.assertNotIn("000108906326000098", index_url)
 
+    def test_loads_historical_submission_shard_when_target_is_not_recent(self) -> None:
+        submissions = {
+            "filings": {
+                "recent": {
+                    "form": ["8-K"],
+                    "filingDate": ["2026-08-24"],
+                    "accessionNumber": ["0001089063-26-000098"],
+                    "primaryDocument": ["dks-20260824.htm"],
+                    "acceptanceDateTime": ["2026-08-24T17:00:00.000Z"],
+                },
+                "files": [
+                    {
+                        "name": "CIK0001089063-submissions-001.json",
+                        "filingFrom": "2025-01-01",
+                        "filingTo": "2026-08-25",
+                    }
+                ],
+            }
+        }
+        historical = {
+            "form": ["8-K"],
+            "filingDate": ["2026-08-25"],
+            "accessionNumber": ["0001089063-26-000099"],
+            "primaryDocument": ["dks-20260825.htm"],
+            "acceptanceDateTime": ["2026-08-25T07:01:00.000Z"],
+        }
+        with patch.object(
+            self.provider,
+            "_fetch_json",
+            side_effect=[self.tickers, submissions, historical],
+        ) as fetch_json, patch.object(
+            self.provider,
+            "_fetch_text",
+            side_effect=[self.primary_html, self.index_html],
+        ), patch.object(
+            self.provider,
+            "_fetch_release_text",
+            return_value=(self.release_text, "company_results"),
+        ):
+            document = self.provider.discover("calendar:event-id")
+
+        self.assertIsNotNone(document)
+        assert document is not None
+        self.assertIn("000108906326000099", document.source_url)
+        self.assertEqual(fetch_json.call_count, 3)
+        self.assertEqual(
+            fetch_json.call_args_list[2].args[0],
+            "https://data.sec.gov/submissions/CIK0001089063-submissions-001.json",
+        )
+
     def test_never_falls_back_to_neighboring_filing_date(self) -> None:
         submissions = {
             "filings": {
