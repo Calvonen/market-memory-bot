@@ -26,10 +26,6 @@ class _Query:
         self.calls.append(("limit", value))
         return self
 
-    def delete(self):
-        self.calls.append(("delete",))
-        return self
-
     def execute(self):
         self.calls.append(("execute",))
         return SimpleNamespace(data=self.response_rows)
@@ -82,8 +78,12 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
             OfficialReleaseSource(self.EVENT_ID, "auto_discovery", "https://example.com/results")
         with self.assertRaisesRegex(ValueError, "absolute HTTPS URL"):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "http://example.com/results")
-        with self.assertRaisesRegex(ValueError, "without credentials"):
+        with self.assertRaisesRegex(ValueError, "no credentials"):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://user:pass@example.com/results")
+        with self.assertRaisesRegex(ValueError, "valid host"):
+            OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://:")
+        with self.assertRaisesRegex(ValueError, "valid port"):
+            OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://example.com:99999/results")
         with self.assertRaisesRegex(ValueError, "version must be positive"):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://example.com/results", version=0)
 
@@ -160,14 +160,24 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "zero or positive"):
             repository.set(source, expected_version=-1)
 
-    def test_clear_deletes_only_the_canonical_event_source(self):
-        client = _Client()
+    def test_clear_uses_atomic_rpc_with_expected_version(self):
+        client = _Client(rpc_rows=True)
         repository = SupabaseOfficialReleaseSourceRepository(client)
 
-        repository.clear(self.EVENT_ID)
+        repository.clear(self.EVENT_ID, expected_version=3)
 
-        self.assertIn(("delete",), client.queries[0].calls)
-        self.assertIn(("eq", "event_id", self.EVENT_ID), client.queries[0].calls)
+        self.assertEqual(client.rpc_calls, [(
+            "clear_event_official_release_source",
+            {
+                "input_event_id": self.EVENT_ID,
+                "input_expected_version": 3,
+            },
+        )])
+
+    def test_clear_requires_positive_expected_version(self):
+        repository = SupabaseOfficialReleaseSourceRepository(_Client())
+        with self.assertRaisesRegex(ValueError, "expected_version must be positive"):
+            repository.clear(self.EVENT_ID, expected_version=0)
 
 
 if __name__ == "__main__":
