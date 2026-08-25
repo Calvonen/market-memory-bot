@@ -318,6 +318,16 @@ class SecEdgarResultsProviderTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "EX-99.1 retrieval failed"):
                 self.provider.discover("calendar:event-id")
 
+    def test_misaligned_required_filing_arrays_fail_closed(self) -> None:
+        malformed = {
+            "form": ["8-K", "8-K"],
+            "filingDate": ["2026-08-24", "2026-08-25"],
+            "accessionNumber": ["0001089063-26-000098"],
+            "primaryDocument": ["old.htm", "target.htm"],
+        }
+        with self.assertRaisesRegex(RuntimeError, "required arrays are misaligned"):
+            self.provider._matching_filings_table(malformed)
+
     def test_ticker_must_resolve_to_exactly_one_cik(self) -> None:
         ambiguous = {
             "0": {"cik_str": 1, "ticker": "DKS"},
