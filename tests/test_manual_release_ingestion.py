@@ -248,6 +248,11 @@ class ManualOfficialReleaseProviderTests(unittest.TestCase):
                     document = provider.discover(self.EVENT_ID)
                 self.assertIsNotNone(document)
 
+    def test_bom_html_sniff_tolerates_truncated_multibyte_prefix(self) -> None:
+        prefix = b"\xef\xbb\xbf<html><body>" + (b"a" * (1024 - len(b"\xef\xbb\xbf<html><body>") - 1))
+        payload = prefix + "€".encode("utf-8") + b"</body></html>"
+        self.assertTrue(ManualOfficialReleaseProvider._looks_like_html_or_text("", payload))
+
     def _response(self, final_url: str, *, content_length: str | None = None) -> MagicMock:
         response = MagicMock()
         response.__enter__.return_value = response
