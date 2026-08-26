@@ -373,6 +373,7 @@ class ManualOfficialReleaseProvider:
                 "exceeds page limit",
                 "extracted text exceeds size limit",
                 "produced no text",
+                "unable to determine PDF worker baseline memory",
                 "inherited address-space limit leaves no allocation headroom",
                 "inherited CPU limit leaves no execution headroom",
             )
