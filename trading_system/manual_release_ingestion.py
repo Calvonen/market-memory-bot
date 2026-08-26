@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import io
 import multiprocessing
 import re
@@ -188,8 +189,9 @@ class ManualOfficialReleaseProvider:
         bom_encoding = cls._sniff_bom_encoding(data)
         if bom_encoding:
             try:
-                prefix_text = data[:1024].decode(bom_encoding, errors="strict").lstrip().lower()
-            except UnicodeDecodeError:
+                decoder = codecs.getincrementaldecoder(bom_encoding)(errors="strict")
+                prefix_text = decoder.decode(data[:1024], final=False).lstrip().lower()
+            except (LookupError, UnicodeDecodeError):
                 return False
             return prefix_text.startswith(("<!doctype html", "<html", "<head", "<body"))
 
