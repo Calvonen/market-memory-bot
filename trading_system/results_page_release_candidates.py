@@ -71,7 +71,13 @@ class _ResultsPageLinkParser(HTMLParser):
         self._text_parts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.lower() != "a":
+        normalized_tag = tag.lower()
+        if normalized_tag == "br" and self._href is not None:
+            # A line break is an unambiguous rendered separator. Preserve it as
+            # whitespace while ordinary inline wrappers keep text adjacency.
+            self._text_parts.append(" ")
+            return
+        if normalized_tag != "a":
             return
         values = {key.lower(): value for key, value in attrs if value is not None}
         self._href = values.get("href")
@@ -87,9 +93,10 @@ class _ResultsPageLinkParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag.lower() != "a" or self._href is None:
             return
-        # Preserve adjacency between HTML text nodes. Real whitespace remains in
-        # the data chunks and is normalized afterwards, but adjacent inline
-        # elements must not manufacture a token boundary.
+        # Preserve adjacency between HTML text nodes. Real whitespace and
+        # explicit rendered separators remain in the chunks and are normalized
+        # afterwards, but adjacent inline elements must not manufacture a token
+        # boundary.
         visible_text = _normalized_text("".join(self._text_parts))
         evidence_fields = tuple(
             value
