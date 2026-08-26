@@ -249,6 +249,9 @@ class _ResultsPageLinkParser(HTMLParser):
         self._open_namespaces.append(namespace)
         self._annotation_xml_html_integration.append(annotation_xml_html_integration)
 
+    def _is_suppressed_element(self, tag: str, namespace: str) -> bool:
+        return tag in {"script", "style"} or (tag == "template" and namespace == "html")
+
     def _scope_boundaries_for(self, tag: str) -> frozenset[str]:
         return _BASE_SCOPE_BOUNDARIES | _IMPLIED_CLOSE_SCOPE_BOUNDARIES.get(tag, frozenset())
 
@@ -284,7 +287,7 @@ class _ResultsPageLinkParser(HTMLParser):
         removed_non_rendered = [
             tag
             for (tag, _), namespace in zip(self._open_elements[index:], self._open_namespaces[index:])
-            if namespace == "html" and tag in _NON_RENDERED_TAGS
+            if self._is_suppressed_element(tag, namespace)
         ]
         for tag in reversed(removed_non_rendered):
             if self._non_rendered_tags and self._non_rendered_tags[-1] == tag:
@@ -361,6 +364,9 @@ class _ResultsPageLinkParser(HTMLParser):
             and self._open_elements[index][0] in _MATHML_TEXT_INTEGRATION_POINTS
         )
 
+    def _current_node_is_foreign(self) -> bool:
+        return bool(self._open_elements and self._open_namespaces[-1] != "html")
+
     def _exit_foreign_content_for_breakout(self) -> None:
         while self._open_elements:
             index = len(self._open_elements) - 1
@@ -372,6 +378,18 @@ class _ResultsPageLinkParser(HTMLParser):
             ):
                 return
             self._delete_open_elements_from(index)
+
+    def _exit_foreign_content_for_endtag_breakout(self) -> None:
+        while self._open_elements and self._open_namespaces[-1] != "html":
+            self._delete_open_elements_from(len(self._open_elements) - 1)
+
+    def _handle_foreign_endtag(self, tag: str) -> None:
+        for index in range(len(self._open_elements) - 1, -1, -1):
+            if self._open_namespaces[index] == "html":
+                return
+            if self._open_elements[index][0] == tag:
+                self._delete_open_elements_from(index)
+                return
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = tag.lower()
@@ -401,7 +419,7 @@ class _ResultsPageLinkParser(HTMLParser):
 
         self._push_element(normalized_tag, attrs)
 
-        if incoming_namespace == "html" and normalized_tag in _NON_RENDERED_TAGS:
+        if self._is_suppressed_element(normalized_tag, incoming_namespace):
             self._non_rendered_tags.append(normalized_tag)
             return
 
@@ -456,28 +474,32 @@ class _ResultsPageLinkParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         normalized_tag = tag.lower()
 
-        if normalized_tag in {"p", "br"} and self._current_node_is_foreign_without_integration():
-            self._exit_foreign_content_for_breakout()
-            if normalized_tag == "br":
-                if (
-                    self._href is not None
-                    and not self._inside_non_rendered_content()
-                    and not self._inside_hidden_content()
-                ):
-                    self._text_parts.append(" ")
-                return
-            if normalized_tag == "p" and self._find_open_element_index("p") is None:
-                if (
-                    self._href is not None
-                    and not self._inside_non_rendered_content()
-                    and not self._inside_hidden_content()
-                ):
-                    self._text_parts.append(" ")
+        if self._current_node_is_foreign():
+            if normalized_tag in {"p", "br"}:
+                self._exit_foreign_content_for_endtag_breakout()
+                if normalized_tag == "br":
+                    if (
+                        self._href is not None
+                        and not self._inside_non_rendered_content()
+                        and not self._inside_hidden_content()
+                    ):
+                        self._text_parts.append(" ")
+                    return
+                if normalized_tag == "p" and self._find_open_element_index("p") is None:
+                    if (
+                        self._href is not None
+                        and not self._inside_non_rendered_content()
+                        and not self._inside_hidden_content()
+                    ):
+                        self._text_parts.append(" ")
+                    return
+            else:
+                self._handle_foreign_endtag(normalized_tag)
                 return
 
         if normalized_tag in _NON_RENDERED_TAGS:
             index = self._find_open_element_index(normalized_tag)
-            if index is None or self._open_namespaces[index] != "html":
+            if index is None or not self._is_suppressed_element(normalized_tag, self._open_namespaces[index]):
                 return
             if self._non_rendered_tags and self._non_rendered_tags[-1] == normalized_tag:
                 self._pop_element(normalized_tag)
