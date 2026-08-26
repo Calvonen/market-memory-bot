@@ -26,7 +26,6 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             </body></html>
             """,
         )
-
         self.assertEqual(
             [candidate.source_url for candidate in candidates],
             [
@@ -48,7 +47,6 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             <a href="javascript:alert(1)">script</a>
             """,
         )
-
         self.assertEqual(candidates, ())
 
     def test_rejects_trailing_dot_and_double_dot_host_spellings(self):
@@ -60,7 +58,6 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             <a href="/valid.pdf">valid</a>
             """,
         )
-
         self.assertEqual(
             [candidate.source_url for candidate in candidates],
             ["https://investor.example.com/valid.pdf"],
@@ -74,13 +71,12 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             <a href="/valid.pdf">valid</a>
             """,
         )
-
         self.assertEqual(
             [candidate.source_url for candidate in candidates],
             ["https://investor.example.com/valid.pdf"],
         )
 
-    def test_rejects_raw_ascii_controls_before_url_parsing_or_stripping(self):
+    def test_rejects_raw_and_encoded_ascii_controls_before_html_decoding(self):
         candidates = extract_results_page_candidates(
             self._source(),
             """
@@ -88,10 +84,10 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             <a href="https://investor.example.com/release2.pdf&#12;">form feed</a>
             <a href="&#31;/release3.pdf">unit separator</a>
             <a href="&#127;/release4.pdf">del</a>
+            <a href="&Tab;/release5.pdf">named tab</a>
             <a href="/valid.pdf">valid</a>
             """,
         )
-
         self.assertEqual(
             [candidate.source_url for candidate in candidates],
             ["https://investor.example.com/valid.pdf"],
@@ -106,12 +102,8 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             <a href="/release.pdf">third</a>
             """,
         )
-
         self.assertEqual(len(candidates), 1)
-        self.assertEqual(
-            candidates[0].source_url,
-            "https://investor.example.com/release.pdf",
-        )
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
         self.assertEqual(candidates[0].source_title, "first")
 
     def test_rfc_dot_segment_removal_preserves_slashes_and_trailing_semantics(self):
@@ -131,7 +123,6 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             <a href="https://investor.example.com/a/./c/../d">dot normalized</a>
             """,
         )
-
         self.assertEqual(
             [candidate.source_url for candidate in candidates],
             [
@@ -139,6 +130,50 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
                 "https://investor.example.com/a/d",
             ],
         )
+
+    def test_relative_resolution_preserves_empty_segments(self):
+        source = OfficialReleaseSource(
+            event_id="calendar:test-event",
+            source_kind="results_page",
+            source_url="https://investor.example.com/results/page",
+            source_title="Results",
+            version=1,
+        )
+        candidates = extract_results_page_candidates(
+            source,
+            '<a href="a//b">release</a>',
+        )
+        self.assertEqual(
+            [candidate.source_url for candidate in candidates],
+            ["https://investor.example.com/results/a//b"],
+        )
+
+    def test_semicolon_parameters_remain_part_of_rfc_path_segments(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            """
+            <a href="https://investor.example.com/a/.;p">dot-like param</a>
+            <a href="https://investor.example.com/a/..;p">parent-like param</a>
+            """,
+        )
+        self.assertEqual(
+            [candidate.source_url for candidate in candidates],
+            [
+                "https://investor.example.com/a/.;p",
+                "https://investor.example.com/a/..;p",
+            ],
+        )
+
+    def test_invalid_approved_base_url_fails_closed_before_relative_resolution(self):
+        source = OfficialReleaseSource(
+            event_id="calendar:test-event",
+            source_kind="results_page",
+            source_url="https://investor.example.com/results\x7f",
+            source_title="Results",
+            version=1,
+        )
+        candidates = extract_results_page_candidates(source, '<a href="/release.pdf">release</a>')
+        self.assertEqual(candidates, ())
 
     def test_normalizes_dot_segments_before_self_page_and_deduplication(self):
         candidates = extract_results_page_candidates(
@@ -149,12 +184,8 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             <a href="/release.pdf">duplicate</a>
             """,
         )
-
         self.assertEqual(len(candidates), 1)
-        self.assertEqual(
-            candidates[0].source_url,
-            "https://investor.example.com/release.pdf",
-        )
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
         self.assertEqual(candidates[0].source_title, "first")
 
     def test_normalizes_empty_https_path_to_slash_for_self_page_and_deduplication(self):
@@ -165,7 +196,6 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             source_title="Results",
             version=1,
         )
-
         candidates = extract_results_page_candidates(
             source,
             """
@@ -174,7 +204,6 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             <a href="/release.pdf">release</a>
             """,
         )
-
         self.assertEqual(
             [candidate.source_url for candidate in candidates],
             ["https://investor.example.com/release.pdf"],
@@ -189,12 +218,8 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             <a href="https://investor.example.com/release.pdf">PDF duplicate</a>
             """,
         )
-
         self.assertEqual(len(candidates), 1)
-        self.assertEqual(
-            candidates[0].source_url,
-            "https://investor.example.com/release.pdf",
-        )
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
         self.assertEqual(candidates[0].source_title, "PDF")
 
     def test_preserves_accessible_link_title_when_anchor_text_is_empty(self):
@@ -202,7 +227,6 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             self._source(),
             '<a href="/release.pdf" aria-label="Q2 results"></a>',
         )
-
         self.assertEqual(candidates[0].source_title, "Q2 results")
 
     def test_direct_url_source_is_rejected(self):
@@ -212,7 +236,6 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             source_url="https://investor.example.com/release.pdf",
             version=1,
         )
-
         with self.assertRaisesRegex(ValueError, "source_kind=results_page"):
             extract_results_page_candidates(source, "<html></html>")
 
