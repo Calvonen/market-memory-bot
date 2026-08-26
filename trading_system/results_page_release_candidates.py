@@ -69,7 +69,7 @@ _IMPLIED_CLOSE_SCOPE_BOUNDARIES = {
     "optgroup": frozenset({"select", "datalist"}),
     "p": frozenset({"button", "table", "td", "th", "template", "html"}),
 }
-_GENERIC_END_TAG_SPECIAL_ELEMENTS = frozenset(
+_HTML_GENERIC_END_TAG_SPECIAL_ELEMENTS = frozenset(
     {
         "address", "applet", "area", "article", "aside", "base", "basefont", "bgsound",
         "blockquote", "body", "br", "button", "caption", "center", "col", "colgroup", "dd",
@@ -81,11 +81,14 @@ _GENERIC_END_TAG_SPECIAL_ELEMENTS = frozenset(
         "search", "section", "select", "source", "style", "summary", "table", "tbody", "td",
         "template", "textarea", "tfoot", "th", "thead", "title", "tr", "track", "ul", "wbr",
         "xmp",
-        # HTML's special-element category also includes these foreign-namespace
-        # elements. HTMLParser lowercases tag names, including foreignObject.
-        "annotation-xml", "mi", "mn", "mo", "ms", "mtext", "desc", "foreignobject",
     }
 )
+_MATHML_GENERIC_END_TAG_SPECIAL_ELEMENTS = frozenset(
+    {"annotation-xml", "mi", "mn", "mo", "ms", "mtext"}
+)
+_SVG_GENERIC_END_TAG_SPECIAL_ELEMENTS = frozenset({"desc", "foreignobject", "title"})
+_MATHML_TEXT_INTEGRATION_POINTS = frozenset({"mi", "mn", "mo", "ms", "mtext"})
+_SVG_HTML_INTEGRATION_POINTS = frozenset({"desc", "foreignobject", "title"})
 _NON_GENERIC_EXPLICIT_END_TAGS = frozenset(_IMPLIED_CLOSE_SCOPE_BOUNDARIES) | _HEADING_TAGS | _NON_RENDERED_TAGS | {"a"}
 
 
@@ -145,6 +148,8 @@ class _ResultsPageLinkParser(HTMLParser):
         self._open_break_tags: list[str] = []
         self._non_rendered_tags: list[str] = []
         self._open_elements: list[tuple[str, bool]] = []
+        self._open_namespaces: list[str] = []
+        self._annotation_xml_html_integration: list[bool] = []
 
     def _inside_non_rendered_content(self) -> bool:
         return bool(self._non_rendered_tags)
@@ -177,38 +182,86 @@ class _ResultsPageLinkParser(HTMLParser):
         self.links.append((self._href, title, self._raw_href_safe, evidence_fields))
         self._reset_anchor()
 
+    def _namespace_for_new_element(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> str:
+        if not self._open_elements:
+            return "math" if tag == "math" else "svg" if tag == "svg" else "html"
+
+        parent_tag = self._open_elements[-1][0]
+        parent_namespace = self._open_namespaces[-1]
+        if parent_namespace == "html":
+            return "math" if tag == "math" else "svg" if tag == "svg" else "html"
+        if parent_namespace == "math":
+            if parent_tag in _MATHML_TEXT_INTEGRATION_POINTS and tag not in {"mglyph", "malignmark"}:
+                return "html"
+            if parent_tag == "annotation-xml" and self._annotation_xml_html_integration[-1]:
+                return "html"
+            return "math"
+        if parent_namespace == "svg" and parent_tag in _SVG_HTML_INTEGRATION_POINTS:
+            return "html"
+        return parent_namespace
+
     def _push_element(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in _VOID_TAGS:
             return
         hidden = any(key.lower() == "hidden" for key, _ in attrs)
+        namespace = self._namespace_for_new_element(tag, attrs)
+        values = {key.lower(): value for key, value in attrs if value is not None}
+        annotation_xml_html_integration = (
+            namespace == "math"
+            and tag == "annotation-xml"
+            and values.get("encoding", "").lower() in {"text/html", "application/xhtml+xml"}
+        )
         self._open_elements.append((tag, hidden))
+        self._open_namespaces.append(namespace)
+        self._annotation_xml_html_integration.append(annotation_xml_html_integration)
 
     def _scope_boundaries_for(self, tag: str) -> frozenset[str]:
-        boundaries = _BASE_SCOPE_BOUNDARIES | _IMPLIED_CLOSE_SCOPE_BOUNDARIES.get(tag, frozenset())
-        if tag not in _NON_GENERIC_EXPLICIT_END_TAGS:
-            boundaries = boundaries | _GENERIC_END_TAG_SPECIAL_ELEMENTS
-        return boundaries
+        return _BASE_SCOPE_BOUNDARIES | _IMPLIED_CLOSE_SCOPE_BOUNDARIES.get(tag, frozenset())
+
+    def _is_generic_special_element(self, index: int) -> bool:
+        open_tag = self._open_elements[index][0]
+        namespace = self._open_namespaces[index]
+        if namespace == "html":
+            return open_tag in _HTML_GENERIC_END_TAG_SPECIAL_ELEMENTS
+        if namespace == "math":
+            return open_tag in _MATHML_GENERIC_END_TAG_SPECIAL_ELEMENTS
+        if namespace == "svg":
+            return open_tag in _SVG_GENERIC_END_TAG_SPECIAL_ELEMENTS
+        return False
 
     def _find_open_element_index(self, tag: str) -> int | None:
         boundaries = self._scope_boundaries_for(tag)
+        generic_close = tag not in _NON_GENERIC_EXPLICIT_END_TAGS
         for index in range(len(self._open_elements) - 1, -1, -1):
             open_tag = self._open_elements[index][0]
             if open_tag == tag:
                 return index
-            if open_tag in boundaries:
+            if open_tag in boundaries or (generic_close and self._is_generic_special_element(index)):
                 return None
         return None
+
+    def _delete_open_elements_from(self, index: int) -> None:
+        removed_tags = [tag for tag, _ in self._open_elements[index:]]
+        if self._href is not None and "a" in removed_tags:
+            self._finalize_anchor()
+        del self._open_elements[index:]
+        del self._open_namespaces[index:]
+        del self._annotation_xml_html_integration[index:]
 
     def _pop_element(self, tag: str) -> bool:
         index = self._find_open_element_index(tag)
         if index is None:
             return False
-        del self._open_elements[index:]
+        self._delete_open_elements_from(index)
         return True
 
     def _close_open_element_at(self, index: int) -> None:
         open_tag = self._open_elements[index][0]
-        del self._open_elements[index:]
+        self._delete_open_elements_from(index)
         if open_tag in self._open_break_tags:
             break_index = len(self._open_break_tags) - 1 - self._open_break_tags[::-1].index(open_tag)
             del self._open_break_tags[break_index:]
@@ -338,9 +391,6 @@ class _ResultsPageLinkParser(HTMLParser):
 
     def close(self) -> None:
         super().close()
-        # Malformed non-rendered markup can leave a visible outer anchor active
-        # even after its end tag is ignored by scope rules. Preserve the outer
-        # URL/attribute candidate at EOF while keeping all suppressed text out.
         self._finalize_anchor()
 
 
