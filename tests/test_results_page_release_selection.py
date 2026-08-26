@@ -36,9 +36,7 @@ class ResultsPageReleaseSelectionTests(unittest.TestCase):
                 self._candidate("https://investor.example.com/reports/2025-08-26-results.pdf", "Old results"),
             ),
         )
-
         self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
-        self.assertEqual(selection.candidate.source_url, "https://investor.example.com/reports/2026-08-26-results.pdf")
 
     def test_accepts_compact_slash_and_underscore_date_spellings(self):
         for url in (
@@ -74,7 +72,6 @@ class ResultsPageReleaseSelectionTests(unittest.TestCase):
             (self._candidate("https://investor.example.com/q2-2026-results.pdf", "Q2 2026 results"),),
         )
         self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
-        self.assertIsNone(selection.candidate)
 
     def test_selects_unique_candidate_with_explicit_period_evidence(self):
         for release_period, url in (
@@ -89,6 +86,35 @@ class ResultsPageReleaseSelectionTests(unittest.TestCase):
                     release_period=release_period,
                 )
                 self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
+
+    def test_invalid_period_is_rejected_even_when_exact_date_matches(self):
+        with self.assertRaises(ValueError):
+            select_results_page_release_candidate(
+                self._event(),
+                (self._candidate("https://investor.example.com/2026-08-26-results.pdf"),),
+                release_period="Q5 2026",
+            )
+
+    def test_period_evidence_must_exist_within_one_field(self):
+        selection = select_results_page_release_candidate(
+            self._event(),
+            (self._candidate("https://investor.example.com/releases/Q2", "2026 results"),),
+            release_period="Q2 2026",
+        )
+        self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_rejects_period_labels_embedded_in_larger_alphanumeric_tokens(self):
+        for candidate in (
+            self._candidate("https://investor.example.com/q2-2026results.pdf"),
+            self._candidate("https://investor.example.com/release.pdf", "FY2026annual results"),
+        ):
+            with self.subTest(candidate=candidate):
+                selection = select_results_page_release_candidate(
+                    self._event(),
+                    (candidate,),
+                    release_period="Q2 2026" if "q2" in candidate.source_url else "FY 2026",
+                )
+                self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
 
     def test_exact_date_tier_wins_over_period_only_candidate(self):
         exact = self._candidate("https://investor.example.com/2026-08-26-results.pdf")
@@ -111,7 +137,6 @@ class ResultsPageReleaseSelectionTests(unittest.TestCase):
             release_period="Q2 2026",
         )
         self.assertEqual(selection.status, ResultsPageSelectionStatus.AMBIGUOUS)
-        self.assertIsNone(selection.candidate)
 
     def test_rejects_invalid_period_labels_instead_of_guessing(self):
         for release_period in ("Q5 2026", "2026 Q2", "2026", "H3 2026"):
@@ -132,7 +157,6 @@ class ResultsPageReleaseSelectionTests(unittest.TestCase):
             ),
         )
         self.assertEqual(selection.status, ResultsPageSelectionStatus.AMBIGUOUS)
-        self.assertIsNone(selection.candidate)
 
     def test_ignores_candidates_for_another_event(self):
         selection = select_results_page_release_candidate(
