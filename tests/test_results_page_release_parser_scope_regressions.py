@@ -122,6 +122,35 @@ class ResultsPageReleaseParserScopeRegressionTests(unittest.TestCase):
         self.assertEqual(candidates[0].source_url, "https://investor.example.com/r")
         self.assertEqual(candidates[0].evidence_fields, ("Q2-2026",))
 
+    def test_template_local_anchor_pop_does_not_finalize_outer_anchor_node(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report<template><a href="/other">hidden</a></template> Q2-2026</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report Q2-2026",))
+
+    def test_svg_anchor_does_not_trigger_html_nested_anchor_repair(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report<svg><a href="/other">icon</a></svg> Q2-2026</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Reporticon Q2-2026",))
+
+    def test_foreignobject_anchor_still_uses_html_nested_anchor_repair(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Q2-2026<svg><foreignObject><a href="/other">Annual</a></foreignObject></svg>',
+        )
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Q2-2026",))
+        self.assertEqual(candidates[1].source_url, "https://investor.example.com/other")
+        self.assertEqual(candidates[1].evidence_fields, ("Annual",))
+
 
 if __name__ == "__main__":
     unittest.main()
