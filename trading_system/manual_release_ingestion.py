@@ -184,6 +184,15 @@ class ManualOfficialReleaseProvider:
             return True
         if media_type:
             return False
+
+        bom_encoding = cls._sniff_bom_encoding(data)
+        if bom_encoding:
+            try:
+                prefix_text = data[:1024].decode(bom_encoding, errors="strict").lstrip().lower()
+            except UnicodeDecodeError:
+                return False
+            return prefix_text.startswith(("<!doctype html", "<html", "<head", "<body"))
+
         prefix = data.lstrip()[:256].lower()
         return (
             prefix.startswith(b"<!doctype html")
