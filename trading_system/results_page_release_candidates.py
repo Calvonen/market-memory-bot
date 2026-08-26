@@ -281,6 +281,14 @@ class _ResultsPageLinkParser(HTMLParser):
             and index <= self._active_anchor_index
         ):
             self._finalize_anchor()
+        removed_non_rendered = [
+            tag
+            for (tag, _), namespace in zip(self._open_elements[index:], self._open_namespaces[index:])
+            if namespace == "html" and tag in _NON_RENDERED_TAGS
+        ]
+        for tag in reversed(removed_non_rendered):
+            if self._non_rendered_tags and self._non_rendered_tags[-1] == tag:
+                self._non_rendered_tags.pop()
         del self._open_elements[index:]
         del self._open_namespaces[index:]
         del self._annotation_xml_html_integration[index:]
@@ -393,7 +401,7 @@ class _ResultsPageLinkParser(HTMLParser):
 
         self._push_element(normalized_tag, attrs)
 
-        if normalized_tag in _NON_RENDERED_TAGS:
+        if incoming_namespace == "html" and normalized_tag in _NON_RENDERED_TAGS:
             self._non_rendered_tags.append(normalized_tag)
             return
 
@@ -450,14 +458,28 @@ class _ResultsPageLinkParser(HTMLParser):
 
         if normalized_tag in {"p", "br"} and self._current_node_is_foreign_without_integration():
             self._exit_foreign_content_for_breakout()
+            if normalized_tag == "br":
+                if (
+                    self._href is not None
+                    and not self._inside_non_rendered_content()
+                    and not self._inside_hidden_content()
+                ):
+                    self._text_parts.append(" ")
+                return
+            if normalized_tag == "p" and self._find_open_element_index("p") is None:
+                if (
+                    self._href is not None
+                    and not self._inside_non_rendered_content()
+                    and not self._inside_hidden_content()
+                ):
+                    self._text_parts.append(" ")
+                return
 
         if normalized_tag in _NON_RENDERED_TAGS:
-            if (
-                self._non_rendered_tags
-                and self._non_rendered_tags[-1] == normalized_tag
-                and self._find_open_element_index(normalized_tag) is not None
-            ):
-                self._non_rendered_tags.pop()
+            index = self._find_open_element_index(normalized_tag)
+            if index is None or self._open_namespaces[index] != "html":
+                return
+            if self._non_rendered_tags and self._non_rendered_tags[-1] == normalized_tag:
                 self._pop_element(normalized_tag)
             return
 
