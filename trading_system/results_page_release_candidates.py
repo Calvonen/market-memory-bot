@@ -103,6 +103,13 @@ def _element_hidden(element) -> bool:
     return any(str(key).lower().split("}")[-1] == "hidden" for key in element.attrib)
 
 
+def _element_is_non_rendered(element) -> bool:
+    namespace, local = _element_name(element.tag)
+    return local in _NON_RENDERED_TAGS and (
+        local in {"script", "style"} or namespace == _HTML_NAMESPACE
+    )
+
+
 def _visible_anchor_text(anchor) -> str:
     parts: list[str] = []
 
@@ -111,19 +118,19 @@ def _visible_anchor_text(anchor) -> str:
             parts.append(" ")
 
     def visit(element) -> None:
-        namespace, local = _element_name(element.tag)
-        hidden = _element_hidden(element)
-        non_rendered = local in _NON_RENDERED_TAGS and (
-            local in {"script", "style"} or namespace == _HTML_NAMESPACE
-        )
-        if hidden or non_rendered:
+        if _element_hidden(element) or _element_is_non_rendered(element):
             return
 
         if element.text:
             parts.append(element.text)
         for child in list(element):
             child_namespace, child_local = _element_name(child.tag)
-            rendered_break = child_namespace == _HTML_NAMESPACE and child_local in _RENDERED_BREAK_TAGS
+            child_visible = not _element_hidden(child) and not _element_is_non_rendered(child)
+            rendered_break = (
+                child_visible
+                and child_namespace == _HTML_NAMESPACE
+                and child_local in _RENDERED_BREAK_TAGS
+            )
             if rendered_break:
                 append_break()
             visit(child)
@@ -140,9 +147,7 @@ def _iter_visible_html_anchors(root):
     def walk(element, hidden_ancestor: bool):
         hidden_here = hidden_ancestor or _element_hidden(element)
         namespace, local = _element_name(element.tag)
-        non_rendered = local in _NON_RENDERED_TAGS and (
-            local in {"script", "style"} or namespace == _HTML_NAMESPACE
-        )
+        non_rendered = _element_is_non_rendered(element)
         if hidden_here or non_rendered:
             return
         if namespace == _HTML_NAMESPACE and local == "a":
