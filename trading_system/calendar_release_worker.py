@@ -204,12 +204,12 @@ def run_calendar_release_ingestion_once(
                 provider = ManualOfficialReleaseProvider(approved_source)
             else:
                 normalized_market = target.market.strip().upper()
-                if normalized_market and normalized_market not in US_MARKET_LABELS:
+                if normalized_market not in US_MARKET_LABELS:
                     results.append(
                         CalendarReleaseWorkerResult(
                             target.event_id,
                             "missing_official_source",
-                            "non-US earnings target requires an approved official release source",
+                            "earnings target outside approved US market labels requires an approved official release source",
                         )
                     )
                     continue
