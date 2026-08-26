@@ -125,6 +125,19 @@ _IMPLIED_CLOSE_ON_START = {
     "option": frozenset({"option"}),
     "optgroup": frozenset({"option", "optgroup"}),
 }
+_BASE_SCOPE_BOUNDARIES = frozenset(
+    {
+        "applet",
+        "caption",
+        "html",
+        "marquee",
+        "object",
+        "table",
+        "td",
+        "template",
+        "th",
+    }
+)
 _IMPLIED_CLOSE_SCOPE_BOUNDARIES = {
     "li": frozenset({"ol", "ul", "menu"}),
     "dt": frozenset({"dl"}),
@@ -236,7 +249,7 @@ class _ResultsPageLinkParser(HTMLParser):
         self._open_elements.append((tag, hidden))
 
     def _scope_boundaries_for(self, tag: str) -> frozenset[str]:
-        return _IMPLIED_CLOSE_SCOPE_BOUNDARIES.get(tag, frozenset())
+        return _BASE_SCOPE_BOUNDARIES | _IMPLIED_CLOSE_SCOPE_BOUNDARIES.get(tag, frozenset())
 
     def _find_open_element_index(self, tag: str) -> int | None:
         boundaries = self._scope_boundaries_for(tag)
@@ -248,10 +261,12 @@ class _ResultsPageLinkParser(HTMLParser):
                 return None
         return None
 
-    def _pop_element(self, tag: str) -> None:
+    def _pop_element(self, tag: str) -> bool:
         index = self._find_open_element_index(tag)
-        if index is not None:
-            del self._open_elements[index:]
+        if index is None:
+            return False
+        del self._open_elements[index:]
+        return True
 
     def _close_open_element_at(self, index: int) -> None:
         open_tag = self._open_elements[index][0]
@@ -274,29 +289,36 @@ class _ResultsPageLinkParser(HTMLParser):
                 return None
         return None
 
-    def _apply_implied_closes(self, incoming_tag: str) -> None:
-        closing_tags = _IMPLIED_CLOSE_ON_START.get(incoming_tag, frozenset())
-        if incoming_tag in _P_IMPLIED_CLOSE_START_TAGS:
-            closing_tags = closing_tags | {"p"}
-        if incoming_tag in _HEADING_TAGS:
-            closing_tags = closing_tags | _HEADING_TAGS
-        if not closing_tags:
-            return
-
-        close_index = self._find_implied_close_index(frozenset(closing_tags))
+    def _close_first_in_scope(self, closing_tags: frozenset[str]) -> None:
+        close_index = self._find_implied_close_index(closing_tags)
         if close_index is not None:
             self._close_open_element_at(close_index)
+
+    def _apply_implied_closes(self, incoming_tag: str) -> None:
+        closing_tags = _IMPLIED_CLOSE_ON_START.get(incoming_tag, frozenset())
+        if closing_tags:
+            self._close_first_in_scope(closing_tags)
+
+        # HTML in-body handling can perform more than one repair for a single
+        # incoming heading. Keep these ordered rather than merging the target
+        # sets, otherwise a nearer paragraph can mask the heading close.
+        if incoming_tag in _P_IMPLIED_CLOSE_START_TAGS:
+            self._close_first_in_scope(frozenset({"p"}))
+        if incoming_tag in _HEADING_TAGS:
+            self._close_first_in_scope(_HEADING_TAGS)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = tag.lower()
         self._apply_implied_closes(normalized_tag)
 
-        if normalized_tag == "a" and self._href is not None:
-            self._finalize_anchor()
-            self._pop_element("a")
-
         ancestor_hidden = self._inside_hidden_content()
         ancestor_non_rendered = self._inside_non_rendered_content()
+
+        if normalized_tag == "a" and self._href is not None and not ancestor_non_rendered:
+            self._finalize_anchor()
+            self._pop_element("a")
+            ancestor_hidden = self._inside_hidden_content()
+
         self._push_element(normalized_tag, attrs)
 
         if normalized_tag in _NON_RENDERED_TAGS:
@@ -305,6 +327,10 @@ class _ResultsPageLinkParser(HTMLParser):
 
         if normalized_tag == "a":
             if ancestor_hidden or ancestor_non_rendered or self._inside_hidden_content():
+                # A template/non-rendered subtree must not disturb an outer
+                # active anchor or create a visible candidate of its own.
+                if ancestor_non_rendered:
+                    return
                 self._reset_anchor()
                 return
             values = {key.lower(): value for key, value in attrs if value is not None}
@@ -341,12 +367,23 @@ class _ResultsPageLinkParser(HTMLParser):
         normalized_tag = tag.lower()
 
         if normalized_tag in _NON_RENDERED_TAGS:
-            if self._non_rendered_tags and self._non_rendered_tags[-1] == normalized_tag:
+            # Only release suppression after confirming the corresponding
+            # element can actually close in the current HTML scope.
+            if (
+                self._non_rendered_tags
+                and self._non_rendered_tags[-1] == normalized_tag
+                and self._find_open_element_index(normalized_tag) is not None
+            ):
                 self._non_rendered_tags.pop()
-            self._pop_element(normalized_tag)
+                self._pop_element(normalized_tag)
             return
 
         if normalized_tag == "a":
+            if self._inside_non_rendered_content():
+                # Closing a hidden/template-local anchor must not finalize the
+                # outer visible anchor.
+                self._pop_element(normalized_tag)
+                return
             self._finalize_anchor()
             self._pop_element(normalized_tag)
             return
