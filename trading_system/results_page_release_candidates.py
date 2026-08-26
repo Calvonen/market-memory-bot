@@ -99,13 +99,6 @@ def _element_name(tag: str) -> tuple[str | None, str]:
     return None, tag.lower()
 
 
-def _is_html_element(element, name: str | None = None) -> bool:
-    namespace, local = _element_name(element.tag)
-    if namespace != _HTML_NAMESPACE:
-        return False
-    return name is None or local == name
-
-
 def _element_hidden(element) -> bool:
     return any(str(key).lower().split("}")[-1] == "hidden" for key in element.attrib)
 
@@ -117,33 +110,29 @@ def _visible_anchor_text(anchor) -> str:
         if parts and parts[-1] != " ":
             parts.append(" ")
 
-    def visit(element, *, include_own_text: bool) -> None:
+    def visit(element) -> None:
         namespace, local = _element_name(element.tag)
         hidden = _element_hidden(element)
         non_rendered = local in _NON_RENDERED_TAGS and (
             local in {"script", "style"} or namespace == _HTML_NAMESPACE
         )
+        if hidden or non_rendered:
+            return
 
-        if include_own_text and not hidden and not non_rendered and element.text:
+        if element.text:
             parts.append(element.text)
+        for child in list(element):
+            child_namespace, child_local = _element_name(child.tag)
+            rendered_break = child_namespace == _HTML_NAMESPACE and child_local in _RENDERED_BREAK_TAGS
+            if rendered_break:
+                append_break()
+            visit(child)
+            if rendered_break:
+                append_break()
+            if child.tail:
+                parts.append(child.tail)
 
-        if not hidden and not non_rendered:
-            for child in list(element):
-                child_namespace, child_local = _element_name(child.tag)
-                rendered_break = child_namespace == _HTML_NAMESPACE and child_local in _RENDERED_BREAK_TAGS
-                if rendered_break:
-                    append_break()
-                visit(child, include_own_text=True)
-                if rendered_break:
-                    append_break()
-                if child.tail:
-                    parts.append(child.tail)
-        else:
-            for child in list(element):
-                if child.tail:
-                    parts.append(child.tail)
-
-    visit(anchor, include_own_text=True)
+    visit(anchor)
     return _normalized_text("".join(parts))
 
 
