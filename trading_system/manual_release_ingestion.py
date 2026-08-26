@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 from html.parser import HTMLParser
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from pypdf import PdfReader
@@ -120,6 +121,17 @@ class ManualOfficialReleaseProvider:
             raise RuntimeError("manual official release PDF extraction failed") from exc
         return "\n".join(pages)
 
+    @staticmethod
+    def _validate_final_url(approved_url: str, final_url: str) -> None:
+        approved = urlparse(approved_url)
+        final = urlparse(final_url)
+        approved_host = (approved.hostname or "").rstrip(".").lower()
+        final_host = (final.hostname or "").rstrip(".").lower()
+        if final.scheme.lower() != "https" or final_host != approved_host:
+            raise RuntimeError(
+                "manual official release redirect left approved HTTPS host"
+            )
+
     def _fetch_bytes(self, url: str) -> tuple[bytes, str, str]:
         request = Request(
             url,
@@ -129,6 +141,8 @@ class ManualOfficialReleaseProvider:
             },
         )
         with urlopen(request, timeout=self.timeout_seconds) as response:
+            final_url = response.geturl()
+            self._validate_final_url(url, final_url)
             content_type = response.headers.get("Content-Type", "") or ""
             charset = response.headers.get_content_charset() or "utf-8"
             return response.read(), content_type, charset
