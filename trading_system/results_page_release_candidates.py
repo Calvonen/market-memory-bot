@@ -86,11 +86,12 @@ def _canonical_https_url(url: str) -> str | None:
         is_ipv6 = False
     rendered_host = f"[{canonical_host}]" if is_ipv6 else canonical_host
     canonical_netloc = rendered_host if port in (None, 443) else f"{rendered_host}:{port}"
+    canonical_path = parsed.path or "/"
     return urlunparse(
         (
             "https",
             canonical_netloc,
-            parsed.path,
+            canonical_path,
             parsed.params,
             parsed.query,
             "",
@@ -99,8 +100,15 @@ def _canonical_https_url(url: str) -> str | None:
 
 
 def _canonical_candidate_url(base_url: str, href: str) -> str | None:
+    raw_href = href.strip()
+    # urllib intentionally strips ASCII tab/CR/LF during parsing. Reject those
+    # bytes before URL normalization so a malformed authority cannot be
+    # transformed into the approved origin.
+    if any(control in raw_href for control in ("\t", "\r", "\n")):
+        return None
+
     try:
-        candidate = urljoin(base_url, href.strip())
+        candidate = urljoin(base_url, raw_href)
     except ValueError:
         return None
 
