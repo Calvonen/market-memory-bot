@@ -27,7 +27,8 @@ _NUMERIC_ENTITY_RE = re.compile(r"&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));?")
 _SIMPLE_HTML_TEXT_TAGS = frozenset(
     {
         "a", "abbr", "address", "article", "aside", "b", "bdi", "bdo", "blockquote", "br",
-        "button", "caption", "center", "cite", "code", "dd", "del", "details", "dfn", "dialog", "div", "dl",
+        "button", "caption", "center", "cite", "code", "data", "dd", "del", "details", "dfn",
+        "dialog", "div", "dl",
         "dt", "em", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
         "h5", "h6", "header", "hgroup", "hr", "i", "ins", "kbd", "label", "legend", "li", "listing", "main",
         "mark", "menu", "nav", "ol", "p", "plaintext", "pre", "q", "s", "samp", "search", "section",
@@ -35,6 +36,7 @@ _SIMPLE_HTML_TEXT_TAGS = frozenset(
         "thead", "time", "tr", "u", "ul", "var", "wbr", "xmp",
     }
 )
+_FOREIGN_ROOT_TAGS = frozenset({"svg", "math"})
 _RENDERED_BREAK_TAGS = frozenset(
     {
         "address", "article", "aside", "blockquote", "br", "caption", "center", "dd", "details", "dialog",
@@ -154,17 +156,48 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.unsafe_hrefs: set[str] = set()
+        self._template_hrefs: set[str] = set()
+        self._rendered_hrefs: set[str] = set()
+        self._foreign_depth = 0
+        self._template_depth = 0
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.lower() != "a":
-            return
+    @property
+    def template_only_hrefs(self) -> set[str]:
+        """Hrefs that a results page only ever spells inside <template> content."""
+
+        return self._template_hrefs - self._rendered_hrefs
+
+    def _record_anchor(self, attrs: list[tuple[str, str | None]]) -> None:
         hrefs = [value for key, value in attrs if key.lower() == "href" and value is not None]
         raw_start_tag = self.get_starttag_text() or ""
         if len(hrefs) != 1 or not _raw_href_is_safe(raw_start_tag, hrefs[0] if hrefs else None):
             self.unsafe_hrefs.update(hrefs)
+        target = self._template_hrefs if self._template_depth else self._rendered_hrefs
+        target.update(hrefs)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        lowered = tag.lower()
+        if lowered in _FOREIGN_ROOT_TAGS:
+            self._foreign_depth += 1
+        elif lowered == "template" and not self._foreign_depth:
+            # <svg>/<math> subtrees have no HTML template semantics, so only a
+            # template spelled in HTML content suppresses its anchors.
+            self._template_depth += 1
+        if lowered == "a":
+            self._record_anchor(attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        lowered = tag.lower()
+        if lowered in _FOREIGN_ROOT_TAGS:
+            self._foreign_depth = max(0, self._foreign_depth - 1)
+        elif lowered == "template":
+            self._template_depth = max(0, self._template_depth - 1)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.handle_starttag(tag, attrs)
+        # A self-closing start tag opens and closes in one step, so container
+        # depths stay balanced; only the anchor bookkeeping matters here.
+        if tag.lower() == "a":
+            self._record_anchor(attrs)
 
 
 def _element_name(tag: object) -> tuple[str | None, str]:
@@ -277,22 +310,39 @@ def _visible_anchor_text_fields(anchor) -> tuple[str, ...]:
     return tuple(fields)
 
 
+def _element_is_foreign(element) -> bool:
+    namespace, _ = _element_name(element.tag)
+    return namespace is not None and namespace != _HTML_NAMESPACE
+
+
 def _iter_visible_html_anchors(root):
     def walk(element, is_fragment_root: bool = False):
         if not isinstance(element.tag, str):
             return
         if not is_fragment_root:
-            if _element_hidden(element) or not _element_allows_simple_text(element):
+            if _element_hidden(element):
                 return
-            namespace, local = _element_name(element.tag)
-            if namespace == _HTML_NAMESPACE and local == "a":
-                yield element
+            if not _element_allows_simple_text(element):
+                # SVG/MathML subtrees never supply evidence themselves, but their
+                # HTML integration points (foreignObject, desc, title,
+                # annotation-xml) hold ordinary HTML anchors that a browser
+                # renders as real links. Keep descending through foreign content
+                # so those anchors stay discoverable; only HTML-namespace anchors
+                # are ever yielded, so SVG/MathML anchors remain fail-closed.
+                # HTML elements outside the conservative allowlist still stop the
+                # walk, which keeps template/script/style content suppressed.
+                if not _element_is_foreign(element):
+                    return
+            else:
+                namespace, local = _element_name(element.tag)
+                if namespace == _HTML_NAMESPACE and local == "a":
+                    yield element
 
-            details_summary = _closed_details_summary(element)
-            if details_summary is not None:
-                if details_summary is not False:
-                    yield from walk(details_summary)
-                return
+                details_summary = _closed_details_summary(element)
+                if details_summary is not None:
+                    if details_summary is not False:
+                        yield from walk(details_summary)
+                    return
 
         for child in list(element):
             yield from walk(child)
@@ -304,6 +354,7 @@ def _parse_html5_links(html_text: str) -> list[tuple[str, str | None, tuple[str,
     safety_scanner = _RawAnchorHrefSafetyScanner()
     safety_scanner.feed(html_text)
     safety_scanner.close()
+    template_only_hrefs = safety_scanner.template_only_hrefs
 
     fragment = html5lib.parseFragment(
         _preserve_invalid_scalars_as_control(html_text),
@@ -315,6 +366,12 @@ def _parse_html5_links(html_text: str) -> list[tuple[str, str | None, tuple[str,
     for anchor in _iter_visible_html_anchors(fragment):
         href = anchor.attrib.get("href")
         if href is None or href in safety_scanner.unsafe_hrefs or _contains_ascii_control(href):
+            continue
+        if href in template_only_hrefs:
+            # html5lib has no <template> support, so the anchor adoption agency can
+            # hoist a template-local anchor out of its template and into rendered
+            # content. Template content is never rendered, so such an anchor must
+            # not become a release candidate.
             continue
         aria_label = _safe_normalized_text(anchor.attrib.get("aria-label", ""))
         title_attr = _safe_normalized_text(anchor.attrib.get("title", ""))
@@ -375,6 +432,7 @@ def _remove_dot_segments(path: str) -> str:
             output = _remove_last_path_segment(output)
         elif input_buffer == "/..":
             input_buffer = "/"
+            output = _remove_last_path_segment(output)
         elif input_buffer in {".", ".."}:
             input_buffer = ""
         else:
@@ -492,11 +550,15 @@ def extract_results_page_candidates(
         if candidate_url is None or candidate_url == page_url:
             continue
         if candidate_url not in aggregated:
-            aggregated[candidate_url] = {"titles": [], "fields": []}
+            aggregated[candidate_url] = {"title": None, "fields": []}
             order.append(candidate_url)
         record = aggregated[candidate_url]
-        if title:
-            record["titles"].append(title)
+        # The display title stays exactly the first candidate's title: later
+        # duplicates must not concatenate their own text onto it. Their unique
+        # evidence fields are still aggregated because fiscal-period selection
+        # needs every distinct rendered field for the canonical URL.
+        if title and record["title"] is None:
+            record["title"] = title
         for field in evidence_fields:
             if field not in record["fields"]:
                 record["fields"].append(field)
@@ -504,14 +566,12 @@ def extract_results_page_candidates(
     candidates: list[ResultsPageReleaseCandidate] = []
     for candidate_url in order:
         record = aggregated[candidate_url]
-        fields = tuple(record["fields"])
-        titles = record["titles"]
         candidates.append(
             ResultsPageReleaseCandidate(
                 event_id=source.event_id,
                 source_url=candidate_url,
-                source_title=" ".join(titles) or None,
-                evidence_fields=fields,
+                source_title=record["title"],
+                evidence_fields=tuple(record["fields"]),
             )
         )
     return tuple(candidates)

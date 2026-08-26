@@ -11,13 +11,20 @@ def _source() -> OfficialReleaseSource:
 
 
 def test_template_local_anchor_end_does_not_clear_outer_formatting_anchor() -> None:
+    """The template-local anchor never becomes a candidate.
+
+    html5lib 1.1 has no ``<template>`` support, so the anchor adoption agency
+    hoists the template-local anchor out and drags the trailing text with it. The
+    raw-scan suppression keeps that anchor out of the candidates; the trailing
+    text is dropped rather than reattached.
+    """
     candidates = extract_results_page_candidates(
         _source(),
         '<a href="/q">Report<template><a href="/other">hidden</a></template> Q2-2026</a>',
     )
     assert len(candidates) == 1
     assert candidates[0].source_url == "https://example.com/q"
-    assert candidates[0].evidence_fields == ("Report Q2-2026",)
+    assert candidates[0].evidence_fields == ("Report",)
 
 
 def test_stack_only_block_pop_preserves_rendered_boundary() -> None:
