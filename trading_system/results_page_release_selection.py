@@ -38,7 +38,7 @@ def _scheduled_date_patterns(event: CalendarEvent) -> tuple[re.Pattern[str], ...
 def _period_patterns(release_period: str | None) -> tuple[re.Pattern[str], ...]:
     if release_period is None:
         return ()
-    match = _PERIOD_LABEL_RE.fullmatch(release_period.strip())
+    match = _PERIOD_LABEL_RE.fullmatch(release_period)
     if match is None:
         raise ValueError("release_period must be Q1-Q4, H1-H2, or FY followed by one ASCII space and a four-digit ASCII year")
     period, year = match.groups()
@@ -50,9 +50,9 @@ def _period_patterns(release_period: str | None) -> tuple[re.Pattern[str], ...]:
 
 
 def _candidate_evidence_fields(candidate: ResultsPageReleaseCandidate) -> tuple[str, ...]:
-    fields = [candidate.source_url.casefold()]
+    fields = [candidate.source_url]
     if candidate.source_title:
-        fields.append(candidate.source_title.casefold())
+        fields.append(candidate.source_title)
     return tuple(fields)
 
 
