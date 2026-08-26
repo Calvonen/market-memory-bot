@@ -16,100 +16,27 @@ _RAW_HREF_RE = re.compile(
 _NUMERIC_ENTITY_RE = re.compile(r"&#(?:x([0-9a-fA-F]+)|([0-9]+));?")
 _RENDERED_BREAK_START_TAGS = frozenset(
     {
-        "address",
-        "article",
-        "aside",
-        "blockquote",
-        "br",
-        "dd",
-        "div",
-        "dl",
-        "dt",
-        "fieldset",
-        "figcaption",
-        "figure",
-        "footer",
-        "form",
-        "h1",
-        "h2",
-        "h3",
-        "h4",
-        "h5",
-        "h6",
-        "header",
-        "hr",
-        "li",
-        "main",
-        "nav",
-        "ol",
-        "p",
-        "pre",
-        "section",
-        "table",
-        "tbody",
-        "td",
-        "tfoot",
-        "th",
-        "thead",
-        "tr",
-        "ul",
+        "address", "article", "aside", "blockquote", "br", "dd", "div", "dl", "dt",
+        "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
+        "h5", "h6", "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section",
+        "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
     }
 )
 _RENDERED_BREAK_END_TAGS = _RENDERED_BREAK_START_TAGS - {"br", "hr"}
 _NON_RENDERED_TAGS = frozenset({"script", "style", "template"})
 _VOID_TAGS = frozenset(
     {
-        "area",
-        "base",
-        "br",
-        "col",
-        "embed",
-        "hr",
-        "img",
-        "input",
-        "link",
-        "meta",
-        "param",
-        "source",
-        "track",
-        "wbr",
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
+        "param", "source", "track", "wbr",
     }
 )
 _HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
 _P_IMPLIED_CLOSE_START_TAGS = frozenset(
     {
-        "address",
-        "article",
-        "aside",
-        "blockquote",
-        "details",
-        "dialog",
-        "div",
-        "dl",
-        "fieldset",
-        "figcaption",
-        "figure",
-        "footer",
-        "form",
-        "h1",
-        "h2",
-        "h3",
-        "h4",
-        "h5",
-        "h6",
-        "header",
-        "hgroup",
-        "hr",
-        "main",
-        "menu",
-        "nav",
-        "ol",
-        "p",
-        "pre",
-        "search",
-        "section",
-        "table",
-        "ul",
+        "address", "article", "aside", "blockquote", "details", "dialog", "div", "dl",
+        "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
+        "h5", "h6", "header", "hgroup", "hr", "main", "menu", "nav", "ol", "p",
+        "pre", "search", "section", "table", "ul",
     }
 )
 _IMPLIED_CLOSE_ON_START = {
@@ -126,17 +53,7 @@ _IMPLIED_CLOSE_ON_START = {
     "optgroup": frozenset({"option", "optgroup"}),
 }
 _BASE_SCOPE_BOUNDARIES = frozenset(
-    {
-        "applet",
-        "caption",
-        "html",
-        "marquee",
-        "object",
-        "table",
-        "td",
-        "template",
-        "th",
-    }
+    {"applet", "caption", "html", "marquee", "object", "table", "td", "template", "th"}
 )
 _IMPLIED_CLOSE_SCOPE_BOUNDARIES = {
     "li": frozenset({"ol", "ul", "menu"}),
@@ -152,6 +69,21 @@ _IMPLIED_CLOSE_SCOPE_BOUNDARIES = {
     "optgroup": frozenset({"select", "datalist"}),
     "p": frozenset({"button", "table", "td", "th", "template", "html"}),
 }
+_GENERIC_END_TAG_SPECIAL_ELEMENTS = frozenset(
+    {
+        "address", "applet", "area", "article", "aside", "base", "basefont", "bgsound",
+        "blockquote", "body", "br", "button", "caption", "center", "col", "colgroup", "dd",
+        "details", "dir", "div", "dl", "dt", "embed", "fieldset", "figcaption", "figure",
+        "footer", "form", "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6",
+        "head", "header", "hgroup", "hr", "html", "iframe", "img", "input", "keygen",
+        "li", "link", "listing", "main", "marquee", "menu", "meta", "nav", "noembed",
+        "noframes", "noscript", "object", "ol", "p", "param", "plaintext", "pre", "script",
+        "search", "section", "select", "source", "style", "summary", "table", "tbody", "td",
+        "template", "textarea", "tfoot", "th", "thead", "title", "tr", "track", "ul", "wbr",
+        "xmp",
+    }
+)
+_NON_GENERIC_EXPLICIT_END_TAGS = frozenset(_IMPLIED_CLOSE_SCOPE_BOUNDARIES) | _HEADING_TAGS | _NON_RENDERED_TAGS | {"a"}
 
 
 @dataclass(frozen=True)
@@ -249,7 +181,10 @@ class _ResultsPageLinkParser(HTMLParser):
         self._open_elements.append((tag, hidden))
 
     def _scope_boundaries_for(self, tag: str) -> frozenset[str]:
-        return _BASE_SCOPE_BOUNDARIES | _IMPLIED_CLOSE_SCOPE_BOUNDARIES.get(tag, frozenset())
+        boundaries = _BASE_SCOPE_BOUNDARIES | _IMPLIED_CLOSE_SCOPE_BOUNDARIES.get(tag, frozenset())
+        if tag not in _NON_GENERIC_EXPLICIT_END_TAGS:
+            boundaries = boundaries | _GENERIC_END_TAG_SPECIAL_ELEMENTS
+        return boundaries
 
     def _find_open_element_index(self, tag: str) -> int | None:
         boundaries = self._scope_boundaries_for(tag)
@@ -280,7 +215,8 @@ class _ResultsPageLinkParser(HTMLParser):
     def _find_implied_close_index(self, closing_tags: frozenset[str]) -> int | None:
         boundaries: set[str] = set()
         for closing_tag in closing_tags:
-            boundaries.update(self._scope_boundaries_for(closing_tag))
+            boundaries.update(_BASE_SCOPE_BOUNDARIES)
+            boundaries.update(_IMPLIED_CLOSE_SCOPE_BOUNDARIES.get(closing_tag, frozenset()))
         for index in range(len(self._open_elements) - 1, -1, -1):
             open_tag = self._open_elements[index][0]
             if open_tag in closing_tags:
@@ -299,13 +235,18 @@ class _ResultsPageLinkParser(HTMLParser):
         if closing_tags:
             self._close_first_in_scope(closing_tags)
 
-        # HTML in-body handling can perform more than one repair for a single
-        # incoming heading. Keep these ordered rather than merging the target
-        # sets, otherwise a nearer paragraph can mask the heading close.
         if incoming_tag in _P_IMPLIED_CLOSE_START_TAGS:
             self._close_first_in_scope(frozenset({"p"}))
-        if incoming_tag in _HEADING_TAGS:
-            self._close_first_in_scope(_HEADING_TAGS)
+
+        # A heading start only pops an existing heading when that heading is
+        # the current open node after any paragraph repair. Do not search back
+        # through intervening elements, which would expose hidden ancestors.
+        if (
+            incoming_tag in _HEADING_TAGS
+            and self._open_elements
+            and self._open_elements[-1][0] in _HEADING_TAGS
+        ):
+            self._close_open_element_at(len(self._open_elements) - 1)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = tag.lower()
@@ -327,8 +268,6 @@ class _ResultsPageLinkParser(HTMLParser):
 
         if normalized_tag == "a":
             if ancestor_hidden or ancestor_non_rendered or self._inside_hidden_content():
-                # A template/non-rendered subtree must not disturb an outer
-                # active anchor or create a visible candidate of its own.
                 if ancestor_non_rendered:
                     return
                 self._reset_anchor()
@@ -367,8 +306,6 @@ class _ResultsPageLinkParser(HTMLParser):
         normalized_tag = tag.lower()
 
         if normalized_tag in _NON_RENDERED_TAGS:
-            # Only release suppression after confirming the corresponding
-            # element can actually close in the current HTML scope.
             if (
                 self._non_rendered_tags
                 and self._non_rendered_tags[-1] == normalized_tag
@@ -380,8 +317,6 @@ class _ResultsPageLinkParser(HTMLParser):
 
         if normalized_tag == "a":
             if self._inside_non_rendered_content():
-                # Closing a hidden/template-local anchor must not finalize the
-                # outer visible anchor.
                 self._pop_element(normalized_tag)
                 return
             self._finalize_anchor()
@@ -434,7 +369,6 @@ def _remove_last_path_segment(path: str) -> str:
 def _remove_dot_segments(path: str) -> str:
     input_buffer = path
     output = ""
-
     while input_buffer:
         if input_buffer.startswith("../"):
             input_buffer = input_buffer[3:]
@@ -453,17 +387,13 @@ def _remove_dot_segments(path: str) -> str:
         elif input_buffer in {".", ".."}:
             input_buffer = ""
         else:
-            if input_buffer.startswith("/"):
-                next_slash = input_buffer.find("/", 1)
-            else:
-                next_slash = input_buffer.find("/")
+            next_slash = input_buffer.find("/", 1) if input_buffer.startswith("/") else input_buffer.find("/")
             if next_slash < 0:
                 output += input_buffer
                 input_buffer = ""
             else:
                 output += input_buffer[:next_slash]
                 input_buffer = input_buffer[next_slash:]
-
     return output
 
 
@@ -504,16 +434,11 @@ def _resolve_reference(base_url: str, href: str) -> str | None:
                 target_path = base.path
                 target_query = reference.query if reference.query else base.query
             else:
-                if reference.path.startswith("/"):
-                    merged_path = reference.path
-                else:
-                    merged_path = _merge_paths(base.path, reference.path, bool(base.netloc))
+                merged_path = reference.path if reference.path.startswith("/") else _merge_paths(base.path, reference.path, bool(base.netloc))
                 target_path = _remove_dot_segments(merged_path)
                 target_query = reference.query
 
-    return urlunsplit(
-        (target_scheme, target_netloc, target_path, target_query, reference.fragment)
-    )
+    return urlunsplit((target_scheme, target_netloc, target_path, target_query, reference.fragment))
 
 
 def _canonical_https_url(url: str) -> str | None:
@@ -545,7 +470,6 @@ def _canonical_candidate_url(base_url: str, href: str) -> str | None:
     if _contains_ascii_control(base_url) or _contains_ascii_control(href):
         return None
     raw_href = href.strip()
-
     approved_origin = _https_origin(base_url)
     if approved_origin is None:
         return None
