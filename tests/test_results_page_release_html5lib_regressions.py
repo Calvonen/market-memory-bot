@@ -202,3 +202,32 @@ def test_canvas_fallback_subtree_is_not_release_evidence() -> None:
         '<canvas><a href="/r">Q2-2026</a></canvas>',
     )
     assert candidates == ()
+
+
+def test_unicode_noncharacter_reference_is_excluded_fail_closed() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<a href="/r">Annual&#xFFFF;Q2-2026</a>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ()
+
+
+def test_conditional_fallback_containers_do_not_expose_release_anchors() -> None:
+    for tag in ("noscript", "audio", "video", "object"):
+        candidates = extract_results_page_candidates(
+            _source(),
+            f'<{tag}><a href="/r">Q2-2026</a></{tag}>',
+        )
+        assert candidates == (), tag
+
+
+def test_svg_title_metadata_is_not_release_evidence() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<a href="/r">Annual<svg><title>Q2-2026</title></svg></a>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ("Annual",)
