@@ -19,7 +19,6 @@ _RAW_HREF_RE = re.compile(
     re.IGNORECASE,
 )
 _NUMERIC_ENTITY_RE = re.compile(r"&#(?:x([0-9a-fA-F]+)|([0-9]+));?")
-_NUL_ENTITY_RE = re.compile(r"&#(?:[xX]0+(?![0-9A-Fa-f])|0+(?![0-9]));?")
 _RENDERED_BREAK_TAGS = frozenset(
     {
         "address", "article", "aside", "blockquote", "br", "center", "dd", "details", "dialog",
@@ -29,7 +28,7 @@ _RENDERED_BREAK_TAGS = frozenset(
         "tbody", "td", "tfoot", "th", "thead", "tr", "ul", "xmp",
     }
 )
-_NON_RENDERED_TAGS = frozenset({"iframe", "script", "style", "template"})
+_NON_RENDERED_TAGS = frozenset({"iframe", "script", "style", "template", "title"})
 
 
 @dataclass(frozen=True)
@@ -89,9 +88,21 @@ def _safe_normalized_text(value: str) -> str | None:
     return _normalized_text(value)
 
 
-def _preserve_nul_as_control(html_text: str) -> str:
-    """Keep NUL evidence detectable instead of letting html5lib replace it with U+FFFD."""
-    return _NUL_ENTITY_RE.sub("\u000b", html_text.replace("\x00", "\u000b"))
+def _preserve_invalid_scalars_as_control(html_text: str) -> str:
+    """Keep invalid scalar evidence detectable instead of letting html5lib replace it with U+FFFD."""
+
+    def replace_invalid(match: re.Match[str]) -> str:
+        raw_codepoint = match.group(1) or match.group(2)
+        base = 16 if match.group(1) is not None else 10
+        try:
+            codepoint = int(raw_codepoint, base)
+        except ValueError:
+            return "\u000b"
+        if codepoint == 0 or 0xD800 <= codepoint <= 0xDFFF or codepoint > 0x10FFFF:
+            return "\u000b"
+        return match.group(0)
+
+    return _NUMERIC_ENTITY_RE.sub(replace_invalid, html_text.replace("\x00", "\u000b"))
 
 
 class _RawAnchorHrefSafetyScanner(HTMLParser):
@@ -140,6 +151,21 @@ def _element_is_non_rendered(element) -> bool:
     )
 
 
+def _closed_details_summary(element):
+    namespace, local = _element_name(element.tag)
+    if (
+        namespace != _HTML_NAMESPACE
+        or local != "details"
+        or _element_has_attribute(element, "open")
+    ):
+        return None
+    for child in list(element):
+        child_namespace, child_local = _element_name(child.tag)
+        if child_namespace == _HTML_NAMESPACE and child_local == "summary":
+            return child
+    return False
+
+
 def _visible_anchor_text(anchor) -> str | None:
     parts: list[str] = []
 
@@ -151,6 +177,14 @@ def _visible_anchor_text(anchor) -> str | None:
         if not isinstance(element.tag, str):
             return
         if _element_hidden(element) or _element_is_non_rendered(element):
+            return
+
+        details_summary = _closed_details_summary(element)
+        if details_summary is not None:
+            if details_summary is not False:
+                append_break()
+                visit(details_summary)
+                append_break()
             return
 
         if element.text:
@@ -191,6 +225,13 @@ def _iter_visible_html_anchors(root):
             return
         if namespace == _HTML_NAMESPACE and local == "a":
             yield element
+
+        details_summary = _closed_details_summary(element)
+        if details_summary is not None:
+            if details_summary is not False:
+                yield from walk(details_summary, hidden_here)
+            return
+
         for child in list(element):
             yield from walk(child, hidden_here)
 
@@ -203,7 +244,7 @@ def _parse_html5_links(html_text: str) -> list[tuple[str, str | None, tuple[str,
     safety_scanner.close()
 
     fragment = html5lib.parseFragment(
-        _preserve_nul_as_control(html_text),
+        _preserve_invalid_scalars_as_control(html_text),
         treebuilder="etree",
         namespaceHTMLElements=True,
     )
@@ -270,7 +311,6 @@ def _remove_dot_segments(path: str) -> str:
             output = _remove_last_path_segment(output)
         elif input_buffer == "/..":
             input_buffer = "/"
-            output = _remove_last_path_segment(output)
         elif input_buffer in {".", ".."}:
             input_buffer = ""
         else:
