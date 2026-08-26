@@ -231,3 +231,43 @@ def test_svg_title_metadata_is_not_release_evidence() -> None:
     assert len(candidates) == 1
     assert candidates[0].source_url == "https://example.com/r"
     assert candidates[0].evidence_fields == ("Annual",)
+
+
+def test_c1_numeric_reference_is_excluded_before_html5_remapping() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<a href="/r">Annual&#x85;Q2-2026</a>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ()
+
+
+def test_literal_unicode_noncharacter_is_excluded_fail_closed() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<a href="/r">Annual\uffffQ2-2026</a>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ()
+
+
+def test_noembed_and_noframes_fallbacks_do_not_expose_release_anchors() -> None:
+    for tag in ("noembed", "noframes"):
+        candidates = extract_results_page_candidates(
+            _source(),
+            f'<{tag}><a href="/r">Q2-2026</a></{tag}>',
+        )
+        assert candidates == (), tag
+
+
+def test_svg_description_metadata_is_not_release_evidence() -> None:
+    for tag in ("desc", "metadata"):
+        candidates = extract_results_page_candidates(
+            _source(),
+            f'<a href="/r">Annual<svg><{tag}>Q2-2026</{tag}></svg></a>',
+        )
+        assert len(candidates) == 1
+        assert candidates[0].source_url == "https://example.com/r"
+        assert candidates[0].evidence_fields == ("Annual",), tag
