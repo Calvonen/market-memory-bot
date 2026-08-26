@@ -29,7 +29,7 @@ _SIMPLE_HTML_TEXT_TAGS = frozenset(
         "a", "abbr", "address", "article", "aside", "b", "bdi", "bdo", "blockquote", "br",
         "button", "caption", "center", "cite", "code", "dd", "del", "details", "dfn", "dialog", "div", "dl",
         "dt", "em", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
-        "h5", "h6", "header", "hgroup", "hr", "i", "ins", "kbd", "label", "li", "listing", "main",
+        "h5", "h6", "header", "hgroup", "hr", "i", "ins", "kbd", "label", "legend", "li", "listing", "main",
         "mark", "menu", "nav", "ol", "p", "plaintext", "pre", "q", "s", "samp", "search", "section",
         "small", "span", "strong", "sub", "summary", "sup", "table", "tbody", "td", "tfoot", "th",
         "thead", "time", "tr", "u", "ul", "var", "wbr", "xmp",
@@ -39,7 +39,7 @@ _RENDERED_BREAK_TAGS = frozenset(
     {
         "address", "article", "aside", "blockquote", "br", "caption", "center", "dd", "details", "dialog",
         "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3",
-        "h4", "h5", "h6", "header", "hgroup", "hr", "li", "listing", "main", "menu", "nav", "ol",
+        "h4", "h5", "h6", "header", "hgroup", "hr", "legend", "li", "listing", "main", "menu", "nav", "ol",
         "p", "plaintext", "pre", "search", "section", "summary", "table", "tbody", "td", "tfoot", "th",
         "thead", "tr", "ul", "xmp",
     }
@@ -375,7 +375,6 @@ def _remove_dot_segments(path: str) -> str:
             output = _remove_last_path_segment(output)
         elif input_buffer == "/..":
             input_buffer = "/"
-            output = _remove_last_path_segment(output)
         elif input_buffer in {".", ".."}:
             input_buffer = ""
         else:
