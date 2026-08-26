@@ -17,7 +17,7 @@ declare
   ipv6_text text;
   label text;
 begin
-  if input_url is null or input_url !~ '^https://[^[:space:]]+$' then
+  if input_url is null or input_url !~* '^https://[^[:space:]]+$' then
     return false;
   end if;
 
