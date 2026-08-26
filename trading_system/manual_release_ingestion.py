@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import multiprocessing
 import re
 from html.parser import HTMLParser
 from urllib.parse import urlparse
@@ -64,6 +65,35 @@ class _ApprovedOriginRedirectHandler(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def _pdf_extract_worker(
+    data: bytes,
+    send_conn,
+    max_pages: int,
+    max_chars: int,
+    memory_limit_bytes: int,
+    cpu_limit_seconds: int,
+) -> None:  # type: ignore[no-untyped-def]
+    """Run pypdf behind OS resource limits so decompression cannot exhaust the worker."""
+    try:
+        import resource
+
+        resource.setrlimit(resource.RLIMIT_AS, (memory_limit_bytes, memory_limit_bytes))
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit_seconds, cpu_limit_seconds))
+        text = ManualOfficialReleaseProvider._extract_pdf_text_in_process(
+            data,
+            max_pages=max_pages,
+            max_chars=max_chars,
+        )
+        send_conn.send(("ok", text))
+    except BaseException as exc:
+        try:
+            send_conn.send(("error", f"{type(exc).__name__}: {exc}"))
+        except BaseException:
+            pass
+    finally:
+        send_conn.close()
+
+
 class ManualOfficialReleaseProvider:
     """Fetch exactly one user-approved official release document.
 
@@ -79,6 +109,9 @@ class ManualOfficialReleaseProvider:
     MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
     MAX_PDF_PAGES = 500
     MAX_EXTRACTED_CHARS = 5_000_000
+    PDF_EXTRACTION_MEMORY_BYTES = 1024 * 1024 * 1024
+    PDF_EXTRACTION_CPU_SECONDS = 10
+    PDF_EXTRACTION_TIMEOUT_SECONDS = 15.0
 
     def __init__(
         self,
@@ -195,13 +228,17 @@ class ManualOfficialReleaseProvider:
         allow_html_meta: bool,
         allow_xml_declaration: bool = False,
     ) -> str:
-        encoding = (
-            http_charset
-            or cls._sniff_bom_encoding(data)
-            or (cls._sniff_xml_encoding(data) if allow_xml_declaration else None)
-            or (cls._sniff_html_meta_encoding(data) if allow_html_meta else None)
-            or "utf-8"
-        )
+        bom_encoding = cls._sniff_bom_encoding(data)
+        if allow_html_meta or allow_xml_declaration:
+            encoding = (
+                bom_encoding
+                or http_charset
+                or (cls._sniff_xml_encoding(data) if allow_xml_declaration else None)
+                or (cls._sniff_html_meta_encoding(data) if allow_html_meta else None)
+                or "utf-8"
+            )
+        else:
+            encoding = http_charset or bom_encoding or "utf-8"
         try:
             return data.decode(encoding, errors="strict")
         except (LookupError, UnicodeDecodeError) as exc:
@@ -210,27 +247,75 @@ class ManualOfficialReleaseProvider:
             ) from exc
 
     @classmethod
-    def _extract_pdf_text(cls, data: bytes) -> str:
-        try:
-            reader = PdfReader(io.BytesIO(data))
-            if len(reader.pages) > cls.MAX_PDF_PAGES:
-                raise RuntimeError("manual official release PDF exceeds page limit")
-            parts: list[str] = []
-            total_chars = 0
-            for page in reader.pages:
-                text = page.extract_text() or ""
-                total_chars += len(text)
-                if total_chars > cls.MAX_EXTRACTED_CHARS:
-                    raise RuntimeError("manual official release PDF extracted text exceeds size limit")
-                parts.append(text)
-        except RuntimeError:
-            raise
-        except Exception as exc:
-            raise RuntimeError("manual official release PDF extraction failed") from exc
+    def _extract_pdf_text_in_process(
+        cls,
+        data: bytes,
+        *,
+        max_pages: int | None = None,
+        max_chars: int | None = None,
+    ) -> str:
+        page_limit = cls.MAX_PDF_PAGES if max_pages is None else max_pages
+        char_limit = cls.MAX_EXTRACTED_CHARS if max_chars is None else max_chars
+        reader = PdfReader(io.BytesIO(data))
+        if len(reader.pages) > page_limit:
+            raise RuntimeError("manual official release PDF exceeds page limit")
+        parts: list[str] = []
+        total_chars = 0
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            total_chars += len(text)
+            if total_chars > char_limit:
+                raise RuntimeError("manual official release PDF extracted text exceeds size limit")
+            parts.append(text)
         raw_text = "\n".join(parts).strip()
         if not raw_text:
             raise RuntimeError("manual official release PDF extraction produced no text")
         return raw_text
+
+    @classmethod
+    def _extract_pdf_text(cls, data: bytes) -> str:
+        try:
+            context = multiprocessing.get_context("fork")
+        except ValueError as exc:
+            raise RuntimeError(
+                "manual official release PDF extraction requires a fork-capable runtime"
+            ) from exc
+
+        recv_conn, send_conn = context.Pipe(duplex=False)
+        process = context.Process(
+            target=_pdf_extract_worker,
+            args=(
+                data,
+                send_conn,
+                cls.MAX_PDF_PAGES,
+                cls.MAX_EXTRACTED_CHARS,
+                cls.PDF_EXTRACTION_MEMORY_BYTES,
+                cls.PDF_EXTRACTION_CPU_SECONDS,
+            ),
+        )
+        process.start()
+        send_conn.close()
+        try:
+            if not recv_conn.poll(cls.PDF_EXTRACTION_TIMEOUT_SECONDS):
+                process.terminate()
+                process.join(timeout=1.0)
+                raise RuntimeError("manual official release PDF extraction exceeded resource limit")
+            status, payload = recv_conn.recv()
+        except (EOFError, OSError) as exc:
+            process.join(timeout=1.0)
+            raise RuntimeError("manual official release PDF extraction exceeded resource limit") from exc
+        finally:
+            recv_conn.close()
+
+        process.join(timeout=1.0)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=1.0)
+        if status != "ok":
+            if "exceeds page limit" in payload or "extracted text exceeds size limit" in payload or "produced no text" in payload:
+                raise RuntimeError(payload.split(": ", 1)[-1])
+            raise RuntimeError("manual official release PDF extraction failed")
+        return payload
 
     @staticmethod
     def _https_origin(url: str) -> tuple[str, str, int]:
