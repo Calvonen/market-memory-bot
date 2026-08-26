@@ -3,9 +3,9 @@
 
 The existing strategy-draft and calendar/watchlist checks stay in place. The
 persistent tracked-event worker additionally requires the tracked-event runtime
-migrations through the calendar release-pipeline shell version. Migrations are
-applied out-of-band; this script only verifies them before backend/systemd
-processes are restarted.
+migrations through the calendar release-pipeline shell version. Manual official
+release sources have a dedicated verifier RPC so a missing out-of-band migration
+fails before backend/systemd processes are restarted.
 """
 
 from __future__ import annotations
@@ -36,6 +36,21 @@ REQUIRED_CHECKS: tuple[tuple[str, str], ...] = (
     (
         "transition_calendar_event_status_function_exists",
         "transition_calendar_event_status() function",
+    ),
+)
+
+REQUIRED_OFFICIAL_RELEASE_SOURCE_CHECKS: tuple[tuple[str, str], ...] = (
+    (
+        "event_official_release_sources_table_exists",
+        "event_official_release_sources table",
+    ),
+    (
+        "set_event_official_release_source_function_exists",
+        "set_event_official_release_source() function",
+    ),
+    (
+        "clear_event_official_release_source_function_exists",
+        "clear_event_official_release_source() function",
     ),
 )
 
@@ -190,6 +205,33 @@ def main() -> int:
         )
 
     try:
+        official_source_response = client.rpc(
+            "verify_official_release_source_schema", {}
+        ).execute()
+    except Exception as exc:
+        print(
+            "SCHEMA GATE FAILED: could not call verify_official_release_source_schema(). "
+            "Apply the pending official-release-source migrations before deploying. "
+            f"Underlying error: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    official_source_rows = getattr(official_source_response, "data", None) or []
+    if not official_source_rows:
+        print(
+            "SCHEMA GATE FAILED: verify_official_release_source_schema() returned no rows.",
+            file=sys.stderr,
+        )
+        return 1
+    official_source_row: dict[str, Any] = official_source_rows[0]
+    missing.extend(
+        label
+        for key_name, label in REQUIRED_OFFICIAL_RELEASE_SOURCE_CHECKS
+        if not _check_value(official_source_row, key_name)
+    )
+
+    try:
         tracked_response = client.rpc("verify_tracked_event_runtime_schema", {}).execute()
     except Exception as exc:
         print(
@@ -232,8 +274,8 @@ def main() -> int:
         return 1
 
     print(
-        "Supabase schema gate passed: strategy-draft/calendar dependencies and "
-        "persistent tracked-event runtime promotion/release-shell guards are present."
+        "Supabase schema gate passed: strategy/calendar, official-release-source, "
+        "and persistent tracked-event runtime dependencies are present."
     )
     return 0
 
