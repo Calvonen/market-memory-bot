@@ -13,27 +13,37 @@ from trading_system.official_release_source_repository import OfficialReleaseSou
 
 
 _HTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
-_SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 _HTML_WHITESPACE = frozenset({"\t", "\n", "\f", "\r", " "})
 _RAW_HREF_RE = re.compile(
     r"\bhref\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'=<>`]+))",
     re.IGNORECASE,
 )
 _NUMERIC_ENTITY_RE = re.compile(r"&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));?")
+
+# Results pages only need a conservative subset of ordinary rendered HTML.  Anything
+# outside this allowlist is an evidence boundary: html5lib still repairs the tree,
+# but we do not try to emulate browser rendering for SVG/MathML, custom elements,
+# fallback containers, metadata, or other stateful/conditional content.
+_SIMPLE_HTML_TEXT_TAGS = frozenset(
+    {
+        "a", "abbr", "address", "article", "aside", "b", "bdi", "bdo", "blockquote", "br",
+        "button", "center", "cite", "code", "dd", "del", "details", "dfn", "dialog", "div", "dl",
+        "dt", "em", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
+        "h5", "h6", "header", "hgroup", "hr", "i", "ins", "kbd", "label", "li", "listing", "main",
+        "mark", "menu", "nav", "ol", "p", "plaintext", "pre", "q", "s", "samp", "search", "section",
+        "small", "span", "strong", "sub", "summary", "sup", "table", "tbody", "td", "tfoot", "th",
+        "thead", "time", "tr", "u", "ul", "var", "wbr", "xmp",
+    }
+)
 _RENDERED_BREAK_TAGS = frozenset(
     {
         "address", "article", "aside", "blockquote", "br", "center", "dd", "details", "dialog",
-        "dir", "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1",
-        "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "hr", "li", "listing", "main",
-        "menu", "nav", "ol", "p", "plaintext", "pre", "search", "section", "summary", "table",
-        "tbody", "td", "tfoot", "th", "thead", "tr", "ul", "xmp",
+        "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3",
+        "h4", "h5", "h6", "header", "hgroup", "hr", "li", "listing", "main", "menu", "nav", "ol",
+        "p", "plaintext", "pre", "search", "section", "summary", "table", "tbody", "td", "tfoot", "th",
+        "thead", "tr", "ul", "xmp",
     }
 )
-_ALWAYS_NON_RENDERED_TAGS = frozenset({"script", "style", "title"})
-_HTML_NON_RENDERED_TAGS = frozenset(
-    {"audio", "canvas", "iframe", "noembed", "noframes", "noscript", "object", "template", "video"}
-)
-_SVG_NON_RENDERED_TAGS = frozenset({"desc", "metadata"})
 
 
 @dataclass(frozen=True)
@@ -100,11 +110,21 @@ def _is_unicode_noncharacter(codepoint: int) -> bool:
     )
 
 
+def _literal_requires_rejection_sentinel(char: str) -> bool:
+    codepoint = ord(char)
+    return (
+        char == "\x00"
+        or 0xD800 <= codepoint <= 0xDFFF
+        or _is_unicode_noncharacter(codepoint)
+        or (unicodedata.category(char) == "Cc" and char not in _HTML_WHITESPACE)
+    )
+
+
 def _preserve_invalid_scalars_as_control(html_text: str) -> str:
-    """Keep malformed/control evidence detectable instead of accepting parser remapping boundaries."""
+    """Preserve malformed evidence as a rejection sentinel before HTML5 repair."""
 
     html_text = "".join(
-        "\u000b" if char == "\x00" or _is_unicode_noncharacter(ord(char)) else char
+        "\u000b" if _literal_requires_rejection_sentinel(char) else char
         for char in html_text
     )
 
@@ -165,15 +185,13 @@ def _element_has_attribute(element, attribute: str) -> bool:
     return any(str(key).lower().split("}")[-1] == attribute for key in element.attrib)
 
 
-def _element_is_non_rendered(element) -> bool:
+def _element_allows_simple_text(element) -> bool:
     namespace, local = _element_name(element.tag)
-    if namespace == _HTML_NAMESPACE and local == "dialog":
-        return not _element_has_attribute(element, "open")
-    if local in _ALWAYS_NON_RENDERED_TAGS:
-        return True
-    if namespace == _SVG_NAMESPACE and local in _SVG_NON_RENDERED_TAGS:
-        return True
-    return namespace == _HTML_NAMESPACE and local in _HTML_NON_RENDERED_TAGS
+    if namespace != _HTML_NAMESPACE or local not in _SIMPLE_HTML_TEXT_TAGS:
+        return False
+    if local == "dialog" and not _element_has_attribute(element, "open"):
+        return False
+    return True
 
 
 def _closed_details_summary(element):
@@ -201,7 +219,7 @@ def _visible_anchor_text(anchor) -> str | None:
     def visit(element) -> None:
         if not isinstance(element.tag, str):
             return
-        if _element_hidden(element) or _element_is_non_rendered(element):
+        if _element_hidden(element) or not _element_allows_simple_text(element):
             return
 
         details_summary = _closed_details_summary(element)
@@ -216,11 +234,10 @@ def _visible_anchor_text(anchor) -> str | None:
             parts.append(element.text)
         for child in list(element):
             child_namespace, child_local = _element_name(child.tag)
-            child_is_element = isinstance(child.tag, str)
             child_visible = (
-                child_is_element
+                isinstance(child.tag, str)
                 and not _element_hidden(child)
-                and not _element_is_non_rendered(child)
+                and _element_allows_simple_text(child)
             )
             rendered_break = (
                 child_visible
@@ -229,9 +246,12 @@ def _visible_anchor_text(anchor) -> str | None:
             )
             if rendered_break:
                 append_break()
-            visit(child)
+            if child_visible:
+                visit(child)
             if rendered_break:
                 append_break()
+            # Tail text belongs to the surrounding simple HTML element even when
+            # the child subtree itself is an ambiguous/foreign evidence boundary.
             if child.tail:
                 parts.append(child.tail)
 
@@ -240,27 +260,26 @@ def _visible_anchor_text(anchor) -> str | None:
 
 
 def _iter_visible_html_anchors(root):
-    def walk(element, hidden_ancestor: bool):
+    def walk(element, is_fragment_root: bool = False):
         if not isinstance(element.tag, str):
             return
-        hidden_here = hidden_ancestor or _element_hidden(element)
-        namespace, local = _element_name(element.tag)
-        non_rendered = _element_is_non_rendered(element)
-        if hidden_here or non_rendered:
-            return
-        if namespace == _HTML_NAMESPACE and local == "a":
-            yield element
+        if not is_fragment_root:
+            if _element_hidden(element) or not _element_allows_simple_text(element):
+                return
+            namespace, local = _element_name(element.tag)
+            if namespace == _HTML_NAMESPACE and local == "a":
+                yield element
 
-        details_summary = _closed_details_summary(element)
-        if details_summary is not None:
-            if details_summary is not False:
-                yield from walk(details_summary, hidden_here)
-            return
+            details_summary = _closed_details_summary(element)
+            if details_summary is not None:
+                if details_summary is not False:
+                    yield from walk(details_summary)
+                return
 
         for child in list(element):
-            yield from walk(child, hidden_here)
+            yield from walk(child)
 
-    yield from walk(root, False)
+    yield from walk(root, True)
 
 
 def _parse_html5_links(html_text: str) -> list[tuple[str, str | None, tuple[str, ...]]]:
