@@ -28,7 +28,10 @@ _RENDERED_BREAK_TAGS = frozenset(
         "tbody", "td", "tfoot", "th", "thead", "tr", "ul", "xmp",
     }
 )
-_NON_RENDERED_TAGS = frozenset({"canvas", "iframe", "script", "style", "template", "title"})
+_ALWAYS_NON_RENDERED_TAGS = frozenset({"script", "style", "title"})
+_HTML_NON_RENDERED_TAGS = frozenset(
+    {"audio", "canvas", "iframe", "noscript", "object", "template", "video"}
+)
 
 
 @dataclass(frozen=True)
@@ -88,8 +91,15 @@ def _safe_normalized_text(value: str) -> str | None:
     return _normalized_text(value)
 
 
+def _is_unicode_noncharacter(codepoint: int) -> bool:
+    return (
+        0xFDD0 <= codepoint <= 0xFDEF
+        or (0 <= codepoint <= 0x10FFFF and codepoint & 0xFFFF in {0xFFFE, 0xFFFF})
+    )
+
+
 def _preserve_invalid_scalars_as_control(html_text: str) -> str:
-    """Keep invalid scalar evidence detectable instead of letting html5lib replace it with U+FFFD."""
+    """Keep invalid/noncharacter evidence detectable instead of accepting replacement boundaries."""
 
     def replace_invalid(match: re.Match[str]) -> str:
         raw_codepoint = match.group(1) or match.group(2)
@@ -98,7 +108,12 @@ def _preserve_invalid_scalars_as_control(html_text: str) -> str:
             codepoint = int(raw_codepoint, base)
         except ValueError:
             return "\u000b"
-        if codepoint == 0 or 0xD800 <= codepoint <= 0xDFFF or codepoint > 0x10FFFF:
+        if (
+            codepoint == 0
+            or 0xD800 <= codepoint <= 0xDFFF
+            or codepoint > 0x10FFFF
+            or _is_unicode_noncharacter(codepoint)
+        ):
             return "\u000b"
         return match.group(0)
 
@@ -146,9 +161,9 @@ def _element_is_non_rendered(element) -> bool:
     namespace, local = _element_name(element.tag)
     if namespace == _HTML_NAMESPACE and local == "dialog":
         return not _element_has_attribute(element, "open")
-    return bool(local) and local in _NON_RENDERED_TAGS and (
-        local in {"script", "style"} or namespace == _HTML_NAMESPACE
-    )
+    if local in _ALWAYS_NON_RENDERED_TAGS:
+        return True
+    return namespace == _HTML_NAMESPACE and local in _HTML_NON_RENDERED_TAGS
 
 
 def _closed_details_summary(element):
