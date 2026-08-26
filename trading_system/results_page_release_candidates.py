@@ -81,6 +81,9 @@ _GENERIC_END_TAG_SPECIAL_ELEMENTS = frozenset(
         "search", "section", "select", "source", "style", "summary", "table", "tbody", "td",
         "template", "textarea", "tfoot", "th", "thead", "title", "tr", "track", "ul", "wbr",
         "xmp",
+        # HTML's special-element category also includes these foreign-namespace
+        # elements. HTMLParser lowercases tag names, including foreignObject.
+        "annotation-xml", "mi", "mn", "mo", "ms", "mtext", "desc", "foreignobject",
     }
 )
 _NON_GENERIC_EXPLICIT_END_TAGS = frozenset(_IMPLIED_CLOSE_SCOPE_BOUNDARIES) | _HEADING_TAGS | _NON_RENDERED_TAGS | {"a"}
@@ -238,9 +241,6 @@ class _ResultsPageLinkParser(HTMLParser):
         if incoming_tag in _P_IMPLIED_CLOSE_START_TAGS:
             self._close_first_in_scope(frozenset({"p"}))
 
-        # A heading start only pops an existing heading when that heading is
-        # the current open node after any paragraph repair. Do not search back
-        # through intervening elements, which would expose hidden ancestors.
         if (
             incoming_tag in _HEADING_TAGS
             and self._open_elements
@@ -335,6 +335,13 @@ class _ResultsPageLinkParser(HTMLParser):
                     self._text_parts.append(" ")
                     break
         self._pop_element(normalized_tag)
+
+    def close(self) -> None:
+        super().close()
+        # Malformed non-rendered markup can leave a visible outer anchor active
+        # even after its end tag is ignored by scope rules. Preserve the outer
+        # URL/attribute candidate at EOF while keeping all suppressed text out.
+        self._finalize_anchor()
 
 
 def _https_origin(url: str) -> tuple[str, str, int] | None:
@@ -496,6 +503,7 @@ def extract_results_page_candidates(
 
     parser = _ResultsPageLinkParser()
     parser.feed(html_text)
+    parser.close()
 
     seen: set[str] = set()
     candidates: list[ResultsPageReleaseCandidate] = []
