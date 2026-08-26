@@ -21,6 +21,7 @@ class ResultsPageReleaseCandidate:
     event_id: str
     source_url: str
     source_title: str | None = None
+    evidence_fields: tuple[str, ...] = ()
 
 
 def _contains_ascii_control(value: str) -> bool:
@@ -48,9 +49,6 @@ def _raw_href_is_safe(raw_start_tag: str, decoded_href: str | None) -> bool:
     if decoded_href is None:
         return True
     matches = list(_RAW_HREF_RE.finditer(raw_start_tag))
-    # Duplicate or parser-only href spellings are ambiguous at this security
-    # boundary. Reject them instead of guessing which raw value produced the
-    # decoded attribute selected by HTMLParser.
     if len(matches) != 1:
         return False
     match = matches[0]
@@ -58,13 +56,19 @@ def _raw_href_is_safe(raw_start_tag: str, decoded_href: str | None) -> bool:
     return not _raw_href_contains_encoded_control(raw_href)
 
 
+def _normalized_text(value: str) -> str:
+    return " ".join(value.split())
+
+
 class _ResultsPageLinkParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
-        self.links: list[tuple[str, str | None, bool]] = []
+        self.links: list[tuple[str, str | None, bool, tuple[str, ...]]] = []
         self._href: str | None = None
         self._raw_href_safe = True
-        self._parts: list[str] = []
+        self._aria_label: str | None = None
+        self._title_attr: str | None = None
+        self._text_parts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag.lower() != "a":
@@ -72,20 +76,34 @@ class _ResultsPageLinkParser(HTMLParser):
         values = {key.lower(): value for key, value in attrs if value is not None}
         self._href = values.get("href")
         self._raw_href_safe = _raw_href_is_safe(self.get_starttag_text(), self._href)
-        self._parts = [values.get("aria-label") or "", values.get("title") or ""]
+        self._aria_label = values.get("aria-label")
+        self._title_attr = values.get("title")
+        self._text_parts = []
 
     def handle_data(self, data: str) -> None:
         if self._href is not None:
-            self._parts.append(data)
+            self._text_parts.append(data)
 
     def handle_endtag(self, tag: str) -> None:
         if tag.lower() != "a" or self._href is None:
             return
-        title = " ".join(" ".join(self._parts).split()) or None
-        self.links.append((self._href, title, self._raw_href_safe))
+        visible_text = _normalized_text(" ".join(self._text_parts))
+        evidence_fields = tuple(
+            value
+            for value in (
+                _normalized_text(self._aria_label or ""),
+                _normalized_text(self._title_attr or ""),
+                visible_text,
+            )
+            if value
+        )
+        title = " ".join(evidence_fields) or None
+        self.links.append((self._href, title, self._raw_href_safe, evidence_fields))
         self._href = None
         self._raw_href_safe = True
-        self._parts = []
+        self._aria_label = None
+        self._title_attr = None
+        self._text_parts = []
 
 
 def _https_origin(url: str) -> tuple[str, str, int] | None:
@@ -118,7 +136,6 @@ def _remove_last_path_segment(path: str) -> str:
 
 
 def _remove_dot_segments(path: str) -> str:
-    """Remove URI dot segments using RFC 3986 section 5.2.4 semantics."""
     input_buffer = path
     output = ""
 
@@ -168,7 +185,6 @@ def _merge_paths(base_path: str, reference_path: str, base_has_authority: bool) 
 
 
 def _resolve_reference(base_url: str, href: str) -> str | None:
-    """Resolve an RFC 3986 reference without urllib's empty-segment collapse."""
     try:
         base = urlsplit(base_url)
         reference = urlsplit(href)
@@ -254,9 +270,6 @@ def extract_results_page_candidates(
     if source.source_kind != "results_page":
         raise ValueError("results page candidate extraction requires source_kind=results_page")
 
-    # The approved page is itself part of the trust boundary. If it cannot be
-    # canonicalized exactly under this extractor's rules, do not process any
-    # relative links against it.
     page_url = _canonical_candidate_url(source.source_url, source.source_url)
     if page_url is None:
         return ()
@@ -266,7 +279,7 @@ def extract_results_page_candidates(
 
     seen: set[str] = set()
     candidates: list[ResultsPageReleaseCandidate] = []
-    for href, title, raw_href_safe in parser.links:
+    for href, title, raw_href_safe, evidence_fields in parser.links:
         if not raw_href_safe:
             continue
         candidate_url = _canonical_candidate_url(source.source_url, href)
@@ -278,6 +291,7 @@ def extract_results_page_candidates(
                 event_id=source.event_id,
                 source_url=candidate_url,
                 source_title=title,
+                evidence_fields=evidence_fields,
             )
         )
     return tuple(candidates)
