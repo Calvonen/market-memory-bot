@@ -50,7 +50,8 @@ def _period_patterns(release_period: str | None) -> tuple[re.Pattern[str], ...]:
 
 
 def _is_token_char(char: str) -> bool:
-    return char.isalnum() or unicodedata.category(char).startswith("M")
+    category = unicodedata.category(char)
+    return char.isalnum() or category.startswith("M") or category == "Cf"
 
 
 def _pattern_has_standalone_match(field: str, pattern: re.Pattern[str]) -> bool:
