@@ -75,6 +75,7 @@ _VOID_TAGS = frozenset(
         "wbr",
     }
 )
+_HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
 _P_IMPLIED_CLOSE_START_TAGS = frozenset(
     {
         "address",
@@ -211,17 +212,46 @@ class _ResultsPageLinkParser(HTMLParser):
         self._text_parts = []
         self._open_break_tags = []
 
+    def _finalize_anchor(self) -> None:
+        if self._href is None:
+            return
+        visible_text = _normalized_text("".join(self._text_parts))
+        evidence_fields = tuple(
+            value
+            for value in (
+                _normalized_text(self._aria_label or ""),
+                _normalized_text(self._title_attr or ""),
+                visible_text,
+            )
+            if value
+        )
+        title = " ".join(evidence_fields) or None
+        self.links.append((self._href, title, self._raw_href_safe, evidence_fields))
+        self._reset_anchor()
+
     def _push_element(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in _VOID_TAGS:
             return
         hidden = any(key.lower() == "hidden" for key, _ in attrs)
         self._open_elements.append((tag, hidden))
 
-    def _pop_element(self, tag: str) -> None:
+    def _scope_boundaries_for(self, tag: str) -> frozenset[str]:
+        return _IMPLIED_CLOSE_SCOPE_BOUNDARIES.get(tag, frozenset())
+
+    def _find_open_element_index(self, tag: str) -> int | None:
+        boundaries = self._scope_boundaries_for(tag)
         for index in range(len(self._open_elements) - 1, -1, -1):
-            if self._open_elements[index][0] == tag:
-                del self._open_elements[index:]
-                return
+            open_tag = self._open_elements[index][0]
+            if open_tag == tag:
+                return index
+            if open_tag in boundaries:
+                return None
+        return None
+
+    def _pop_element(self, tag: str) -> None:
+        index = self._find_open_element_index(tag)
+        if index is not None:
+            del self._open_elements[index:]
 
     def _close_open_element_at(self, index: int) -> None:
         open_tag = self._open_elements[index][0]
@@ -235,7 +265,7 @@ class _ResultsPageLinkParser(HTMLParser):
     def _find_implied_close_index(self, closing_tags: frozenset[str]) -> int | None:
         boundaries: set[str] = set()
         for closing_tag in closing_tags:
-            boundaries.update(_IMPLIED_CLOSE_SCOPE_BOUNDARIES.get(closing_tag, frozenset()))
+            boundaries.update(self._scope_boundaries_for(closing_tag))
         for index in range(len(self._open_elements) - 1, -1, -1):
             open_tag = self._open_elements[index][0]
             if open_tag in closing_tags:
@@ -248,6 +278,8 @@ class _ResultsPageLinkParser(HTMLParser):
         closing_tags = _IMPLIED_CLOSE_ON_START.get(incoming_tag, frozenset())
         if incoming_tag in _P_IMPLIED_CLOSE_START_TAGS:
             closing_tags = closing_tags | {"p"}
+        if incoming_tag in _HEADING_TAGS:
+            closing_tags = closing_tags | _HEADING_TAGS
         if not closing_tags:
             return
 
@@ -258,6 +290,11 @@ class _ResultsPageLinkParser(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = tag.lower()
         self._apply_implied_closes(normalized_tag)
+
+        if normalized_tag == "a" and self._href is not None:
+            self._finalize_anchor()
+            self._pop_element("a")
+
         ancestor_hidden = self._inside_hidden_content()
         ancestor_non_rendered = self._inside_non_rendered_content()
         self._push_element(normalized_tag, attrs)
@@ -288,9 +325,6 @@ class _ResultsPageLinkParser(HTMLParser):
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = tag.lower()
-        # In HTML, the self-closing flag on a non-void HTML element is ignored.
-        # Treat every non-void '/>' tag exactly like an ordinary start tag and
-        # keep it open until a real matching end tag arrives.
         self.handle_starttag(tag, attrs)
         if normalized_tag in _VOID_TAGS:
             self.handle_endtag(tag)
@@ -307,28 +341,13 @@ class _ResultsPageLinkParser(HTMLParser):
         normalized_tag = tag.lower()
 
         if normalized_tag in _NON_RENDERED_TAGS:
-            # Only the currently active innermost non-rendered element may end.
-            # An out-of-order outer close must not expose still-hidden content.
             if self._non_rendered_tags and self._non_rendered_tags[-1] == normalized_tag:
                 self._non_rendered_tags.pop()
             self._pop_element(normalized_tag)
             return
 
         if normalized_tag == "a":
-            if self._href is not None:
-                visible_text = _normalized_text("".join(self._text_parts))
-                evidence_fields = tuple(
-                    value
-                    for value in (
-                        _normalized_text(self._aria_label or ""),
-                        _normalized_text(self._title_attr or ""),
-                        visible_text,
-                    )
-                    if value
-                )
-                title = " ".join(evidence_fields) or None
-                self.links.append((self._href, title, self._raw_href_safe, evidence_fields))
-                self._reset_anchor()
+            self._finalize_anchor()
             self._pop_element(normalized_tag)
             return
 
