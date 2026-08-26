@@ -41,6 +41,9 @@ ALL_PRESENT_ROW = {
     "transition_calendar_event_status_function_exists": True,
     "calendar_candidate_upsert_version_matches": True,
     "calendar_candidate_upsert_implementation_version": 3,
+    "event_official_release_sources_table_exists": True,
+    "set_event_official_release_source_function_exists": True,
+    "clear_event_official_release_source_function_exists": True,
     "tracked_market_events_table_exists": True,
     "tracked_market_event_reactions_table_exists": True,
     "upsert_tracked_market_event_function_exists": True,
@@ -180,6 +183,7 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
             fake_client.calls,
             [
                 ("verify_strategy_draft_schema", {}),
+                ("verify_official_release_source_schema", {}),
                 ("verify_tracked_event_runtime_schema", {}),
             ],
         )
