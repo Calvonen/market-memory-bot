@@ -62,7 +62,10 @@ class ManualReleaseMemoryLimitTests(unittest.TestCase):
         ):
             _pdf_extract_worker(b"%PDF-1.7", send_conn, 10, 1000, budget, 5)
 
-        setrlimit.assert_any_call(resource.RLIMIT_AS, (desired, desired))
+        setrlimit.assert_any_call(
+            resource.RLIMIT_AS,
+            (desired, resource.RLIM_INFINITY),
+        )
         send_conn.send.assert_called_once_with(("ok", "results"))
 
 
