@@ -104,6 +104,24 @@ class ResultsPageReleaseParserScopeRegressionTests(unittest.TestCase):
         self.assertEqual(candidates[0].source_url, "https://investor.example.com/Q2-2026.pdf")
         self.assertEqual(candidates[0].evidence_fields, ())
 
+    def test_ancestor_close_finalizes_anchor_before_outside_text(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<div><a href="/release.pdf">Download</div> Q2-2026',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+        self.assertEqual(candidates[0].evidence_fields, ("Download",))
+
+    def test_foreign_special_name_is_not_boundary_in_html_namespace(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<span hidden><mi></span><a href="/r">Q2-2026</a></mi></span>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/r")
+        self.assertEqual(candidates[0].evidence_fields, ("Q2-2026",))
+
 
 if __name__ == "__main__":
     unittest.main()
