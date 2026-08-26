@@ -13,6 +13,7 @@ from trading_system.official_release_source_repository import OfficialReleaseSou
 
 
 _HTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
+_SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 _HTML_WHITESPACE = frozenset({"\t", "\n", "\f", "\r", " "})
 _RAW_HREF_RE = re.compile(
     r"\bhref\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'=<>`]+))",
@@ -30,8 +31,9 @@ _RENDERED_BREAK_TAGS = frozenset(
 )
 _ALWAYS_NON_RENDERED_TAGS = frozenset({"script", "style", "title"})
 _HTML_NON_RENDERED_TAGS = frozenset(
-    {"audio", "canvas", "iframe", "noscript", "object", "template", "video"}
+    {"audio", "canvas", "iframe", "noembed", "noframes", "noscript", "object", "template", "video"}
 )
+_SVG_NON_RENDERED_TAGS = frozenset({"desc", "metadata"})
 
 
 @dataclass(frozen=True)
@@ -99,7 +101,12 @@ def _is_unicode_noncharacter(codepoint: int) -> bool:
 
 
 def _preserve_invalid_scalars_as_control(html_text: str) -> str:
-    """Keep invalid/noncharacter evidence detectable instead of accepting replacement boundaries."""
+    """Keep malformed/control evidence detectable instead of accepting parser remapping boundaries."""
+
+    html_text = "".join(
+        "\u000b" if char == "\x00" or _is_unicode_noncharacter(ord(char)) else char
+        for char in html_text
+    )
 
     def replace_invalid(match: re.Match[str]) -> str:
         raw_codepoint = match.group(1) or match.group(2)
@@ -110,6 +117,7 @@ def _preserve_invalid_scalars_as_control(html_text: str) -> str:
             return "\u000b"
         if (
             codepoint == 0
+            or 0x80 <= codepoint <= 0x9F
             or 0xD800 <= codepoint <= 0xDFFF
             or codepoint > 0x10FFFF
             or _is_unicode_noncharacter(codepoint)
@@ -117,7 +125,7 @@ def _preserve_invalid_scalars_as_control(html_text: str) -> str:
             return "\u000b"
         return match.group(0)
 
-    return _NUMERIC_ENTITY_RE.sub(replace_invalid, html_text.replace("\x00", "\u000b"))
+    return _NUMERIC_ENTITY_RE.sub(replace_invalid, html_text)
 
 
 class _RawAnchorHrefSafetyScanner(HTMLParser):
@@ -162,6 +170,8 @@ def _element_is_non_rendered(element) -> bool:
     if namespace == _HTML_NAMESPACE and local == "dialog":
         return not _element_has_attribute(element, "open")
     if local in _ALWAYS_NON_RENDERED_TAGS:
+        return True
+    if namespace == _SVG_NAMESPACE and local in _SVG_NON_RENDERED_TAGS:
         return True
     return namespace == _HTML_NAMESPACE and local in _HTML_NON_RENDERED_TAGS
 
