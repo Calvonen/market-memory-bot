@@ -24,6 +24,7 @@ class ResultsPageSelection:
 
 _PERIOD_LABEL_RE = re.compile(r"^(Q[1-4]|H[12]|FY) ([0-9]{4})$", re.IGNORECASE)
 _PERCENT_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}")
+_ZERO_WIDTH_SPACE = "\u200b"
 
 
 def _scheduled_date_patterns(event: CalendarEvent) -> tuple[re.Pattern[str], ...]:
@@ -53,7 +54,14 @@ def _period_patterns(release_period: str | None) -> tuple[re.Pattern[str], ...]:
 
 def _is_token_char(char: str) -> bool:
     category = unicodedata.category(char)
-    return char.isalnum() or category.startswith("M") or category == "Cf"
+    # U+200B is a deliberate word separator even though it is category Cf.
+    # Other format controls, including ZWNJ/ZWJ, must not manufacture token
+    # boundaries around fiscal-period evidence.
+    return (
+        char.isalnum()
+        or category.startswith("M")
+        or (category == "Cf" and char != _ZERO_WIDTH_SPACE)
+    )
 
 
 def _pattern_has_standalone_match(field: str, pattern: re.Pattern[str]) -> bool:
@@ -63,6 +71,10 @@ def _pattern_has_standalone_match(field: str, pattern: re.Pattern[str]) -> bool:
         if (not before or not _is_token_char(before)) and (not after or not _is_token_char(after)):
             return True
     return False
+
+
+def _contains_ascii_control(value: str) -> bool:
+    return any(ord(char) <= 0x1F or ord(char) == 0x7F for char in value)
 
 
 def _decoded_url_evidence(source_url: str) -> str | None:
@@ -76,9 +88,12 @@ def _decoded_url_evidence(source_url: str) -> str | None:
             return None
         index += 3
     try:
-        return unquote(source_url, encoding="utf-8", errors="strict")
+        decoded = unquote(source_url, encoding="utf-8", errors="strict")
     except UnicodeDecodeError:
         return None
+    if _contains_ascii_control(decoded):
+        return None
+    return decoded
 
 
 def _candidate_evidence_fields(candidate: ResultsPageReleaseCandidate) -> tuple[str, ...]:
