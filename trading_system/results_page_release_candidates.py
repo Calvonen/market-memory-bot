@@ -6,15 +6,18 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urlsplit, urlunsplit
 
+import html5lib
+
 from trading_system.official_release_source_repository import OfficialReleaseSource, _is_valid_host
 
 
+_HTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
 _RAW_HREF_RE = re.compile(
     r"\bhref\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'=<>`]+))",
     re.IGNORECASE,
 )
 _NUMERIC_ENTITY_RE = re.compile(r"&#(?:x([0-9a-fA-F]+)|([0-9]+));?")
-_RENDERED_BREAK_START_TAGS = frozenset(
+_RENDERED_BREAK_TAGS = frozenset(
     {
         "address", "article", "aside", "blockquote", "br", "center", "dd", "details", "dialog",
         "dir", "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1",
@@ -23,83 +26,7 @@ _RENDERED_BREAK_START_TAGS = frozenset(
         "tbody", "td", "tfoot", "th", "thead", "tr", "ul", "xmp",
     }
 )
-_RENDERED_BREAK_END_TAGS = _RENDERED_BREAK_START_TAGS - {"br", "hr"}
 _NON_RENDERED_TAGS = frozenset({"script", "style", "template"})
-_VOID_TAGS = frozenset(
-    {
-        "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
-        "param", "source", "track", "wbr",
-    }
-)
-_HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
-_P_IMPLIED_CLOSE_START_TAGS = frozenset(
-    {
-        "address", "article", "aside", "blockquote", "center", "dd", "details", "dialog", "dir",
-        "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2",
-        "h3", "h4", "h5", "h6", "header", "hgroup", "hr", "li", "listing", "main", "menu",
-        "nav", "ol", "p", "plaintext", "pre", "search", "section", "summary", "table", "ul",
-        "xmp",
-    }
-)
-_IMPLIED_CLOSE_ON_START = {
-    "li": frozenset({"li"}),
-    "dt": frozenset({"dt", "dd"}),
-    "dd": frozenset({"dt", "dd"}),
-    "thead": frozenset({"thead", "tbody", "tfoot"}),
-    "tbody": frozenset({"thead", "tbody", "tfoot"}),
-    "tfoot": frozenset({"thead", "tbody", "tfoot"}),
-    "tr": frozenset({"tr"}),
-    "th": frozenset({"th", "td"}),
-    "td": frozenset({"th", "td"}),
-    "option": frozenset({"option"}),
-    "optgroup": frozenset({"option", "optgroup"}),
-}
-_BASE_SCOPE_BOUNDARIES = frozenset(
-    {"applet", "caption", "html", "marquee", "object", "table", "td", "template", "th"}
-)
-_IMPLIED_CLOSE_SCOPE_BOUNDARIES = {
-    "li": frozenset({"ol", "ul", "menu"}),
-    "dt": frozenset({"dl"}),
-    "dd": frozenset({"dl"}),
-    "thead": frozenset({"table"}),
-    "tbody": frozenset({"table"}),
-    "tfoot": frozenset({"table"}),
-    "tr": frozenset({"table", "tbody", "thead", "tfoot"}),
-    "th": frozenset({"table", "tbody", "thead", "tfoot", "tr"}),
-    "td": frozenset({"table", "tbody", "thead", "tfoot", "tr"}),
-    "option": frozenset({"select", "datalist", "optgroup"}),
-    "optgroup": frozenset({"select", "datalist"}),
-    "p": frozenset({"button", "table", "td", "th", "template", "html"}),
-}
-_HTML_GENERIC_END_TAG_SPECIAL_ELEMENTS = frozenset(
-    {
-        "address", "applet", "area", "article", "aside", "base", "basefont", "bgsound",
-        "blockquote", "body", "br", "button", "caption", "center", "col", "colgroup", "dd",
-        "details", "dir", "div", "dl", "dt", "embed", "fieldset", "figcaption", "figure",
-        "footer", "form", "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6",
-        "head", "header", "hgroup", "hr", "html", "iframe", "img", "input", "keygen",
-        "li", "link", "listing", "main", "marquee", "menu", "meta", "nav", "noembed",
-        "noframes", "noscript", "object", "ol", "p", "param", "plaintext", "pre", "script",
-        "search", "section", "select", "source", "style", "summary", "table", "tbody", "td",
-        "template", "textarea", "tfoot", "th", "thead", "title", "tr", "track", "ul", "wbr",
-        "xmp",
-    }
-)
-_MATHML_GENERIC_END_TAG_SPECIAL_ELEMENTS = frozenset(
-    {"annotation-xml", "mi", "mn", "mo", "ms", "mtext"}
-)
-_SVG_GENERIC_END_TAG_SPECIAL_ELEMENTS = frozenset({"desc", "foreignobject", "title"})
-_MATHML_TEXT_INTEGRATION_POINTS = frozenset({"mi", "mn", "mo", "ms", "mtext"})
-_SVG_HTML_INTEGRATION_POINTS = frozenset({"desc", "foreignobject", "title"})
-_FOREIGN_CONTENT_BREAKOUT_START_TAGS = frozenset(
-    {
-        "b", "big", "blockquote", "body", "br", "center", "code", "dd", "div", "dl", "dt",
-        "em", "embed", "h1", "h2", "h3", "h4", "h5", "h6", "head", "hr", "i", "img",
-        "li", "listing", "menu", "meta", "nobr", "ol", "p", "pre", "ruby", "s", "small",
-        "span", "strong", "strike", "sub", "sup", "table", "tt", "u", "ul", "var",
-    }
-)
-_NON_GENERIC_EXPLICIT_END_TAGS = frozenset(_IMPLIED_CLOSE_SCOPE_BOUNDARIES) | _HEADING_TAGS | _NON_RENDERED_TAGS | {"a"}
 
 
 @dataclass(frozen=True)
@@ -146,437 +73,120 @@ def _normalized_text(value: str) -> str:
     return " ".join(value.split())
 
 
-class _ResultsPageLinkParser(HTMLParser):
+class _RawAnchorHrefSafetyScanner(HTMLParser):
+    """Track href spellings only; html5lib owns all HTML tree construction semantics."""
+
     def __init__(self) -> None:
-        super().__init__()
-        self.links: list[tuple[str, str | None, bool, tuple[str, ...]]] = []
-        self._href: str | None = None
-        self._raw_href_safe = True
-        self._aria_label: str | None = None
-        self._title_attr: str | None = None
-        self._text_parts: list[str] = []
-        self._open_break_tags: list[str] = []
-        self._non_rendered_tags: list[str] = []
-        self._open_elements: list[tuple[str, bool]] = []
-        self._open_namespaces: list[str] = []
-        self._annotation_xml_html_integration: list[bool] = []
-        self._active_anchor_index: int | None = None
-        self._formatting_anchor_index: int | None = None
-        self._formatting_anchor_active = False
-
-    def _inside_non_rendered_content(self) -> bool:
-        return bool(self._non_rendered_tags)
-
-    def _inside_hidden_content(self) -> bool:
-        return any(hidden for _, hidden in self._open_elements)
-
-    def _reset_anchor(self) -> None:
-        self._href = None
-        self._raw_href_safe = True
-        self._aria_label = None
-        self._title_attr = None
-        self._text_parts = []
-        self._open_break_tags = []
-        self._active_anchor_index = None
-
-    def _clear_formatting_anchor(self) -> None:
-        self._formatting_anchor_active = False
-        self._formatting_anchor_index = None
-
-    def _finalize_anchor(self) -> None:
-        if self._href is None:
-            return
-        visible_text = _normalized_text("".join(self._text_parts))
-        evidence_fields = tuple(
-            value
-            for value in (
-                _normalized_text(self._aria_label or ""),
-                _normalized_text(self._title_attr or ""),
-                visible_text,
-            )
-            if value
-        )
-        title = " ".join(evidence_fields) or None
-        self.links.append((self._href, title, self._raw_href_safe, evidence_fields))
-        self._reset_anchor()
-
-    def _html_namespace_for_start_tag(self, tag: str) -> str:
-        if tag == "math":
-            return "math"
-        if tag == "svg":
-            return "svg"
-        return "html"
-
-    def _is_html_integration_point(self, index: int) -> bool:
-        tag = self._open_elements[index][0]
-        namespace = self._open_namespaces[index]
-        if namespace == "svg":
-            return tag in _SVG_HTML_INTEGRATION_POINTS
-        return (
-            namespace == "math"
-            and tag == "annotation-xml"
-            and self._annotation_xml_html_integration[index]
-        )
-
-    def _namespace_for_new_element(
-        self,
-        tag: str,
-        attrs: list[tuple[str, str | None]],
-    ) -> str:
-        if not self._open_elements:
-            return self._html_namespace_for_start_tag(tag)
-
-        parent_tag = self._open_elements[-1][0]
-        parent_namespace = self._open_namespaces[-1]
-        if parent_namespace == "html":
-            return self._html_namespace_for_start_tag(tag)
-        if parent_namespace == "math":
-            if parent_tag == "annotation-xml" and tag == "svg":
-                return "svg"
-            if parent_tag in _MATHML_TEXT_INTEGRATION_POINTS and tag not in {"mglyph", "malignmark"}:
-                return self._html_namespace_for_start_tag(tag)
-            if parent_tag == "annotation-xml" and self._annotation_xml_html_integration[-1]:
-                return self._html_namespace_for_start_tag(tag)
-            return "math"
-        if parent_namespace == "svg" and parent_tag in _SVG_HTML_INTEGRATION_POINTS:
-            return self._html_namespace_for_start_tag(tag)
-        return parent_namespace
-
-    def _push_element(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        hidden = any(key.lower() == "hidden" for key, _ in attrs)
-        namespace = self._namespace_for_new_element(tag, attrs)
-        if namespace == "html" and tag in _VOID_TAGS:
-            return
-        values = {key.lower(): value for key, value in attrs if value is not None}
-        annotation_xml_html_integration = (
-            namespace == "math"
-            and tag == "annotation-xml"
-            and values.get("encoding", "").lower() in {"text/html", "application/xhtml+xml"}
-        )
-        self._open_elements.append((tag, hidden))
-        self._open_namespaces.append(namespace)
-        self._annotation_xml_html_integration.append(annotation_xml_html_integration)
-
-    def _is_suppressed_element(self, tag: str, namespace: str) -> bool:
-        return tag in {"script", "style"} or (tag == "template" and namespace == "html")
-
-    def _scope_boundaries_for(self, tag: str) -> frozenset[str]:
-        return _BASE_SCOPE_BOUNDARIES | _IMPLIED_CLOSE_SCOPE_BOUNDARIES.get(tag, frozenset())
-
-    def _is_generic_special_element(self, index: int) -> bool:
-        open_tag = self._open_elements[index][0]
-        namespace = self._open_namespaces[index]
-        if namespace == "html":
-            return open_tag in _HTML_GENERIC_END_TAG_SPECIAL_ELEMENTS
-        if namespace == "math":
-            return open_tag in _MATHML_GENERIC_END_TAG_SPECIAL_ELEMENTS
-        if namespace == "svg":
-            return open_tag in _SVG_GENERIC_END_TAG_SPECIAL_ELEMENTS
-        return False
-
-    def _find_open_element_index(self, tag: str) -> int | None:
-        boundaries = self._scope_boundaries_for(tag)
-        generic_close = tag not in _NON_GENERIC_EXPLICIT_END_TAGS
-        for index in range(len(self._open_elements) - 1, -1, -1):
-            open_tag = self._open_elements[index][0]
-            if open_tag == tag:
-                return index
-            if open_tag in boundaries or (generic_close and self._is_generic_special_element(index)):
-                return None
-        return None
-
-    def _delete_open_elements_from(self, index: int, *, clear_formatting_anchor: bool = False) -> None:
-        continuing_formatting_anchor = (
-            self._active_anchor_index is not None
-            and index <= self._active_anchor_index
-            and self._formatting_anchor_active
-            and not clear_formatting_anchor
-        )
-        if continuing_formatting_anchor:
-            active_anchor_index = self._active_anchor_index
-            if (
-                not self._inside_non_rendered_content()
-                and not self._inside_hidden_content()
-                and any(
-                    namespace == "html" and tag in _RENDERED_BREAK_END_TAGS
-                    for (tag, _), namespace in zip(
-                        self._open_elements[index : active_anchor_index + 1],
-                        self._open_namespaces[index : active_anchor_index + 1],
-                    )
-                )
-            ):
-                self._text_parts.append(" ")
-            self._active_anchor_index = None
-        elif self._active_anchor_index is not None and index <= self._active_anchor_index:
-            self._finalize_anchor()
-
-        if self._formatting_anchor_index is not None and index <= self._formatting_anchor_index:
-            self._formatting_anchor_index = None
-            if clear_formatting_anchor:
-                self._clear_formatting_anchor()
-        removed_non_rendered = [
-            tag
-            for (tag, _), namespace in zip(self._open_elements[index:], self._open_namespaces[index:])
-            if self._is_suppressed_element(tag, namespace)
-        ]
-        for tag in reversed(removed_non_rendered):
-            if self._non_rendered_tags and self._non_rendered_tags[-1] == tag:
-                self._non_rendered_tags.pop()
-        del self._open_elements[index:]
-        del self._open_namespaces[index:]
-        del self._annotation_xml_html_integration[index:]
-
-    def _pop_element(self, tag: str) -> bool:
-        index = self._find_open_element_index(tag)
-        if index is None:
-            return False
-        self._delete_open_elements_from(index)
-        return True
-
-    def _close_open_element_at(self, index: int) -> None:
-        open_tag = self._open_elements[index][0]
-        self._delete_open_elements_from(index)
-        if open_tag in self._open_break_tags:
-            break_index = len(self._open_break_tags) - 1 - self._open_break_tags[::-1].index(open_tag)
-            del self._open_break_tags[break_index:]
-            if self._href is not None and not self._inside_non_rendered_content():
-                self._text_parts.append(" ")
-
-    def _find_implied_close_index(self, closing_tags: frozenset[str]) -> int | None:
-        boundaries: set[str] = set()
-        for closing_tag in closing_tags:
-            boundaries.update(_BASE_SCOPE_BOUNDARIES)
-            boundaries.update(_IMPLIED_CLOSE_SCOPE_BOUNDARIES.get(closing_tag, frozenset()))
-        for index in range(len(self._open_elements) - 1, -1, -1):
-            open_tag = self._open_elements[index][0]
-            if self._open_namespaces[index] != "html" and self._is_generic_special_element(index):
-                return None
-            if open_tag in closing_tags:
-                return index
-            if open_tag in boundaries:
-                return None
-        return None
-
-    def _close_first_in_scope(self, closing_tags: frozenset[str]) -> None:
-        close_index = self._find_implied_close_index(closing_tags)
-        if close_index is not None:
-            self._close_open_element_at(close_index)
-
-    def _apply_implied_closes(self, incoming_tag: str) -> None:
-        closing_tags = _IMPLIED_CLOSE_ON_START.get(incoming_tag, frozenset())
-        if closing_tags:
-            self._close_first_in_scope(closing_tags)
-
-        if incoming_tag in _P_IMPLIED_CLOSE_START_TAGS:
-            self._close_first_in_scope(frozenset({"p"}))
-
-        if (
-            incoming_tag in _HEADING_TAGS
-            and self._open_elements
-            and self._open_elements[-1][0] in _HEADING_TAGS
-        ):
-            self._close_open_element_at(len(self._open_elements) - 1)
-
-    def _is_foreign_content_breakout(self, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
-        if tag in _FOREIGN_CONTENT_BREAKOUT_START_TAGS:
-            return True
-        if tag != "font":
-            return False
-        attr_names = {key.lower() for key, _ in attrs}
-        return bool(attr_names & {"color", "face", "size"})
-
-    def _current_node_is_foreign_without_integration(self) -> bool:
-        if not self._open_elements:
-            return False
-        index = len(self._open_elements) - 1
-        if self._open_namespaces[index] == "html" or self._is_html_integration_point(index):
-            return False
-        return not (
-            self._open_namespaces[index] == "math"
-            and self._open_elements[index][0] in _MATHML_TEXT_INTEGRATION_POINTS
-        )
-
-    def _current_node_is_foreign(self) -> bool:
-        return bool(self._open_elements and self._open_namespaces[-1] != "html")
-
-    def _exit_foreign_content_for_breakout(self) -> None:
-        while self._open_elements:
-            index = len(self._open_elements) - 1
-            if self._open_namespaces[index] == "html" or self._is_html_integration_point(index):
-                return
-            if (
-                self._open_namespaces[index] == "math"
-                and self._open_elements[index][0] in _MATHML_TEXT_INTEGRATION_POINTS
-            ):
-                return
-            self._delete_open_elements_from(index)
-
-    def _exit_foreign_content_for_endtag_breakout(self) -> None:
-        while self._open_elements and self._open_namespaces[-1] != "html":
-            self._delete_open_elements_from(len(self._open_elements) - 1)
-
-    def _handle_foreign_endtag(self, tag: str) -> None:
-        for index in range(len(self._open_elements) - 1, -1, -1):
-            if self._open_namespaces[index] == "html":
-                return
-            if self._open_elements[index][0] == tag:
-                self._delete_open_elements_from(index)
-                return
-
-    def _append_visible_break(self) -> None:
-        if (
-            self._href is not None
-            and not self._inside_non_rendered_content()
-            and not self._inside_hidden_content()
-        ):
-            self._text_parts.append(" ")
+        super().__init__(convert_charrefs=True)
+        self.unsafe_hrefs: set[str] = set()
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        normalized_tag = tag.lower()
-        if self._current_node_is_foreign_without_integration() and self._is_foreign_content_breakout(normalized_tag, attrs):
-            self._exit_foreign_content_for_breakout()
-
-        incoming_namespace = self._namespace_for_new_element(normalized_tag, attrs)
-        if incoming_namespace == "html":
-            self._apply_implied_closes(normalized_tag)
-            incoming_namespace = self._namespace_for_new_element(normalized_tag, attrs)
-
-        ancestor_hidden = self._inside_hidden_content()
-        ancestor_non_rendered = self._inside_non_rendered_content()
-
-        if (
-            normalized_tag == "a"
-            and incoming_namespace == "html"
-            and self._formatting_anchor_active
-            and not ancestor_non_rendered
-        ):
-            formatting_anchor_index = self._formatting_anchor_index
-            self._finalize_anchor()
-            if formatting_anchor_index is not None and formatting_anchor_index < len(self._open_elements):
-                self._delete_open_elements_from(formatting_anchor_index, clear_formatting_anchor=True)
-            else:
-                self._clear_formatting_anchor()
-            ancestor_hidden = self._inside_hidden_content()
-            incoming_namespace = self._namespace_for_new_element(normalized_tag, attrs)
-
-        self._push_element(normalized_tag, attrs)
-
-        if self._is_suppressed_element(normalized_tag, incoming_namespace):
-            self._non_rendered_tags.append(normalized_tag)
+        if tag.lower() != "a":
             return
-
-        if normalized_tag == "a":
-            if incoming_namespace != "html":
-                return
-            if ancestor_non_rendered:
-                return
-            self._formatting_anchor_active = True
-            self._formatting_anchor_index = len(self._open_elements) - 1
-            if ancestor_hidden or self._inside_hidden_content():
-                self._reset_anchor()
-                return
-            values = {key.lower(): value for key, value in attrs if value is not None}
-            self._href = values.get("href")
-            self._raw_href_safe = _raw_href_is_safe(self.get_starttag_text(), self._href)
-            self._aria_label = values.get("aria-label")
-            self._title_attr = values.get("title")
-            self._text_parts = []
-            self._open_break_tags = []
-            self._active_anchor_index = len(self._open_elements) - 1 if self._href is not None else None
-            return
-
-        if self._href is None or ancestor_hidden or ancestor_non_rendered or self._inside_hidden_content():
-            return
-        if incoming_namespace == "html" and normalized_tag in _RENDERED_BREAK_START_TAGS:
-            self._text_parts.append(" ")
-            if normalized_tag in _RENDERED_BREAK_END_TAGS:
-                self._open_break_tags.append(normalized_tag)
+        hrefs = [value for key, value in attrs if key.lower() == "href" and value is not None]
+        raw_start_tag = self.get_starttag_text() or ""
+        if len(hrefs) != 1 or not _raw_href_is_safe(raw_start_tag, hrefs[0] if hrefs else None):
+            self.unsafe_hrefs.update(hrefs)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        normalized_tag = tag.lower()
         self.handle_starttag(tag, attrs)
-        if not self._open_elements:
+
+
+def _element_name(tag: str) -> tuple[str | None, str]:
+    if tag.startswith("{") and "}" in tag:
+        namespace, local = tag[1:].split("}", 1)
+        return namespace, local.lower()
+    return None, tag.lower()
+
+
+def _is_html_element(element, name: str | None = None) -> bool:
+    namespace, local = _element_name(element.tag)
+    if namespace != _HTML_NAMESPACE:
+        return False
+    return name is None or local == name
+
+
+def _element_hidden(element) -> bool:
+    return any(str(key).lower().split("}")[-1] == "hidden" for key in element.attrib)
+
+
+def _visible_anchor_text(anchor) -> str:
+    parts: list[str] = []
+
+    def append_break() -> None:
+        if parts and parts[-1] != " ":
+            parts.append(" ")
+
+    def visit(element, *, include_own_text: bool) -> None:
+        namespace, local = _element_name(element.tag)
+        hidden = _element_hidden(element)
+        non_rendered = local in _NON_RENDERED_TAGS and (
+            local in {"script", "style"} or namespace == _HTML_NAMESPACE
+        )
+
+        if include_own_text and not hidden and not non_rendered and element.text:
+            parts.append(element.text)
+
+        if not hidden and not non_rendered:
+            for child in list(element):
+                child_namespace, child_local = _element_name(child.tag)
+                rendered_break = child_namespace == _HTML_NAMESPACE and child_local in _RENDERED_BREAK_TAGS
+                if rendered_break:
+                    append_break()
+                visit(child, include_own_text=True)
+                if rendered_break:
+                    append_break()
+                if child.tail:
+                    parts.append(child.tail)
+        else:
+            for child in list(element):
+                if child.tail:
+                    parts.append(child.tail)
+
+    visit(anchor, include_own_text=True)
+    return _normalized_text("".join(parts))
+
+
+def _iter_visible_html_anchors(root):
+    def walk(element, hidden_ancestor: bool):
+        hidden_here = hidden_ancestor or _element_hidden(element)
+        namespace, local = _element_name(element.tag)
+        non_rendered = local in _NON_RENDERED_TAGS and (
+            local in {"script", "style"} or namespace == _HTML_NAMESPACE
+        )
+        if hidden_here or non_rendered:
             return
-        if self._open_elements[-1][0] != normalized_tag:
-            return
-        namespace = self._open_namespaces[-1]
-        if namespace != "html":
-            self.handle_endtag(tag)
-        elif normalized_tag in _VOID_TAGS:
-            self.handle_endtag(tag)
+        if namespace == _HTML_NAMESPACE and local == "a":
+            yield element
+        for child in list(element):
+            yield from walk(child, hidden_here)
 
-    def handle_data(self, data: str) -> None:
-        if (
-            self._href is not None
-            and self._formatting_anchor_active
-            and not self._inside_non_rendered_content()
-            and not self._inside_hidden_content()
-        ):
-            self._text_parts.append(data)
+    yield from walk(root, False)
 
-    def handle_endtag(self, tag: str) -> None:
-        normalized_tag = tag.lower()
 
-        if self._current_node_is_foreign():
-            if normalized_tag in {"p", "br"}:
-                self._exit_foreign_content_for_endtag_breakout()
-            else:
-                self._handle_foreign_endtag(normalized_tag)
-                return
+def _parse_html5_links(html_text: str) -> list[tuple[str, str | None, tuple[str, ...]]]:
+    safety_scanner = _RawAnchorHrefSafetyScanner()
+    safety_scanner.feed(html_text)
+    safety_scanner.close()
 
-        if normalized_tag == "br":
-            self._append_visible_break()
-            return
+    fragment = html5lib.parseFragment(
+        html_text,
+        treebuilder="etree",
+        namespaceHTMLElements=True,
+    )
 
-        if normalized_tag == "p" and self._find_open_element_index("p") is None:
-            self._append_visible_break()
-            return
-
-        if normalized_tag in _NON_RENDERED_TAGS:
-            index = self._find_open_element_index(normalized_tag)
-            if index is None or not self._is_suppressed_element(normalized_tag, self._open_namespaces[index]):
-                return
-            if self._non_rendered_tags and self._non_rendered_tags[-1] == normalized_tag:
-                self._pop_element(normalized_tag)
-            return
-
-        if normalized_tag == "a":
-            anchor_index = self._find_open_element_index(normalized_tag)
-            if anchor_index is not None:
-                closes_formatting_anchor = (
-                    self._formatting_anchor_index is not None
-                    and anchor_index == self._formatting_anchor_index
-                )
-                if closes_formatting_anchor:
-                    if self._active_anchor_index == anchor_index:
-                        self._finalize_anchor()
-                    self._delete_open_elements_from(anchor_index, clear_formatting_anchor=True)
-                    self._clear_formatting_anchor()
-                else:
-                    self._delete_open_elements_from(anchor_index)
-                return
-            if self._formatting_anchor_active:
-                self._finalize_anchor()
-                self._clear_formatting_anchor()
-            return
-
-        if (
-            self._href is not None
-            and not self._inside_non_rendered_content()
-            and not self._inside_hidden_content()
-            and normalized_tag in _RENDERED_BREAK_END_TAGS
-        ):
-            for index in range(len(self._open_break_tags) - 1, -1, -1):
-                if self._open_break_tags[index] == normalized_tag:
-                    del self._open_break_tags[index:]
-                    self._text_parts.append(" ")
-                    break
-        self._pop_element(normalized_tag)
-
-    def close(self) -> None:
-        super().close()
-        self._finalize_anchor()
-        self._clear_formatting_anchor()
+    links: list[tuple[str, str | None, tuple[str, ...]]] = []
+    for anchor in _iter_visible_html_anchors(fragment):
+        href = anchor.attrib.get("href")
+        if href is None or href in safety_scanner.unsafe_hrefs or _contains_ascii_control(href):
+            continue
+        aria_label = _normalized_text(anchor.attrib.get("aria-label", ""))
+        title_attr = _normalized_text(anchor.attrib.get("title", ""))
+        visible_text = _visible_anchor_text(anchor)
+        evidence_fields = tuple(value for value in (aria_label, title_attr, visible_text) if value)
+        title = " ".join(evidence_fields) or None
+        links.append((href, title, evidence_fields))
+    return links
 
 
 def _https_origin(url: str) -> tuple[str, str, int] | None:
@@ -728,7 +338,7 @@ def extract_results_page_candidates(
     source: OfficialReleaseSource,
     html_text: str,
 ) -> tuple[ResultsPageReleaseCandidate, ...]:
-    """Extract deterministic same-origin HTTPS candidates from a results page."""
+    """Extract deterministic same-origin HTTPS candidates from an HTML5-repaired results page."""
     if source.source_kind != "results_page":
         raise ValueError("results page candidate extraction requires source_kind=results_page")
 
@@ -736,25 +346,33 @@ def extract_results_page_candidates(
     if page_url is None:
         return ()
 
-    parser = _ResultsPageLinkParser()
-    parser.feed(html_text)
-    parser.close()
-
-    seen: set[str] = set()
-    candidates: list[ResultsPageReleaseCandidate] = []
-    for href, title, raw_href_safe, evidence_fields in parser.links:
-        if not raw_href_safe:
-            continue
+    aggregated: dict[str, dict[str, object]] = {}
+    order: list[str] = []
+    for href, title, evidence_fields in _parse_html5_links(html_text):
         candidate_url = _canonical_candidate_url(source.source_url, href)
-        if candidate_url is None or candidate_url == page_url or candidate_url in seen:
+        if candidate_url is None or candidate_url == page_url:
             continue
-        seen.add(candidate_url)
+        if candidate_url not in aggregated:
+            aggregated[candidate_url] = {"titles": [], "fields": []}
+            order.append(candidate_url)
+        record = aggregated[candidate_url]
+        if title:
+            record["titles"].append(title)
+        for field in evidence_fields:
+            if field not in record["fields"]:
+                record["fields"].append(field)
+
+    candidates: list[ResultsPageReleaseCandidate] = []
+    for candidate_url in order:
+        record = aggregated[candidate_url]
+        fields = tuple(record["fields"])
+        titles = record["titles"]
         candidates.append(
             ResultsPageReleaseCandidate(
                 event_id=source.event_id,
                 source_url=candidate_url,
-                source_title=title,
-                evidence_fields=evidence_fields,
+                source_title=" ".join(titles) or None,
+                evidence_fields=fields,
             )
         )
     return tuple(candidates)
