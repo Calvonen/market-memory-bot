@@ -33,6 +33,27 @@ class _VisibleTextParser(HTMLParser):
                 self.parts.append(text)
 
 
+class _EncodingMetaParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.encoding: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self.encoding is not None or tag.lower() != "meta":
+            return
+        values = {key.lower(): value for key, value in attrs if value is not None}
+        charset = values.get("charset")
+        if charset:
+            self.encoding = charset.strip()
+            return
+        if values.get("http-equiv", "").lower() != "content-type":
+            return
+        content = values.get("content", "")
+        match = re.search(r"charset\s*=\s*([A-Za-z0-9._:-]+)", content, flags=re.IGNORECASE)
+        if match:
+            self.encoding = match.group(1)
+
+
 class _ApprovedOriginRedirectHandler(HTTPRedirectHandler):
     def __init__(self, approved_url: str) -> None:
         super().__init__()
@@ -56,6 +77,8 @@ class ManualOfficialReleaseProvider:
     name = "manual_official_release"
     MIN_DOCUMENT_CHARS = 500
     MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
+    MAX_PDF_PAGES = 500
+    MAX_EXTRACTED_CHARS = 5_000_000
 
     def __init__(
         self,
@@ -81,7 +104,12 @@ class ManualOfficialReleaseProvider:
             raw_text = self._decode_text(data, http_charset, allow_html_meta=False)
             source_type = "company_results"
         elif self._looks_like_html_or_text(content_type, data):
-            html_text = self._decode_text(data, http_charset, allow_html_meta=True)
+            html_text = self._decode_text(
+                data,
+                http_charset,
+                allow_html_meta=True,
+                allow_xml_declaration=media_type == "application/xhtml+xml",
+            )
             parser = _VisibleTextParser()
             parser.feed(html_text)
             raw_text = "\n".join(parser.parts)
@@ -144,21 +172,19 @@ class ManualOfficialReleaseProvider:
     @staticmethod
     def _sniff_html_meta_encoding(data: bytes) -> str | None:
         head = data[:4096].decode("latin-1", errors="strict")
-        charset_match = re.search(
-            r"<meta\b[^>]*\bcharset\s*=\s*['\"]?\s*([A-Za-z0-9._:-]+)",
+        parser = _EncodingMetaParser()
+        parser.feed(head)
+        return parser.encoding
+
+    @staticmethod
+    def _sniff_xml_encoding(data: bytes) -> str | None:
+        head = data[:512].decode("latin-1", errors="strict")
+        match = re.match(
+            r"\s*<\?xml\b[^>]*\bencoding\s*=\s*['\"]([A-Za-z0-9._:-]+)['\"]",
             head,
             flags=re.IGNORECASE,
         )
-        if charset_match:
-            return charset_match.group(1)
-        http_equiv_match = re.search(
-            r"<meta\b[^>]*\bcontent\s*=\s*['\"][^'\"]*charset\s*=\s*([A-Za-z0-9._:-]+)[^'\"]*['\"][^>]*>",
-            head,
-            flags=re.IGNORECASE,
-        )
-        if http_equiv_match:
-            return http_equiv_match.group(1)
-        return None
+        return match.group(1) if match else None
 
     @classmethod
     def _decode_text(
@@ -167,10 +193,12 @@ class ManualOfficialReleaseProvider:
         http_charset: str | None,
         *,
         allow_html_meta: bool,
+        allow_xml_declaration: bool = False,
     ) -> str:
         encoding = (
             http_charset
             or cls._sniff_bom_encoding(data)
+            or (cls._sniff_xml_encoding(data) if allow_xml_declaration else None)
             or (cls._sniff_html_meta_encoding(data) if allow_html_meta else None)
             or "utf-8"
         )
@@ -181,14 +209,25 @@ class ManualOfficialReleaseProvider:
                 f"manual official release text decode failed for charset {encoding}"
             ) from exc
 
-    @staticmethod
-    def _extract_pdf_text(data: bytes) -> str:
+    @classmethod
+    def _extract_pdf_text(cls, data: bytes) -> str:
         try:
             reader = PdfReader(io.BytesIO(data))
-            pages = [page.extract_text() or "" for page in reader.pages]
+            if len(reader.pages) > cls.MAX_PDF_PAGES:
+                raise RuntimeError("manual official release PDF exceeds page limit")
+            parts: list[str] = []
+            total_chars = 0
+            for page in reader.pages:
+                text = page.extract_text() or ""
+                total_chars += len(text)
+                if total_chars > cls.MAX_EXTRACTED_CHARS:
+                    raise RuntimeError("manual official release PDF extracted text exceeds size limit")
+                parts.append(text)
+        except RuntimeError:
+            raise
         except Exception as exc:
             raise RuntimeError("manual official release PDF extraction failed") from exc
-        raw_text = "\n".join(pages).strip()
+        raw_text = "\n".join(parts).strip()
         if not raw_text:
             raise RuntimeError("manual official release PDF extraction produced no text")
         return raw_text
