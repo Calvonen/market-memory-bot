@@ -166,6 +166,129 @@ class ResultsPageReleasePostMergeRegressionTests(unittest.TestCase):
         self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
         self.assertEqual(candidates[0].evidence_fields, ("Q2-2026",))
 
+    def test_template_local_anchor_sharing_a_rendered_href_is_suppressed(self):
+        """A rendered spelling must not unsuppress the template spelling.
+
+        html5lib hoists the template-local anchor out of its template, so it
+        reaches the tree as a duplicate of the rendered candidate. Suppression is
+        per occurrence, so the rendered anchor stays a candidate and the template
+        content contributes no evidence to it.
+        """
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/release.pdf">Annual</a>'
+            '<a href="/q">'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</a>',
+        )
+        self.assertEqual(
+            [candidate.source_url for candidate in candidates],
+            [
+                "https://investor.example.com/release.pdf",
+                "https://investor.example.com/q",
+            ],
+        )
+        self.assertEqual(candidates[0].source_title, "Annual")
+        self.assertEqual(candidates[0].evidence_fields, ("Annual",))
+        self.assertEqual(candidates[1].evidence_fields, ())
+
+    def test_template_local_anchor_before_its_rendered_twin_is_suppressed(self):
+        """Occurrence matching follows document order, whichever spelling is first."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</a>'
+            '<a href="/release.pdf">Annual</a>',
+        )
+        self.assertEqual(
+            [candidate.source_url for candidate in candidates],
+            [
+                "https://investor.example.com/q",
+                "https://investor.example.com/release.pdf",
+            ],
+        )
+        self.assertEqual(candidates[1].source_title, "Annual")
+        self.assertEqual(candidates[1].evidence_fields, ("Annual",))
+
+    def test_only_the_template_occurrence_of_a_repeated_href_is_suppressed(self):
+        """Occurrence matching picks out the template slot among several duplicates."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/release.pdf">Annual</a>'
+            '<a href="/q">'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</a>'
+            '<a href="/release.pdf">Interim</a>',
+        )
+        self.assertEqual(
+            [candidate.source_url for candidate in candidates],
+            [
+                "https://investor.example.com/release.pdf",
+                "https://investor.example.com/q",
+            ],
+        )
+        self.assertEqual(candidates[0].source_title, "Annual")
+        self.assertEqual(candidates[0].evidence_fields, ("Annual", "Interim"))
+
+    def test_non_hoisted_template_anchor_keeps_its_rendered_twin_intact(self):
+        """A template anchor that stays inside its template still holds its slot."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '<a href="/release.pdf">Annual</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+        self.assertEqual(candidates[0].evidence_fields, ("Annual",))
+
+    def test_self_closing_template_opens_a_template_scope(self):
+        """<template/> is a plain start tag, not a self-closing void element.
+
+        HTML has no self-closing syntax for ordinary elements, so the anchor that
+        follows is template content until the matching </template>.
+        """
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">'
+            '<template/>'
+            '<a href="/hidden.pdf">Q2-2026</a>'
+            '</template>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ())
+
+    def test_self_closing_template_scope_ends_at_its_end_tag(self):
+        """The <template/> scope closes at </template>, not before and not after."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<template/><a href="/hidden.pdf">Q2-2026</a></template>'
+            '<a href="/release.pdf">Annual report</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+        self.assertEqual(candidates[0].evidence_fields, ("Annual report",))
+
+    def test_self_closing_svg_does_not_open_a_foreign_scope(self):
+        """A foreign element does acknowledge its self-closing flag.
+
+        <svg/> opens and closes in one step, so the <template> after it is an
+        ordinary HTML template and still suppresses its anchor.
+        """
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<svg/><template><a href="/hidden.pdf">Q2-2026</a></template>'
+            '<a href="/release.pdf">Annual report</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+
     def test_svg_template_is_not_html_template_suppression(self):
         candidates = extract_results_page_candidates(
             self._source(),

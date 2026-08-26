@@ -156,33 +156,39 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.unsafe_hrefs: set[str] = set()
-        self._template_hrefs: set[str] = set()
-        self._rendered_hrefs: set[str] = set()
+        # Every anchor occurrence in source order, per href, flagged with whether
+        # it was spelled inside HTML <template> content. Suppression has to work
+        # per occurrence: the same href may legitimately appear both in rendered
+        # content and, separately, inside a template.
+        self.anchor_occurrences: dict[str, list[bool]] = {}
         self._foreign_depth = 0
         self._template_depth = 0
 
     @property
-    def template_only_hrefs(self) -> set[str]:
-        """Hrefs that a results page only ever spells inside <template> content."""
+    def template_hrefs(self) -> set[str]:
+        """Hrefs a results page spells at least once inside <template> content."""
 
-        return self._template_hrefs - self._rendered_hrefs
+        return {href for href, flags in self.anchor_occurrences.items() if any(flags)}
 
     def _record_anchor(self, attrs: list[tuple[str, str | None]]) -> None:
         hrefs = [value for key, value in attrs if key.lower() == "href" and value is not None]
         raw_start_tag = self.get_starttag_text() or ""
         if len(hrefs) != 1 or not _raw_href_is_safe(raw_start_tag, hrefs[0] if hrefs else None):
             self.unsafe_hrefs.update(hrefs)
-        target = self._template_hrefs if self._template_depth else self._rendered_hrefs
-        target.update(hrefs)
+        for href in hrefs:
+            self.anchor_occurrences.setdefault(href, []).append(bool(self._template_depth))
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        lowered = tag.lower()
+    def _open_element(self, lowered: str) -> None:
         if lowered in _FOREIGN_ROOT_TAGS:
             self._foreign_depth += 1
         elif lowered == "template" and not self._foreign_depth:
             # <svg>/<math> subtrees have no HTML template semantics, so only a
             # template spelled in HTML content suppresses its anchors.
             self._template_depth += 1
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        lowered = tag.lower()
+        self._open_element(lowered)
         if lowered == "a":
             self._record_anchor(attrs)
 
@@ -194,9 +200,15 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
             self._template_depth = max(0, self._template_depth - 1)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        # A self-closing start tag opens and closes in one step, so container
-        # depths stay balanced; only the anchor bookkeeping matters here.
-        if tag.lower() == "a":
+        lowered = tag.lower()
+        # HTML has no self-closing syntax for ordinary elements: "<template/>" is
+        # a plain <template> start tag that keeps its scope open until the
+        # matching </template>. <svg/>/<math/> are foreign elements, where the
+        # self-closing flag *is* acknowledged, so their scope opens and closes in
+        # one step and the depth stays balanced.
+        if lowered == "template":
+            self._open_element(lowered)
+        if lowered == "a":
             self._record_anchor(attrs)
 
 
@@ -315,6 +327,49 @@ def _element_is_foreign(element) -> bool:
     return namespace is not None and namespace != _HTML_NAMESPACE
 
 
+def _iter_all_html_anchors(root):
+    """Every HTML anchor in document order, template and hidden subtrees included."""
+
+    for element in root.iter():
+        namespace, local = _element_name(element.tag)
+        if namespace == _HTML_NAMESPACE and local == "a":
+            yield element
+
+
+def _template_local_tree_anchors(root, safety_scanner) -> set:
+    """Match each tree anchor back to the raw source occurrence it came from.
+
+    html5lib 1.1 has no <template> support at all, so the anchor adoption agency
+    can hoist a template-local anchor out of its template and into rendered
+    content. Classifying by href alone would then let one rendered spelling
+    unsuppress every template spelling of the same href, so the k-th tree anchor
+    for an href is matched against the k-th raw occurrence of it: both are in
+    document order, and a non-hoisted template anchor still occupies its slot
+    inside the template element.
+    """
+
+    template_hrefs = safety_scanner.template_hrefs
+    if not template_hrefs:
+        return set()
+
+    suppressed = set()
+    seen: dict[str, int] = {}
+    for anchor in _iter_all_html_anchors(root):
+        href = anchor.attrib.get("href")
+        if href is None or href not in template_hrefs:
+            # No template spells this href, so no hoist is possible. Skipping it
+            # also keeps adoption-agency anchor clones from shifting the index.
+            continue
+        occurrences = safety_scanner.anchor_occurrences[href]
+        index = seen.get(href, 0)
+        seen[href] = index + 1
+        if index >= len(occurrences) or occurrences[index]:
+            # An index past the raw occurrences means html5lib cloned an anchor
+            # for an href a template also spells, which is ambiguous: fail closed.
+            suppressed.add(anchor)
+    return suppressed
+
+
 def _iter_visible_html_anchors(root):
     def walk(element, is_fragment_root: bool = False):
         if not isinstance(element.tag, str):
@@ -354,24 +409,23 @@ def _parse_html5_links(html_text: str) -> list[tuple[str, str | None, tuple[str,
     safety_scanner = _RawAnchorHrefSafetyScanner()
     safety_scanner.feed(html_text)
     safety_scanner.close()
-    template_only_hrefs = safety_scanner.template_only_hrefs
 
     fragment = html5lib.parseFragment(
         _preserve_invalid_scalars_as_control(html_text),
         treebuilder="etree",
         namespaceHTMLElements=True,
     )
+    template_local_anchors = _template_local_tree_anchors(fragment, safety_scanner)
 
     links: list[tuple[str, str | None, tuple[str, ...]]] = []
     for anchor in _iter_visible_html_anchors(fragment):
         href = anchor.attrib.get("href")
         if href is None or href in safety_scanner.unsafe_hrefs or _contains_ascii_control(href):
             continue
-        if href in template_only_hrefs:
-            # html5lib has no <template> support, so the anchor adoption agency can
-            # hoist a template-local anchor out of its template and into rendered
-            # content. Template content is never rendered, so such an anchor must
-            # not become a release candidate.
+        if anchor in template_local_anchors:
+            # Template content is never rendered, so a template-local anchor must
+            # neither become a release candidate nor contribute its evidence to
+            # one, even when a rendered anchor uses the very same href.
             continue
         aria_label = _safe_normalized_text(anchor.attrib.get("aria-label", ""))
         title_attr = _safe_normalized_text(anchor.attrib.get("title", ""))
