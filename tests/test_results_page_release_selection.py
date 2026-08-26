@@ -68,13 +68,60 @@ class ResultsPageReleaseSelectionTests(unittest.TestCase):
                 selection = select_results_page_release_candidate(self._event(), (self._candidate(url),))
                 self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
 
-    def test_returns_no_match_without_exact_scheduled_date(self):
+    def test_returns_no_match_without_exact_scheduled_date_or_explicit_period(self):
         selection = select_results_page_release_candidate(
             self._event(),
             (self._candidate("https://investor.example.com/q2-2026-results.pdf", "Q2 2026 results"),),
         )
         self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
         self.assertIsNone(selection.candidate)
+
+    def test_selects_unique_candidate_with_explicit_period_evidence(self):
+        for release_period, url in (
+            ("Q2 2026", "https://investor.example.com/q2-2026-results.pdf"),
+            ("H1 2026", "https://investor.example.com/H1_2026-report.pdf"),
+            ("FY 2026", "https://investor.example.com/fy2026-results.pdf"),
+        ):
+            with self.subTest(release_period=release_period):
+                selection = select_results_page_release_candidate(
+                    self._event(),
+                    (self._candidate(url),),
+                    release_period=release_period,
+                )
+                self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
+
+    def test_exact_date_tier_wins_over_period_only_candidate(self):
+        exact = self._candidate("https://investor.example.com/2026-08-26-results.pdf")
+        period_only = self._candidate("https://investor.example.com/q2-2026-results.pdf")
+        selection = select_results_page_release_candidate(
+            self._event(),
+            (period_only, exact),
+            release_period="Q2 2026",
+        )
+        self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
+        self.assertEqual(selection.candidate, exact)
+
+    def test_period_evidence_fails_closed_when_ambiguous(self):
+        selection = select_results_page_release_candidate(
+            self._event(),
+            (
+                self._candidate("https://investor.example.com/q2-2026-report.pdf"),
+                self._candidate("https://investor.example.com/q2_2026-release.html"),
+            ),
+            release_period="Q2 2026",
+        )
+        self.assertEqual(selection.status, ResultsPageSelectionStatus.AMBIGUOUS)
+        self.assertIsNone(selection.candidate)
+
+    def test_rejects_invalid_period_labels_instead_of_guessing(self):
+        for release_period in ("Q5 2026", "2026 Q2", "2026", "H3 2026"):
+            with self.subTest(release_period=release_period):
+                with self.assertRaises(ValueError):
+                    select_results_page_release_candidate(
+                        self._event(),
+                        (self._candidate("https://investor.example.com/q2-2026-results.pdf"),),
+                        release_period=release_period,
+                    )
 
     def test_returns_ambiguous_when_multiple_candidates_match(self):
         selection = select_results_page_release_candidate(
