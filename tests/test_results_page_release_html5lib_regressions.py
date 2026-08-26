@@ -136,3 +136,51 @@ def test_open_dialog_keeps_descendant_release_anchor_visible() -> None:
     assert len(candidates) == 1
     assert candidates[0].source_url == "https://example.com/r"
     assert candidates[0].evidence_fields == ("Q2-2026",)
+
+
+def test_invalid_surrogate_reference_is_excluded_before_html5_replacement() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<a href="/r">Annual&#xD800;Q2-2026</a>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ()
+
+
+def test_out_of_range_scalar_reference_is_excluded_before_html5_replacement() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<a href="/r" title="Annual&#x110000;Q2-2026">Download</a>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ("Download",)
+
+
+def test_closed_details_suppresses_non_summary_release_anchor() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<details><summary>Annual</summary><a href="/r">Q2-2026</a></details>',
+    )
+    assert candidates == ()
+
+
+def test_closed_details_keeps_first_summary_release_anchor_visible() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<details><summary><a href="/r">Q2-2026</a></summary><a href="/hidden">Q2-2026</a></details>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ("Q2-2026",)
+
+
+def test_html_title_text_is_not_release_evidence() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<a href="/r">Annual<title>Q2-2026</title></a>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ("Annual",)
