@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from enum import Enum
 
@@ -21,7 +22,6 @@ class ResultsPageSelection:
 
 
 _PERIOD_LABEL_RE = re.compile(r"^(Q[1-4]|H[12]|FY) ([0-9]{4})$", re.IGNORECASE)
-_UNICODE_ALNUM = r"[^\W_]"
 
 
 def _scheduled_date_patterns(event: CalendarEvent) -> tuple[re.Pattern[str], ...]:
@@ -44,14 +44,29 @@ def _period_patterns(release_period: str | None) -> tuple[re.Pattern[str], ...]:
     period, year = match.groups()
     separator = r"(?:[ _\-/]+)"
     return (
-        re.compile(rf"(?<!{_UNICODE_ALNUM}){period}{separator}{year}(?!{_UNICODE_ALNUM})", re.IGNORECASE),
-        re.compile(rf"(?<!{_UNICODE_ALNUM}){period}{year}(?!{_UNICODE_ALNUM})", re.IGNORECASE),
+        re.compile(rf"{period}{separator}{year}", re.IGNORECASE),
+        re.compile(rf"{period}{year}", re.IGNORECASE),
     )
+
+
+def _is_token_char(char: str) -> bool:
+    return char.isalnum() or unicodedata.category(char).startswith("M")
+
+
+def _pattern_has_standalone_match(field: str, pattern: re.Pattern[str]) -> bool:
+    for match in pattern.finditer(field):
+        before = field[match.start() - 1] if match.start() > 0 else ""
+        after = field[match.end()] if match.end() < len(field) else ""
+        if (not before or not _is_token_char(before)) and (not after or not _is_token_char(after)):
+            return True
+    return False
 
 
 def _candidate_evidence_fields(candidate: ResultsPageReleaseCandidate) -> tuple[str, ...]:
     fields = [candidate.source_url]
-    if candidate.source_title:
+    if candidate.evidence_fields:
+        fields.extend(candidate.evidence_fields)
+    elif candidate.source_title:
         fields.append(candidate.source_title)
     return tuple(fields)
 
@@ -60,13 +75,15 @@ def _matching_candidates(
     event: CalendarEvent,
     candidates: tuple[ResultsPageReleaseCandidate, ...],
     patterns: tuple[re.Pattern[str], ...],
+    *,
+    standalone_token: bool = False,
 ) -> tuple[ResultsPageReleaseCandidate, ...]:
     return tuple(
         candidate
         for candidate in candidates
         if candidate.event_id == event.calendar_event_id
         and any(
-            pattern.search(field)
+            _pattern_has_standalone_match(field, pattern) if standalone_token else bool(pattern.search(field))
             for field in _candidate_evidence_fields(candidate)
             for pattern in patterns
         )
@@ -94,7 +111,12 @@ def select_results_page_release_candidate(
     if not period_patterns:
         return ResultsPageSelection(status=ResultsPageSelectionStatus.NO_MATCH)
 
-    period_matches = _matching_candidates(event, candidates, period_patterns)
+    period_matches = _matching_candidates(
+        event,
+        candidates,
+        period_patterns,
+        standalone_token=True,
+    )
     if not period_matches:
         return ResultsPageSelection(status=ResultsPageSelectionStatus.NO_MATCH)
     if len(period_matches) != 1:
