@@ -184,3 +184,21 @@ def test_html_title_text_is_not_release_evidence() -> None:
     assert len(candidates) == 1
     assert candidates[0].source_url == "https://example.com/r"
     assert candidates[0].evidence_fields == ("Annual",)
+
+
+def test_uppercase_hex_invalid_scalar_reference_is_excluded() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<a href="/r">Annual&#XD800;Q2-2026</a>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ()
+
+
+def test_canvas_fallback_subtree_is_not_release_evidence() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<canvas><a href="/r">Q2-2026</a></canvas>',
+    )
+    assert candidates == ()
