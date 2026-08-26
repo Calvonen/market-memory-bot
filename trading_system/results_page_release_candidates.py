@@ -223,6 +223,8 @@ class _ResultsPageLinkParser(HTMLParser):
         if parent_namespace == "html":
             return self._html_namespace_for_start_tag(tag)
         if parent_namespace == "math":
+            if parent_tag == "annotation-xml" and tag == "svg":
+                return "svg"
             if parent_tag in _MATHML_TEXT_INTEGRATION_POINTS and tag not in {"mglyph", "malignmark"}:
                 return self._html_namespace_for_start_tag(tag)
             if parent_tag == "annotation-xml" and self._annotation_xml_html_integration[-1]:
@@ -340,6 +342,17 @@ class _ResultsPageLinkParser(HTMLParser):
         attr_names = {key.lower() for key, _ in attrs}
         return bool(attr_names & {"color", "face", "size"})
 
+    def _current_node_is_foreign_without_integration(self) -> bool:
+        if not self._open_elements:
+            return False
+        index = len(self._open_elements) - 1
+        if self._open_namespaces[index] == "html" or self._is_html_integration_point(index):
+            return False
+        return not (
+            self._open_namespaces[index] == "math"
+            and self._open_elements[index][0] in _MATHML_TEXT_INTEGRATION_POINTS
+        )
+
     def _exit_foreign_content_for_breakout(self) -> None:
         while self._open_elements:
             index = len(self._open_elements) - 1
@@ -354,16 +367,7 @@ class _ResultsPageLinkParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = tag.lower()
-        if (
-            self._open_elements
-            and self._open_namespaces[-1] != "html"
-            and not self._is_html_integration_point(len(self._open_elements) - 1)
-            and not (
-                self._open_namespaces[-1] == "math"
-                and self._open_elements[-1][0] in _MATHML_TEXT_INTEGRATION_POINTS
-            )
-            and self._is_foreign_content_breakout(normalized_tag, attrs)
-        ):
+        if self._current_node_is_foreign_without_integration() and self._is_foreign_content_breakout(normalized_tag, attrs):
             self._exit_foreign_content_for_breakout()
 
         incoming_namespace = self._namespace_for_new_element(normalized_tag, attrs)
@@ -380,8 +384,10 @@ class _ResultsPageLinkParser(HTMLParser):
             and self._href is not None
             and not ancestor_non_rendered
         ):
+            active_anchor_index = self._active_anchor_index
             self._finalize_anchor()
-            self._pop_element("a")
+            if active_anchor_index is not None and active_anchor_index < len(self._open_elements):
+                self._delete_open_elements_from(active_anchor_index)
             ancestor_hidden = self._inside_hidden_content()
             incoming_namespace = self._namespace_for_new_element(normalized_tag, attrs)
 
@@ -441,6 +447,9 @@ class _ResultsPageLinkParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         normalized_tag = tag.lower()
+
+        if normalized_tag in {"p", "br"} and self._current_node_is_foreign_without_integration():
+            self._exit_foreign_content_for_breakout()
 
         if normalized_tag in _NON_RENDERED_TAGS:
             if (
