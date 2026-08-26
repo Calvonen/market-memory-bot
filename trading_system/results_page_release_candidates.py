@@ -2,18 +2,48 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import unicodedata
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urlsplit, urlunsplit
 
+import html5lib
+
 from trading_system.official_release_source_repository import OfficialReleaseSource, _is_valid_host
 
 
+_HTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
+_HTML_WHITESPACE = frozenset({"\t", "\n", "\f", "\r", " "})
 _RAW_HREF_RE = re.compile(
     r"\bhref\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'=<>`]+))",
     re.IGNORECASE,
 )
-_NUMERIC_ENTITY_RE = re.compile(r"&#(?:x([0-9a-fA-F]+)|([0-9]+));?")
+_NUMERIC_ENTITY_RE = re.compile(r"&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));?")
+
+# Results pages only need a conservative subset of ordinary rendered HTML. Anything
+# outside this allowlist is an evidence boundary: html5lib still repairs the tree,
+# but we do not try to emulate browser rendering for SVG/MathML, custom elements,
+# fallback containers, metadata, or other stateful/conditional content.
+_SIMPLE_HTML_TEXT_TAGS = frozenset(
+    {
+        "a", "abbr", "address", "article", "aside", "b", "bdi", "bdo", "blockquote", "br",
+        "button", "caption", "center", "cite", "code", "dd", "del", "details", "dfn", "dialog", "div", "dl",
+        "dt", "em", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
+        "h5", "h6", "header", "hgroup", "hr", "i", "ins", "kbd", "label", "legend", "li", "listing", "main",
+        "mark", "menu", "nav", "ol", "p", "plaintext", "pre", "q", "s", "samp", "search", "section",
+        "small", "span", "strong", "sub", "summary", "sup", "table", "tbody", "td", "tfoot", "th",
+        "thead", "time", "tr", "u", "ul", "var", "wbr", "xmp",
+    }
+)
+_RENDERED_BREAK_TAGS = frozenset(
+    {
+        "address", "article", "aside", "blockquote", "br", "caption", "center", "dd", "details", "dialog",
+        "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3",
+        "h4", "h5", "h6", "header", "hgroup", "hr", "legend", "li", "listing", "main", "menu", "nav", "ol",
+        "p", "plaintext", "pre", "search", "section", "summary", "table", "tbody", "td", "tfoot", "th",
+        "thead", "tr", "ul", "xmp",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -21,10 +51,18 @@ class ResultsPageReleaseCandidate:
     event_id: str
     source_url: str
     source_title: str | None = None
+    evidence_fields: tuple[str, ...] = ()
 
 
 def _contains_ascii_control(value: str) -> bool:
     return any(ord(char) <= 0x1F or ord(char) == 0x7F for char in value)
+
+
+def _contains_text_control(value: str) -> bool:
+    return any(
+        unicodedata.category(char) == "Cc" and char not in _HTML_WHITESPACE
+        for char in value
+    )
 
 
 def _raw_href_contains_encoded_control(raw_href: str) -> bool:
@@ -48,9 +86,6 @@ def _raw_href_is_safe(raw_start_tag: str, decoded_href: str | None) -> bool:
     if decoded_href is None:
         return True
     matches = list(_RAW_HREF_RE.finditer(raw_start_tag))
-    # Duplicate or parser-only href spellings are ambiguous at this security
-    # boundary. Reject them instead of guessing which raw value produced the
-    # decoded attribute selected by HTMLParser.
     if len(matches) != 1:
         return False
     match = matches[0]
@@ -58,34 +93,240 @@ def _raw_href_is_safe(raw_start_tag: str, decoded_href: str | None) -> bool:
     return not _raw_href_contains_encoded_control(raw_href)
 
 
-class _ResultsPageLinkParser(HTMLParser):
+def _normalized_text(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _safe_normalized_text(value: str) -> str | None:
+    if _contains_text_control(value):
+        return None
+    return _normalized_text(value)
+
+
+def _is_unicode_noncharacter(codepoint: int) -> bool:
+    return (
+        0xFDD0 <= codepoint <= 0xFDEF
+        or (0 <= codepoint <= 0x10FFFF and codepoint & 0xFFFF in {0xFFFE, 0xFFFF})
+    )
+
+
+def _literal_requires_rejection_sentinel(char: str) -> bool:
+    codepoint = ord(char)
+    return (
+        char == "\x00"
+        or 0xD800 <= codepoint <= 0xDFFF
+        or _is_unicode_noncharacter(codepoint)
+        or (unicodedata.category(char) == "Cc" and char not in _HTML_WHITESPACE)
+    )
+
+
+def _preserve_invalid_scalars_as_control(html_text: str) -> str:
+    """Preserve malformed evidence as a rejection sentinel before HTML5 repair."""
+
+    html_text = "".join(
+        "\u000b" if _literal_requires_rejection_sentinel(char) else char
+        for char in html_text
+    )
+
+    def replace_invalid(match: re.Match[str]) -> str:
+        raw_codepoint = match.group(1) or match.group(2)
+        base = 16 if match.group(1) is not None else 10
+        try:
+            codepoint = int(raw_codepoint, base)
+        except ValueError:
+            return "\u000b"
+        if (
+            codepoint == 0
+            or 0x80 <= codepoint <= 0x9F
+            or 0xD800 <= codepoint <= 0xDFFF
+            or codepoint > 0x10FFFF
+            or _is_unicode_noncharacter(codepoint)
+        ):
+            return "\u000b"
+        return match.group(0)
+
+    return _NUMERIC_ENTITY_RE.sub(replace_invalid, html_text)
+
+
+class _RawAnchorHrefSafetyScanner(HTMLParser):
+    """Track href spellings only; html5lib owns all HTML tree construction semantics."""
+
     def __init__(self) -> None:
-        super().__init__()
-        self.links: list[tuple[str, str | None, bool]] = []
-        self._href: str | None = None
-        self._raw_href_safe = True
-        self._parts: list[str] = []
+        super().__init__(convert_charrefs=True)
+        self.unsafe_hrefs: set[str] = set()
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag.lower() != "a":
             return
-        values = {key.lower(): value for key, value in attrs if value is not None}
-        self._href = values.get("href")
-        self._raw_href_safe = _raw_href_is_safe(self.get_starttag_text(), self._href)
-        self._parts = [values.get("aria-label") or "", values.get("title") or ""]
+        hrefs = [value for key, value in attrs if key.lower() == "href" and value is not None]
+        raw_start_tag = self.get_starttag_text() or ""
+        if len(hrefs) != 1 or not _raw_href_is_safe(raw_start_tag, hrefs[0] if hrefs else None):
+            self.unsafe_hrefs.update(hrefs)
 
-    def handle_data(self, data: str) -> None:
-        if self._href is not None:
-            self._parts.append(data)
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
 
-    def handle_endtag(self, tag: str) -> None:
-        if tag.lower() != "a" or self._href is None:
+
+def _element_name(tag: object) -> tuple[str | None, str]:
+    if not isinstance(tag, str):
+        return None, ""
+    if tag.startswith("{") and "}" in tag:
+        namespace, local = tag[1:].split("}", 1)
+        return namespace, local.lower()
+    return None, tag.lower()
+
+
+def _element_hidden(element) -> bool:
+    return any(str(key).lower().split("}")[-1] == "hidden" for key in element.attrib)
+
+
+def _element_has_attribute(element, attribute: str) -> bool:
+    attribute = attribute.lower()
+    return any(str(key).lower().split("}")[-1] == attribute for key in element.attrib)
+
+
+def _element_allows_simple_text(element) -> bool:
+    namespace, local = _element_name(element.tag)
+    if namespace != _HTML_NAMESPACE or local not in _SIMPLE_HTML_TEXT_TAGS:
+        return False
+    if local == "dialog" and not _element_has_attribute(element, "open"):
+        return False
+    return True
+
+
+def _closed_details_summary(element):
+    namespace, local = _element_name(element.tag)
+    if (
+        namespace != _HTML_NAMESPACE
+        or local != "details"
+        or _element_has_attribute(element, "open")
+    ):
+        return None
+    for child in list(element):
+        child_namespace, child_local = _element_name(child.tag)
+        if child_namespace == _HTML_NAMESPACE and child_local == "summary":
+            return child
+    return False
+
+
+def _visible_anchor_text_fields(anchor) -> tuple[str, ...]:
+    fragments: list[list[str]] = [[]]
+
+    def append_text(value: str) -> None:
+        fragments[-1].append(value)
+
+    def append_break() -> None:
+        current = fragments[-1]
+        if current and current[-1] != " ":
+            current.append(" ")
+
+    def split_ambiguous_boundary() -> None:
+        if fragments[-1]:
+            fragments.append([])
+
+    def visit(element) -> None:
+        if not isinstance(element.tag, str):
             return
-        title = " ".join(" ".join(self._parts).split()) or None
-        self.links.append((self._href, title, self._raw_href_safe))
-        self._href = None
-        self._raw_href_safe = True
-        self._parts = []
+        if _element_hidden(element) or not _element_allows_simple_text(element):
+            return
+
+        details_summary = _closed_details_summary(element)
+        if details_summary is not None:
+            if details_summary is not False:
+                append_break()
+                visit(details_summary)
+                append_break()
+            return
+
+        if element.text:
+            append_text(element.text)
+        for child in list(element):
+            child_namespace, child_local = _element_name(child.tag)
+            child_is_element = isinstance(child.tag, str)
+            child_hidden = child_is_element and _element_hidden(child)
+            child_visible = (
+                child_is_element
+                and not child_hidden
+                and _element_allows_simple_text(child)
+            )
+            rendered_break = (
+                child_visible
+                and child_namespace == _HTML_NAMESPACE
+                and child_local in _RENDERED_BREAK_TAGS
+            )
+            if rendered_break:
+                append_break()
+            if child_visible:
+                visit(child)
+            elif child_is_element and not child_hidden:
+                # The subtree is intentionally unevaluated. Keep text on each side
+                # in independent evidence fields so a fiscal token cannot be
+                # manufactured across the ambiguity boundary.
+                split_ambiguous_boundary()
+            if rendered_break:
+                append_break()
+            if child.tail:
+                append_text(child.tail)
+
+    visit(anchor)
+    fields: list[str] = []
+    for fragment in fragments:
+        normalized = _safe_normalized_text("".join(fragment))
+        if normalized:
+            fields.append(normalized)
+    return tuple(fields)
+
+
+def _iter_visible_html_anchors(root):
+    def walk(element, is_fragment_root: bool = False):
+        if not isinstance(element.tag, str):
+            return
+        if not is_fragment_root:
+            if _element_hidden(element) or not _element_allows_simple_text(element):
+                return
+            namespace, local = _element_name(element.tag)
+            if namespace == _HTML_NAMESPACE and local == "a":
+                yield element
+
+            details_summary = _closed_details_summary(element)
+            if details_summary is not None:
+                if details_summary is not False:
+                    yield from walk(details_summary)
+                return
+
+        for child in list(element):
+            yield from walk(child)
+
+    yield from walk(root, True)
+
+
+def _parse_html5_links(html_text: str) -> list[tuple[str, str | None, tuple[str, ...]]]:
+    safety_scanner = _RawAnchorHrefSafetyScanner()
+    safety_scanner.feed(html_text)
+    safety_scanner.close()
+
+    fragment = html5lib.parseFragment(
+        _preserve_invalid_scalars_as_control(html_text),
+        treebuilder="etree",
+        namespaceHTMLElements=True,
+    )
+
+    links: list[tuple[str, str | None, tuple[str, ...]]] = []
+    for anchor in _iter_visible_html_anchors(fragment):
+        href = anchor.attrib.get("href")
+        if href is None or href in safety_scanner.unsafe_hrefs or _contains_ascii_control(href):
+            continue
+        aria_label = _safe_normalized_text(anchor.attrib.get("aria-label", ""))
+        title_attr = _safe_normalized_text(anchor.attrib.get("title", ""))
+        visible_text_fields = _visible_anchor_text_fields(anchor)
+        evidence_fields = tuple(
+            value
+            for value in (aria_label, title_attr, *visible_text_fields)
+            if value
+        )
+        title = " ".join(evidence_fields) or None
+        links.append((href, title, evidence_fields))
+    return links
 
 
 def _https_origin(url: str) -> tuple[str, str, int] | None:
@@ -118,10 +359,8 @@ def _remove_last_path_segment(path: str) -> str:
 
 
 def _remove_dot_segments(path: str) -> str:
-    """Remove URI dot segments using RFC 3986 section 5.2.4 semantics."""
     input_buffer = path
     output = ""
-
     while input_buffer:
         if input_buffer.startswith("../"):
             input_buffer = input_buffer[3:]
@@ -136,21 +375,16 @@ def _remove_dot_segments(path: str) -> str:
             output = _remove_last_path_segment(output)
         elif input_buffer == "/..":
             input_buffer = "/"
-            output = _remove_last_path_segment(output)
         elif input_buffer in {".", ".."}:
             input_buffer = ""
         else:
-            if input_buffer.startswith("/"):
-                next_slash = input_buffer.find("/", 1)
-            else:
-                next_slash = input_buffer.find("/")
+            next_slash = input_buffer.find("/", 1) if input_buffer.startswith("/") else input_buffer.find("/")
             if next_slash < 0:
                 output += input_buffer
                 input_buffer = ""
             else:
                 output += input_buffer[:next_slash]
                 input_buffer = input_buffer[next_slash:]
-
     return output
 
 
@@ -168,7 +402,6 @@ def _merge_paths(base_path: str, reference_path: str, base_has_authority: bool) 
 
 
 def _resolve_reference(base_url: str, href: str) -> str | None:
-    """Resolve an RFC 3986 reference without urllib's empty-segment collapse."""
     try:
         base = urlsplit(base_url)
         reference = urlsplit(href)
@@ -192,16 +425,11 @@ def _resolve_reference(base_url: str, href: str) -> str | None:
                 target_path = base.path
                 target_query = reference.query if reference.query else base.query
             else:
-                if reference.path.startswith("/"):
-                    merged_path = reference.path
-                else:
-                    merged_path = _merge_paths(base.path, reference.path, bool(base.netloc))
+                merged_path = reference.path if reference.path.startswith("/") else _merge_paths(base.path, reference.path, bool(base.netloc))
                 target_path = _remove_dot_segments(merged_path)
                 target_query = reference.query
 
-    return urlunsplit(
-        (target_scheme, target_netloc, target_path, target_query, reference.fragment)
-    )
+    return urlunsplit((target_scheme, target_netloc, target_path, target_query, reference.fragment))
 
 
 def _canonical_https_url(url: str) -> str | None:
@@ -233,7 +461,6 @@ def _canonical_candidate_url(base_url: str, href: str) -> str | None:
     if _contains_ascii_control(base_url) or _contains_ascii_control(href):
         return None
     raw_href = href.strip()
-
     approved_origin = _https_origin(base_url)
     if approved_origin is None:
         return None
@@ -250,34 +477,41 @@ def extract_results_page_candidates(
     source: OfficialReleaseSource,
     html_text: str,
 ) -> tuple[ResultsPageReleaseCandidate, ...]:
-    """Extract deterministic same-origin HTTPS candidates from a results page."""
+    """Extract deterministic same-origin HTTPS candidates from an HTML5-repaired results page."""
     if source.source_kind != "results_page":
         raise ValueError("results page candidate extraction requires source_kind=results_page")
 
-    # The approved page is itself part of the trust boundary. If it cannot be
-    # canonicalized exactly under this extractor's rules, do not process any
-    # relative links against it.
     page_url = _canonical_candidate_url(source.source_url, source.source_url)
     if page_url is None:
         return ()
 
-    parser = _ResultsPageLinkParser()
-    parser.feed(html_text)
-
-    seen: set[str] = set()
-    candidates: list[ResultsPageReleaseCandidate] = []
-    for href, title, raw_href_safe in parser.links:
-        if not raw_href_safe:
-            continue
+    aggregated: dict[str, dict[str, object]] = {}
+    order: list[str] = []
+    for href, title, evidence_fields in _parse_html5_links(html_text):
         candidate_url = _canonical_candidate_url(source.source_url, href)
-        if candidate_url is None or candidate_url == page_url or candidate_url in seen:
+        if candidate_url is None or candidate_url == page_url:
             continue
-        seen.add(candidate_url)
+        if candidate_url not in aggregated:
+            aggregated[candidate_url] = {"titles": [], "fields": []}
+            order.append(candidate_url)
+        record = aggregated[candidate_url]
+        if title:
+            record["titles"].append(title)
+        for field in evidence_fields:
+            if field not in record["fields"]:
+                record["fields"].append(field)
+
+    candidates: list[ResultsPageReleaseCandidate] = []
+    for candidate_url in order:
+        record = aggregated[candidate_url]
+        fields = tuple(record["fields"])
+        titles = record["titles"]
         candidates.append(
             ResultsPageReleaseCandidate(
                 event_id=source.event_id,
                 source_url=candidate_url,
-                source_title=title,
+                source_title=" ".join(titles) or None,
+                evidence_fields=fields,
             )
         )
     return tuple(candidates)

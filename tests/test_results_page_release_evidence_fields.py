@@ -1,0 +1,257 @@
+from __future__ import annotations
+
+import unittest
+from datetime import date
+
+from trading_system.calendar_repository import CalendarEvent, CalendarEventStatus
+from trading_system.official_release_source_repository import OfficialReleaseSource
+from trading_system.results_page_release_candidates import (
+    ResultsPageReleaseCandidate,
+    extract_results_page_candidates,
+)
+from trading_system.results_page_release_selection import (
+    ResultsPageSelectionStatus,
+    select_results_page_release_candidate,
+)
+
+
+class ResultsPageReleaseEvidenceFieldTests(unittest.TestCase):
+    def _event(self) -> CalendarEvent:
+        return CalendarEvent(
+            calendar_event_id="calendar:test-event",
+            company_name="Example Oyj",
+            instrument="EXAMPLE.HE",
+            market="Helsinki",
+            event_type="earnings",
+            scheduled_date=date(2026, 8, 26),
+            source="calendar",
+            occurrence_key="2026-08-26",
+            status=CalendarEventStatus.TRACKED,
+        )
+
+    def _source(self) -> OfficialReleaseSource:
+        return OfficialReleaseSource(
+            event_id="calendar:test-event",
+            source_kind="results_page",
+            source_url="https://investor.example.com/results",
+            version=1,
+        )
+
+    def _select(self, candidate: ResultsPageReleaseCandidate) -> ResultsPageSelectionStatus:
+        return select_results_page_release_candidate(
+            self._event(),
+            (candidate,),
+            release_period="Q2 2026",
+        ).status
+
+    def test_extractor_preserves_original_anchor_evidence_fields(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/release.pdf" aria-label="Q2" title="2026">Results</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_title, "Q2 2026 Results")
+        self.assertEqual(candidates[0].evidence_fields, ("Q2", "2026", "Results"))
+        self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_combining_marks_are_token_adjacency(self):
+        for title in ("A\u0301Q2-2026", "Q2-2026\u0301A"):
+            with self.subTest(title=title):
+                candidate = ResultsPageReleaseCandidate(
+                    event_id="calendar:test-event",
+                    source_url="https://investor.example.com/release.pdf",
+                    source_title=title,
+                )
+                self.assertEqual(self._select(candidate), ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_unicode_format_controls_are_token_adjacency(self):
+        for title in ("A\u200cQ2-2026", "Q2-2026\u200dA"):
+            with self.subTest(title=title):
+                candidate = ResultsPageReleaseCandidate(
+                    event_id="calendar:test-event",
+                    source_url="https://investor.example.com/release.pdf",
+                    source_title=title,
+                )
+                self.assertEqual(self._select(candidate), ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_zero_width_space_is_a_period_token_separator(self):
+        candidate = ResultsPageReleaseCandidate(
+            event_id="calendar:test-event",
+            source_url="https://investor.example.com/release.pdf",
+            source_title="Download\u200bQ2-2026",
+        )
+        self.assertEqual(self._select(candidate), ResultsPageSelectionStatus.SELECTED)
+
+    def test_visible_text_nodes_preserve_adjacency(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/release.pdf"><span>A</span><span>Q2-2026</span></a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].evidence_fields, ("AQ2-2026",))
+        self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_percent_decoded_url_adjacency_fails_closed(self):
+        for url in (
+            "https://investor.example.com/Q2-2026%41nnual.pdf",
+            "https://investor.example.com/Q2-2026%CC%81A.pdf",
+            "https://investor.example.com/Q2-2026%E2%80%8DA.pdf",
+        ):
+            with self.subTest(url=url):
+                candidate = ResultsPageReleaseCandidate(
+                    event_id="calendar:test-event",
+                    source_url=url,
+                )
+                self.assertEqual(self._select(candidate), ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_percent_decoded_url_controls_fail_closed(self):
+        for url in (
+            "https://investor.example.com/Q2-2026%00Annual.pdf",
+            "https://investor.example.com/Q2-2026%0AAnnual.pdf",
+            "https://investor.example.com/Q2-2026%7FAnnual.pdf",
+            "https://investor.example.com/Q2-2026%C2%85Annual.pdf",
+        ):
+            with self.subTest(url=url):
+                candidate = ResultsPageReleaseCandidate(
+                    event_id="calendar:test-event",
+                    source_url=url,
+                )
+                self.assertEqual(self._select(candidate), ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_percent_decoded_url_separator_can_supply_standalone_period(self):
+        candidate = ResultsPageReleaseCandidate(
+            event_id="calendar:test-event",
+            source_url="https://investor.example.com/results%20Q2-2026.pdf",
+        )
+        self.assertEqual(self._select(candidate), ResultsPageSelectionStatus.SELECTED)
+
+    def test_rendered_breaks_preserve_visible_separator(self):
+        for html in (
+            '<a href="/release.pdf"><span>Download</span><br><span>Q2-2026</span></a>',
+            '<a href="/release.pdf"><span>Download</span><hr><span>Q2-2026</span></a>',
+            '<a href="/release.pdf"><div>Download</div><div>Q2-2026</div></a>',
+            '<a href="/release.pdf"><p>Download</p>Q2-2026</a>',
+        ):
+            with self.subTest(html=html):
+                candidates = extract_results_page_candidates(self._source(), html)
+                self.assertEqual(len(candidates), 1)
+                self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.SELECTED)
+
+    def test_unmatched_structural_end_tag_does_not_manufacture_separator(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/release.pdf">Download</div>Q2-2026</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].evidence_fields, ("DownloadQ2-2026",))
+        self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_non_rendered_subtrees_do_not_supply_evidence(self):
+        for tag in ("script", "style", "template"):
+            html = f'<a href="/release.pdf">Download<{tag}> Q2-2026 </{tag}>Report</a>'
+            with self.subTest(tag=tag):
+                candidates = extract_results_page_candidates(self._source(), html)
+                self.assertEqual(len(candidates), 1)
+                self.assertEqual(candidates[0].evidence_fields, ("DownloadReport",))
+                self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_hidden_anchors_are_not_release_candidates(self):
+        for hidden_attribute in ("hidden", 'hidden=""', 'HIDDEN="hidden"'):
+            html = (
+                f'<a {hidden_attribute} href="/hidden.pdf">Q2-2026</a>'
+                '<a href="/visible.pdf">Annual report</a>'
+            )
+            with self.subTest(hidden_attribute=hidden_attribute):
+                candidates = extract_results_page_candidates(self._source(), html)
+                self.assertEqual(len(candidates), 1)
+                self.assertEqual(candidates[0].source_url, "https://investor.example.com/visible.pdf")
+                self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_self_closing_non_rendered_tags_remain_suppressed_until_end_tag(self):
+        for tag in ("script", "style", "template"):
+            html = f'<a href="/release.pdf">Download<{tag}/> Q2-2026 </{tag}>Report</a>'
+            with self.subTest(tag=tag):
+                candidates = extract_results_page_candidates(self._source(), html)
+                self.assertEqual(len(candidates), 1)
+                self.assertEqual(candidates[0].evidence_fields, ("DownloadReport",))
+                self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_hidden_ancestor_suppresses_descendant_anchors(self):
+        html = (
+            '<div hidden><a href="/hidden.pdf">Q2-2026</a></div>'
+            '<a href="/visible.pdf">Annual report</a>'
+        )
+        candidates = extract_results_page_candidates(self._source(), html)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/visible.pdf")
+        self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_document_scope_non_rendered_suppression_blocks_descendant_anchors(self):
+        for tag in ("script", "style", "template"):
+            html = (
+                f'<{tag}/><a href="/hidden.pdf">Q2-2026</a></{tag}>'
+                '<a href="/visible.pdf">Annual report</a>'
+            )
+            with self.subTest(tag=tag):
+                candidates = extract_results_page_candidates(self._source(), html)
+                self.assertEqual(len(candidates), 1)
+                self.assertEqual(candidates[0].source_url, "https://investor.example.com/visible.pdf")
+                self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_out_of_order_non_rendered_close_does_not_expose_inner_content(self):
+        html = (
+            '<a href="/release.pdf"><template/><style/>hidden</template> '
+            'Q2-2026 </style>Report</a>'
+        )
+        candidates = extract_results_page_candidates(self._source(), html)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].evidence_fields, ())
+        self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_hidden_non_void_startend_tag_stays_hidden_until_real_close(self):
+        html = (
+            '<div hidden/><a href="/hidden.pdf">Q2-2026</a></div>'
+            '<a href="/visible.pdf">Annual report</a>'
+        )
+        candidates = extract_results_page_candidates(self._source(), html)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/visible.pdf")
+        self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_implied_li_close_releases_hidden_state_before_next_li(self):
+        html = '<ul><li hidden>old<li><a href="/release.pdf">Q2-2026</a></li></ul>'
+        candidates = extract_results_page_candidates(self._source(), html)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+        self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.SELECTED)
+
+    def test_block_start_impliedly_closes_hidden_p(self):
+        html = '<p hidden>old<div><a href="/release.pdf">Q2-2026</a></div>'
+        candidates = extract_results_page_candidates(self._source(), html)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.SELECTED)
+
+    def test_non_void_startend_child_stays_open_under_hidden_ancestor(self):
+        html = (
+            '<div hidden><div/>x</div><a href="/hidden.pdf">Q2-2026</a></div>'
+            '<a href="/visible.pdf">Annual report</a>'
+        )
+        candidates = extract_results_page_candidates(self._source(), html)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/visible.pdf")
+
+    def test_implied_li_close_respects_nested_list_scope(self):
+        html = '<ul><li hidden>old<ul><li><a href="/hidden.pdf">Q2-2026</a></li></ul></li></ul>'
+        candidates = extract_results_page_candidates(self._source(), html)
+        self.assertEqual(candidates, ())
+
+    def test_figure_start_impliedly_closes_hidden_p(self):
+        html = '<p hidden>old<figure><a href="/release.pdf">Q2-2026</a></figure>'
+        candidates = extract_results_page_candidates(self._source(), html)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+        self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.SELECTED)
+
+
+if __name__ == "__main__":
+    unittest.main()

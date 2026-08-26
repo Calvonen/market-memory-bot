@@ -10,5 +10,6 @@ fastapi==0.139.2
 supabase==2.31.0
 uvicorn==0.51.0
 pypdf==6.16.1
+html5lib==1.1
 websockets
 exchange_calendars==4.13.2
