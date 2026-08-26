@@ -20,7 +20,8 @@ class ResultsPageSelection:
     candidate: ResultsPageReleaseCandidate | None = None
 
 
-_PERIOD_LABEL_RE = re.compile(r"^(Q[1-4]|H[12]|FY)\s+(\d{4})$", re.IGNORECASE)
+_PERIOD_LABEL_RE = re.compile(r"^(Q[1-4]|H[12]|FY) ([0-9]{4})$", re.IGNORECASE)
+_UNICODE_ALNUM = r"[^\W_]"
 
 
 def _scheduled_date_patterns(event: CalendarEvent) -> tuple[re.Pattern[str], ...]:
@@ -39,12 +40,12 @@ def _period_patterns(release_period: str | None) -> tuple[re.Pattern[str], ...]:
         return ()
     match = _PERIOD_LABEL_RE.fullmatch(release_period.strip())
     if match is None:
-        raise ValueError("release_period must be Q1-Q4, H1-H2, or FY followed by a four-digit year")
+        raise ValueError("release_period must be Q1-Q4, H1-H2, or FY followed by one ASCII space and a four-digit ASCII year")
     period, year = match.groups()
     separator = r"(?:[ _\-/]+)"
     return (
-        re.compile(rf"(?<![A-Za-z0-9]){period}{separator}{year}(?![A-Za-z0-9])", re.IGNORECASE),
-        re.compile(rf"(?<![A-Za-z0-9]){period}{year}(?![A-Za-z0-9])", re.IGNORECASE),
+        re.compile(rf"(?<!{_UNICODE_ALNUM}){period}{separator}{year}(?!{_UNICODE_ALNUM})", re.IGNORECASE),
+        re.compile(rf"(?<!{_UNICODE_ALNUM}){period}{year}(?!{_UNICODE_ALNUM})", re.IGNORECASE),
     )
 
 
