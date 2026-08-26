@@ -122,14 +122,28 @@ class ManualOfficialReleaseProvider:
         return "\n".join(pages)
 
     @staticmethod
-    def _validate_final_url(approved_url: str, final_url: str) -> None:
-        approved = urlparse(approved_url)
-        final = urlparse(final_url)
-        approved_host = (approved.hostname or "").rstrip(".").lower()
-        final_host = (final.hostname or "").rstrip(".").lower()
-        if final.scheme.lower() != "https" or final_host != approved_host:
+    def _https_origin(url: str) -> tuple[str, str, int]:
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").rstrip(".").lower()
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise RuntimeError("manual official release redirect has invalid port") from exc
+        effective_port = 443 if port is None else port
+        return scheme, host, effective_port
+
+    @classmethod
+    def _validate_final_url(cls, approved_url: str, final_url: str) -> None:
+        approved_origin = cls._https_origin(approved_url)
+        final_origin = cls._https_origin(final_url)
+        if (
+            approved_origin[0] != "https"
+            or final_origin[0] != "https"
+            or final_origin != approved_origin
+        ):
             raise RuntimeError(
-                "manual official release redirect left approved HTTPS host"
+                "manual official release redirect left approved HTTPS origin"
             )
 
     def _fetch_bytes(self, url: str) -> tuple[bytes, str, str]:
