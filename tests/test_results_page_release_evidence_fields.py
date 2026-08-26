@@ -205,7 +205,7 @@ class ResultsPageReleaseEvidenceFieldTests(unittest.TestCase):
         )
         candidates = extract_results_page_candidates(self._source(), html)
         self.assertEqual(len(candidates), 1)
-        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+        self.assertEqual(candidates[0].evidence_fields, ())
         self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
 
 
