@@ -208,6 +208,29 @@ class ResultsPageReleaseEvidenceFieldTests(unittest.TestCase):
         self.assertEqual(candidates[0].evidence_fields, ())
         self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
 
+    def test_hidden_non_void_startend_tag_stays_hidden_until_real_close(self):
+        html = (
+            '<div hidden/><a href="/hidden.pdf">Q2-2026</a></div>'
+            '<a href="/visible.pdf">Annual report</a>'
+        )
+        candidates = extract_results_page_candidates(self._source(), html)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/visible.pdf")
+        self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_implied_li_close_releases_hidden_state_before_next_li(self):
+        html = '<ul><li hidden>old<li><a href="/release.pdf">Q2-2026</a></li></ul>'
+        candidates = extract_results_page_candidates(self._source(), html)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+        self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.SELECTED)
+
+    def test_block_start_impliedly_closes_hidden_p(self):
+        html = '<p hidden>old<div><a href="/release.pdf">Q2-2026</a></div>'
+        candidates = extract_results_page_candidates(self._source(), html)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.SELECTED)
+
 
 if __name__ == "__main__":
     unittest.main()
