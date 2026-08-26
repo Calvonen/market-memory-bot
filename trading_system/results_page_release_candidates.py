@@ -75,6 +75,49 @@ _VOID_TAGS = frozenset(
         "wbr",
     }
 )
+_P_IMPLIED_CLOSE_START_TAGS = frozenset(
+    {
+        "address",
+        "article",
+        "aside",
+        "blockquote",
+        "div",
+        "dl",
+        "fieldset",
+        "footer",
+        "form",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "header",
+        "hr",
+        "main",
+        "menu",
+        "nav",
+        "ol",
+        "p",
+        "pre",
+        "section",
+        "table",
+        "ul",
+    }
+)
+_IMPLIED_CLOSE_ON_START = {
+    "li": frozenset({"li"}),
+    "dt": frozenset({"dt", "dd"}),
+    "dd": frozenset({"dt", "dd"}),
+    "thead": frozenset({"thead", "tbody", "tfoot"}),
+    "tbody": frozenset({"thead", "tbody", "tfoot"}),
+    "tfoot": frozenset({"thead", "tbody", "tfoot"}),
+    "tr": frozenset({"tr"}),
+    "th": frozenset({"th", "td"}),
+    "td": frozenset({"th", "td"}),
+    "option": frozenset({"option"}),
+    "optgroup": frozenset({"option", "optgroup"}),
+}
 
 
 @dataclass(frozen=True)
@@ -160,8 +203,27 @@ class _ResultsPageLinkParser(HTMLParser):
                 del self._open_elements[index:]
                 return
 
+    def _apply_implied_closes(self, incoming_tag: str) -> None:
+        closing_tags = _IMPLIED_CLOSE_ON_START.get(incoming_tag, frozenset())
+        if incoming_tag in _P_IMPLIED_CLOSE_START_TAGS:
+            closing_tags = closing_tags | {"p"}
+        if not closing_tags:
+            return
+
+        for index in range(len(self._open_elements) - 1, -1, -1):
+            open_tag = self._open_elements[index][0]
+            if open_tag in closing_tags:
+                del self._open_elements[index:]
+                if open_tag in self._open_break_tags:
+                    break_index = len(self._open_break_tags) - 1 - self._open_break_tags[::-1].index(open_tag)
+                    del self._open_break_tags[break_index:]
+                    if self._href is not None and not self._inside_non_rendered_content():
+                        self._text_parts.append(" ")
+                break
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = tag.lower()
+        self._apply_implied_closes(normalized_tag)
         ancestor_hidden = self._inside_hidden_content()
         ancestor_non_rendered = self._inside_non_rendered_content()
         self._push_element(normalized_tag, attrs)
@@ -192,10 +254,10 @@ class _ResultsPageLinkParser(HTMLParser):
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = tag.lower()
-        if normalized_tag in _NON_RENDERED_TAGS:
-            # script/style/template are HTML non-void elements. Treat XHTML-style
-            # '/>' conservatively as an opener and keep suppression until a real
-            # matching end tag appears, even outside an active anchor.
+        hidden = any(key.lower() == "hidden" for key, _ in attrs)
+        if normalized_tag in _NON_RENDERED_TAGS or (hidden and normalized_tag not in _VOID_TAGS):
+            # HTML non-void elements remain open even when source uses XHTML-style
+            # '/>'. Keep hidden/non-rendered suppression until a real end tag.
             self.handle_starttag(tag, attrs)
             return
         self.handle_starttag(tag, attrs)
