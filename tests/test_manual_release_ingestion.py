@@ -117,6 +117,39 @@ class ManualOfficialReleaseProviderTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "PDF extraction failed"):
                 provider.discover(self.EVENT_ID)
 
+    def test_binary_or_structured_payload_is_rejected(self) -> None:
+        source = OfficialReleaseSource(
+            self.EVENT_ID,
+            "direct_url",
+            "https://investor.example.com/download",
+            version=1,
+        )
+
+        for content_type, payload in (
+            ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", b"PK" + b"x" * 700),
+            ("image/png", b"\x89PNG" + b"x" * 700),
+            ("application/json", b'{"error":"temporary"}' + b" " * 700),
+        ):
+            with self.subTest(content_type=content_type):
+                provider = _Provider(source, payload, content_type)
+                with self.assertRaisesRegex(RuntimeError, "unsupported content type"):
+                    provider.discover(self.EVENT_ID)
+
+    def test_missing_content_type_accepts_only_html_sniff(self) -> None:
+        source = OfficialReleaseSource(
+            self.EVENT_ID,
+            "direct_url",
+            "https://investor.example.com/download",
+            version=1,
+        )
+        html_payload = ("<html><body>" + ("Results improved. " * 40) + "</body></html>").encode("utf-8")
+        provider = _Provider(source, html_payload, "")
+        self.assertIsNotNone(provider.discover(self.EVENT_ID))
+
+        binary_provider = _Provider(source, b"PK" + b"x" * 700, "")
+        with self.assertRaisesRegex(RuntimeError, "unsupported content type"):
+            binary_provider.discover(self.EVENT_ID)
+
 
 if __name__ == "__main__":
     unittest.main()
