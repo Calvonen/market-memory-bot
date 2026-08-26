@@ -176,6 +176,38 @@ class ResultsPageReleaseEvidenceFieldTests(unittest.TestCase):
                 self.assertEqual(candidates[0].evidence_fields, ("DownloadReport",))
                 self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
 
+    def test_hidden_ancestor_suppresses_descendant_anchors(self):
+        html = (
+            '<div hidden><a href="/hidden.pdf">Q2-2026</a></div>'
+            '<a href="/visible.pdf">Annual report</a>'
+        )
+        candidates = extract_results_page_candidates(self._source(), html)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/visible.pdf")
+        self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_document_scope_non_rendered_suppression_blocks_descendant_anchors(self):
+        for tag in ("script", "style", "template"):
+            html = (
+                f'<{tag}/><a href="/hidden.pdf">Q2-2026</a></{tag}>'
+                '<a href="/visible.pdf">Annual report</a>'
+            )
+            with self.subTest(tag=tag):
+                candidates = extract_results_page_candidates(self._source(), html)
+                self.assertEqual(len(candidates), 1)
+                self.assertEqual(candidates[0].source_url, "https://investor.example.com/visible.pdf")
+                self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_out_of_order_non_rendered_close_does_not_expose_inner_content(self):
+        html = (
+            '<a href="/release.pdf"><template/><style/>hidden</template> '
+            'Q2-2026 </style>Report</a>'
+        )
+        candidates = extract_results_page_candidates(self._source(), html)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+        self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
+
 
 if __name__ == "__main__":
     unittest.main()
