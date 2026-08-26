@@ -648,6 +648,114 @@ class ResultsPageReleasePostMergeRegressionTests(unittest.TestCase):
         self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
         self.assertEqual(candidates[0].evidence_fields, ("Report",))
 
+    def test_foreign_template_end_tag_does_not_release_html_template_scope(self):
+        """An SVG <template>'s end tag closes that element, not the HTML ancestor.
+
+        The inner template is an ordinary SVG element of that name, so its
+        </template> must close it rather than decrement the enclosing HTML
+        template's suppression scope. The <div> breaks out of foreign content,
+        but the anchor is still inside the outer HTML template and must stay
+        suppressed.
+        """
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">'
+            '<template><svg>'
+            '<template></template>'
+            '<div><a href="/release.pdf">Q2-2026</a></div>'
+            '</svg></template>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ())
+
+    def test_foreign_template_end_tag_holds_scope_for_other_breakout_tags(self):
+        """The rule is the template's namespace, not the particular breakout tag."""
+
+        for tag in ("span", "b", "p", "table"):
+            with self.subTest(tag=tag):
+                candidates = extract_results_page_candidates(
+                    self._source(),
+                    '<a href="/q">'
+                    '<template><svg>'
+                    '<template></template>'
+                    f'<{tag}><a href="/release.pdf">Q2-2026</a></{tag}>'
+                    '</svg></template>'
+                    '</a>',
+                )
+                self.assertEqual(len(candidates), 1)
+                self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+                self.assertEqual(candidates[0].evidence_fields, ())
+
+    def test_plain_html_template_still_closes_normally(self):
+        """The ordinary case keeps working: </template> ends the suppression."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<template><a href="/hidden.pdf">Q2-2026</a></template>'
+            '<a href="/release.pdf">Annual report</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+        self.assertEqual(candidates[0].evidence_fields, ("Annual report",))
+
+    def test_bare_foreign_template_pair_leaves_html_scope_untouched(self):
+        """A whole <svg><template></template> pair must not open or close anything."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<svg><template></template></svg>'
+            '<a href="/release.pdf">Annual report</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+        self.assertEqual(candidates[0].evidence_fields, ("Annual report",))
+
+    def test_nested_html_templates_release_one_scope_at_a_time(self):
+        """Each </template> closes exactly one opener, so the outer one survives."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<template>'
+            '<template><a href="/inner.pdf">Q2-2026</a></template>'
+            '<a href="/outer.pdf">Q2-2026</a>'
+            '</template>'
+            '<a href="/release.pdf">Annual report</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+        self.assertEqual(candidates[0].evidence_fields, ("Annual report",))
+
+    def test_stray_template_end_tag_does_not_release_a_later_html_template(self):
+        """A </template> with nothing open must not leave the state owing a close."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '</template></template>'
+            '<a href="/q">'
+            '<template><svg>'
+            '<template></template>'
+            '<div><a href="/release.pdf">Q2-2026</a></div>'
+            '</svg></template>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ())
+
+    def test_unclosed_foreign_template_does_not_swallow_the_html_close(self):
+        """Closing the SVG root also closes the templates it still held open."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<template><svg><template></svg></template>'
+            '<a href="/release.pdf">Annual report</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+        self.assertEqual(candidates[0].evidence_fields, ("Annual report",))
+
     def test_svg_template_is_not_html_template_suppression(self):
         candidates = extract_results_page_candidates(
             self._source(),

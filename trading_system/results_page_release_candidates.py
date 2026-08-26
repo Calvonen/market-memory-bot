@@ -186,7 +186,11 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
         self._foreign_depth = 0
         self._integration_stack: list[str] = []
         self._broke_out_of_foreign = False
-        self._template_depth = 0
+        # One entry per open <template> token: whether it carries HTML template
+        # semantics, and the foreign depth it was opened at. A foreign <template>
+        # is tracked too, so that its own end tag closes it instead of releasing
+        # an enclosing HTML template's suppression scope.
+        self._template_stack: list[tuple[bool, int]] = []
 
     @property
     def template_hrefs(self) -> set[str]:
@@ -200,9 +204,14 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
         if len(hrefs) != 1 or not _raw_href_is_safe(raw_start_tag, hrefs[0] if hrefs else None):
             self.unsafe_hrefs.update(hrefs)
         for href in hrefs:
-            self.anchor_occurrences.setdefault(href, []).append(bool(self._template_depth))
+            self.anchor_occurrences.setdefault(href, []).append(self._inside_html_template())
 
-    def _in_html_template_scope(self) -> bool:
+    def _inside_html_template(self) -> bool:
+        """Whether an anchor spelled here sits in HTML template content."""
+
+        return any(is_html for is_html, _ in self._template_stack)
+
+    def _template_opens_html_scope(self) -> bool:
         """Whether a <template> spelled here carries HTML template semantics.
 
         A bare <svg>/<math> subtree does not: a <template> there is an ordinary
@@ -236,8 +245,13 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
                 self._integration_stack.append(lowered)
         elif self._foreign_depth and lowered in _FOREIGN_BREAKOUT_TAGS:
             self._broke_out_of_foreign = True
-        elif lowered == "template" and self._in_html_template_scope():
-            self._template_depth += 1
+        elif lowered == "template":
+            # Push foreign templates as well: only by tracking them can their own
+            # end tag be told apart from the one closing an enclosing HTML
+            # template.
+            self._template_stack.append(
+                (self._template_opens_html_scope(), self._foreign_depth)
+            )
 
     def set_cdata_mode(self, elem: str, **kwargs) -> None:
         # script/style/title/textarea and friends are text-only in HTML, but
@@ -259,6 +273,11 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
         lowered = tag.lower()
         if lowered in _FOREIGN_ROOT_TAGS:
             self._foreign_depth = max(0, self._foreign_depth - 1)
+            # Closing a foreign root also closes every element it still held open,
+            # so templates opened inside it can no longer swallow a </template>
+            # that belongs to an enclosing HTML template.
+            while self._template_stack and self._template_stack[-1][1] > self._foreign_depth:
+                self._template_stack.pop()
             if not self._foreign_depth:
                 self._integration_stack.clear()
                 self._broke_out_of_foreign = False
@@ -272,7 +291,12 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
             if self._integration_stack and self._integration_stack[-1] == lowered:
                 self._integration_stack.pop()
         elif lowered == "template":
-            self._template_depth = max(0, self._template_depth - 1)
+            # Close only the innermost open template. A foreign <template>'s end
+            # tag therefore closes that element rather than releasing an
+            # enclosing HTML template's suppression scope, and a stray
+            # </template> with nothing open releases nothing at all.
+            if self._template_stack:
+                self._template_stack.pop()
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lowered = tag.lower()
