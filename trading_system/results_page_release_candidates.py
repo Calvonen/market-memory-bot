@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse, urlunparse
@@ -42,36 +43,72 @@ class _ResultsPageLinkParser(HTMLParser):
 
 
 def _https_origin(url: str) -> tuple[str, str, int] | None:
-    parsed = urlparse(url)
     try:
+        parsed = urlparse(url)
         port = parsed.port
+        host = parsed.hostname or ""
     except ValueError:
         return None
-    host = (parsed.hostname or "").rstrip(".").lower()
+
+    # Preserve the approved authority spelling exactly at the validation
+    # boundary. A trailing dot is a different authority spelling and must not
+    # be silently collapsed into the approved origin.
     if (
         parsed.scheme.lower() != "https"
         or not host
+        or host.endswith(".")
         or not _is_valid_host(host)
+        or parsed.username is not None
+        or parsed.password is not None
         or "@" in parsed.netloc
         or (port is not None and not 1 <= port <= 65535)
     ):
         return None
-    return "https", host, 443 if port is None else port
+    return "https", host.lower(), 443 if port is None else port
+
+
+def _canonical_https_url(url: str) -> str | None:
+    try:
+        parsed = urlparse(url)
+        port = parsed.port
+        host = parsed.hostname or ""
+    except ValueError:
+        return None
+
+    origin = _https_origin(url)
+    if origin is None:
+        return None
+
+    canonical_host = host.lower()
+    try:
+        is_ipv6 = isinstance(ipaddress.ip_address(canonical_host), ipaddress.IPv6Address)
+    except ValueError:
+        is_ipv6 = False
+    rendered_host = f"[{canonical_host}]" if is_ipv6 else canonical_host
+    canonical_netloc = rendered_host if port in (None, 443) else f"{rendered_host}:{port}"
+    return urlunparse(
+        (
+            "https",
+            canonical_netloc,
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            "",
+        )
+    )
 
 
 def _canonical_candidate_url(base_url: str, href: str) -> str | None:
-    candidate = urljoin(base_url, href.strip())
+    try:
+        candidate = urljoin(base_url, href.strip())
+    except ValueError:
+        return None
+
     approved_origin = _https_origin(base_url)
     candidate_origin = _https_origin(candidate)
     if approved_origin is None or candidate_origin != approved_origin:
         return None
-
-    parsed = urlparse(candidate)
-    if parsed.username is not None or parsed.password is not None:
-        return None
-    # Fragments are client-side navigation and do not identify a different
-    # release resource. Drop them so duplicate anchors collapse canonically.
-    return urlunparse(parsed._replace(fragment=""))
+    return _canonical_https_url(candidate)
 
 
 def extract_results_page_candidates(
