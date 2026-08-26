@@ -57,6 +57,24 @@ _RENDERED_BREAK_START_TAGS = frozenset(
 )
 _RENDERED_BREAK_END_TAGS = _RENDERED_BREAK_START_TAGS - {"br", "hr"}
 _NON_RENDERED_TAGS = frozenset({"script", "style", "template"})
+_VOID_TAGS = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -114,9 +132,13 @@ class _ResultsPageLinkParser(HTMLParser):
         self._text_parts: list[str] = []
         self._open_break_tags: list[str] = []
         self._non_rendered_tags: list[str] = []
+        self._open_elements: list[tuple[str, bool]] = []
 
     def _inside_non_rendered_content(self) -> bool:
         return bool(self._non_rendered_tags)
+
+    def _inside_hidden_content(self) -> bool:
+        return any(hidden for _, hidden in self._open_elements)
 
     def _reset_anchor(self) -> None:
         self._href = None
@@ -125,12 +147,31 @@ class _ResultsPageLinkParser(HTMLParser):
         self._title_attr = None
         self._text_parts = []
         self._open_break_tags = []
-        self._non_rendered_tags = []
+
+    def _push_element(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _VOID_TAGS:
+            return
+        hidden = any(key.lower() == "hidden" for key, _ in attrs)
+        self._open_elements.append((tag, hidden))
+
+    def _pop_element(self, tag: str) -> None:
+        for index in range(len(self._open_elements) - 1, -1, -1):
+            if self._open_elements[index][0] == tag:
+                del self._open_elements[index:]
+                return
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = tag.lower()
+        ancestor_hidden = self._inside_hidden_content()
+        ancestor_non_rendered = self._inside_non_rendered_content()
+        self._push_element(normalized_tag, attrs)
+
+        if normalized_tag in _NON_RENDERED_TAGS:
+            self._non_rendered_tags.append(normalized_tag)
+            return
+
         if normalized_tag == "a":
-            if any(key.lower() == "hidden" for key, _ in attrs):
+            if ancestor_hidden or ancestor_non_rendered or self._inside_hidden_content():
                 self._reset_anchor()
                 return
             values = {key.lower(): value for key, value in attrs if value is not None}
@@ -140,70 +181,75 @@ class _ResultsPageLinkParser(HTMLParser):
             self._title_attr = values.get("title")
             self._text_parts = []
             self._open_break_tags = []
-            self._non_rendered_tags = []
             return
-        if self._href is None:
-            return
-        if normalized_tag in _NON_RENDERED_TAGS:
-            self._non_rendered_tags.append(normalized_tag)
-            return
-        if self._inside_non_rendered_content():
+
+        if self._href is None or ancestor_hidden or ancestor_non_rendered or self._inside_hidden_content():
             return
         if normalized_tag in _RENDERED_BREAK_START_TAGS:
-            # Explicit line/block separators create a real rendered boundary;
-            # ordinary inline wrappers preserve the original text adjacency.
             self._text_parts.append(" ")
             if normalized_tag in _RENDERED_BREAK_END_TAGS:
                 self._open_break_tags.append(normalized_tag)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = tag.lower()
-        if self._href is not None and normalized_tag in _NON_RENDERED_TAGS:
-            # HTML non-void elements do not become rendered merely because the
-            # source uses XHTML-style '/>'. Keep suppressing until a real end tag.
-            self._non_rendered_tags.append(normalized_tag)
+        if normalized_tag in _NON_RENDERED_TAGS:
+            # script/style/template are HTML non-void elements. Treat XHTML-style
+            # '/>' conservatively as an opener and keep suppression until a real
+            # matching end tag appears, even outside an active anchor.
+            self.handle_starttag(tag, attrs)
             return
         self.handle_starttag(tag, attrs)
         self.handle_endtag(tag)
 
     def handle_data(self, data: str) -> None:
-        if self._href is not None and not self._inside_non_rendered_content():
+        if (
+            self._href is not None
+            and not self._inside_non_rendered_content()
+            and not self._inside_hidden_content()
+        ):
             self._text_parts.append(data)
 
     def handle_endtag(self, tag: str) -> None:
         normalized_tag = tag.lower()
-        if normalized_tag == "a":
-            if self._href is None:
-                return
-            visible_text = _normalized_text("".join(self._text_parts))
-            evidence_fields = tuple(
-                value
-                for value in (
-                    _normalized_text(self._aria_label or ""),
-                    _normalized_text(self._title_attr or ""),
-                    visible_text,
-                )
-                if value
-            )
-            title = " ".join(evidence_fields) or None
-            self.links.append((self._href, title, self._raw_href_safe, evidence_fields))
-            self._reset_anchor()
-            return
-        if self._href is None:
-            return
+
         if normalized_tag in _NON_RENDERED_TAGS:
-            for index in range(len(self._non_rendered_tags) - 1, -1, -1):
-                if self._non_rendered_tags[index] == normalized_tag:
-                    del self._non_rendered_tags[index:]
+            # Only the currently active innermost non-rendered element may end.
+            # An out-of-order outer close must not expose still-hidden content.
+            if self._non_rendered_tags and self._non_rendered_tags[-1] == normalized_tag:
+                self._non_rendered_tags.pop()
+            self._pop_element(normalized_tag)
+            return
+
+        if normalized_tag == "a":
+            if self._href is not None:
+                visible_text = _normalized_text("".join(self._text_parts))
+                evidence_fields = tuple(
+                    value
+                    for value in (
+                        _normalized_text(self._aria_label or ""),
+                        _normalized_text(self._title_attr or ""),
+                        visible_text,
+                    )
+                    if value
+                )
+                title = " ".join(evidence_fields) or None
+                self.links.append((self._href, title, self._raw_href_safe, evidence_fields))
+                self._reset_anchor()
+            self._pop_element(normalized_tag)
+            return
+
+        if (
+            self._href is not None
+            and not self._inside_non_rendered_content()
+            and not self._inside_hidden_content()
+            and normalized_tag in _RENDERED_BREAK_END_TAGS
+        ):
+            for index in range(len(self._open_break_tags) - 1, -1, -1):
+                if self._open_break_tags[index] == normalized_tag:
+                    del self._open_break_tags[index:]
+                    self._text_parts.append(" ")
                     break
-            return
-        if self._inside_non_rendered_content() or normalized_tag not in _RENDERED_BREAK_END_TAGS:
-            return
-        for index in range(len(self._open_break_tags) - 1, -1, -1):
-            if self._open_break_tags[index] == normalized_tag:
-                del self._open_break_tags[index:]
-                self._text_parts.append(" ")
-                break
+        self._pop_element(normalized_tag)
 
 
 def _https_origin(url: str) -> tuple[str, str, int] | None:
