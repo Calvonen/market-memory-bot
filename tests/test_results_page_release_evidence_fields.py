@@ -155,6 +155,27 @@ class ResultsPageReleaseEvidenceFieldTests(unittest.TestCase):
                 self.assertEqual(candidates[0].evidence_fields, ("DownloadReport",))
                 self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
 
+    def test_hidden_anchors_are_not_release_candidates(self):
+        for hidden_attribute in ("hidden", 'hidden=""', 'HIDDEN="hidden"'):
+            html = (
+                f'<a {hidden_attribute} href="/hidden.pdf">Q2-2026</a>'
+                '<a href="/visible.pdf">Annual report</a>'
+            )
+            with self.subTest(hidden_attribute=hidden_attribute):
+                candidates = extract_results_page_candidates(self._source(), html)
+                self.assertEqual(len(candidates), 1)
+                self.assertEqual(candidates[0].source_url, "https://investor.example.com/visible.pdf")
+                self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_self_closing_non_rendered_tags_remain_suppressed_until_end_tag(self):
+        for tag in ("script", "style", "template"):
+            html = f'<a href="/release.pdf">Download<{tag}/> Q2-2026 </{tag}>Report</a>'
+            with self.subTest(tag=tag):
+                candidates = extract_results_page_candidates(self._source(), html)
+                self.assertEqual(len(candidates), 1)
+                self.assertEqual(candidates[0].evidence_fields, ("DownloadReport",))
+                self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
+
 
 if __name__ == "__main__":
     unittest.main()
