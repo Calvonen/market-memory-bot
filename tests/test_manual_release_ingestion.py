@@ -237,6 +237,17 @@ class ManualOfficialReleaseProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "unsupported content type"):
             binary_provider.discover(self.EVENT_ID)
 
+    def test_missing_content_type_accepts_bom_prefixed_html(self) -> None:
+        source = self._source("https://investor.example.com/download")
+        html = "<html><body>" + ("Results improved. " * 40) + "</body></html>"
+        for encoding in ("utf-8-sig", "utf-16"):
+            with self.subTest(encoding=encoding):
+                payload = html.encode(encoding)
+                provider = ManualOfficialReleaseProvider(source)
+                with patch.object(provider, "_fetch_bytes", return_value=(payload, "", None)):
+                    document = provider.discover(self.EVENT_ID)
+                self.assertIsNotNone(document)
+
     def _response(self, final_url: str, *, content_length: str | None = None) -> MagicMock:
         response = MagicMock()
         response.__enter__.return_value = response
