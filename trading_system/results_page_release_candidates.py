@@ -118,9 +118,21 @@ class _ResultsPageLinkParser(HTMLParser):
     def _inside_non_rendered_content(self) -> bool:
         return bool(self._non_rendered_tags)
 
+    def _reset_anchor(self) -> None:
+        self._href = None
+        self._raw_href_safe = True
+        self._aria_label = None
+        self._title_attr = None
+        self._text_parts = []
+        self._open_break_tags = []
+        self._non_rendered_tags = []
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = tag.lower()
         if normalized_tag == "a":
+            if any(key.lower() == "hidden" for key, _ in attrs):
+                self._reset_anchor()
+                return
             values = {key.lower(): value for key, value in attrs if value is not None}
             self._href = values.get("href")
             self._raw_href_safe = _raw_href_is_safe(self.get_starttag_text(), self._href)
@@ -144,6 +156,16 @@ class _ResultsPageLinkParser(HTMLParser):
             if normalized_tag in _RENDERED_BREAK_END_TAGS:
                 self._open_break_tags.append(normalized_tag)
 
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        normalized_tag = tag.lower()
+        if self._href is not None and normalized_tag in _NON_RENDERED_TAGS:
+            # HTML non-void elements do not become rendered merely because the
+            # source uses XHTML-style '/>'. Keep suppressing until a real end tag.
+            self._non_rendered_tags.append(normalized_tag)
+            return
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
     def handle_data(self, data: str) -> None:
         if self._href is not None and not self._inside_non_rendered_content():
             self._text_parts.append(data)
@@ -165,13 +187,7 @@ class _ResultsPageLinkParser(HTMLParser):
             )
             title = " ".join(evidence_fields) or None
             self.links.append((self._href, title, self._raw_href_safe, evidence_fields))
-            self._href = None
-            self._raw_href_safe = True
-            self._aria_label = None
-            self._title_attr = None
-            self._text_parts = []
-            self._open_break_tags = []
-            self._non_rendered_tags = []
+            self._reset_anchor()
             return
         if self._href is None:
             return
