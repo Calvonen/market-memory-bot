@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ipaddress
-import posixpath
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse, urlunparse
@@ -68,16 +67,51 @@ def _https_origin(url: str) -> tuple[str, str, int] | None:
     return "https", host.lower(), 443 if port is None else port
 
 
+def _remove_last_path_segment(path: str) -> str:
+    slash = path.rfind("/")
+    return "" if slash < 0 else path[:slash]
+
+
+def _remove_dot_segments(path: str) -> str:
+    """Remove URI dot segments using the RFC 3986 section 5.2.4 algorithm."""
+    input_buffer = path
+    output = ""
+
+    while input_buffer:
+        if input_buffer.startswith("../"):
+            input_buffer = input_buffer[3:]
+        elif input_buffer.startswith("./"):
+            input_buffer = input_buffer[2:]
+        elif input_buffer.startswith("/./"):
+            input_buffer = "/" + input_buffer[3:]
+        elif input_buffer == "/.":
+            input_buffer = "/"
+        elif input_buffer.startswith("/../"):
+            input_buffer = "/" + input_buffer[4:]
+            output = _remove_last_path_segment(output)
+        elif input_buffer == "/..":
+            input_buffer = "/"
+            output = _remove_last_path_segment(output)
+        elif input_buffer in {".", ".."}:
+            input_buffer = ""
+        else:
+            if input_buffer.startswith("/"):
+                next_slash = input_buffer.find("/", 1)
+            else:
+                next_slash = input_buffer.find("/")
+            if next_slash < 0:
+                output += input_buffer
+                input_buffer = ""
+            else:
+                output += input_buffer[:next_slash]
+                input_buffer = input_buffer[next_slash:]
+
+    return output
+
+
 def _normalize_url_path(path: str) -> str:
-    if not path:
-        return "/"
-    trailing_slash = path.endswith("/")
-    normalized = posixpath.normpath(path)
-    if not normalized.startswith("/"):
-        normalized = "/" + normalized
-    if trailing_slash and normalized != "/":
-        normalized += "/"
-    return normalized
+    normalized = _remove_dot_segments(path or "/")
+    return normalized or "/"
 
 
 def _canonical_https_url(url: str) -> str | None:
@@ -112,11 +146,15 @@ def _canonical_https_url(url: str) -> str | None:
     )
 
 
+def _contains_ascii_control(value: str) -> bool:
+    return any(ord(char) <= 0x1F or ord(char) == 0x7F for char in value)
+
+
 def _canonical_candidate_url(base_url: str, href: str) -> str | None:
-    # urllib intentionally strips ASCII tab/CR/LF during parsing. Inspect the
-    # parser-provided href before whitespace trimming so controls at either end
-    # also fail closed instead of disappearing via strip().
-    if any(control in href for control in ("\t", "\r", "\n")):
+    # URL parsers and whitespace trimming can normalize raw controls away.
+    # Reject the complete ASCII control range, including DEL, before either
+    # operation so malformed href spellings always fail closed.
+    if _contains_ascii_control(href):
         return None
     raw_href = href.strip()
 
