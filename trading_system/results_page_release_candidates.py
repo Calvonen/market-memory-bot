@@ -150,6 +150,7 @@ class _ResultsPageLinkParser(HTMLParser):
         self._open_elements: list[tuple[str, bool]] = []
         self._open_namespaces: list[str] = []
         self._annotation_xml_html_integration: list[bool] = []
+        self._active_anchor_index: int | None = None
 
     def _inside_non_rendered_content(self) -> bool:
         return bool(self._non_rendered_tags)
@@ -164,6 +165,7 @@ class _ResultsPageLinkParser(HTMLParser):
         self._title_attr = None
         self._text_parts = []
         self._open_break_tags = []
+        self._active_anchor_index = None
 
     def _finalize_anchor(self) -> None:
         if self._href is None:
@@ -245,8 +247,11 @@ class _ResultsPageLinkParser(HTMLParser):
         return None
 
     def _delete_open_elements_from(self, index: int) -> None:
-        removed_tags = [tag for tag, _ in self._open_elements[index:]]
-        if self._href is not None and "a" in removed_tags:
+        if (
+            self._href is not None
+            and self._active_anchor_index is not None
+            and index <= self._active_anchor_index
+        ):
             self._finalize_anchor()
         del self._open_elements[index:]
         del self._open_namespaces[index:]
@@ -307,11 +312,18 @@ class _ResultsPageLinkParser(HTMLParser):
 
         ancestor_hidden = self._inside_hidden_content()
         ancestor_non_rendered = self._inside_non_rendered_content()
+        incoming_namespace = self._namespace_for_new_element(normalized_tag, attrs)
 
-        if normalized_tag == "a" and self._href is not None and not ancestor_non_rendered:
+        if (
+            normalized_tag == "a"
+            and incoming_namespace == "html"
+            and self._href is not None
+            and not ancestor_non_rendered
+        ):
             self._finalize_anchor()
             self._pop_element("a")
             ancestor_hidden = self._inside_hidden_content()
+            incoming_namespace = self._namespace_for_new_element(normalized_tag, attrs)
 
         self._push_element(normalized_tag, attrs)
 
@@ -325,6 +337,8 @@ class _ResultsPageLinkParser(HTMLParser):
                     return
                 self._reset_anchor()
                 return
+            if self._href is not None:
+                return
             values = {key.lower(): value for key, value in attrs if value is not None}
             self._href = values.get("href")
             self._raw_href_safe = _raw_href_is_safe(self.get_starttag_text(), self._href)
@@ -332,6 +346,7 @@ class _ResultsPageLinkParser(HTMLParser):
             self._title_attr = values.get("title")
             self._text_parts = []
             self._open_break_tags = []
+            self._active_anchor_index = len(self._open_elements) - 1 if self._href is not None else None
             return
 
         if self._href is None or ancestor_hidden or ancestor_non_rendered or self._inside_hidden_content():
@@ -369,11 +384,12 @@ class _ResultsPageLinkParser(HTMLParser):
             return
 
         if normalized_tag == "a":
-            if self._inside_non_rendered_content():
-                self._pop_element(normalized_tag)
+            anchor_index = self._find_open_element_index(normalized_tag)
+            if anchor_index is None:
                 return
-            self._finalize_anchor()
-            self._pop_element(normalized_tag)
+            if self._active_anchor_index == anchor_index:
+                self._finalize_anchor()
+            self._delete_open_elements_from(anchor_index)
             return
 
         if (
