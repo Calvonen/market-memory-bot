@@ -151,6 +151,35 @@ class ResultsPageReleaseParserScopeRegressionTests(unittest.TestCase):
         self.assertEqual(candidates[1].source_url, "https://investor.example.com/other")
         self.assertEqual(candidates[1].evidence_fields, ("Annual",))
 
+    def test_nested_svg_root_beneath_foreignobject_returns_to_svg_namespace(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report<svg><foreignObject><svg><a href="/other"><text>icon</text></a></svg></foreignObject></svg> Q2-2026</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Reporticon Q2-2026",))
+
+    def test_html_breakout_tag_exits_svg_content_before_nested_anchor_repair(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report<svg><div><a href="/other">Annual</a></div></svg> Q2-2026</a>',
+        )
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+        self.assertEqual(candidates[1].source_url, "https://investor.example.com/other")
+        self.assertEqual(candidates[1].evidence_fields, ("Annual",))
+
+    def test_foreign_self_closing_script_releases_suppression_immediately(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report<svg><script/><text>Q2-2026</text></svg></a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("ReportQ2-2026",))
+
 
 if __name__ == "__main__":
     unittest.main()
