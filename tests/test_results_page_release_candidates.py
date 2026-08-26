@@ -80,6 +80,22 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             ["https://investor.example.com/valid.pdf"],
         )
 
+    def test_rejects_raw_control_characters_before_url_parsing(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            """
+            <a href="https://investor.examp&#10;le.com/release.pdf">newline</a>
+            <a href="https://investor.examp&#13;le.com/release2.pdf">carriage return</a>
+            <a href="https://investor.examp&#9;le.com/release3.pdf">tab</a>
+            <a href="/valid.pdf">valid</a>
+            """,
+        )
+
+        self.assertEqual(
+            [candidate.source_url for candidate in candidates],
+            ["https://investor.example.com/valid.pdf"],
+        )
+
     def test_canonicalizes_authority_before_deduplicating(self):
         candidates = extract_results_page_candidates(
             self._source(),
@@ -96,6 +112,29 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             "https://investor.example.com/release.pdf",
         )
         self.assertEqual(candidates[0].source_title, "first")
+
+    def test_normalizes_empty_https_path_to_slash_for_self_page_and_deduplication(self):
+        source = OfficialReleaseSource(
+            event_id="calendar:test-event",
+            source_kind="results_page",
+            source_url="https://investor.example.com",
+            source_title="Results",
+            version=1,
+        )
+
+        candidates = extract_results_page_candidates(
+            source,
+            """
+            <a href="/">same page slash</a>
+            <a href="https://investor.example.com">same page empty path</a>
+            <a href="/release.pdf">release</a>
+            """,
+        )
+
+        self.assertEqual(
+            [candidate.source_url for candidate in candidates],
+            ["https://investor.example.com/release.pdf"],
+        )
 
     def test_deduplicates_fragments_and_ignores_results_page_itself(self):
         candidates = extract_results_page_candidates(
