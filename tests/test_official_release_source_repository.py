@@ -72,6 +72,13 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
         self.assertEqual(source.event_id, self.EVENT_ID)
         self.assertEqual(source.source_title, "FY2026 results")
 
+        uppercase_scheme = OfficialReleaseSource(
+            self.EVENT_ID,
+            "direct_url",
+            "HTTPS://investor.example.com/results.pdf",
+        )
+        self.assertEqual(uppercase_scheme.source_url, "HTTPS://investor.example.com/results.pdf")
+
         with self.assertRaisesRegex(ValueError, "event_id is required"):
             OfficialReleaseSource("", "direct_url", "https://example.com/results")
         with self.assertRaisesRegex(ValueError, "direct_url or results_page"):
