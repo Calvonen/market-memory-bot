@@ -51,6 +51,52 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
 
         self.assertEqual(candidates, ())
 
+    def test_rejects_trailing_dot_and_double_dot_host_spellings(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            """
+            <a href="https://investor.example.com./release.pdf">trailing dot</a>
+            <a href="https://investor.example.com../release.pdf">double dot</a>
+            <a href="/valid.pdf">valid</a>
+            """,
+        )
+
+        self.assertEqual(
+            [candidate.source_url for candidate in candidates],
+            ["https://investor.example.com/valid.pdf"],
+        )
+
+    def test_malformed_ipv6_candidate_does_not_abort_later_valid_links(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            """
+            <a href="https://[invalid/release.pdf">bad ipv6</a>
+            <a href="/valid.pdf">valid</a>
+            """,
+        )
+
+        self.assertEqual(
+            [candidate.source_url for candidate in candidates],
+            ["https://investor.example.com/valid.pdf"],
+        )
+
+    def test_canonicalizes_authority_before_deduplicating(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            """
+            <a href="https://INVESTOR.EXAMPLE.COM/release.pdf">first</a>
+            <a href="https://investor.example.com:443/release.pdf">second</a>
+            <a href="/release.pdf">third</a>
+            """,
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(
+            candidates[0].source_url,
+            "https://investor.example.com/release.pdf",
+        )
+        self.assertEqual(candidates[0].source_title, "first")
+
     def test_deduplicates_fragments_and_ignores_results_page_itself(self):
         candidates = extract_results_page_candidates(
             self._source(),
