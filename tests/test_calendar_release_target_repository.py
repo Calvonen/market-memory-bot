@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 from trading_system.calendar_release_worker import (
     TARGET_PAGE_SIZE,
-    US_MARKET_LABELS,
     SupabaseCalendarReleaseTargetRepository,
 )
 
@@ -68,14 +67,21 @@ class _Client:
 
 
 class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
-    def test_requests_tracked_us_market_labels_through_end_date_without_lower_bound(self):
+    def test_requests_tracked_earnings_across_markets_through_end_date_without_lower_bound(self):
         client = _Client(
             [[
                 {
                     "id": "22648076-6e43-40fc-ac6e-f57a79ceee31",
                     "instrument": "aapl",
                     "scheduled_date": "2026-08-23",
-                }
+                    "market": "NASDAQ",
+                },
+                {
+                    "id": "32648076-6e43-40fc-ac6e-f57a79ceee31",
+                    "instrument": "nokia",
+                    "scheduled_date": "2026-08-24",
+                    "market": "helsinki",
+                },
             ]]
         )
         repository = SupabaseCalendarReleaseTargetRepository(client)
@@ -87,18 +93,20 @@ class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
 
         self.assertEqual(client.table_names, ["calendar_events"])
         calls = client.queries[0].calls
+        self.assertIn(("select", "id,instrument,scheduled_date,market"), calls)
         self.assertIn(("eq", "status", "tracked"), calls)
-        self.assertIn(("in", "market", US_MARKET_LABELS), calls)
-        self.assertIn("US", US_MARKET_LABELS)
-        self.assertIn("NASDAQ", US_MARKET_LABELS)
+        self.assertFalse(any(call[0] == "in" and call[1] == "market" for call in calls))
         self.assertIn(("eq", "event_type", "earnings"), calls)
         self.assertNotIn(("gte", "scheduled_date", "2026-08-24"), calls)
         self.assertIn(("lte", "scheduled_date", "2026-08-25"), calls)
         self.assertIn(("order", "id"), calls)
         self.assertIn(("limit", TARGET_PAGE_SIZE), calls)
-        self.assertEqual(len(targets), 1)
+        self.assertEqual(len(targets), 2)
         self.assertEqual(targets[0].ticker, "AAPL")
+        self.assertEqual(targets[0].market, "NASDAQ")
         self.assertEqual(targets[0].scheduled_date, date(2026, 8, 23))
+        self.assertEqual(targets[1].ticker, "NOKIA")
+        self.assertEqual(targets[1].market, "HELSINKI")
         self.assertEqual(
             targets[0].event_id,
             "calendar:22648076-6e43-40fc-ac6e-f57a79ceee31",
@@ -110,6 +118,7 @@ class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
                 "id": f"{index:08d}-0000-0000-0000-000000000000",
                 "instrument": "AAA",
                 "scheduled_date": "2026-08-20",
+                "market": "NASDAQ",
             }
             for index in range(TARGET_PAGE_SIZE)
         ]
@@ -119,6 +128,7 @@ class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
                 "id": second_id,
                 "instrument": "NEW",
                 "scheduled_date": "2026-08-25",
+                "market": "ASX",
             }
         ]
         client = _Client([first_page, second_page])
@@ -132,6 +142,7 @@ class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
         self.assertEqual(len(client.queries), 2)
         self.assertEqual(len(targets), TARGET_PAGE_SIZE + 1)
         self.assertEqual(targets[-1].ticker, "NEW")
+        self.assertEqual(targets[-1].market, "ASX")
         self.assertIn(
             ("gt", "id", first_page[-1]["id"]),
             client.queries[1].calls,
@@ -144,6 +155,7 @@ class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
                     "id": "22648076-6e43-40fc-ac6e-f57a79ceee31",
                     "instrument": "",
                     "scheduled_date": "2026-08-25",
+                    "market": "NASDAQ",
                 }
             ]]
         )
@@ -153,6 +165,25 @@ class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
             RuntimeError,
             "22648076-6e43-40fc-ac6e-f57a79ceee31.*missing required canonical data",
         ):
+            repository.list_targets(
+                start_date=date(2026, 8, 24),
+                end_date=date(2026, 8, 25),
+            )
+
+    def test_missing_market_fails_closed(self):
+        client = _Client(
+            [[
+                {
+                    "id": "22648076-6e43-40fc-ac6e-f57a79ceee31",
+                    "instrument": "NOKIA",
+                    "scheduled_date": "2026-08-25",
+                    "market": "",
+                }
+            ]]
+        )
+        repository = SupabaseCalendarReleaseTargetRepository(client)
+
+        with self.assertRaisesRegex(RuntimeError, "missing required canonical data"):
             repository.list_targets(
                 start_date=date(2026, 8, 24),
                 end_date=date(2026, 8, 25),
