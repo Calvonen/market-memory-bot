@@ -119,7 +119,10 @@ class ManualOfficialReleaseProvider:
             pages = [page.extract_text() or "" for page in reader.pages]
         except Exception as exc:
             raise RuntimeError("manual official release PDF extraction failed") from exc
-        return "\n".join(pages)
+        raw_text = "\n".join(pages).strip()
+        if not raw_text:
+            raise RuntimeError("manual official release PDF extraction produced no text")
+        return raw_text
 
     @staticmethod
     def _https_origin(url: str) -> tuple[str, str, int]:
