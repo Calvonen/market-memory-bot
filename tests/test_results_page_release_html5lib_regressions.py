@@ -48,3 +48,33 @@ def test_hidden_rendered_break_does_not_create_period_boundary() -> None:
     assert len(candidates) == 1
     assert candidates[0].source_url == "https://example.com/r"
     assert candidates[0].evidence_fields == ("AQ2-2026",)
+
+
+def test_html_comments_do_not_abort_or_become_anchor_evidence() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<!-- page note --><a href="/r">Annual<!-- hidden note --> Q2-2026</a>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ("Annual Q2-2026",)
+
+
+def test_visible_text_controls_are_excluded_fail_closed() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<a href="/r">Annual\u000bQ2-2026</a>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ()
+
+
+def test_attribute_controls_are_excluded_fail_closed() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<a href="/r" aria-label="Annual\u000bQ2-2026">Download</a>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ("Download",)
