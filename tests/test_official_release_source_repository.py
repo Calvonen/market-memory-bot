@@ -72,13 +72,6 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
         self.assertEqual(source.event_id, self.EVENT_ID)
         self.assertEqual(source.source_title, "FY2026 results")
 
-        uppercase_scheme = OfficialReleaseSource(
-            self.EVENT_ID,
-            "direct_url",
-            "HTTPS://investor.example.com/results.pdf",
-        )
-        self.assertEqual(uppercase_scheme.source_url, "HTTPS://investor.example.com/results.pdf")
-
         with self.assertRaisesRegex(ValueError, "event_id is required"):
             OfficialReleaseSource("", "direct_url", "https://example.com/results")
         with self.assertRaisesRegex(ValueError, "direct_url or results_page"):
@@ -87,6 +80,10 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "http://example.com/results")
         with self.assertRaisesRegex(ValueError, "no credentials"):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://user:pass@example.com/results")
+        with self.assertRaisesRegex(ValueError, "no credentials"):
+            OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://@example.com/release")
+        with self.assertRaisesRegex(ValueError, "no credentials"):
+            OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://:@example.com/release")
         with self.assertRaisesRegex(ValueError, "valid host"):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://:")
         with self.assertRaisesRegex(ValueError, "valid host"):
@@ -99,6 +96,8 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://example.com../release")
         rooted = OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://example.com./release")
         self.assertEqual(rooted.source_url, "https://example.com./release")
+        uppercase_scheme = OfficialReleaseSource(self.EVENT_ID, "direct_url", "HTTPS://example.com/release")
+        self.assertEqual(uppercase_scheme.source_url, "HTTPS://example.com/release")
         with self.assertRaisesRegex(ValueError, "valid port"):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://example.com:99999/results")
         with self.assertRaisesRegex(ValueError, "version must be positive"):
