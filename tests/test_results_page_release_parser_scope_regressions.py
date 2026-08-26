@@ -42,6 +42,38 @@ class ResultsPageReleaseParserScopeRegressionTests(unittest.TestCase):
         self.assertEqual(candidates[0].source_url, "https://investor.example.com/r")
         self.assertEqual(candidates[0].evidence_fields, ("Q2-2026",))
 
+    def test_generic_explicit_close_respects_base_scope_boundary(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<div hidden><table></div><a href="/r">Q2-2026</a></table></div>',
+        )
+        self.assertEqual(candidates, ())
+
+    def test_template_close_checks_scope_before_releasing_suppression(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<template><table></template><a href="/r">Q2-2026</a></table></template>',
+        )
+        self.assertEqual(candidates, ())
+
+    def test_template_local_anchor_does_not_finalize_outer_anchor(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report<template><a href="/other">hidden</a></template> Q2-2026</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report Q2-2026",))
+
+    def test_paragraph_and_heading_implied_closes_run_sequentially(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<h1 hidden><p>old<h2><a href="/r">Q2-2026</a></h2>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/r")
+        self.assertEqual(candidates[0].evidence_fields, ("Q2-2026",))
+
 
 if __name__ == "__main__":
     unittest.main()
