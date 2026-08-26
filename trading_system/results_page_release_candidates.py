@@ -56,6 +56,7 @@ _RENDERED_BREAK_START_TAGS = frozenset(
     }
 )
 _RENDERED_BREAK_END_TAGS = _RENDERED_BREAK_START_TAGS - {"br", "hr"}
+_NON_RENDERED_TAGS = frozenset({"script", "style", "template"})
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,11 @@ class _ResultsPageLinkParser(HTMLParser):
         self._aria_label: str | None = None
         self._title_attr: str | None = None
         self._text_parts: list[str] = []
+        self._open_break_tags: list[str] = []
+        self._non_rendered_tags: list[str] = []
+
+    def _inside_non_rendered_content(self) -> bool:
+        return bool(self._non_rendered_tags)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = tag.lower()
@@ -121,14 +127,25 @@ class _ResultsPageLinkParser(HTMLParser):
             self._aria_label = values.get("aria-label")
             self._title_attr = values.get("title")
             self._text_parts = []
+            self._open_break_tags = []
+            self._non_rendered_tags = []
             return
-        if self._href is not None and normalized_tag in _RENDERED_BREAK_START_TAGS:
+        if self._href is None:
+            return
+        if normalized_tag in _NON_RENDERED_TAGS:
+            self._non_rendered_tags.append(normalized_tag)
+            return
+        if self._inside_non_rendered_content():
+            return
+        if normalized_tag in _RENDERED_BREAK_START_TAGS:
             # Explicit line/block separators create a real rendered boundary;
             # ordinary inline wrappers preserve the original text adjacency.
             self._text_parts.append(" ")
+            if normalized_tag in _RENDERED_BREAK_END_TAGS:
+                self._open_break_tags.append(normalized_tag)
 
     def handle_data(self, data: str) -> None:
-        if self._href is not None:
+        if self._href is not None and not self._inside_non_rendered_content():
             self._text_parts.append(data)
 
     def handle_endtag(self, tag: str) -> None:
@@ -136,10 +153,6 @@ class _ResultsPageLinkParser(HTMLParser):
         if normalized_tag == "a":
             if self._href is None:
                 return
-            # Preserve adjacency between HTML text nodes. Real whitespace and
-            # explicit rendered separators remain in the chunks and are
-            # normalized afterwards, but adjacent inline elements must not
-            # manufacture a token boundary.
             visible_text = _normalized_text("".join(self._text_parts))
             evidence_fields = tuple(
                 value
@@ -157,9 +170,24 @@ class _ResultsPageLinkParser(HTMLParser):
             self._aria_label = None
             self._title_attr = None
             self._text_parts = []
+            self._open_break_tags = []
+            self._non_rendered_tags = []
             return
-        if self._href is not None and normalized_tag in _RENDERED_BREAK_END_TAGS:
-            self._text_parts.append(" ")
+        if self._href is None:
+            return
+        if normalized_tag in _NON_RENDERED_TAGS:
+            for index in range(len(self._non_rendered_tags) - 1, -1, -1):
+                if self._non_rendered_tags[index] == normalized_tag:
+                    del self._non_rendered_tags[index:]
+                    break
+            return
+        if self._inside_non_rendered_content() or normalized_tag not in _RENDERED_BREAK_END_TAGS:
+            return
+        for index in range(len(self._open_break_tags) - 1, -1, -1):
+            if self._open_break_tags[index] == normalized_tag:
+                del self._open_break_tags[index:]
+                self._text_parts.append(" ")
+                break
 
 
 def _https_origin(url: str) -> tuple[str, str, int] | None:
