@@ -60,7 +60,7 @@ class ManualOfficialReleaseProvider:
             return None
 
         data, content_type, charset = self._fetch_bytes(self.source.source_url)
-        if self._looks_like_pdf(self.source.source_url, content_type):
+        if self._looks_like_pdf(self.source.source_url, content_type, data):
             raw_text = self._extract_pdf_text(data)
             source_type = "company_results_pdf"
         else:
@@ -83,17 +83,21 @@ class ManualOfficialReleaseProvider:
         )
 
     @staticmethod
-    def _looks_like_pdf(url: str, content_type: str) -> bool:
+    def _looks_like_pdf(url: str, content_type: str, data: bytes) -> bool:
         path = url.split("?", 1)[0].split("#", 1)[0]
-        return path.lower().endswith(".pdf") or "pdf" in content_type.lower()
+        return (
+            path.lower().endswith(".pdf")
+            or "pdf" in content_type.lower()
+            or data.lstrip().startswith(b"%PDF-")
+        )
 
     @staticmethod
     def _extract_pdf_text(data: bytes) -> str:
         try:
             reader = PdfReader(io.BytesIO(data))
             pages = [page.extract_text() or "" for page in reader.pages]
-        except Exception:
-            return ""
+        except Exception as exc:
+            raise RuntimeError("manual official release PDF extraction failed") from exc
         return "\n".join(pages)
 
     def _fetch_bytes(self, url: str) -> tuple[bytes, str, str]:
