@@ -30,6 +30,7 @@ class CalendarReleaseTarget:
     event_id: str
     ticker: str
     scheduled_date: date
+    market: str = ""
 
 
 class SupabaseCalendarReleaseTargetRepository:
@@ -54,7 +55,7 @@ class SupabaseCalendarReleaseTargetRepository:
         start_date: date,
         end_date: date,
     ) -> tuple[CalendarReleaseTarget, ...]:
-        # Do not apply a lower date bound here. An event that failed SEC,
+        # Do not apply a lower date bound here. An event that failed release,
         # Supabase or AI processing must remain eligible for a later timer run
         # until an analysis exists for its current expectation version. The
         # caller's start_date is retained for API compatibility and observability.
@@ -64,9 +65,8 @@ class SupabaseCalendarReleaseTargetRepository:
         while True:
             query = (
                 self.client.table("calendar_events")
-                .select("id,instrument,scheduled_date")
+                .select("id,instrument,scheduled_date,market")
                 .eq("status", "tracked")
-                .in_("market", US_MARKET_LABELS)
                 .eq("event_type", "earnings")
                 .lte("scheduled_date", end_date.isoformat())
                 .order("id")
@@ -82,8 +82,9 @@ class SupabaseCalendarReleaseTargetRepository:
                     raise RuntimeError("calendar release target row is not an object")
                 calendar_id = str(row.get("id") or "").strip()
                 ticker = str(row.get("instrument") or "").strip().upper()
+                market = str(row.get("market") or "").strip().upper()
                 scheduled = row.get("scheduled_date")
-                if not calendar_id or not ticker or not scheduled:
+                if not calendar_id or not ticker or not market or not scheduled:
                     row_identity = calendar_id or "<missing-id>"
                     raise RuntimeError(
                         f"calendar release target {row_identity} is missing required canonical data"
@@ -104,6 +105,7 @@ class SupabaseCalendarReleaseTargetRepository:
                         event_id=f"calendar:{calendar_id}",
                         ticker=ticker,
                         scheduled_date=parsed_date,
+                        market=market,
                     )
                 )
 
@@ -201,6 +203,16 @@ def run_calendar_release_ingestion_once(
             if approved_source is not None:
                 provider = ManualOfficialReleaseProvider(approved_source)
             else:
+                normalized_market = target.market.strip().upper()
+                if normalized_market not in US_MARKET_LABELS:
+                    results.append(
+                        CalendarReleaseWorkerResult(
+                            target.event_id,
+                            "missing_official_source",
+                            "earnings target outside approved US market labels requires an approved official release source",
+                        )
+                    )
+                    continue
                 provider = SecEdgarResultsProvider(
                     ticker=target.ticker,
                     scheduled_date=target.scheduled_date,

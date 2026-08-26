@@ -56,6 +56,7 @@ class CalendarReleaseWorkerTests(unittest.TestCase):
             event_id=self.EVENT_ID,
             ticker=ticker,
             scheduled_date=scheduled,
+            market="NASDAQ",
         )
 
     def _expectation(self, *, ticker="DKS", scheduled=date(2026, 8, 25), version=1):
@@ -76,6 +77,7 @@ class CalendarReleaseWorkerTests(unittest.TestCase):
             event_id=second_id,
             ticker="ABC",
             scheduled_date=date(2026, 8, 25),
+            market="NASDAQ",
         )
         expectation = EventExpectation(
             event_id=second_id,
