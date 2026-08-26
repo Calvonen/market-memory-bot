@@ -99,6 +99,51 @@ class ResultsPageReleaseEvidenceFieldTests(unittest.TestCase):
         )
         self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
 
+    def test_percent_decoded_url_adjacency_fails_closed(self):
+        for url in (
+            "https://investor.example.com/Q2-2026%41nnual.pdf",
+            "https://investor.example.com/Q2-2026%CC%81A.pdf",
+            "https://investor.example.com/Q2-2026%E2%80%8DA.pdf",
+        ):
+            with self.subTest(url=url):
+                candidate = ResultsPageReleaseCandidate(
+                    event_id="calendar:test-event",
+                    source_url=url,
+                )
+                selection = select_results_page_release_candidate(
+                    self._event(),
+                    (candidate,),
+                    release_period="Q2 2026",
+                )
+                self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_percent_decoded_url_separator_can_supply_standalone_period(self):
+        candidate = ResultsPageReleaseCandidate(
+            event_id="calendar:test-event",
+            source_url="https://investor.example.com/results%20Q2-2026.pdf",
+        )
+        selection = select_results_page_release_candidate(
+            self._event(),
+            (candidate,),
+            release_period="Q2 2026",
+        )
+        self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
+
+    def test_rendered_br_preserves_visible_separator(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/release.pdf"><span>Download</span><br><span>Q2-2026</span></a>',
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].evidence_fields, ("Download Q2-2026",))
+        selection = select_results_page_release_candidate(
+            self._event(),
+            candidates,
+            release_period="Q2 2026",
+        )
+        self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
+
 
 if __name__ == "__main__":
     unittest.main()
