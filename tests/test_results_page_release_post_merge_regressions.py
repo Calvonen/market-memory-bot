@@ -212,6 +212,97 @@ class ResultsPageReleasePostMergeRegressionTests(unittest.TestCase):
         self.assertEqual(candidates[1].source_title, "Annual")
         self.assertEqual(candidates[1].evidence_fields, ("Annual",))
 
+    def test_foreign_anchor_does_not_consume_a_template_occurrence_index(self):
+        """An SVG anchor must not shift the occurrence index of the HTML anchors.
+
+        The raw scanner sees three spellings of /release.pdf, but only two of them
+        become HTML anchors in the tree, so matching HTML anchors alone against the
+        raw list would align the hoisted template anchor with the SVG anchor's
+        non-template occurrence and let its hidden evidence through.
+        """
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/release.pdf">Annual</a>'
+            '<svg><a href="/release.pdf">icon</a></svg>'
+            '<a href="/q">'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</a>',
+        )
+        self.assertEqual(
+            [candidate.source_url for candidate in candidates],
+            [
+                "https://investor.example.com/release.pdf",
+                "https://investor.example.com/q",
+            ],
+        )
+        self.assertEqual(candidates[0].source_title, "Annual")
+        self.assertEqual(candidates[0].evidence_fields, ("Annual",))
+        self.assertNotIn("Q2-2026", candidates[0].evidence_fields)
+        self.assertEqual(candidates[1].evidence_fields, ())
+
+    def test_mathml_anchor_does_not_consume_a_template_occurrence_index(self):
+        """MathML anchors hold their own occurrence slot just like SVG ones."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/release.pdf">Annual</a>'
+            '<math><a href="/release.pdf">glyph</a></math>'
+            '<a href="/q">'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</a>',
+        )
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+        self.assertEqual(candidates[0].evidence_fields, ("Annual",))
+
+    def test_integration_point_anchor_keeps_its_own_occurrence_slot(self):
+        """An anchor html5lib promotes to HTML still matches its own spelling.
+
+        Inside foreignObject the anchor becomes an HTML anchor, so it must keep
+        the rendered slot and the template spelling must stay suppressed.
+        """
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<svg><foreignObject>'
+            '<a href="/release.pdf">Annual</a>'
+            '</foreignObject></svg>'
+            '<template><a href="/release.pdf">Q2-2026</a></template>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+        self.assertEqual(candidates[0].evidence_fields, ("Annual",))
+
+    def test_unprovable_anchor_correspondence_fails_closed(self):
+        """A dropped anchor makes the occurrence match unprovable, so the href goes.
+
+        html5lib discards the anchor inside <select>, so the raw occurrences and
+        the tree anchors no longer describe the same anchors. Rather than risk
+        matching the template spelling against a rendered slot, every candidate
+        for that href is dropped.
+        """
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<select><a href="/release.pdf">dropped</a></select>'
+            '<a href="/release.pdf">Annual</a>'
+            '<a href="/q">'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ())
+
+    def test_dropped_anchor_without_a_template_keeps_its_candidate(self):
+        """The fail-closed path only applies to hrefs a template also spells."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<select><a href="/release.pdf">dropped</a></select>'
+            '<a href="/release.pdf">Annual</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+        self.assertEqual(candidates[0].evidence_fields, ("Annual",))
+
     def test_only_the_template_occurrence_of_a_repeated_href_is_suppressed(self):
         """Occurrence matching picks out the template slot among several duplicates."""
 

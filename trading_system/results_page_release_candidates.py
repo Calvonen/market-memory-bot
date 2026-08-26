@@ -327,12 +327,20 @@ def _element_is_foreign(element) -> bool:
     return namespace is not None and namespace != _HTML_NAMESPACE
 
 
-def _iter_all_html_anchors(root):
-    """Every HTML anchor in document order, template and hidden subtrees included."""
+def _iter_all_tree_anchors(root):
+    """Every <a> element in document order, in any namespace and any subtree.
+
+    Foreign anchors are deliberately included. html5lib decides whether an anchor
+    spelled inside <svg>/<math> ends up in the HTML namespace (an HTML breakout,
+    or an HTML integration point such as foreignObject) or stays an SVG/MathML
+    anchor, and the raw scanner cannot tell in advance. Counting both sides the
+    same way is what keeps a foreign anchor from consuming an occurrence index
+    that belongs to an HTML one.
+    """
 
     for element in root.iter():
-        namespace, local = _element_name(element.tag)
-        if namespace == _HTML_NAMESPACE and local == "a":
+        _, local = _element_name(element.tag)
+        if local == "a":
             yield element
 
 
@@ -346,27 +354,36 @@ def _template_local_tree_anchors(root, safety_scanner) -> set:
     for an href is matched against the k-th raw occurrence of it: both are in
     document order, and a non-hoisted template anchor still occupies its slot
     inside the template element.
+
+    The match is only trustworthy while the two sequences describe the same
+    anchors. When their lengths disagree - html5lib cloned an anchor through the
+    adoption agency, or dropped one the raw scanner still saw - no occurrence can
+    be tied to its source spelling, so the whole href fails closed.
     """
 
     template_hrefs = safety_scanner.template_hrefs
     if not template_hrefs:
         return set()
 
-    suppressed = set()
-    seen: dict[str, int] = {}
-    for anchor in _iter_all_html_anchors(root):
+    grouped: dict[str, list] = {}
+    for anchor in _iter_all_tree_anchors(root):
         href = anchor.attrib.get("href")
         if href is None or href not in template_hrefs:
-            # No template spells this href, so no hoist is possible. Skipping it
-            # also keeps adoption-agency anchor clones from shifting the index.
+            # No template spells this href, so no hoist is possible.
             continue
+        grouped.setdefault(href, []).append(anchor)
+
+    suppressed = set()
+    for href, anchors in grouped.items():
         occurrences = safety_scanner.anchor_occurrences[href]
-        index = seen.get(href, 0)
-        seen[href] = index + 1
-        if index >= len(occurrences) or occurrences[index]:
-            # An index past the raw occurrences means html5lib cloned an anchor
-            # for an href a template also spells, which is ambiguous: fail closed.
-            suppressed.add(anchor)
+        if len(anchors) != len(occurrences):
+            suppressed.update(anchors)
+            continue
+        suppressed.update(
+            anchor
+            for anchor, is_template_local in zip(anchors, occurrences)
+            if is_template_local
+        )
     return suppressed
 
 
