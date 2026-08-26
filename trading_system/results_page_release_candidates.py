@@ -183,14 +183,22 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
         # per occurrence: the same href may legitimately appear both in rendered
         # content and, separately, inside a template.
         self.anchor_occurrences: dict[str, list[bool]] = {}
-        self._foreign_depth = 0
-        self._integration_stack: list[str] = []
-        self._broke_out_of_foreign = False
-        # One entry per open <template> token: whether it carries HTML template
-        # semantics, and the foreign depth it was opened at. A foreign <template>
-        # is tracked too, so that its own end tag closes it instead of releasing
-        # an enclosing HTML template's suppression scope.
-        self._template_stack: list[tuple[bool, int]] = []
+        # One scope stack for every element whose name we ever match an end tag
+        # against, newest last. Each entry is (kind, name). Only these kinds are
+        # tracked - never arbitrary HTML elements - so this stays scope
+        # bookkeeping rather than a tree builder:
+        #   foreign_root     <svg>/<math>
+        #   integration      an HTML integration point inside foreign content
+        #   html_shadow      an element parsed in HTML mode whose name collides
+        #                    with one of the above, so its end tag closes it
+        #                    instead of a deeper foreign scope
+        #   template_html    a <template> with HTML template semantics
+        #   template_foreign a <template> that is an ordinary foreign element
+        self._scope_stack: list[tuple[str, str]] = []
+        self._last_start_was_foreign = False
+
+    _FOREIGN_KINDS = frozenset({"foreign_root", "integration", "template_foreign"})
+    _TEMPLATE_KINDS = frozenset({"template_html", "template_foreign"})
 
     @property
     def template_hrefs(self) -> set[str]:
@@ -209,57 +217,135 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
     def _inside_html_template(self) -> bool:
         """Whether an anchor spelled here sits in HTML template content."""
 
-        return any(is_html for is_html, _ in self._template_stack)
+        return any(kind == "template_html" for kind, _ in self._scope_stack)
 
-    def _template_opens_html_scope(self) -> bool:
-        """Whether a <template> spelled here carries HTML template semantics.
+    def _start_tag_mode(self) -> str:
+        """Which content a start tag here is parsed as.
 
-        A bare <svg>/<math> subtree does not: a <template> there is an ordinary
-        foreign element of that name. HTML5 hands content back to the HTML
-        insertion modes at an HTML integration point, and pops out of foreign
-        content entirely at a breakout start tag, and in both cases the template
-        is a real HTML template again.
+        An HTML integration point hands start tags back to the HTML insertion
+        modes even though the element itself is foreign, so it counts as HTML
+        here - that is the whole point of an integration point.
         """
 
-        return (
-            not self._foreign_depth
-            or bool(self._integration_stack)
-            or self._broke_out_of_foreign
-        )
+        if not self._scope_stack:
+            return "html"
+        kind = self._scope_stack[-1][0]
+        return "foreign" if kind in ("foreign_root", "template_foreign") else "html"
+
+    def _end_tag_mode(self) -> str:
+        """Which rules an end tag here follows.
+
+        End tags dispatch on the current node rather than the adjusted one, so
+        an integration point still follows the foreign-content rules and can be
+        closed by its own end tag.
+        """
+
+        if not self._scope_stack:
+            return "html"
+        return "foreign" if self._scope_stack[-1][0] in self._FOREIGN_KINDS else "html"
 
     def _open_element(self, lowered: str, self_closing: bool) -> None:
-        """Apply one start tag's foreign/template scope transitions.
+        """Apply one start tag's scope transitions.
 
-        A foreign element acknowledges the self-closing flag, so <svg/> and
-        <foreignObject/> open and close in one step and leave the scopes
-        balanced. An HTML element does not: the slash is ignored, so <div/>
-        still breaks out of foreign content and <template/> still opens a
-        template scope that runs until its end tag.
+        Whether the self-closing flag means anything depends on the parse mode,
+        not on the tag name: a foreign element acknowledges it, so <svg/> and a
+        bare <foreignObject/> open and close in one step, while the very same
+        <foreignObject/> spelled inside an HTML integration point is parsed as
+        HTML, where the slash is ignored and the element stays open until its
+        end tag.
         """
 
+        mode = self._start_tag_mode()
+
         if lowered in _FOREIGN_ROOT_TAGS:
+            self._last_start_was_foreign = True
             if not self_closing:
-                self._foreign_depth += 1
-        elif self._foreign_depth and lowered in _HTML_INTEGRATION_POINT_TAGS:
-            if not self_closing:
-                self._integration_stack.append(lowered)
-        elif self._foreign_depth and lowered in _FOREIGN_BREAKOUT_TAGS:
-            self._broke_out_of_foreign = True
-        elif lowered == "template":
-            # Push foreign templates as well: only by tracking them can their own
-            # end tag be told apart from the one closing an enclosing HTML
-            # template.
-            self._template_stack.append(
-                (self._template_opens_html_scope(), self._foreign_depth)
-            )
+                self._scope_stack.append(("foreign_root", lowered))
+            return
+
+        if mode == "foreign":
+            if lowered in _HTML_INTEGRATION_POINT_TAGS:
+                self._last_start_was_foreign = True
+                if not self_closing:
+                    self._scope_stack.append(("integration", lowered))
+                return
+            if lowered in _FOREIGN_BREAKOUT_TAGS:
+                # HTML5 pops foreign elements off the stack and reprocesses the
+                # token in HTML content, so the breakout element itself is HTML.
+                while self._scope_stack and self._scope_stack[-1][0] in (
+                    "foreign_root",
+                    "template_foreign",
+                ):
+                    self._scope_stack.pop()
+                self._last_start_was_foreign = False
+                mode = "html"
+            else:
+                self._last_start_was_foreign = True
+                if lowered == "template":
+                    # An ordinary foreign element that happens to be named
+                    # template. Tracked so its own end tag closes it instead of
+                    # an enclosing HTML template's suppression scope.
+                    self._scope_stack.append(("template_foreign", lowered))
+                return
+
+        self._last_start_was_foreign = False
+        if lowered == "template":
+            self._scope_stack.append(("template_html", lowered))
+        elif lowered in _HTML_INTEGRATION_POINT_TAGS:
+            # Not an integration point here - just an HTML element sharing the
+            # name. Tracking it keeps its end tag from closing the real
+            # integration point it sits inside.
+            self._scope_stack.append(("html_shadow", lowered))
+
+    def _close_foreign(self, lowered: str) -> bool:
+        """Foreign-content end tag: pop through the matching foreign opener."""
+
+        for index in range(len(self._scope_stack) - 1, -1, -1):
+            kind, name = self._scope_stack[index]
+            if kind in self._FOREIGN_KINDS:
+                if name == lowered:
+                    del self._scope_stack[index:]
+                    return True
+                continue
+            # Reached HTML content: the token is processed by the HTML rules.
+            return False
+        # No matching opener anywhere. HTML5 ignores the token, and leaving the
+        # scopes untouched also fails closed.
+        return True
+
+    def _close_html(self, lowered: str) -> None:
+        """HTML-content end tag: it may only close an element opened in HTML mode."""
+
+        if lowered == "template":
+            # "Pop elements until a template element has been popped", so a
+            # </template> reaches its template ancestor through whatever foreign
+            # elements are still open above it. With nothing open it releases
+            # nothing at all.
+            for index in range(len(self._scope_stack) - 1, -1, -1):
+                if self._scope_stack[index][0] in self._TEMPLATE_KINDS:
+                    del self._scope_stack[index:]
+                    return
+            return
+
+        for index in range(len(self._scope_stack) - 1, -1, -1):
+            kind, name = self._scope_stack[index]
+            if kind == "html_shadow":
+                if name == lowered:
+                    del self._scope_stack[index:]
+                    return
+                continue
+            # A foreign element or a template in the way is in the special
+            # category, so HTML5 ignores the token. Leaving the scope open is
+            # also the fail-closed direction.
+            return
 
     def set_cdata_mode(self, elem: str, **kwargs) -> None:
-        # script/style/title/textarea and friends are text-only in HTML, but
-        # inside <svg>/<math> they are ordinary foreign elements whose children
-        # are markup. Staying in normal mode there keeps the raw occurrences
-        # aligned with the anchors html5lib actually builds, so an anchor cannot
-        # go unrecorded and slip past the occurrence match on the fast path.
-        if self._foreign_depth:
+        # script/style/title/textarea and friends are text-only in HTML, but as
+        # foreign elements their children are markup. Staying in normal mode for
+        # those keeps the raw occurrences aligned with the anchors html5lib
+        # actually builds, so an anchor cannot go unrecorded and slip past the
+        # occurrence match on the fast path.
+        if self._last_start_was_foreign:
             return
         super().set_cdata_mode(elem, **kwargs)
 
@@ -271,32 +357,10 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         lowered = tag.lower()
-        if lowered in _FOREIGN_ROOT_TAGS:
-            self._foreign_depth = max(0, self._foreign_depth - 1)
-            # Closing a foreign root also closes every element it still held open,
-            # so templates opened inside it can no longer swallow a </template>
-            # that belongs to an enclosing HTML template.
-            while self._template_stack and self._template_stack[-1][1] > self._foreign_depth:
-                self._template_stack.pop()
-            if not self._foreign_depth:
-                self._integration_stack.clear()
-                self._broke_out_of_foreign = False
-        elif lowered in _HTML_INTEGRATION_POINT_TAGS:
-            # Only the integration point actually on top can be closed. HTML5
-            # walks the open elements looking for a match and ignores an end tag
-            # that names something else, so a stray </title> inside foreignObject
-            # leaves the integration point open. Refusing to pop on a mismatch
-            # also fails closed: we keep treating the region as HTML content, so
-            # a <template> there still suppresses its anchors.
-            if self._integration_stack and self._integration_stack[-1] == lowered:
-                self._integration_stack.pop()
-        elif lowered == "template":
-            # Close only the innermost open template. A foreign <template>'s end
-            # tag therefore closes that element rather than releasing an
-            # enclosing HTML template's suppression scope, and a stray
-            # </template> with nothing open releases nothing at all.
-            if self._template_stack:
-                self._template_stack.pop()
+        self._last_start_was_foreign = False
+        if self._end_tag_mode() == "foreign" and self._close_foreign(lowered):
+            return
+        self._close_html(lowered)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lowered = tag.lower()

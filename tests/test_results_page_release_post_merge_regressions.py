@@ -3,7 +3,10 @@ from __future__ import annotations
 import unittest
 
 from trading_system.official_release_source_repository import OfficialReleaseSource
-from trading_system.results_page_release_candidates import extract_results_page_candidates
+from trading_system.results_page_release_candidates import (
+    _RawAnchorHrefSafetyScanner,
+    extract_results_page_candidates,
+)
 
 
 class ResultsPageReleasePostMergeRegressionTests(unittest.TestCase):
@@ -756,6 +759,108 @@ class ResultsPageReleasePostMergeRegressionTests(unittest.TestCase):
         self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
         self.assertEqual(candidates[0].evidence_fields, ("Annual report",))
 
+    def test_foreign_root_end_tag_pops_through_its_matching_opener(self):
+        """</svg> closes every foreign root it still holds open, not just one level.
+
+        HTML5 walks the open elements to the matching svg opener and pops
+        through it, so the <template> after it is back in HTML content and its
+        anchor is template-local.
+        """
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report'
+            '<svg><math></svg>'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+
+    def test_foreign_root_end_tag_pops_through_the_other_nesting_order(self):
+        """The rule is the matching opener, not a preference for svg over math."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report'
+            '<math><svg></math>'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+
+    def test_foreign_roots_closed_in_order_leave_html_content(self):
+        """The well-formed LIFO close still ends up back in HTML content."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report'
+            '<svg><math></math></svg>'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+
+    def test_unmatched_foreign_root_end_tag_leaves_the_scope_alone(self):
+        """</math> with no math open is ignored rather than guessed at.
+
+        The SVG root stays open, so the breakout tag is what returns the
+        following template to HTML content.
+        """
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report'
+            '<svg></math><div>'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</div></svg>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+
+    def test_self_closing_child_of_an_integration_point_is_parsed_as_html(self):
+        """Inside foreignObject the slash is ignored, so the inner element opens.
+
+        The first </foreignObject> then closes that inner HTML element and the
+        outer SVG integration point stays active, which keeps the following
+        <template> an HTML template.
+        """
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report'
+            '<svg><foreignObject>'
+            '<foreignObject/></foreignObject>'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</foreignObject></svg>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+
+    def test_self_closing_meaning_follows_the_parse_mode_not_the_tag_name(self):
+        """Every integration-point name behaves this way inside an integration point."""
+
+        for tag in ("desc", "mi", "mtext", "title", "annotation-xml"):
+            with self.subTest(tag=tag):
+                candidates = extract_results_page_candidates(
+                    self._source(),
+                    '<a href="/q">Report'
+                    '<svg><foreignObject>'
+                    f'<{tag}/></{tag}>'
+                    '<template><a href="/release.pdf">Q2-2026</a></template>'
+                    '</foreignObject></svg>'
+                    '</a>',
+                )
+                self.assertEqual(len(candidates), 1)
+                self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+                self.assertEqual(candidates[0].evidence_fields, ("Report",))
+
     def test_svg_template_is_not_html_template_suppression(self):
         candidates = extract_results_page_candidates(
             self._source(),
@@ -775,6 +880,92 @@ class ResultsPageReleasePostMergeRegressionTests(unittest.TestCase):
         )
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+
+
+class ResultsPageReleaseScopeClassificationTests(unittest.TestCase):
+    """Classification of anchor occurrences, at the scanner rather than the tree.
+
+    html5lib sometimes leaves a misclassified anchor nested where the visible
+    walk drops it anyway, so a leak is not always observable in the candidates.
+    These pin the classification itself, which is what suppression relies on.
+    """
+
+    def _template_local(self, html: str, href: str = "/release.pdf") -> list[bool]:
+        scanner = _RawAnchorHrefSafetyScanner()
+        scanner.feed(html)
+        scanner.close()
+        return scanner.anchor_occurrences.get(href, [])
+
+    def test_self_closing_child_of_integration_point_keeps_the_scope_open(self):
+        self.assertEqual(
+            self._template_local(
+                '<svg><foreignObject><foreignObject/></foreignObject>'
+                '<template><a href="/release.pdf">Q2-2026</a></template>'
+                '</foreignObject></svg>'
+            ),
+            [True],
+        )
+
+    def test_bare_self_closing_foreign_element_still_closes_its_scope(self):
+        self.assertEqual(
+            self._template_local(
+                '<svg><foreignObject/>'
+                '<template><a href="/release.pdf">Q2-2026</a></template>'
+                '</svg>'
+            ),
+            [False],
+        )
+
+    def test_foreign_root_end_tag_pops_through_the_matching_opener(self):
+        self.assertEqual(
+            self._template_local(
+                '<svg><math></svg>'
+                '<template><a href="/release.pdf">Q2-2026</a></template>'
+            ),
+            [True],
+        )
+
+    def test_unmatched_foreign_root_end_tag_changes_nothing(self):
+        self.assertEqual(
+            self._template_local(
+                '<svg></math>'
+                '<template><a href="/release.pdf">Q2-2026</a></template>'
+            ),
+            [False],
+        )
+
+    def test_mismatched_integration_point_close_keeps_the_scope_open(self):
+        self.assertEqual(
+            self._template_local(
+                '<svg><foreignObject><mi></foreignObject>'
+                '<template><a href="/release.pdf">Q2-2026</a></template>'
+                '</svg>'
+            ),
+            [True],
+        )
+
+    def test_bare_foreign_template_stays_foreign(self):
+        self.assertEqual(
+            self._template_local(
+                '<svg><template><div><a href="/release.pdf">Q2-2026</a></div></template></svg>'
+            ),
+            [False],
+        )
+
+    def test_foreign_elements_hold_markup_while_html_text_elements_do_not(self):
+        # <svg><script> is a foreign element whose children are markup, so the
+        # anchor is recorded; inside foreignObject the same tag is HTML raw text.
+        self.assertEqual(
+            self._template_local('<svg><script><a href="/release.pdf">Q2-2026</a></script></svg>'),
+            [False],
+        )
+        self.assertEqual(
+            self._template_local(
+                '<svg><foreignObject><script><a href="/release.pdf">Q2-2026</a></script>'
+                '</foreignObject></svg>'
+            ),
+            [],
+        )
 
 
 if __name__ == "__main__":
