@@ -184,7 +184,7 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
         # content and, separately, inside a template.
         self.anchor_occurrences: dict[str, list[bool]] = {}
         self._foreign_depth = 0
-        self._integration_depth = 0
+        self._integration_stack: list[str] = []
         self._broke_out_of_foreign = False
         self._template_depth = 0
 
@@ -214,15 +214,26 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
 
         return (
             not self._foreign_depth
-            or self._integration_depth > 0
+            or bool(self._integration_stack)
             or self._broke_out_of_foreign
         )
 
-    def _open_element(self, lowered: str) -> None:
+    def _open_element(self, lowered: str, self_closing: bool) -> None:
+        """Apply one start tag's foreign/template scope transitions.
+
+        A foreign element acknowledges the self-closing flag, so <svg/> and
+        <foreignObject/> open and close in one step and leave the scopes
+        balanced. An HTML element does not: the slash is ignored, so <div/>
+        still breaks out of foreign content and <template/> still opens a
+        template scope that runs until its end tag.
+        """
+
         if lowered in _FOREIGN_ROOT_TAGS:
-            self._foreign_depth += 1
+            if not self_closing:
+                self._foreign_depth += 1
         elif self._foreign_depth and lowered in _HTML_INTEGRATION_POINT_TAGS:
-            self._integration_depth += 1
+            if not self_closing:
+                self._integration_stack.append(lowered)
         elif self._foreign_depth and lowered in _FOREIGN_BREAKOUT_TAGS:
             self._broke_out_of_foreign = True
         elif lowered == "template" and self._in_html_template_scope():
@@ -240,7 +251,7 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lowered = tag.lower()
-        self._open_element(lowered)
+        self._open_element(lowered, self_closing=False)
         if lowered == "a":
             self._record_anchor(attrs)
 
@@ -249,21 +260,28 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
         if lowered in _FOREIGN_ROOT_TAGS:
             self._foreign_depth = max(0, self._foreign_depth - 1)
             if not self._foreign_depth:
+                self._integration_stack.clear()
                 self._broke_out_of_foreign = False
-        elif self._integration_depth and lowered in _HTML_INTEGRATION_POINT_TAGS:
-            self._integration_depth -= 1
+        elif lowered in _HTML_INTEGRATION_POINT_TAGS:
+            # Only the integration point actually on top can be closed. HTML5
+            # walks the open elements looking for a match and ignores an end tag
+            # that names something else, so a stray </title> inside foreignObject
+            # leaves the integration point open. Refusing to pop on a mismatch
+            # also fails closed: we keep treating the region as HTML content, so
+            # a <template> there still suppresses its anchors.
+            if self._integration_stack and self._integration_stack[-1] == lowered:
+                self._integration_stack.pop()
         elif lowered == "template":
             self._template_depth = max(0, self._template_depth - 1)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lowered = tag.lower()
-        # HTML has no self-closing syntax for ordinary elements: "<template/>" is
-        # a plain <template> start tag that keeps its scope open until the
-        # matching </template>. <svg/>/<math/> are foreign elements, where the
-        # self-closing flag *is* acknowledged, so their scope opens and closes in
-        # one step and the depth stays balanced.
-        if lowered == "template":
-            self._open_element(lowered)
+        # A self-closing start tag runs the same scope transitions as an ordinary
+        # one; _open_element is what knows which elements actually acknowledge
+        # the flag. In particular "<div/>" in foreign content is an HTML element
+        # whose slash is ignored, so it still breaks out, and "<template/>" still
+        # opens a template scope.
+        self._open_element(lowered, self_closing=True)
         if lowered == "a":
             self._record_anchor(attrs)
 

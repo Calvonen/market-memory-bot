@@ -499,6 +499,155 @@ class ResultsPageReleasePostMergeRegressionTests(unittest.TestCase):
         self.assertEqual(candidates[0].evidence_fields, ("Annual",))
         self.assertNotIn("Q2-2026", candidates[0].evidence_fields)
 
+    def test_self_closing_breakout_tag_still_breaks_out_of_foreign_content(self):
+        """<div/> is an HTML element, so the slash is ignored and it still breaks out.
+
+        Only foreign elements acknowledge the self-closing flag. A self-closing
+        breakout tag therefore leaves foreign content exactly like the ordinary
+        spelling, and the <template> after it is a real HTML template.
+        """
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report'
+            '<svg><div/>'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</svg>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+
+    def test_self_closing_breakout_variants_all_break_out_of_foreign_content(self):
+        """The rule is the breakout list, not a special case for <div/>."""
+
+        for tag in ("span", "b", "br", "hr", "img", "table", "p", "font"):
+            with self.subTest(tag=tag):
+                candidates = extract_results_page_candidates(
+                    self._source(),
+                    '<a href="/q">Report'
+                    f'<svg><{tag}/>'
+                    '<template><a href="/release.pdf">Q2-2026</a></template>'
+                    '</svg>'
+                    '</a>',
+                )
+                self.assertEqual(len(candidates), 1)
+                self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+                self.assertEqual(candidates[0].evidence_fields, ("Report",))
+
+    def test_self_closing_foreign_element_still_balances_its_scope(self):
+        """A foreign element does acknowledge the flag, so <foreignObject/> closes.
+
+        The template that follows is back in bare SVG content, where <template>
+        has no HTML template semantics, so its anchor is not suppressed as
+        template content.
+        """
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<svg><foreignObject/>'
+            '<template><div><a href="/release.pdf">Q2-2026</a></div></template>'
+            '</svg>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+        self.assertEqual(candidates[0].evidence_fields, ("Q2-2026",))
+
+    def test_unmatched_integration_point_end_tag_keeps_the_scope_open(self):
+        """A stray </title> inside foreignObject does not close the integration point.
+
+        HTML5 walks the open elements for a match and ignores an end tag naming
+        something else, so the region stays HTML content and the <template> after
+        it still suppresses its anchor.
+        """
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report'
+            '<svg><foreignObject></title>'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</foreignObject></svg>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+
+    def test_unmatched_integration_point_end_tag_does_not_leak_to_a_visible_twin(self):
+        """The shape where the stray end tag actually let hidden evidence through."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/release.pdf">Annual</a>'
+            '<a href="/q">Report'
+            '<svg><desc></title>'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</desc></svg>'
+            '</a>',
+        )
+        self.assertEqual(
+            [candidate.source_url for candidate in candidates],
+            [
+                "https://investor.example.com/release.pdf",
+                "https://investor.example.com/q",
+            ],
+        )
+        self.assertEqual(candidates[0].evidence_fields, ("Annual",))
+        self.assertNotIn("Q2-2026", candidates[0].evidence_fields)
+
+    def test_matching_integration_point_end_tag_closes_the_scope(self):
+        """A correct </foreignObject> returns to bare SVG content.
+
+        The first template is inside the integration point and is suppressed; the
+        second is an ordinary SVG element of that name, so the anchor a breakout
+        tag pulls out of it stays a candidate.
+        """
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<svg>'
+            '<foreignObject>'
+            '<template><a href="/hidden.pdf">Q2-2026</a></template>'
+            '</foreignObject>'
+            '<template><div><a href="/release.pdf">Annual report</a></div></template>'
+            '</svg>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+        self.assertEqual(candidates[0].evidence_fields, ("Annual report",))
+
+    def test_nested_integration_points_keep_template_suppression(self):
+        """annotation-xml holding an SVG foreignObject is still HTML content."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report'
+            '<math><annotation-xml><svg><foreignObject>'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</foreignObject></svg></annotation-xml></math>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+
+    def test_mismatched_integration_point_nesting_fails_closed(self):
+        """A malformed close over an inner integration point must not open evidence.
+
+        </foreignObject> arrives while <mi> is the open integration point. The
+        scanner refuses to pop on a mismatch instead of guessing which scope the
+        end tag belongs to, so the region keeps HTML template semantics and the
+        anchor stays suppressed.
+        """
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report'
+            '<svg><foreignObject><mi></foreignObject>'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</svg>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+
     def test_svg_template_is_not_html_template_suppression(self):
         candidates = extract_results_page_candidates(
             self._source(),
