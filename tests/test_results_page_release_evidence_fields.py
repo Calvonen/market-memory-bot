@@ -231,6 +231,27 @@ class ResultsPageReleaseEvidenceFieldTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.SELECTED)
 
+    def test_non_void_startend_child_stays_open_under_hidden_ancestor(self):
+        html = (
+            '<div hidden><div/>x</div><a href="/hidden.pdf">Q2-2026</a></div>'
+            '<a href="/visible.pdf">Annual report</a>'
+        )
+        candidates = extract_results_page_candidates(self._source(), html)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/visible.pdf")
+
+    def test_implied_li_close_respects_nested_list_scope(self):
+        html = '<ul><li hidden>old<ul><li><a href="/hidden.pdf">Q2-2026</a></li></ul></li></ul>'
+        candidates = extract_results_page_candidates(self._source(), html)
+        self.assertEqual(candidates, ())
+
+    def test_figure_start_impliedly_closes_hidden_p(self):
+        html = '<p hidden>old<figure><a href="/release.pdf">Q2-2026</a></figure>'
+        candidates = extract_results_page_candidates(self._source(), html)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+        self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.SELECTED)
+
 
 if __name__ == "__main__":
     unittest.main()
