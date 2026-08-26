@@ -80,6 +80,26 @@ class ManualOfficialReleaseProviderTests(unittest.TestCase):
         self.assertIn("–", document.raw_text)
         self.assertNotIn("�", document.raw_text)
 
+    def test_html_bom_overrides_conflicting_http_charset(self) -> None:
+        source = self._source()
+        text = "Tulos parani – näkymä vakaa. " * 30
+        payload = b"\xef\xbb\xbf" + (
+            "<html><body>" + text + "</body></html>"
+        ).encode("utf-8")
+        provider = ManualOfficialReleaseProvider(source)
+
+        with patch.object(
+            provider,
+            "_fetch_bytes",
+            return_value=(payload, "text/html", "windows-1252"),
+        ):
+            document = provider.discover(self.EVENT_ID)
+
+        self.assertIsNotNone(document)
+        assert document is not None
+        self.assertIn("–", document.raw_text)
+        self.assertNotIn("ï»¿", document.raw_text)
+
     def test_commented_meta_charset_is_ignored(self) -> None:
         source = self._source()
         text = "Tulos parani – näkymä vakaa. " * 30
@@ -163,7 +183,7 @@ class ManualOfficialReleaseProviderTests(unittest.TestCase):
         reader.pages = [MagicMock()] * (ManualOfficialReleaseProvider.MAX_PDF_PAGES + 1)
         with patch("trading_system.manual_release_ingestion.PdfReader", return_value=reader):
             with self.assertRaisesRegex(RuntimeError, "exceeds page limit"):
-                ManualOfficialReleaseProvider._extract_pdf_text(b"%PDF-1.7")
+                ManualOfficialReleaseProvider._extract_pdf_text_in_process(b"%PDF-1.7")
         for page in reader.pages:
             page.extract_text.assert_not_called()
 
@@ -176,9 +196,25 @@ class ManualOfficialReleaseProviderTests(unittest.TestCase):
         reader.pages = [first, second]
         with patch("trading_system.manual_release_ingestion.PdfReader", return_value=reader):
             with self.assertRaisesRegex(RuntimeError, "extracted text exceeds size limit"):
-                ManualOfficialReleaseProvider._extract_pdf_text(b"%PDF-1.7")
+                ManualOfficialReleaseProvider._extract_pdf_text_in_process(b"%PDF-1.7")
         first.extract_text.assert_called_once()
         second.extract_text.assert_called_once()
+
+    def test_pdf_extraction_process_timeout_is_contextual_failure(self) -> None:
+        fake_context = MagicMock()
+        recv_conn = MagicMock()
+        send_conn = MagicMock()
+        fake_context.Pipe.return_value = (recv_conn, send_conn)
+        process = MagicMock()
+        fake_context.Process.return_value = process
+        recv_conn.poll.return_value = False
+
+        with patch("trading_system.manual_release_ingestion.multiprocessing.get_context", return_value=fake_context):
+            with self.assertRaisesRegex(RuntimeError, "exceeded resource limit"):
+                ManualOfficialReleaseProvider._extract_pdf_text(b"%PDF-1.7")
+
+        process.terminate.assert_called_once()
+        process.join.assert_called()
 
     def test_binary_or_structured_payload_is_rejected(self) -> None:
         source = self._source("https://investor.example.com/download")
