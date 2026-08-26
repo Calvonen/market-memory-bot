@@ -96,6 +96,21 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             ["https://investor.example.com/valid.pdf"],
         )
 
+    def test_rejects_control_characters_before_stripping_href(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            """
+            <a href="https://investor.example.com/release.pdf&#10;">trailing newline</a>
+            <a href="&#9;/release2.pdf">leading tab</a>
+            <a href="/valid.pdf">valid</a>
+            """,
+        )
+
+        self.assertEqual(
+            [candidate.source_url for candidate in candidates],
+            ["https://investor.example.com/valid.pdf"],
+        )
+
     def test_canonicalizes_authority_before_deduplicating(self):
         candidates = extract_results_page_candidates(
             self._source(),
@@ -103,6 +118,23 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             <a href="https://INVESTOR.EXAMPLE.COM/release.pdf">first</a>
             <a href="https://investor.example.com:443/release.pdf">second</a>
             <a href="/release.pdf">third</a>
+            """,
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(
+            candidates[0].source_url,
+            "https://investor.example.com/release.pdf",
+        )
+        self.assertEqual(candidates[0].source_title, "first")
+
+    def test_normalizes_dot_segments_before_self_page_and_deduplication(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            """
+            <a href="https://investor.example.com/archive/../results">same page</a>
+            <a href="https://investor.example.com/archive/../release.pdf">first</a>
+            <a href="/release.pdf">duplicate</a>
             """,
         )
 
