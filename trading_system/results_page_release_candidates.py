@@ -18,6 +18,7 @@ _RAW_HREF_RE = re.compile(
     re.IGNORECASE,
 )
 _NUMERIC_ENTITY_RE = re.compile(r"&#(?:x([0-9a-fA-F]+)|([0-9]+));?")
+_NUL_ENTITY_RE = re.compile(r"&#(?:[xX]0+(?![0-9A-Fa-f])|0+(?![0-9]));?")
 _RENDERED_BREAK_TAGS = frozenset(
     {
         "address", "article", "aside", "blockquote", "br", "center", "dd", "details", "dialog",
@@ -27,7 +28,7 @@ _RENDERED_BREAK_TAGS = frozenset(
         "tbody", "td", "tfoot", "th", "thead", "tr", "ul", "xmp",
     }
 )
-_NON_RENDERED_TAGS = frozenset({"script", "style", "template"})
+_NON_RENDERED_TAGS = frozenset({"iframe", "script", "style", "template"})
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,11 @@ def _safe_normalized_text(value: str) -> str | None:
     if _contains_text_control(value):
         return None
     return _normalized_text(value)
+
+
+def _preserve_nul_as_control(html_text: str) -> str:
+    """Keep NUL evidence detectable instead of letting html5lib replace it with U+FFFD."""
+    return _NUL_ENTITY_RE.sub("\u000b", html_text.replace("\x00", "\u000b"))
 
 
 class _RawAnchorHrefSafetyScanner(HTMLParser):
@@ -186,7 +192,7 @@ def _parse_html5_links(html_text: str) -> list[tuple[str, str | None, tuple[str,
     safety_scanner.close()
 
     fragment = html5lib.parseFragment(
-        html_text,
+        _preserve_nul_as_control(html_text),
         treebuilder="etree",
         namespaceHTMLElements=True,
     )
