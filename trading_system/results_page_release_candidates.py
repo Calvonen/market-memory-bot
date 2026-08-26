@@ -18,7 +18,7 @@ _RAW_HREF_RE = re.compile(
     r"\bhref\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'=<>`]+))",
     re.IGNORECASE,
 )
-_NUMERIC_ENTITY_RE = re.compile(r"&#(?:x([0-9a-fA-F]+)|([0-9]+));?")
+_NUMERIC_ENTITY_RE = re.compile(r"&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));?")
 _RENDERED_BREAK_TAGS = frozenset(
     {
         "address", "article", "aside", "blockquote", "br", "center", "dd", "details", "dialog",
@@ -28,7 +28,7 @@ _RENDERED_BREAK_TAGS = frozenset(
         "tbody", "td", "tfoot", "th", "thead", "tr", "ul", "xmp",
     }
 )
-_NON_RENDERED_TAGS = frozenset({"iframe", "script", "style", "template", "title"})
+_NON_RENDERED_TAGS = frozenset({"canvas", "iframe", "script", "style", "template", "title"})
 
 
 @dataclass(frozen=True)
