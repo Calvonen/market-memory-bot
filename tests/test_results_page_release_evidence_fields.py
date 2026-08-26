@@ -29,15 +29,17 @@ class ResultsPageReleaseEvidenceFieldTests(unittest.TestCase):
             status=CalendarEventStatus.TRACKED,
         )
 
-    def test_extractor_preserves_original_anchor_evidence_fields(self):
-        source = OfficialReleaseSource(
+    def _source(self) -> OfficialReleaseSource:
+        return OfficialReleaseSource(
             event_id="calendar:test-event",
             source_kind="results_page",
             source_url="https://investor.example.com/results",
             version=1,
         )
+
+    def test_extractor_preserves_original_anchor_evidence_fields(self):
         candidates = extract_results_page_candidates(
-            source,
+            self._source(),
             '<a href="/release.pdf" aria-label="Q2" title="2026">Results</a>',
         )
 
@@ -66,6 +68,36 @@ class ResultsPageReleaseEvidenceFieldTests(unittest.TestCase):
                     release_period="Q2 2026",
                 )
                 self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_unicode_format_controls_are_token_adjacency(self):
+        for title in ("A\u200cQ2-2026", "Q2-2026\u200dA"):
+            with self.subTest(title=title):
+                candidate = ResultsPageReleaseCandidate(
+                    event_id="calendar:test-event",
+                    source_url="https://investor.example.com/release.pdf",
+                    source_title=title,
+                )
+                selection = select_results_page_release_candidate(
+                    self._event(),
+                    (candidate,),
+                    release_period="Q2 2026",
+                )
+                self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_visible_text_nodes_preserve_adjacency(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/release.pdf"><span>A</span><span>Q2-2026</span></a>',
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].evidence_fields, ("AQ2-2026",))
+        selection = select_results_page_release_candidate(
+            self._event(),
+            candidates,
+            release_period="Q2 2026",
+        )
+        self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
 
 
 if __name__ == "__main__":
