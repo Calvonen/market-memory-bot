@@ -138,7 +138,7 @@ class ResultsPageReleaseParserScopeRegressionTests(unittest.TestCase):
         )
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
-        self.assertEqual(candidates[0].evidence_fields, ("Reporticon Q2-2026",))
+        self.assertEqual(candidates[0].evidence_fields, ("Report", "Q2-2026"))
 
     def test_foreignobject_anchor_still_uses_html_nested_anchor_repair(self):
         candidates = extract_results_page_candidates(
@@ -158,7 +158,7 @@ class ResultsPageReleaseParserScopeRegressionTests(unittest.TestCase):
         )
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
-        self.assertEqual(candidates[0].evidence_fields, ("Reporticon Q2-2026",))
+        self.assertEqual(candidates[0].evidence_fields, ("Report", "Q2-2026"))
 
     def test_html_breakout_tag_exits_svg_content_before_nested_anchor_repair(self):
         candidates = extract_results_page_candidates(
@@ -178,7 +178,7 @@ class ResultsPageReleaseParserScopeRegressionTests(unittest.TestCase):
         )
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
-        self.assertEqual(candidates[0].evidence_fields, ("ReportQ2-2026",))
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
 
     def test_foreign_p_endtag_breakout_reprocesses_following_anchor_as_html(self):
         candidates = extract_results_page_candidates(
