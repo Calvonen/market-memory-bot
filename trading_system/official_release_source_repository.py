@@ -60,8 +60,7 @@ class OfficialReleaseSource:
             parsed.scheme != "https"
             or not parsed.hostname
             or not _is_valid_host(parsed.hostname)
-            or parsed.username
-            or parsed.password
+            or "@" in parsed.netloc
             or (parsed_port is not None and not 1 <= parsed_port <= 65535)
         ):
             raise ValueError("official release source_url must be an absolute HTTPS URL with a valid host and no credentials")
