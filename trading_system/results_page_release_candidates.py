@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import posixpath
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse, urlunparse
@@ -67,6 +68,18 @@ def _https_origin(url: str) -> tuple[str, str, int] | None:
     return "https", host.lower(), 443 if port is None else port
 
 
+def _normalize_url_path(path: str) -> str:
+    if not path:
+        return "/"
+    trailing_slash = path.endswith("/")
+    normalized = posixpath.normpath(path)
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    if trailing_slash and normalized != "/":
+        normalized += "/"
+    return normalized
+
+
 def _canonical_https_url(url: str) -> str | None:
     try:
         parsed = urlparse(url)
@@ -86,7 +99,7 @@ def _canonical_https_url(url: str) -> str | None:
         is_ipv6 = False
     rendered_host = f"[{canonical_host}]" if is_ipv6 else canonical_host
     canonical_netloc = rendered_host if port in (None, 443) else f"{rendered_host}:{port}"
-    canonical_path = parsed.path or "/"
+    canonical_path = _normalize_url_path(parsed.path)
     return urlunparse(
         (
             "https",
@@ -100,12 +113,12 @@ def _canonical_https_url(url: str) -> str | None:
 
 
 def _canonical_candidate_url(base_url: str, href: str) -> str | None:
-    raw_href = href.strip()
-    # urllib intentionally strips ASCII tab/CR/LF during parsing. Reject those
-    # bytes before URL normalization so a malformed authority cannot be
-    # transformed into the approved origin.
-    if any(control in raw_href for control in ("\t", "\r", "\n")):
+    # urllib intentionally strips ASCII tab/CR/LF during parsing. Inspect the
+    # parser-provided href before whitespace trimming so controls at either end
+    # also fail closed instead of disappearing via strip().
+    if any(control in href for control in ("\t", "\r", "\n")):
         return None
+    raw_href = href.strip()
 
     try:
         candidate = urljoin(base_url, raw_href)
