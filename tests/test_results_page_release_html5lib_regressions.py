@@ -38,3 +38,13 @@ def test_reconstructed_anchor_fragments_keep_evidence_fields_separate() -> None:
     assert len(candidates) == 1
     assert candidates[0].source_url == "https://example.com/q"
     assert candidates[0].evidence_fields == ("Q2", "2026")
+
+
+def test_hidden_rendered_break_does_not_create_period_boundary() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<a href="/r">A<br hidden>Q2-2026</a>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ("AQ2-2026",)
