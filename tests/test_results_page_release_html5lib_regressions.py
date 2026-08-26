@@ -108,3 +108,31 @@ def test_iframe_fallback_text_is_not_release_evidence() -> None:
     assert len(candidates) == 1
     assert candidates[0].source_url == "https://example.com/r"
     assert candidates[0].evidence_fields == ("Annual",)
+
+
+def test_html_formatting_whitespace_remains_valid_evidence() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<a href="/r">\n\tQ2-2026\r\n</a>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ("Q2-2026",)
+
+
+def test_closed_dialog_suppresses_descendant_release_anchor() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<dialog><a href="/r">Q2-2026</a></dialog>',
+    )
+    assert candidates == ()
+
+
+def test_open_dialog_keeps_descendant_release_anchor_visible() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<dialog open><a href="/r">Q2-2026</a></dialog>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ("Q2-2026",)
