@@ -380,6 +380,125 @@ class ResultsPageReleasePostMergeRegressionTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
 
+    def test_template_inside_svg_integration_point_is_html_template(self):
+        """foreignObject hands content back to HTML, so <template> there suppresses.
+
+        Foreign depth alone is too coarse a test for template semantics: an HTML
+        integration point restores HTML tree construction while the SVG root is
+        still open.
+        """
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">'
+            '<svg><foreignObject>'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</foreignObject></svg>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ())
+
+    def test_self_closing_template_inside_svg_integration_point_is_html_template(self):
+        """The <template/> spelling opens the same scope inside foreignObject."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">'
+            '<svg><foreignObject>'
+            '<template/><a href="/release.pdf">Q2-2026</a></template>'
+            '</foreignObject></svg>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ())
+
+    def test_hoisted_integration_point_template_anchor_does_not_leak(self):
+        """The same template, in the shape where html5lib actually hoists it out."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report'
+            '<svg><foreignObject>'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</foreignObject></svg>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+
+    def test_template_after_a_foreign_breakout_tag_is_html_template(self):
+        """A breakout start tag pops out of foreign content before the template."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report'
+            '<svg><div>'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</div></svg>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+
+    def test_template_inside_mathml_integration_point_is_html_template(self):
+        """MathML text integration points restore HTML tree construction too."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report'
+            '<math><mtext>'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</mtext></math>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+
+    def test_template_inside_svg_title_is_html_template(self):
+        """<svg><title> holds markup, not the text-only content HTML gives <title>.
+
+        The raw scanner must not drop into text-only mode inside foreign content,
+        or the anchor goes unrecorded and never reaches the occurrence match.
+        """
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report'
+            '<svg><title>'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</title></svg>'
+            '</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+
+    def test_integration_point_template_does_not_suppress_a_rendered_twin(self):
+        """Only the template occurrence goes, even inside an integration point."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/release.pdf">Annual</a>'
+            '<a href="/q">Report'
+            '<svg><foreignObject>'
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '</foreignObject></svg>'
+            '</a>',
+        )
+        self.assertEqual(
+            [candidate.source_url for candidate in candidates],
+            [
+                "https://investor.example.com/release.pdf",
+                "https://investor.example.com/q",
+            ],
+        )
+        self.assertEqual(candidates[0].evidence_fields, ("Annual",))
+        self.assertNotIn("Q2-2026", candidates[0].evidence_fields)
+
     def test_svg_template_is_not_html_template_suppression(self):
         candidates = extract_results_page_candidates(
             self._source(),

@@ -37,6 +37,28 @@ _SIMPLE_HTML_TEXT_TAGS = frozenset(
     }
 )
 _FOREIGN_ROOT_TAGS = frozenset({"svg", "math"})
+# Inside these, HTML5 tree construction hands content back to the HTML insertion
+# modes, so a <template> spelled there is a real HTML template. annotation-xml is
+# only an integration point for an html/xhtml encoding, and the MathML text
+# integration points belong to MathML while desc/title/foreignObject belong to
+# SVG; the scanner does not distinguish, which only ever opens more template
+# scopes than strictly necessary - the fail-closed direction.
+_HTML_INTEGRATION_POINT_TAGS = frozenset(
+    {
+        "annotation-xml", "desc", "foreignobject", "mi", "mn", "mo", "ms", "mtext", "title",
+    }
+)
+# HTML5 pops out of foreign content when one of these start tags appears there, so
+# a <template> after one of them is an HTML template rather than an SVG/MathML
+# element of the same name.
+_FOREIGN_BREAKOUT_TAGS = frozenset(
+    {
+        "b", "big", "blockquote", "body", "br", "center", "code", "dd", "div", "dl", "dt",
+        "em", "embed", "font", "h1", "h2", "h3", "h4", "h5", "h6", "head", "hr", "i", "img",
+        "li", "listing", "menu", "meta", "nobr", "ol", "p", "pre", "ruby", "s", "small",
+        "span", "strong", "strike", "sub", "sup", "table", "tt", "u", "ul", "var",
+    }
+)
 _RENDERED_BREAK_TAGS = frozenset(
     {
         "address", "article", "aside", "blockquote", "br", "caption", "center", "dd", "details", "dialog",
@@ -162,6 +184,8 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
         # content and, separately, inside a template.
         self.anchor_occurrences: dict[str, list[bool]] = {}
         self._foreign_depth = 0
+        self._integration_depth = 0
+        self._broke_out_of_foreign = False
         self._template_depth = 0
 
     @property
@@ -178,13 +202,41 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
         for href in hrefs:
             self.anchor_occurrences.setdefault(href, []).append(bool(self._template_depth))
 
+    def _in_html_template_scope(self) -> bool:
+        """Whether a <template> spelled here carries HTML template semantics.
+
+        A bare <svg>/<math> subtree does not: a <template> there is an ordinary
+        foreign element of that name. HTML5 hands content back to the HTML
+        insertion modes at an HTML integration point, and pops out of foreign
+        content entirely at a breakout start tag, and in both cases the template
+        is a real HTML template again.
+        """
+
+        return (
+            not self._foreign_depth
+            or self._integration_depth > 0
+            or self._broke_out_of_foreign
+        )
+
     def _open_element(self, lowered: str) -> None:
         if lowered in _FOREIGN_ROOT_TAGS:
             self._foreign_depth += 1
-        elif lowered == "template" and not self._foreign_depth:
-            # <svg>/<math> subtrees have no HTML template semantics, so only a
-            # template spelled in HTML content suppresses its anchors.
+        elif self._foreign_depth and lowered in _HTML_INTEGRATION_POINT_TAGS:
+            self._integration_depth += 1
+        elif self._foreign_depth and lowered in _FOREIGN_BREAKOUT_TAGS:
+            self._broke_out_of_foreign = True
+        elif lowered == "template" and self._in_html_template_scope():
             self._template_depth += 1
+
+    def set_cdata_mode(self, elem: str, **kwargs) -> None:
+        # script/style/title/textarea and friends are text-only in HTML, but
+        # inside <svg>/<math> they are ordinary foreign elements whose children
+        # are markup. Staying in normal mode there keeps the raw occurrences
+        # aligned with the anchors html5lib actually builds, so an anchor cannot
+        # go unrecorded and slip past the occurrence match on the fast path.
+        if self._foreign_depth:
+            return
+        super().set_cdata_mode(elem, **kwargs)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lowered = tag.lower()
@@ -196,6 +248,10 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
         lowered = tag.lower()
         if lowered in _FOREIGN_ROOT_TAGS:
             self._foreign_depth = max(0, self._foreign_depth - 1)
+            if not self._foreign_depth:
+                self._broke_out_of_foreign = False
+        elif self._integration_depth and lowered in _HTML_INTEGRATION_POINT_TAGS:
+            self._integration_depth -= 1
         elif lowered == "template":
             self._template_depth = max(0, self._template_depth - 1)
 
