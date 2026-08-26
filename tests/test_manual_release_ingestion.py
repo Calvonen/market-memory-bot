@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from trading_system.manual_release_ingestion import ManualOfficialReleaseProvider
 from trading_system.official_release_source_repository import OfficialReleaseSource
@@ -149,6 +149,49 @@ class ManualOfficialReleaseProviderTests(unittest.TestCase):
         binary_provider = _Provider(source, b"PK" + b"x" * 700, "")
         with self.assertRaisesRegex(RuntimeError, "unsupported content type"):
             binary_provider.discover(self.EVENT_ID)
+
+    def test_same_host_https_redirect_is_allowed(self) -> None:
+        source = OfficialReleaseSource(
+            self.EVENT_ID,
+            "direct_url",
+            "https://investor.example.com/results",
+            version=1,
+        )
+        provider = ManualOfficialReleaseProvider(source)
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        response.geturl.return_value = "https://investor.example.com/results/final?download=1"
+        response.headers.get.return_value = "text/html"
+        response.headers.get_content_charset.return_value = "utf-8"
+        response.read.return_value = ("<html><body>" + ("Results improved. " * 40) + "</body></html>").encode("utf-8")
+
+        with patch("trading_system.manual_release_ingestion.urlopen", return_value=response):
+            document = provider.discover(self.EVENT_ID)
+
+        self.assertIsNotNone(document)
+
+    def test_redirect_to_unapproved_host_or_scheme_is_rejected(self) -> None:
+        source = OfficialReleaseSource(
+            self.EVENT_ID,
+            "direct_url",
+            "https://investor.example.com/results",
+            version=1,
+        )
+        provider = ManualOfficialReleaseProvider(source)
+
+        for final_url in (
+            "https://cdn.example.net/results.pdf",
+            "http://investor.example.com/results",
+        ):
+            with self.subTest(final_url=final_url):
+                response = MagicMock()
+                response.__enter__.return_value = response
+                response.__exit__.return_value = False
+                response.geturl.return_value = final_url
+                with patch("trading_system.manual_release_ingestion.urlopen", return_value=response):
+                    with self.assertRaisesRegex(RuntimeError, "left approved HTTPS host"):
+                        provider.discover(self.EVENT_ID)
 
 
 if __name__ == "__main__":
