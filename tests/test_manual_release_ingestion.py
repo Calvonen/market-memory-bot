@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from trading_system.manual_release_ingestion import ManualOfficialReleaseProvider
 from trading_system.official_release_source_repository import OfficialReleaseSource
@@ -78,6 +79,43 @@ class ManualOfficialReleaseProviderTests(unittest.TestCase):
         provider = _Provider(source, b"<html><body>Not the release</body></html>")
 
         self.assertIsNone(provider.discover(self.EVENT_ID))
+
+    def test_pdf_signature_detects_extensionless_octet_stream(self) -> None:
+        source = OfficialReleaseSource(
+            self.EVENT_ID,
+            "direct_url",
+            "https://investor.example.com/download?id=2026",
+            version=1,
+        )
+        provider = _Provider(source, b"%PDF-1.7\nmock-pdf", "application/octet-stream")
+
+        with patch.object(
+            ManualOfficialReleaseProvider,
+            "_extract_pdf_text",
+            return_value="Results " * 80,
+        ) as extract:
+            document = provider.discover(self.EVENT_ID)
+
+        self.assertIsNotNone(document)
+        assert document is not None
+        self.assertEqual(document.source_type, "company_results_pdf")
+        extract.assert_called_once_with(b"%PDF-1.7\nmock-pdf")
+
+    def test_pdf_extraction_failure_is_reported_as_error(self) -> None:
+        source = OfficialReleaseSource(
+            self.EVENT_ID,
+            "direct_url",
+            "https://investor.example.com/results.pdf",
+            version=1,
+        )
+        provider = _Provider(source, b"%PDF-1.7\nbroken", "application/pdf")
+
+        with patch(
+            "trading_system.manual_release_ingestion.PdfReader",
+            side_effect=ValueError("broken pdf"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "PDF extraction failed"):
+                provider.discover(self.EVENT_ID)
 
 
 if __name__ == "__main__":
