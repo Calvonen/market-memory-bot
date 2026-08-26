@@ -74,6 +74,20 @@ class ResultsPageReleaseParserScopeRegressionTests(unittest.TestCase):
         self.assertEqual(candidates[0].source_url, "https://investor.example.com/r")
         self.assertEqual(candidates[0].evidence_fields, ("Q2-2026",))
 
+    def test_generic_explicit_close_stops_at_special_element(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<span hidden><ul></span><a href="/r">Q2-2026</a></ul></span>',
+        )
+        self.assertEqual(candidates, ())
+
+    def test_heading_start_only_closes_current_heading_node(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<h1 hidden><div>old<h2><a href="/r">Q2-2026</a></h2></div></h1>',
+        )
+        self.assertEqual(candidates, ())
+
 
 if __name__ == "__main__":
     unittest.main()
