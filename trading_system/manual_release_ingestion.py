@@ -286,10 +286,10 @@ class ManualOfficialReleaseProvider:
     @classmethod
     def _extract_pdf_text(cls, data: bytes) -> str:
         try:
-            context = multiprocessing.get_context("fork")
+            context = multiprocessing.get_context("spawn")
         except ValueError as exc:
             raise RuntimeError(
-                "manual official release PDF extraction requires a fork-capable runtime"
+                "manual official release PDF extraction requires a spawn-capable runtime"
             ) from exc
 
         recv_conn, send_conn = context.Pipe(duplex=False)
