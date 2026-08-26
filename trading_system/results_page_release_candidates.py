@@ -13,6 +13,7 @@ from trading_system.official_release_source_repository import OfficialReleaseSou
 
 
 _HTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
+_HTML_WHITESPACE = frozenset({"\t", "\n", "\f", "\r", " "})
 _RAW_HREF_RE = re.compile(
     r"\bhref\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'=<>`]+))",
     re.IGNORECASE,
@@ -44,7 +45,10 @@ def _contains_ascii_control(value: str) -> bool:
 
 
 def _contains_text_control(value: str) -> bool:
-    return any(unicodedata.category(char) == "Cc" for char in value)
+    return any(
+        unicodedata.category(char) == "Cc" and char not in _HTML_WHITESPACE
+        for char in value
+    )
 
 
 def _raw_href_contains_encoded_control(raw_href: str) -> bool:
@@ -122,8 +126,15 @@ def _element_hidden(element) -> bool:
     return any(str(key).lower().split("}")[-1] == "hidden" for key in element.attrib)
 
 
+def _element_has_attribute(element, attribute: str) -> bool:
+    attribute = attribute.lower()
+    return any(str(key).lower().split("}")[-1] == attribute for key in element.attrib)
+
+
 def _element_is_non_rendered(element) -> bool:
     namespace, local = _element_name(element.tag)
+    if namespace == _HTML_NAMESPACE and local == "dialog":
+        return not _element_has_attribute(element, "open")
     return bool(local) and local in _NON_RENDERED_TAGS and (
         local in {"script", "style"} or namespace == _HTML_NAMESPACE
     )
