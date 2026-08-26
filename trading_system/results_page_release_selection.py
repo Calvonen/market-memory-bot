@@ -31,9 +31,6 @@ def _scheduled_date_patterns(event: CalendarEvent) -> tuple[re.Pattern[str], ...
         value.strftime("%Y/%m/%d"),
         value.strftime("%Y_%m_%d"),
     )
-    # Date evidence must be a complete numeric token. This prevents compact
-    # dates embedded in longer identifiers (20260826001) and separated forms
-    # with an extra digit (2026-08-260) from being treated as exact evidence.
     return tuple(re.compile(rf"(?<!\d){re.escape(token)}(?!\d)", re.IGNORECASE) for token in tokens)
 
 
@@ -44,17 +41,18 @@ def _period_patterns(release_period: str | None) -> tuple[re.Pattern[str], ...]:
     if match is None:
         raise ValueError("release_period must be Q1-Q4, H1-H2, or FY followed by a four-digit year")
     period, year = match.groups()
-    # The caller supplies trusted fiscal-period evidence. Support common URL
-    # and title spellings without inferring any period from the release date.
-    separator = r"(?:[\s_\-/]+)"
+    separator = r"(?:[ _\-/]+)"
     return (
-        re.compile(rf"(?<![A-Za-z0-9]){period}{separator}{year}(?!\d)", re.IGNORECASE),
-        re.compile(rf"(?<![A-Za-z0-9]){period}{year}(?!\d)", re.IGNORECASE),
+        re.compile(rf"(?<![A-Za-z0-9]){period}{separator}{year}(?![A-Za-z0-9])", re.IGNORECASE),
+        re.compile(rf"(?<![A-Za-z0-9]){period}{year}(?![A-Za-z0-9])", re.IGNORECASE),
     )
 
 
-def _candidate_evidence_text(candidate: ResultsPageReleaseCandidate) -> str:
-    return f"{candidate.source_url}\n{candidate.source_title or ''}".casefold()
+def _candidate_evidence_fields(candidate: ResultsPageReleaseCandidate) -> tuple[str, ...]:
+    fields = [candidate.source_url.casefold()]
+    if candidate.source_title:
+        fields.append(candidate.source_title.casefold())
+    return tuple(fields)
 
 
 def _matching_candidates(
@@ -66,7 +64,11 @@ def _matching_candidates(
         candidate
         for candidate in candidates
         if candidate.event_id == event.calendar_event_id
-        and any(pattern.search(_candidate_evidence_text(candidate)) for pattern in patterns)
+        and any(
+            pattern.search(field)
+            for field in _candidate_evidence_fields(candidate)
+            for pattern in patterns
+        )
     )
 
 
@@ -76,14 +78,9 @@ def select_results_page_release_candidate(
     *,
     release_period: str | None = None,
 ) -> ResultsPageSelection:
-    """Select a unique release candidate using explicit evidence only.
+    """Select a unique release candidate using explicit evidence only."""
+    period_patterns = _period_patterns(release_period)
 
-    Exact scheduled-date evidence is the strongest tier and is evaluated
-    first. Optional fiscal-period evidence (for example ``Q2 2026`` or
-    ``H1 2026``) is used only when no exact-date candidate matches, and only
-    when the caller supplies that period explicitly. The period is never
-    inferred from the scheduled date. Any ambiguity fails closed.
-    """
     date_matches = _matching_candidates(event, candidates, _scheduled_date_patterns(event))
     if len(date_matches) == 1:
         return ResultsPageSelection(
@@ -93,7 +90,6 @@ def select_results_page_release_candidate(
     if len(date_matches) > 1:
         return ResultsPageSelection(status=ResultsPageSelectionStatus.AMBIGUOUS)
 
-    period_patterns = _period_patterns(release_period)
     if not period_patterns:
         return ResultsPageSelection(status=ResultsPageSelectionStatus.NO_MATCH)
 
