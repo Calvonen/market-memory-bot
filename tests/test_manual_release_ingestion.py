@@ -3,7 +3,10 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
-from trading_system.manual_release_ingestion import ManualOfficialReleaseProvider
+from trading_system.manual_release_ingestion import (
+    ManualOfficialReleaseProvider,
+    _ApprovedOriginRedirectHandler,
+)
 from trading_system.official_release_source_repository import OfficialReleaseSource
 
 
@@ -167,15 +170,29 @@ class ManualOfficialReleaseProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "unsupported content type"):
             binary_provider.discover(self.EVENT_ID)
 
-    def _response(self, final_url: str) -> MagicMock:
+    def _response(self, final_url: str, *, content_length: str | None = None) -> MagicMock:
         response = MagicMock()
         response.__enter__.return_value = response
         response.__exit__.return_value = False
         response.geturl.return_value = final_url
-        response.headers.get.return_value = "text/html"
+
+        def header_get(name: str, default=None):
+            if name == "Content-Type":
+                return "text/html"
+            if name == "Content-Length":
+                return content_length
+            return default
+
+        response.headers.get.side_effect = header_get
         response.headers.get_content_charset.return_value = "utf-8"
         response.read.return_value = ("<html><body>" + ("Results improved. " * 40) + "</body></html>").encode("utf-8")
         return response
+
+    def _discover_with_response(self, provider: ManualOfficialReleaseProvider, response: MagicMock):
+        opener = MagicMock()
+        opener.open.return_value = response
+        with patch("trading_system.manual_release_ingestion.build_opener", return_value=opener):
+            return provider.discover(self.EVENT_ID)
 
     def test_same_origin_https_redirect_is_allowed(self) -> None:
         source = OfficialReleaseSource(
@@ -186,20 +203,13 @@ class ManualOfficialReleaseProviderTests(unittest.TestCase):
         )
         provider = ManualOfficialReleaseProvider(source)
         response = self._response("https://investor.example.com:443/results/final?download=1")
+        self.assertIsNotNone(self._discover_with_response(provider, response))
 
-        with patch("trading_system.manual_release_ingestion.urlopen", return_value=response):
-            document = provider.discover(self.EVENT_ID)
-
-        self.assertIsNotNone(document)
-
-    def test_redirect_to_unapproved_origin_is_rejected(self) -> None:
-        source = OfficialReleaseSource(
-            self.EVENT_ID,
-            "direct_url",
-            "https://investor.example.com/results",
-            version=1,
-        )
-        provider = ManualOfficialReleaseProvider(source)
+    def test_redirect_to_unapproved_origin_is_rejected_before_following(self) -> None:
+        handler = _ApprovedOriginRedirectHandler("https://investor.example.com/results")
+        request = MagicMock()
+        fp = MagicMock()
+        headers = MagicMock()
 
         for final_url in (
             "https://cdn.example.net/results.pdf",
@@ -207,10 +217,40 @@ class ManualOfficialReleaseProviderTests(unittest.TestCase):
             "https://investor.example.com:8443/results",
         ):
             with self.subTest(final_url=final_url):
-                response = self._response(final_url)
-                with patch("trading_system.manual_release_ingestion.urlopen", return_value=response):
-                    with self.assertRaisesRegex(RuntimeError, "left approved HTTPS origin"):
-                        provider.discover(self.EVENT_ID)
+                with self.assertRaisesRegex(RuntimeError, "left approved HTTPS origin"):
+                    handler.redirect_request(request, fp, 302, "Found", headers, final_url)
+
+    def test_download_content_length_over_limit_is_rejected(self) -> None:
+        source = OfficialReleaseSource(
+            self.EVENT_ID,
+            "direct_url",
+            "https://investor.example.com/results",
+            version=1,
+        )
+        provider = ManualOfficialReleaseProvider(source)
+        response = self._response(
+            source.source_url,
+            content_length=str(provider.MAX_DOWNLOAD_BYTES + 1),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "exceeds size limit"):
+            self._discover_with_response(provider, response)
+        response.read.assert_not_called()
+
+    def test_stream_over_limit_is_rejected_even_without_content_length(self) -> None:
+        source = OfficialReleaseSource(
+            self.EVENT_ID,
+            "direct_url",
+            "https://investor.example.com/results",
+            version=1,
+        )
+        provider = ManualOfficialReleaseProvider(source)
+        response = self._response(source.source_url)
+        response.read.return_value = b"x" * (provider.MAX_DOWNLOAD_BYTES + 1)
+
+        with self.assertRaisesRegex(RuntimeError, "exceeds size limit"):
+            self._discover_with_response(provider, response)
+        response.read.assert_called_once_with(provider.MAX_DOWNLOAD_BYTES + 1)
 
 
 if __name__ == "__main__":
