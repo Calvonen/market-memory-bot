@@ -180,6 +180,39 @@ class ResultsPageReleaseParserScopeRegressionTests(unittest.TestCase):
         self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
         self.assertEqual(candidates[0].evidence_fields, ("ReportQ2-2026",))
 
+    def test_foreign_p_endtag_breakout_reprocesses_following_anchor_as_html(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report<svg></p><a href="/other">Annual</a></svg> Q2-2026</a>',
+        )
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+        self.assertEqual(candidates[1].source_url, "https://investor.example.com/other")
+        self.assertEqual(candidates[1].evidence_fields, ("Annual",))
+
+    def test_annotation_xml_svg_enters_svg_without_html_encoding(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report<math><annotation-xml><svg><foreignObject><a href="/other">Annual</a></foreignObject></svg></annotation-xml></math> Q2-2026</a>',
+        )
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+        self.assertEqual(candidates[1].source_url, "https://investor.example.com/other")
+        self.assertEqual(candidates[1].evidence_fields, ("Annual",))
+
+    def test_nested_anchor_repair_removes_exact_active_html_anchor(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/q">Report<svg><a><foreignObject><a href="/other">Q2-2026</a></foreignObject></a></svg>',
+        )
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/q")
+        self.assertEqual(candidates[0].evidence_fields, ("Report",))
+        self.assertEqual(candidates[1].source_url, "https://investor.example.com/other")
+        self.assertEqual(candidates[1].evidence_fields, ("Q2-2026",))
+
 
 if __name__ == "__main__":
     unittest.main()
