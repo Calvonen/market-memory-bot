@@ -109,6 +109,7 @@ class ResultsPageReleaseSelectionTests(unittest.TestCase):
             (self._candidate("https://investor.example.com/release.pdf", "FY2026annual results"), "FY 2026"),
             (self._candidate("https://investor.example.com/release.pdf", "Q2-2026årsrapport"), "Q2 2026"),
             (self._candidate("https://investor.example.com/release.pdf", "年Q2-2026"), "Q2 2026"),
+            (self._candidate("https://investor.example.com/release.pdf", "İQ2-2026"), "Q2 2026"),
         ):
             with self.subTest(candidate=candidate):
                 selection = select_results_page_release_candidate(
@@ -124,6 +125,9 @@ class ResultsPageReleaseSelectionTests(unittest.TestCase):
             "Q2\t2026",
             "Q2 ２０２６",
             "Q2  2026",
+            " Q2 2026",
+            "Q2 2026 ",
+            "\u00a0Q2 2026\u00a0",
         ):
             with self.subTest(release_period=release_period):
                 with self.assertRaises(ValueError):
