@@ -80,28 +80,14 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             ["https://investor.example.com/valid.pdf"],
         )
 
-    def test_rejects_raw_control_characters_before_url_parsing(self):
+    def test_rejects_raw_ascii_controls_before_url_parsing_or_stripping(self):
         candidates = extract_results_page_candidates(
             self._source(),
             """
             <a href="https://investor.examp&#10;le.com/release.pdf">newline</a>
-            <a href="https://investor.examp&#13;le.com/release2.pdf">carriage return</a>
-            <a href="https://investor.examp&#9;le.com/release3.pdf">tab</a>
-            <a href="/valid.pdf">valid</a>
-            """,
-        )
-
-        self.assertEqual(
-            [candidate.source_url for candidate in candidates],
-            ["https://investor.example.com/valid.pdf"],
-        )
-
-    def test_rejects_control_characters_before_stripping_href(self):
-        candidates = extract_results_page_candidates(
-            self._source(),
-            """
-            <a href="https://investor.example.com/release.pdf&#10;">trailing newline</a>
-            <a href="&#9;/release2.pdf">leading tab</a>
+            <a href="https://investor.example.com/release2.pdf&#12;">form feed</a>
+            <a href="&#31;/release3.pdf">unit separator</a>
+            <a href="&#127;/release4.pdf">del</a>
             <a href="/valid.pdf">valid</a>
             """,
         )
@@ -127,6 +113,32 @@ class ResultsPageReleaseCandidateTests(unittest.TestCase):
             "https://investor.example.com/release.pdf",
         )
         self.assertEqual(candidates[0].source_title, "first")
+
+    def test_rfc_dot_segment_removal_preserves_slashes_and_trailing_semantics(self):
+        source = OfficialReleaseSource(
+            event_id="calendar:test-event",
+            source_kind="results_page",
+            source_url="https://investor.example.com/results/",
+            source_title="Results",
+            version=1,
+        )
+        candidates = extract_results_page_candidates(
+            source,
+            """
+            <a href="https://investor.example.com/results/.">same page dot</a>
+            <a href="https://investor.example.com/results/child/..">same page parent</a>
+            <a href="https://investor.example.com/a//b">double slash resource</a>
+            <a href="https://investor.example.com/a/./c/../d">dot normalized</a>
+            """,
+        )
+
+        self.assertEqual(
+            [candidate.source_url for candidate in candidates],
+            [
+                "https://investor.example.com/a//b",
+                "https://investor.example.com/a/d",
+            ],
+        )
 
     def test_normalizes_dot_segments_before_self_page_and_deduplication(self):
         candidates = extract_results_page_candidates(
