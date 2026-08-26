@@ -88,6 +88,22 @@ class ResultsPageReleaseParserScopeRegressionTests(unittest.TestCase):
         )
         self.assertEqual(candidates, ())
 
+    def test_generic_explicit_close_stops_at_foreign_special_element(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<span hidden><math><mi></span><a href="/r">Q2-2026</a></mi></math></span>',
+        )
+        self.assertEqual(candidates, ())
+
+    def test_eof_finalization_preserves_outer_url_while_text_stays_suppressed(self):
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<a href="/Q2-2026.pdf"><template/><style/>hidden</template>Q2-2026</style></a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/Q2-2026.pdf")
+        self.assertEqual(candidates[0].evidence_fields, ())
+
 
 if __name__ == "__main__":
     unittest.main()
