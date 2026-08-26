@@ -77,6 +77,16 @@ def _current_virtual_memory_bytes() -> int:
         return 0
 
 
+def _clamp_soft_limit(desired: int, soft_limit: int, hard_limit: int, infinity: int) -> int:
+    """Return a soft limit that never relaxes an inherited finite policy."""
+    candidates = [desired]
+    if soft_limit != infinity:
+        candidates.append(soft_limit)
+    if hard_limit != infinity:
+        candidates.append(hard_limit)
+    return min(candidates)
+
+
 def _pdf_extract_worker(
     data: bytes,
     send_conn,
@@ -92,16 +102,30 @@ def _pdf_extract_worker(
         baseline_vms = _current_virtual_memory_bytes()
         if baseline_vms <= 0:
             raise RuntimeError("unable to determine PDF worker baseline memory")
-        desired_limit = baseline_vms + memory_limit_bytes
-        _soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_AS)
-        if hard_limit == resource.RLIM_INFINITY:
-            address_space_limit = desired_limit
-        else:
-            address_space_limit = min(desired_limit, hard_limit)
+
+        desired_address_space_limit = baseline_vms + memory_limit_bytes
+        inherited_as_soft, inherited_as_hard = resource.getrlimit(resource.RLIMIT_AS)
+        address_space_limit = _clamp_soft_limit(
+            desired_address_space_limit,
+            inherited_as_soft,
+            inherited_as_hard,
+            resource.RLIM_INFINITY,
+        )
         if address_space_limit <= baseline_vms:
             raise RuntimeError("PDF worker inherited address-space limit leaves no allocation headroom")
-        resource.setrlimit(resource.RLIMIT_AS, (address_space_limit, address_space_limit))
-        resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit_seconds, cpu_limit_seconds))
+        resource.setrlimit(resource.RLIMIT_AS, (address_space_limit, inherited_as_hard))
+
+        inherited_cpu_soft, inherited_cpu_hard = resource.getrlimit(resource.RLIMIT_CPU)
+        cpu_soft_limit = _clamp_soft_limit(
+            cpu_limit_seconds,
+            inherited_cpu_soft,
+            inherited_cpu_hard,
+            resource.RLIM_INFINITY,
+        )
+        if cpu_soft_limit <= 0:
+            raise RuntimeError("PDF worker inherited CPU limit leaves no execution headroom")
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu_soft_limit, inherited_cpu_hard))
+
         text = ManualOfficialReleaseProvider._extract_pdf_text_in_process(
             data,
             max_pages=max_pages,
@@ -345,7 +369,14 @@ class ManualOfficialReleaseProvider:
             process.terminate()
             process.join(timeout=1.0)
         if status != "ok":
-            if "exceeds page limit" in payload or "extracted text exceeds size limit" in payload or "produced no text" in payload:
+            propagated_errors = (
+                "exceeds page limit",
+                "extracted text exceeds size limit",
+                "produced no text",
+                "inherited address-space limit leaves no allocation headroom",
+                "inherited CPU limit leaves no execution headroom",
+            )
+            if any(message in payload for message in propagated_errors):
                 raise RuntimeError(payload.split(": ", 1)[-1])
             raise RuntimeError("manual official release PDF extraction failed")
         return payload
