@@ -14,6 +14,48 @@ _RAW_HREF_RE = re.compile(
     re.IGNORECASE,
 )
 _NUMERIC_ENTITY_RE = re.compile(r"&#(?:x([0-9a-fA-F]+)|([0-9]+));?")
+_RENDERED_BREAK_START_TAGS = frozenset(
+    {
+        "address",
+        "article",
+        "aside",
+        "blockquote",
+        "br",
+        "dd",
+        "div",
+        "dl",
+        "dt",
+        "fieldset",
+        "figcaption",
+        "figure",
+        "footer",
+        "form",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "header",
+        "hr",
+        "li",
+        "main",
+        "nav",
+        "ol",
+        "p",
+        "pre",
+        "section",
+        "table",
+        "tbody",
+        "td",
+        "tfoot",
+        "th",
+        "thead",
+        "tr",
+        "ul",
+    }
+)
+_RENDERED_BREAK_END_TAGS = _RENDERED_BREAK_START_TAGS - {"br", "hr"}
 
 
 @dataclass(frozen=True)
@@ -72,48 +114,52 @@ class _ResultsPageLinkParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = tag.lower()
-        if normalized_tag == "br" and self._href is not None:
-            # A line break is an unambiguous rendered separator. Preserve it as
-            # whitespace while ordinary inline wrappers keep text adjacency.
+        if normalized_tag == "a":
+            values = {key.lower(): value for key, value in attrs if value is not None}
+            self._href = values.get("href")
+            self._raw_href_safe = _raw_href_is_safe(self.get_starttag_text(), self._href)
+            self._aria_label = values.get("aria-label")
+            self._title_attr = values.get("title")
+            self._text_parts = []
+            return
+        if self._href is not None and normalized_tag in _RENDERED_BREAK_START_TAGS:
+            # Explicit line/block separators create a real rendered boundary;
+            # ordinary inline wrappers preserve the original text adjacency.
             self._text_parts.append(" ")
-            return
-        if normalized_tag != "a":
-            return
-        values = {key.lower(): value for key, value in attrs if value is not None}
-        self._href = values.get("href")
-        self._raw_href_safe = _raw_href_is_safe(self.get_starttag_text(), self._href)
-        self._aria_label = values.get("aria-label")
-        self._title_attr = values.get("title")
-        self._text_parts = []
 
     def handle_data(self, data: str) -> None:
         if self._href is not None:
             self._text_parts.append(data)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() != "a" or self._href is None:
-            return
-        # Preserve adjacency between HTML text nodes. Real whitespace and
-        # explicit rendered separators remain in the chunks and are normalized
-        # afterwards, but adjacent inline elements must not manufacture a token
-        # boundary.
-        visible_text = _normalized_text("".join(self._text_parts))
-        evidence_fields = tuple(
-            value
-            for value in (
-                _normalized_text(self._aria_label or ""),
-                _normalized_text(self._title_attr or ""),
-                visible_text,
+        normalized_tag = tag.lower()
+        if normalized_tag == "a":
+            if self._href is None:
+                return
+            # Preserve adjacency between HTML text nodes. Real whitespace and
+            # explicit rendered separators remain in the chunks and are
+            # normalized afterwards, but adjacent inline elements must not
+            # manufacture a token boundary.
+            visible_text = _normalized_text("".join(self._text_parts))
+            evidence_fields = tuple(
+                value
+                for value in (
+                    _normalized_text(self._aria_label or ""),
+                    _normalized_text(self._title_attr or ""),
+                    visible_text,
+                )
+                if value
             )
-            if value
-        )
-        title = " ".join(evidence_fields) or None
-        self.links.append((self._href, title, self._raw_href_safe, evidence_fields))
-        self._href = None
-        self._raw_href_safe = True
-        self._aria_label = None
-        self._title_attr = None
-        self._text_parts = []
+            title = " ".join(evidence_fields) or None
+            self.links.append((self._href, title, self._raw_href_safe, evidence_fields))
+            self._href = None
+            self._raw_href_safe = True
+            self._aria_label = None
+            self._title_attr = None
+            self._text_parts = []
+            return
+        if self._href is not None and normalized_tag in _RENDERED_BREAK_END_TAGS:
+            self._text_parts.append(" ")
 
 
 def _https_origin(url: str) -> tuple[str, str, int] | None:
