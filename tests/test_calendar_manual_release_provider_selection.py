@@ -175,7 +175,28 @@ class CalendarManualReleaseProviderSelectionTests(unittest.TestCase):
             )
 
         self.assertEqual(results[0].status, "missing_official_source")
-        self.assertIn("non-US", results[0].message or "")
+        self.assertIn("approved official release source", results[0].message or "")
+        self.assertEqual(official_sources.calls, [EVENT_ID])
+        manual_cls.assert_not_called()
+        sec_cls.assert_not_called()
+        monitor_cls.assert_not_called()
+
+    def test_missing_market_without_manual_source_fails_closed_without_sec(self):
+        official_sources = _OfficialSources(None)
+
+        with patch(
+            "trading_system.calendar_release_worker.ManualOfficialReleaseProvider"
+        ) as manual_cls, patch(
+            "trading_system.calendar_release_worker.SecEdgarResultsProvider"
+        ) as sec_cls, patch(
+            "trading_system.calendar_release_worker.EventReleaseMonitor"
+        ) as monitor_cls:
+            results = self._run(
+                official_sources=official_sources,
+                market="",
+            )
+
+        self.assertEqual(results[0].status, "missing_official_source")
         self.assertEqual(official_sources.calls, [EVENT_ID])
         manual_cls.assert_not_called()
         sec_cls.assert_not_called()
