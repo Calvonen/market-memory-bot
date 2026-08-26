@@ -3,6 +3,7 @@ from __future__ import annotations
 import codecs
 import io
 import multiprocessing
+import os
 import re
 from html.parser import HTMLParser
 from urllib.parse import urlparse
@@ -66,6 +67,16 @@ class _ApprovedOriginRedirectHandler(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def _current_virtual_memory_bytes() -> int:
+    """Return this process's current virtual address-space size on Linux."""
+    try:
+        with open("/proc/self/statm", "r", encoding="ascii") as handle:
+            pages = int(handle.read().split()[0])
+        return pages * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
 def _pdf_extract_worker(
     data: bytes,
     send_conn,
@@ -78,7 +89,11 @@ def _pdf_extract_worker(
     try:
         import resource
 
-        resource.setrlimit(resource.RLIMIT_AS, (memory_limit_bytes, memory_limit_bytes))
+        baseline_vms = _current_virtual_memory_bytes()
+        if baseline_vms <= 0:
+            raise RuntimeError("unable to determine PDF worker baseline memory")
+        address_space_limit = baseline_vms + memory_limit_bytes
+        resource.setrlimit(resource.RLIMIT_AS, (address_space_limit, address_space_limit))
         resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit_seconds, cpu_limit_seconds))
         text = ManualOfficialReleaseProvider._extract_pdf_text_in_process(
             data,
