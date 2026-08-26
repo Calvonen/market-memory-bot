@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import re
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -71,20 +72,23 @@ class ManualOfficialReleaseProvider:
         if self.source.source_kind != "direct_url":
             return None
 
-        data, content_type, charset = self._fetch_bytes(self.source.source_url)
+        data, content_type, http_charset = self._fetch_bytes(self.source.source_url)
+        media_type = self._media_type(content_type)
         if self._looks_like_pdf(self.source.source_url, content_type, data):
             raw_text = self._extract_pdf_text(data)
             source_type = "company_results_pdf"
+        elif media_type == "text/plain":
+            raw_text = self._decode_text(data, http_charset, allow_html_meta=False)
+            source_type = "company_results"
         elif self._looks_like_html_or_text(content_type, data):
-            html_text = data.decode(charset, errors="replace")
+            html_text = self._decode_text(data, http_charset, allow_html_meta=True)
             parser = _VisibleTextParser()
             parser.feed(html_text)
             raw_text = "\n".join(parser.parts)
             source_type = "company_results"
         else:
-            media_type = content_type.split(";", 1)[0].strip() or "<missing>"
             raise RuntimeError(
-                f"manual official release returned unsupported content type: {media_type}"
+                f"manual official release returned unsupported content type: {media_type or '<missing>'}"
             )
 
         raw_text = raw_text.strip()
@@ -100,6 +104,10 @@ class ManualOfficialReleaseProvider:
         )
 
     @staticmethod
+    def _media_type(content_type: str) -> str:
+        return content_type.split(";", 1)[0].strip().lower()
+
+    @staticmethod
     def _looks_like_pdf(url: str, content_type: str, data: bytes) -> bool:
         path = url.split("?", 1)[0].split("#", 1)[0]
         return (
@@ -108,9 +116,9 @@ class ManualOfficialReleaseProvider:
             or data.lstrip().startswith(b"%PDF-")
         )
 
-    @staticmethod
-    def _looks_like_html_or_text(content_type: str, data: bytes) -> bool:
-        media_type = content_type.split(";", 1)[0].strip().lower()
+    @classmethod
+    def _looks_like_html_or_text(cls, content_type: str, data: bytes) -> bool:
+        media_type = cls._media_type(content_type)
         if media_type in {"text/html", "application/xhtml+xml", "text/plain"}:
             return True
         if media_type:
@@ -122,6 +130,56 @@ class ManualOfficialReleaseProvider:
             or prefix.startswith(b"<head")
             or prefix.startswith(b"<body")
         )
+
+    @staticmethod
+    def _sniff_bom_encoding(data: bytes) -> str | None:
+        if data.startswith(b"\xef\xbb\xbf"):
+            return "utf-8-sig"
+        if data.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+            return "utf-32"
+        if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+            return "utf-16"
+        return None
+
+    @staticmethod
+    def _sniff_html_meta_encoding(data: bytes) -> str | None:
+        head = data[:4096].decode("latin-1", errors="strict")
+        charset_match = re.search(
+            r"<meta\b[^>]*\bcharset\s*=\s*['\"]?\s*([A-Za-z0-9._:-]+)",
+            head,
+            flags=re.IGNORECASE,
+        )
+        if charset_match:
+            return charset_match.group(1)
+        http_equiv_match = re.search(
+            r"<meta\b[^>]*\bcontent\s*=\s*['\"][^'\"]*charset\s*=\s*([A-Za-z0-9._:-]+)[^'\"]*['\"][^>]*>",
+            head,
+            flags=re.IGNORECASE,
+        )
+        if http_equiv_match:
+            return http_equiv_match.group(1)
+        return None
+
+    @classmethod
+    def _decode_text(
+        cls,
+        data: bytes,
+        http_charset: str | None,
+        *,
+        allow_html_meta: bool,
+    ) -> str:
+        encoding = (
+            http_charset
+            or cls._sniff_bom_encoding(data)
+            or (cls._sniff_html_meta_encoding(data) if allow_html_meta else None)
+            or "utf-8"
+        )
+        try:
+            return data.decode(encoding, errors="strict")
+        except (LookupError, UnicodeDecodeError) as exc:
+            raise RuntimeError(
+                f"manual official release text decode failed for charset {encoding}"
+            ) from exc
 
     @staticmethod
     def _extract_pdf_text(data: bytes) -> str:
@@ -176,7 +234,7 @@ class ManualOfficialReleaseProvider:
             raise RuntimeError("manual official release download exceeds size limit")
         return data
 
-    def _fetch_bytes(self, url: str) -> tuple[bytes, str, str]:
+    def _fetch_bytes(self, url: str) -> tuple[bytes, str, str | None]:
         request = Request(
             url,
             headers={
@@ -189,6 +247,6 @@ class ManualOfficialReleaseProvider:
             final_url = response.geturl()
             self._validate_final_url(url, final_url)
             content_type = response.headers.get("Content-Type", "") or ""
-            charset = response.headers.get_content_charset() or "utf-8"
+            http_charset = response.headers.get_content_charset()
             data = self._read_bounded(response)
-            return data, content_type, charset
+            return data, content_type, http_charset
