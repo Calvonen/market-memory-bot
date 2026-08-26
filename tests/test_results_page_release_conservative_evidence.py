@@ -56,3 +56,23 @@ def test_foreign_icon_does_not_hide_safe_html_tail_text() -> None:
     assert len(candidates) == 1
     assert candidates[0].source_url == "https://example.com/r"
     assert candidates[0].evidence_fields == ("Q2-2026",)
+
+
+def test_ambiguous_subtree_splits_evidence_fields() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<a href="/r">Q2<svg><switch><text>unknown</text></switch></svg>-2026</a>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ("Q2", "-2026")
+
+
+def test_table_caption_remains_simple_rendered_html() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<table><caption><a href="/r">Q2-2026</a></caption></table>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ("Q2-2026",)
