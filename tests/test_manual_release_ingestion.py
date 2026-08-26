@@ -210,7 +210,7 @@ class ManualOfficialReleaseProviderTests(unittest.TestCase):
             patch.object(ManualOfficialReleaseProvider, "_extract_pdf_text_in_process", return_value="results"),
         ):
             _pdf_extract_worker(b"%PDF-1.7", send_conn, 10, 1000, budget, 5)
-        setrlimit.assert_any_call(resource.RLIMIT_AS, (baseline + budget, baseline + budget))
+        setrlimit.assert_any_call(resource.RLIMIT_AS, (baseline + budget, resource.RLIM_INFINITY))
         send_conn.send.assert_called_once_with(("ok", "results"))
 
     def test_pdf_extraction_process_timeout_is_contextual_failure(self) -> None:
