@@ -57,6 +57,17 @@ class ResultsPageReleaseSelectionTests(unittest.TestCase):
         )
         self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
 
+    def test_rejects_date_tokens_embedded_in_longer_numeric_values(self):
+        for url in (
+            "https://investor.example.com/id/20260826001.pdf",
+            "https://investor.example.com/id/120260826.pdf",
+            "https://investor.example.com/id/2026-08-260.pdf",
+            "https://investor.example.com/id/12026_08_26.pdf",
+        ):
+            with self.subTest(url=url):
+                selection = select_results_page_release_candidate(self._event(), (self._candidate(url),))
+                self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
+
     def test_returns_no_match_without_exact_scheduled_date(self):
         selection = select_results_page_release_candidate(
             self._event(),
