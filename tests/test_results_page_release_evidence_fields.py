@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+import unittest
+from datetime import date
+
+from trading_system.calendar_repository import CalendarEvent, CalendarEventStatus
+from trading_system.official_release_source_repository import OfficialReleaseSource
+from trading_system.results_page_release_candidates import (
+    ResultsPageReleaseCandidate,
+    extract_results_page_candidates,
+)
+from trading_system.results_page_release_selection import (
+    ResultsPageSelectionStatus,
+    select_results_page_release_candidate,
+)
+
+
+class ResultsPageReleaseEvidenceFieldTests(unittest.TestCase):
+    def _event(self) -> CalendarEvent:
+        return CalendarEvent(
+            calendar_event_id="calendar:test-event",
+            company_name="Example Oyj",
+            instrument="EXAMPLE.HE",
+            market="Helsinki",
+            event_type="earnings",
+            scheduled_date=date(2026, 8, 26),
+            source="calendar",
+            occurrence_key="2026-08-26",
+            status=CalendarEventStatus.TRACKED,
+        )
+
+    def test_extractor_preserves_original_anchor_evidence_fields(self):
+        source = OfficialReleaseSource(
+            event_id="calendar:test-event",
+            source_kind="results_page",
+            source_url="https://investor.example.com/results",
+            version=1,
+        )
+        candidates = extract_results_page_candidates(
+            source,
+            '<a href="/release.pdf" aria-label="Q2" title="2026">Results</a>',
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_title, "Q2 2026 Results")
+        self.assertEqual(candidates[0].evidence_fields, ("Q2", "2026", "Results"))
+
+        selection = select_results_page_release_candidate(
+            self._event(),
+            candidates,
+            release_period="Q2 2026",
+        )
+        self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_combining_marks_are_token_adjacency(self):
+        for title in ("A\u0301Q2-2026", "Q2-2026\u0301A"):
+            with self.subTest(title=title):
+                candidate = ResultsPageReleaseCandidate(
+                    event_id="calendar:test-event",
+                    source_url="https://investor.example.com/release.pdf",
+                    source_title=title,
+                )
+                selection = select_results_page_release_candidate(
+                    self._event(),
+                    (candidate,),
+                    release_period="Q2 2026",
+                )
+                self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
+
+
+if __name__ == "__main__":
+    unittest.main()
