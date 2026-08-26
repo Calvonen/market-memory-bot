@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 
@@ -19,14 +20,18 @@ class ResultsPageSelection:
     candidate: ResultsPageReleaseCandidate | None = None
 
 
-def _scheduled_date_tokens(event: CalendarEvent) -> tuple[str, ...]:
+def _scheduled_date_patterns(event: CalendarEvent) -> tuple[re.Pattern[str], ...]:
     value = event.scheduled_date
-    return (
+    tokens = (
         value.isoformat(),
         value.strftime("%Y%m%d"),
         value.strftime("%Y/%m/%d"),
         value.strftime("%Y_%m_%d"),
     )
+    # Date evidence must be a complete numeric token. This prevents compact
+    # dates embedded in longer identifiers (20260826001) and separated forms
+    # with an extra digit (2026-08-260) from being treated as exact evidence.
+    return tuple(re.compile(rf"(?<!\d){re.escape(token)}(?!\d)", re.IGNORECASE) for token in tokens)
 
 
 def _candidate_evidence_text(candidate: ResultsPageReleaseCandidate) -> str:
@@ -40,15 +45,16 @@ def select_results_page_release_candidate(
     """Select only a uniquely date-anchored release candidate.
 
     This intentionally uses a narrow high-confidence rule. A candidate must
-    contain the canonical event's scheduled date in its URL or title. If zero
-    or multiple candidates match, selection fails closed instead of guessing.
+    contain the canonical event's scheduled date in its URL or title as a
+    complete date token. If zero or multiple candidates match, selection fails
+    closed instead of guessing.
     """
-    tokens = tuple(token.casefold() for token in _scheduled_date_tokens(event))
+    patterns = _scheduled_date_patterns(event)
     matches = tuple(
         candidate
         for candidate in candidates
         if candidate.event_id == event.calendar_event_id
-        and any(token in _candidate_evidence_text(candidate) for token in tokens)
+        and any(pattern.search(_candidate_evidence_text(candidate)) for pattern in patterns)
     )
 
     if not matches:
