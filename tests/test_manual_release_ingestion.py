@@ -17,7 +17,7 @@ class _Provider(ManualOfficialReleaseProvider):
         self.content_type = content_type
         self.fetches: list[str] = []
 
-    def _fetch_bytes(self, url: str) -> tuple[bytes, str, str]:
+    def _fetch_bytes(self, url: str) -> tuple[bytes, str, str | None]:
         self.fetches.append(url)
         return self.payload, self.content_type, "utf-8"
 
@@ -46,6 +46,50 @@ class ManualOfficialReleaseProviderTests(unittest.TestCase):
         self.assertEqual(document.source_title, "FY2026 results")
         self.assertNotIn("ignore me", document.raw_text)
         self.assertEqual(provider.fetches, [source.source_url])
+
+    def test_text_plain_preserves_angle_bracket_fragments(self) -> None:
+        source = OfficialReleaseSource(
+            self.EVENT_ID,
+            "direct_url",
+            "https://investor.example.com/results.txt",
+            version=1,
+        )
+        body = (("Guidance <Q1> remains strong and <guidance> is unchanged. " * 20)).encode("utf-8")
+        provider = _Provider(source, body, "text/plain; charset=utf-8")
+
+        document = provider.discover(self.EVENT_ID)
+
+        self.assertIsNotNone(document)
+        assert document is not None
+        self.assertIn("<Q1>", document.raw_text)
+        self.assertIn("<guidance>", document.raw_text)
+
+    def test_html_meta_charset_is_honored_when_http_charset_missing(self) -> None:
+        source = OfficialReleaseSource(
+            self.EVENT_ID,
+            "direct_url",
+            "https://investor.example.com/results",
+            version=1,
+        )
+        text = "Tulos parani – näkymä vakaa. " * 30
+        payload = (
+            '<html><head><meta charset="windows-1252"></head><body>'
+            + text
+            + "</body></html>"
+        ).encode("windows-1252")
+        provider = ManualOfficialReleaseProvider(source)
+
+        with patch.object(
+            provider,
+            "_fetch_bytes",
+            return_value=(payload, "text/html", None),
+        ):
+            document = provider.discover(self.EVENT_ID)
+
+        self.assertIsNotNone(document)
+        assert document is not None
+        self.assertIn("–", document.raw_text)
+        self.assertNotIn("�", document.raw_text)
 
     def test_results_page_does_not_guess_a_release_link(self) -> None:
         source = OfficialReleaseSource(
