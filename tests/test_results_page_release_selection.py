@@ -104,17 +104,34 @@ class ResultsPageReleaseSelectionTests(unittest.TestCase):
         self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
 
     def test_rejects_period_labels_embedded_in_larger_alphanumeric_tokens(self):
-        for candidate in (
-            self._candidate("https://investor.example.com/q2-2026results.pdf"),
-            self._candidate("https://investor.example.com/release.pdf", "FY2026annual results"),
+        for candidate, release_period in (
+            (self._candidate("https://investor.example.com/q2-2026results.pdf"), "Q2 2026"),
+            (self._candidate("https://investor.example.com/release.pdf", "FY2026annual results"), "FY 2026"),
+            (self._candidate("https://investor.example.com/release.pdf", "Q2-2026årsrapport"), "Q2 2026"),
+            (self._candidate("https://investor.example.com/release.pdf", "年Q2-2026"), "Q2 2026"),
         ):
             with self.subTest(candidate=candidate):
                 selection = select_results_page_release_candidate(
                     self._event(),
                     (candidate,),
-                    release_period="Q2 2026" if "q2" in candidate.source_url else "FY 2026",
+                    release_period=release_period,
                 )
                 self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_rejects_noncanonical_release_period_input(self):
+        for release_period in (
+            "Q2\n2026",
+            "Q2\t2026",
+            "Q2 ２０２６",
+            "Q2  2026",
+        ):
+            with self.subTest(release_period=release_period):
+                with self.assertRaises(ValueError):
+                    select_results_page_release_candidate(
+                        self._event(),
+                        (self._candidate("https://investor.example.com/q2-2026-results.pdf"),),
+                        release_period=release_period,
+                    )
 
     def test_exact_date_tier_wins_over_period_only_candidate(self):
         exact = self._candidate("https://investor.example.com/2026-08-26-results.pdf")
