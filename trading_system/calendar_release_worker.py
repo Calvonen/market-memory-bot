@@ -6,7 +6,11 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any, Callable
 
 from trading_system.ai_event_analyzer import EventAnalyzer, build_default_event_analyzer
+from trading_system.manual_release_ingestion import ManualOfficialReleaseProvider
 from trading_system.models import EventExpectation
+from trading_system.official_release_source_repository import (
+    SupabaseOfficialReleaseSourceRepository,
+)
 from trading_system.release_repository import SupabaseReleaseRepository
 from trading_system.release_worker import EventReleaseMonitor, IngestionResult
 from trading_system.sec_release_ingestion import SecEdgarResultsProvider
@@ -139,6 +143,7 @@ def run_calendar_release_ingestion_once(
     expectations: SupabaseEventExpectationRepository,
     releases: SupabaseReleaseRepository,
     analyzer: EventAnalyzer,
+    official_sources: SupabaseOfficialReleaseSourceRepository | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     lookahead_days: int = DEFAULT_LOOKAHEAD_DAYS,
@@ -188,10 +193,18 @@ def run_calendar_release_ingestion_once(
                 )
                 continue
 
-            provider = SecEdgarResultsProvider(
-                ticker=target.ticker,
-                scheduled_date=target.scheduled_date,
+            approved_source = (
+                official_sources.get(target.event_id)
+                if official_sources is not None
+                else None
             )
+            if approved_source is not None:
+                provider = ManualOfficialReleaseProvider(approved_source)
+            else:
+                provider = SecEdgarResultsProvider(
+                    ticker=target.ticker,
+                    scheduled_date=target.scheduled_date,
+                )
             monitor = EventReleaseMonitor(
                 expectation_repository=_PinnedExpectationRepository(
                     event_id=target.event_id,
@@ -253,6 +266,7 @@ def main() -> None:
         expectations=SupabaseEventExpectationRepository.from_env(),
         releases=SupabaseReleaseRepository.from_env(),
         analyzer=build_default_event_analyzer(),
+        official_sources=SupabaseOfficialReleaseSourceRepository.from_env(),
         lookback_days=lookback_days,
         lookahead_days=lookahead_days,
     )
