@@ -78,3 +78,33 @@ def test_attribute_controls_are_excluded_fail_closed() -> None:
     assert len(candidates) == 1
     assert candidates[0].source_url == "https://example.com/r"
     assert candidates[0].evidence_fields == ("Download",)
+
+
+def test_literal_nul_visible_text_is_excluded_before_html5_replacement() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<a href="/r">Annual\x00Q2-2026</a>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ()
+
+
+def test_numeric_nul_attribute_is_excluded_before_html5_replacement() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<a href="/r" title="Annual&#0;Q2-2026">Download</a>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ("Download",)
+
+
+def test_iframe_fallback_text_is_not_release_evidence() -> None:
+    candidates = extract_results_page_candidates(
+        _source(),
+        '<a href="/r">Annual<iframe>Q2-2026</iframe></a>',
+    )
+    assert len(candidates) == 1
+    assert candidates[0].source_url == "https://example.com/r"
+    assert candidates[0].evidence_fields == ("Annual",)
