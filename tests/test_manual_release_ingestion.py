@@ -117,6 +117,23 @@ class ManualOfficialReleaseProviderTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "PDF extraction failed"):
                 provider.discover(self.EVENT_ID)
 
+    def test_pdf_without_extractable_text_is_reported_as_error(self) -> None:
+        source = OfficialReleaseSource(
+            self.EVENT_ID,
+            "direct_url",
+            "https://investor.example.com/scanned-results.pdf",
+            version=1,
+        )
+        provider = _Provider(source, b"%PDF-1.7\nscanned", "application/pdf")
+        page = MagicMock()
+        page.extract_text.return_value = None
+        reader = MagicMock()
+        reader.pages = [page]
+
+        with patch("trading_system.manual_release_ingestion.PdfReader", return_value=reader):
+            with self.assertRaisesRegex(RuntimeError, "produced no text"):
+                provider.discover(self.EVENT_ID)
+
     def test_binary_or_structured_payload_is_rejected(self) -> None:
         source = OfficialReleaseSource(
             self.EVENT_ID,
