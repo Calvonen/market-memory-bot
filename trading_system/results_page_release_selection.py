@@ -4,6 +4,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from enum import Enum
+from urllib.parse import unquote
 
 from trading_system.calendar_repository import CalendarEvent
 from trading_system.results_page_release_candidates import ResultsPageReleaseCandidate
@@ -22,6 +23,7 @@ class ResultsPageSelection:
 
 
 _PERIOD_LABEL_RE = re.compile(r"^(Q[1-4]|H[12]|FY) ([0-9]{4})$", re.IGNORECASE)
+_PERCENT_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}")
 
 
 def _scheduled_date_patterns(event: CalendarEvent) -> tuple[re.Pattern[str], ...]:
@@ -63,8 +65,27 @@ def _pattern_has_standalone_match(field: str, pattern: re.Pattern[str]) -> bool:
     return False
 
 
+def _decoded_url_evidence(source_url: str) -> str | None:
+    """Percent-decode URL evidence without letting malformed escapes broaden matches."""
+    index = 0
+    while index < len(source_url):
+        if source_url[index] != "%":
+            index += 1
+            continue
+        if _PERCENT_ESCAPE_RE.match(source_url, index) is None:
+            return None
+        index += 3
+    try:
+        return unquote(source_url, encoding="utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+
+
 def _candidate_evidence_fields(candidate: ResultsPageReleaseCandidate) -> tuple[str, ...]:
-    fields = [candidate.source_url]
+    fields: list[str] = []
+    decoded_url = _decoded_url_evidence(candidate.source_url)
+    if decoded_url is not None:
+        fields.append(decoded_url)
     if candidate.evidence_fields:
         fields.extend(candidate.evidence_fields)
     elif candidate.source_title:
