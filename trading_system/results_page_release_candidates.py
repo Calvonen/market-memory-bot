@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import unicodedata
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urlsplit, urlunsplit
@@ -41,6 +42,10 @@ def _contains_ascii_control(value: str) -> bool:
     return any(ord(char) <= 0x1F or ord(char) == 0x7F for char in value)
 
 
+def _contains_text_control(value: str) -> bool:
+    return any(unicodedata.category(char) == "Cc" for char in value)
+
+
 def _raw_href_contains_encoded_control(raw_href: str) -> bool:
     if _contains_ascii_control(raw_href):
         return True
@@ -73,6 +78,12 @@ def _normalized_text(value: str) -> str:
     return " ".join(value.split())
 
 
+def _safe_normalized_text(value: str) -> str | None:
+    if _contains_text_control(value):
+        return None
+    return _normalized_text(value)
+
+
 class _RawAnchorHrefSafetyScanner(HTMLParser):
     """Track href spellings only; html5lib owns all HTML tree construction semantics."""
 
@@ -92,7 +103,9 @@ class _RawAnchorHrefSafetyScanner(HTMLParser):
         self.handle_starttag(tag, attrs)
 
 
-def _element_name(tag: str) -> tuple[str | None, str]:
+def _element_name(tag: object) -> tuple[str | None, str]:
+    if not isinstance(tag, str):
+        return None, ""
     if tag.startswith("{") and "}" in tag:
         namespace, local = tag[1:].split("}", 1)
         return namespace, local.lower()
@@ -105,12 +118,12 @@ def _element_hidden(element) -> bool:
 
 def _element_is_non_rendered(element) -> bool:
     namespace, local = _element_name(element.tag)
-    return local in _NON_RENDERED_TAGS and (
+    return bool(local) and local in _NON_RENDERED_TAGS and (
         local in {"script", "style"} or namespace == _HTML_NAMESPACE
     )
 
 
-def _visible_anchor_text(anchor) -> str:
+def _visible_anchor_text(anchor) -> str | None:
     parts: list[str] = []
 
     def append_break() -> None:
@@ -118,6 +131,8 @@ def _visible_anchor_text(anchor) -> str:
             parts.append(" ")
 
     def visit(element) -> None:
+        if not isinstance(element.tag, str):
+            return
         if _element_hidden(element) or _element_is_non_rendered(element):
             return
 
@@ -125,7 +140,12 @@ def _visible_anchor_text(anchor) -> str:
             parts.append(element.text)
         for child in list(element):
             child_namespace, child_local = _element_name(child.tag)
-            child_visible = not _element_hidden(child) and not _element_is_non_rendered(child)
+            child_is_element = isinstance(child.tag, str)
+            child_visible = (
+                child_is_element
+                and not _element_hidden(child)
+                and not _element_is_non_rendered(child)
+            )
             rendered_break = (
                 child_visible
                 and child_namespace == _HTML_NAMESPACE
@@ -140,11 +160,13 @@ def _visible_anchor_text(anchor) -> str:
                 parts.append(child.tail)
 
     visit(anchor)
-    return _normalized_text("".join(parts))
+    return _safe_normalized_text("".join(parts))
 
 
 def _iter_visible_html_anchors(root):
     def walk(element, hidden_ancestor: bool):
+        if not isinstance(element.tag, str):
+            return
         hidden_here = hidden_ancestor or _element_hidden(element)
         namespace, local = _element_name(element.tag)
         non_rendered = _element_is_non_rendered(element)
@@ -174,10 +196,12 @@ def _parse_html5_links(html_text: str) -> list[tuple[str, str | None, tuple[str,
         href = anchor.attrib.get("href")
         if href is None or href in safety_scanner.unsafe_hrefs or _contains_ascii_control(href):
             continue
-        aria_label = _normalized_text(anchor.attrib.get("aria-label", ""))
-        title_attr = _normalized_text(anchor.attrib.get("title", ""))
+        aria_label = _safe_normalized_text(anchor.attrib.get("aria-label", ""))
+        title_attr = _safe_normalized_text(anchor.attrib.get("title", ""))
         visible_text = _visible_anchor_text(anchor)
-        evidence_fields = tuple(value for value in (aria_label, title_attr, visible_text) if value)
+        evidence_fields = tuple(
+            value for value in (aria_label, title_attr, visible_text) if value
+        )
         title = " ".join(evidence_fields) or None
         links.append((href, title, evidence_fields))
     return links
