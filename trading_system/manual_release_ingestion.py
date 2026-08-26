@@ -92,7 +92,14 @@ def _pdf_extract_worker(
         baseline_vms = _current_virtual_memory_bytes()
         if baseline_vms <= 0:
             raise RuntimeError("unable to determine PDF worker baseline memory")
-        address_space_limit = baseline_vms + memory_limit_bytes
+        desired_limit = baseline_vms + memory_limit_bytes
+        _soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_AS)
+        if hard_limit == resource.RLIM_INFINITY:
+            address_space_limit = desired_limit
+        else:
+            address_space_limit = min(desired_limit, hard_limit)
+        if address_space_limit <= baseline_vms:
+            raise RuntimeError("PDF worker inherited address-space limit leaves no allocation headroom")
         resource.setrlimit(resource.RLIMIT_AS, (address_space_limit, address_space_limit))
         resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit_seconds, cpu_limit_seconds))
         text = ManualOfficialReleaseProvider._extract_pdf_text_in_process(
