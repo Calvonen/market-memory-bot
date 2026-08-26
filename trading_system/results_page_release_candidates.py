@@ -20,14 +20,14 @@ _RAW_HREF_RE = re.compile(
 )
 _NUMERIC_ENTITY_RE = re.compile(r"&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));?")
 
-# Results pages only need a conservative subset of ordinary rendered HTML.  Anything
+# Results pages only need a conservative subset of ordinary rendered HTML. Anything
 # outside this allowlist is an evidence boundary: html5lib still repairs the tree,
 # but we do not try to emulate browser rendering for SVG/MathML, custom elements,
 # fallback containers, metadata, or other stateful/conditional content.
 _SIMPLE_HTML_TEXT_TAGS = frozenset(
     {
         "a", "abbr", "address", "article", "aside", "b", "bdi", "bdo", "blockquote", "br",
-        "button", "center", "cite", "code", "dd", "del", "details", "dfn", "dialog", "div", "dl",
+        "button", "caption", "center", "cite", "code", "dd", "del", "details", "dfn", "dialog", "div", "dl",
         "dt", "em", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
         "h5", "h6", "header", "hgroup", "hr", "i", "ins", "kbd", "label", "li", "listing", "main",
         "mark", "menu", "nav", "ol", "p", "plaintext", "pre", "q", "s", "samp", "search", "section",
@@ -37,7 +37,7 @@ _SIMPLE_HTML_TEXT_TAGS = frozenset(
 )
 _RENDERED_BREAK_TAGS = frozenset(
     {
-        "address", "article", "aside", "blockquote", "br", "center", "dd", "details", "dialog",
+        "address", "article", "aside", "blockquote", "br", "caption", "center", "dd", "details", "dialog",
         "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3",
         "h4", "h5", "h6", "header", "hgroup", "hr", "li", "listing", "main", "menu", "nav", "ol",
         "p", "plaintext", "pre", "search", "section", "summary", "table", "tbody", "td", "tfoot", "th",
@@ -209,12 +209,20 @@ def _closed_details_summary(element):
     return False
 
 
-def _visible_anchor_text(anchor) -> str | None:
-    parts: list[str] = []
+def _visible_anchor_text_fields(anchor) -> tuple[str, ...]:
+    fragments: list[list[str]] = [[]]
+
+    def append_text(value: str) -> None:
+        fragments[-1].append(value)
 
     def append_break() -> None:
-        if parts and parts[-1] != " ":
-            parts.append(" ")
+        current = fragments[-1]
+        if current and current[-1] != " ":
+            current.append(" ")
+
+    def split_ambiguous_boundary() -> None:
+        if fragments[-1]:
+            fragments.append([])
 
     def visit(element) -> None:
         if not isinstance(element.tag, str):
@@ -231,12 +239,14 @@ def _visible_anchor_text(anchor) -> str | None:
             return
 
         if element.text:
-            parts.append(element.text)
+            append_text(element.text)
         for child in list(element):
             child_namespace, child_local = _element_name(child.tag)
+            child_is_element = isinstance(child.tag, str)
+            child_hidden = child_is_element and _element_hidden(child)
             child_visible = (
-                isinstance(child.tag, str)
-                and not _element_hidden(child)
+                child_is_element
+                and not child_hidden
                 and _element_allows_simple_text(child)
             )
             rendered_break = (
@@ -248,15 +258,23 @@ def _visible_anchor_text(anchor) -> str | None:
                 append_break()
             if child_visible:
                 visit(child)
+            elif child_is_element and not child_hidden:
+                # The subtree is intentionally unevaluated. Keep text on each side
+                # in independent evidence fields so a fiscal token cannot be
+                # manufactured across the ambiguity boundary.
+                split_ambiguous_boundary()
             if rendered_break:
                 append_break()
-            # Tail text belongs to the surrounding simple HTML element even when
-            # the child subtree itself is an ambiguous/foreign evidence boundary.
             if child.tail:
-                parts.append(child.tail)
+                append_text(child.tail)
 
     visit(anchor)
-    return _safe_normalized_text("".join(parts))
+    fields: list[str] = []
+    for fragment in fragments:
+        normalized = _safe_normalized_text("".join(fragment))
+        if normalized:
+            fields.append(normalized)
+    return tuple(fields)
 
 
 def _iter_visible_html_anchors(root):
@@ -300,9 +318,11 @@ def _parse_html5_links(html_text: str) -> list[tuple[str, str | None, tuple[str,
             continue
         aria_label = _safe_normalized_text(anchor.attrib.get("aria-label", ""))
         title_attr = _safe_normalized_text(anchor.attrib.get("title", ""))
-        visible_text = _visible_anchor_text(anchor)
+        visible_text_fields = _visible_anchor_text_fields(anchor)
         evidence_fields = tuple(
-            value for value in (aria_label, title_attr, visible_text) if value
+            value
+            for value in (aria_label, title_attr, *visible_text_fields)
+            if value
         )
         title = " ".join(evidence_fields) or None
         links.append((href, title, evidence_fields))
