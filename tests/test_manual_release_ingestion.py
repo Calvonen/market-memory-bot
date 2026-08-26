@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import resource
 import unittest
 from unittest.mock import MagicMock, patch
 
 from trading_system.manual_release_ingestion import (
     ManualOfficialReleaseProvider,
     _ApprovedOriginRedirectHandler,
+    _pdf_extract_worker,
 )
 from trading_system.official_release_source_repository import OfficialReleaseSource
 
@@ -168,15 +170,13 @@ class ManualOfficialReleaseProviderTests(unittest.TestCase):
                 provider.discover(self.EVENT_ID)
 
     def test_pdf_without_extractable_text_is_reported_as_error(self) -> None:
-        source = self._source("https://investor.example.com/scanned-results.pdf")
-        provider = _Provider(source, b"%PDF-1.7\nscanned", "application/pdf")
         page = MagicMock()
         page.extract_text.return_value = None
         reader = MagicMock()
         reader.pages = [page]
         with patch("trading_system.manual_release_ingestion.PdfReader", return_value=reader):
             with self.assertRaisesRegex(RuntimeError, "produced no text"):
-                provider.discover(self.EVENT_ID)
+                ManualOfficialReleaseProvider._extract_pdf_text_in_process(b"%PDF-1.7\nscanned")
 
     def test_pdf_page_limit_is_enforced_before_extraction(self) -> None:
         reader = MagicMock()
@@ -200,6 +200,19 @@ class ManualOfficialReleaseProviderTests(unittest.TestCase):
         first.extract_text.assert_called_once()
         second.extract_text.assert_called_once()
 
+    def test_pdf_worker_adds_budget_to_spawn_bootstrap_memory(self) -> None:
+        send_conn = MagicMock()
+        baseline = 1_500_000_000
+        budget = 1_073_741_824
+        with (
+            patch("trading_system.manual_release_ingestion._current_virtual_memory_bytes", return_value=baseline),
+            patch("resource.setrlimit") as setrlimit,
+            patch.object(ManualOfficialReleaseProvider, "_extract_pdf_text_in_process", return_value="results"),
+        ):
+            _pdf_extract_worker(b"%PDF-1.7", send_conn, 10, 1000, budget, 5)
+        setrlimit.assert_any_call(resource.RLIMIT_AS, (baseline + budget, baseline + budget))
+        send_conn.send.assert_called_once_with(("ok", "results"))
+
     def test_pdf_extraction_process_timeout_is_contextual_failure(self) -> None:
         fake_context = MagicMock()
         recv_conn = MagicMock()
@@ -209,10 +222,11 @@ class ManualOfficialReleaseProviderTests(unittest.TestCase):
         fake_context.Process.return_value = process
         recv_conn.poll.return_value = False
 
-        with patch("trading_system.manual_release_ingestion.multiprocessing.get_context", return_value=fake_context):
+        with patch("trading_system.manual_release_ingestion.multiprocessing.get_context", return_value=fake_context) as get_context:
             with self.assertRaisesRegex(RuntimeError, "exceeded resource limit"):
                 ManualOfficialReleaseProvider._extract_pdf_text(b"%PDF-1.7")
 
+        get_context.assert_called_once_with("spawn")
         process.terminate.assert_called_once()
         process.join.assert_called()
 
