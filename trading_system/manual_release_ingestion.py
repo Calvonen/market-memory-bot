@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 from html.parser import HTMLParser
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from pypdf import PdfReader
 
@@ -32,6 +32,16 @@ class _VisibleTextParser(HTMLParser):
                 self.parts.append(text)
 
 
+class _ApprovedOriginRedirectHandler(HTTPRedirectHandler):
+    def __init__(self, approved_url: str) -> None:
+        super().__init__()
+        self.approved_url = approved_url
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        ManualOfficialReleaseProvider._validate_final_url(self.approved_url, newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 class ManualOfficialReleaseProvider:
     """Fetch exactly one user-approved official release document.
 
@@ -44,6 +54,7 @@ class ManualOfficialReleaseProvider:
 
     name = "manual_official_release"
     MIN_DOCUMENT_CHARS = 500
+    MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 
     def __init__(
         self,
@@ -149,6 +160,22 @@ class ManualOfficialReleaseProvider:
                 "manual official release redirect left approved HTTPS origin"
             )
 
+    @classmethod
+    def _read_bounded(cls, response) -> bytes:  # type: ignore[no-untyped-def]
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                declared_length = int(content_length)
+            except (TypeError, ValueError):
+                declared_length = None
+            if declared_length is not None and declared_length > cls.MAX_DOWNLOAD_BYTES:
+                raise RuntimeError("manual official release download exceeds size limit")
+
+        data = response.read(cls.MAX_DOWNLOAD_BYTES + 1)
+        if len(data) > cls.MAX_DOWNLOAD_BYTES:
+            raise RuntimeError("manual official release download exceeds size limit")
+        return data
+
     def _fetch_bytes(self, url: str) -> tuple[bytes, str, str]:
         request = Request(
             url,
@@ -157,9 +184,11 @@ class ManualOfficialReleaseProvider:
                 "Accept": "text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8",
             },
         )
-        with urlopen(request, timeout=self.timeout_seconds) as response:
+        opener = build_opener(_ApprovedOriginRedirectHandler(url))
+        with opener.open(request, timeout=self.timeout_seconds) as response:
             final_url = response.geturl()
             self._validate_final_url(url, final_url)
             content_type = response.headers.get("Content-Type", "") or ""
             charset = response.headers.get_content_charset() or "utf-8"
-            return response.read(), content_type, charset
+            data = self._read_bounded(response)
+            return data, content_type, charset
