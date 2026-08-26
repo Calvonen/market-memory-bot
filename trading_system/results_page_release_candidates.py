@@ -311,6 +311,7 @@ def _remove_dot_segments(path: str) -> str:
             output = _remove_last_path_segment(output)
         elif input_buffer == "/..":
             input_buffer = "/"
+            output = _remove_last_path_segment(output)
         elif input_buffer in {".", ".."}:
             input_buffer = ""
         else:
