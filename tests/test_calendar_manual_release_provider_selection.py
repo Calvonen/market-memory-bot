@@ -18,6 +18,9 @@ SCHEDULED = date(2026, 8, 25)
 
 
 class _Targets:
+    def __init__(self, market="NASDAQ"):
+        self.market = market
+
     def list_targets(self, *, start_date, end_date):
         return (
             CalendarReleaseTarget(
@@ -25,6 +28,7 @@ class _Targets:
                 event_id=EVENT_ID,
                 ticker="DKS",
                 scheduled_date=SCHEDULED,
+                market=self.market,
             ),
         )
 
@@ -64,9 +68,9 @@ class _OfficialSources:
 
 
 class CalendarManualReleaseProviderSelectionTests(unittest.TestCase):
-    def _run(self, *, official_sources, releases=None):
+    def _run(self, *, official_sources, releases=None, market="NASDAQ"):
         return run_calendar_release_ingestion_once(
-            targets=_Targets(),
+            targets=_Targets(market),
             expectations=_Expectations(),
             releases=releases or _Releases(),
             analyzer=MagicMock(),
@@ -105,7 +109,35 @@ class CalendarManualReleaseProviderSelectionTests(unittest.TestCase):
         self.assertIs(monitor_cls.call_args.kwargs["provider"], manual_provider)
         fake_monitor.run_once.assert_called_once_with(EVENT_ID)
 
-    def test_missing_manual_source_preserves_existing_sec_fallback(self):
+    def test_approved_manual_source_supports_non_us_market(self):
+        source = OfficialReleaseSource(
+            event_id=EVENT_ID,
+            source_kind="direct_url",
+            source_url="https://investor.example.com/results.pdf",
+            version=1,
+        )
+        fake_monitor = MagicMock()
+        fake_monitor.run_once.return_value = IngestionResult(status="no_release")
+
+        with patch(
+            "trading_system.calendar_release_worker.ManualOfficialReleaseProvider",
+            return_value=MagicMock(),
+        ) as manual_cls, patch(
+            "trading_system.calendar_release_worker.SecEdgarResultsProvider"
+        ) as sec_cls, patch(
+            "trading_system.calendar_release_worker.EventReleaseMonitor",
+            return_value=fake_monitor,
+        ):
+            results = self._run(
+                official_sources=_OfficialSources(source),
+                market="HELSINKI",
+            )
+
+        self.assertEqual(results[0].status, "no_release")
+        manual_cls.assert_called_once_with(source)
+        sec_cls.assert_not_called()
+
+    def test_missing_manual_source_preserves_existing_us_sec_fallback(self):
         official_sources = _OfficialSources(None)
         fake_monitor = MagicMock()
         fake_monitor.run_once.return_value = IngestionResult(status="no_release")
@@ -126,6 +158,28 @@ class CalendarManualReleaseProviderSelectionTests(unittest.TestCase):
         manual_cls.assert_not_called()
         sec_cls.assert_called_once_with(ticker="DKS", scheduled_date=SCHEDULED)
         self.assertIs(monitor_cls.call_args.kwargs["provider"], sec_provider)
+
+    def test_non_us_without_manual_source_fails_closed_without_sec(self):
+        official_sources = _OfficialSources(None)
+
+        with patch(
+            "trading_system.calendar_release_worker.ManualOfficialReleaseProvider"
+        ) as manual_cls, patch(
+            "trading_system.calendar_release_worker.SecEdgarResultsProvider"
+        ) as sec_cls, patch(
+            "trading_system.calendar_release_worker.EventReleaseMonitor"
+        ) as monitor_cls:
+            results = self._run(
+                official_sources=official_sources,
+                market="HELSINKI",
+            )
+
+        self.assertEqual(results[0].status, "missing_official_source")
+        self.assertIn("non-US", results[0].message or "")
+        self.assertEqual(official_sources.calls, [EVENT_ID])
+        manual_cls.assert_not_called()
+        sec_cls.assert_not_called()
+        monitor_cls.assert_not_called()
 
     def test_manual_source_lookup_failure_fails_event_closed_without_sec_fallback(self):
         official_sources = _OfficialSources(error=RuntimeError("source repository unavailable"))
