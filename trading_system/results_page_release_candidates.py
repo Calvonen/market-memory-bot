@@ -16,11 +16,11 @@ _RAW_HREF_RE = re.compile(
 _NUMERIC_ENTITY_RE = re.compile(r"&#(?:x([0-9a-fA-F]+)|([0-9]+));?")
 _RENDERED_BREAK_START_TAGS = frozenset(
     {
-        "address", "article", "aside", "blockquote", "br", "center", "dd", "dir", "div", "dl", "dt",
-        "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
-        "h5", "h6", "header", "hr", "li", "listing", "main", "nav", "ol", "p", "plaintext",
-        "pre", "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
-        "xmp",
+        "address", "article", "aside", "blockquote", "br", "center", "dd", "details", "dialog",
+        "dir", "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1",
+        "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "hr", "li", "listing", "main",
+        "menu", "nav", "ol", "p", "plaintext", "pre", "search", "section", "summary", "table",
+        "tbody", "td", "tfoot", "th", "thead", "tr", "ul", "xmp",
     }
 )
 _RENDERED_BREAK_END_TAGS = _RENDERED_BREAK_START_TAGS - {"br", "hr"}
@@ -286,14 +286,30 @@ class _ResultsPageLinkParser(HTMLParser):
         return None
 
     def _delete_open_elements_from(self, index: int, *, clear_formatting_anchor: bool = False) -> None:
-        if (
+        continuing_formatting_anchor = (
             self._active_anchor_index is not None
             and index <= self._active_anchor_index
-        ):
-            if clear_formatting_anchor or not self._formatting_anchor_active:
-                self._finalize_anchor()
-            else:
-                self._active_anchor_index = None
+            and self._formatting_anchor_active
+            and not clear_formatting_anchor
+        )
+        if continuing_formatting_anchor:
+            active_anchor_index = self._active_anchor_index
+            if (
+                not self._inside_non_rendered_content()
+                and not self._inside_hidden_content()
+                and any(
+                    namespace == "html" and tag in _RENDERED_BREAK_END_TAGS
+                    for (tag, _), namespace in zip(
+                        self._open_elements[index : active_anchor_index + 1],
+                        self._open_namespaces[index : active_anchor_index + 1],
+                    )
+                )
+            ):
+                self._text_parts.append(" ")
+            self._active_anchor_index = None
+        elif self._active_anchor_index is not None and index <= self._active_anchor_index:
+            self._finalize_anchor()
+
         if self._formatting_anchor_index is not None and index <= self._formatting_anchor_index:
             self._formatting_anchor_index = None
             if clear_formatting_anchor:
@@ -333,6 +349,8 @@ class _ResultsPageLinkParser(HTMLParser):
             boundaries.update(_IMPLIED_CLOSE_SCOPE_BOUNDARIES.get(closing_tag, frozenset()))
         for index in range(len(self._open_elements) - 1, -1, -1):
             open_tag = self._open_elements[index][0]
+            if self._open_namespaces[index] != "html" and self._is_generic_special_element(index):
+                return None
             if open_tag in closing_tags:
                 return index
             if open_tag in boundaries:
@@ -525,10 +543,17 @@ class _ResultsPageLinkParser(HTMLParser):
         if normalized_tag == "a":
             anchor_index = self._find_open_element_index(normalized_tag)
             if anchor_index is not None:
-                if self._active_anchor_index == anchor_index:
-                    self._finalize_anchor()
-                self._delete_open_elements_from(anchor_index, clear_formatting_anchor=True)
-                self._clear_formatting_anchor()
+                closes_formatting_anchor = (
+                    self._formatting_anchor_index is not None
+                    and anchor_index == self._formatting_anchor_index
+                )
+                if closes_formatting_anchor:
+                    if self._active_anchor_index == anchor_index:
+                        self._finalize_anchor()
+                    self._delete_open_elements_from(anchor_index, clear_formatting_anchor=True)
+                    self._clear_formatting_anchor()
+                else:
+                    self._delete_open_elements_from(anchor_index)
                 return
             if self._formatting_anchor_active:
                 self._finalize_anchor()
