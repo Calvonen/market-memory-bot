@@ -87,7 +87,10 @@ class _ResultsPageLinkParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag.lower() != "a" or self._href is None:
             return
-        visible_text = _normalized_text(" ".join(self._text_parts))
+        # Preserve adjacency between HTML text nodes. Real whitespace remains in
+        # the data chunks and is normalized afterwards, but adjacent inline
+        # elements must not manufacture a token boundary.
+        visible_text = _normalized_text("".join(self._text_parts))
         evidence_fields = tuple(
             value
             for value in (
