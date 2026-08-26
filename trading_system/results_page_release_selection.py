@@ -73,8 +73,11 @@ def _pattern_has_standalone_match(field: str, pattern: re.Pattern[str]) -> bool:
     return False
 
 
-def _contains_ascii_control(value: str) -> bool:
-    return any(ord(char) <= 0x1F or ord(char) == 0x7F for char in value)
+def _contains_unicode_control(value: str) -> bool:
+    # Unicode category Cc covers both ASCII controls and the C1 control range
+    # such as U+0085. Those characters must never manufacture evidence
+    # boundaries after URL percent-decoding.
+    return any(unicodedata.category(char) == "Cc" for char in value)
 
 
 def _decoded_url_evidence(source_url: str) -> str | None:
@@ -91,7 +94,7 @@ def _decoded_url_evidence(source_url: str) -> str | None:
         decoded = unquote(source_url, encoding="utf-8", errors="strict")
     except UnicodeDecodeError:
         return None
-    if _contains_ascii_control(decoded):
+    if _contains_unicode_control(decoded):
         return None
     return decoded
 
