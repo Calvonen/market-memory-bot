@@ -63,12 +63,17 @@ class ManualOfficialReleaseProvider:
         if self._looks_like_pdf(self.source.source_url, content_type, data):
             raw_text = self._extract_pdf_text(data)
             source_type = "company_results_pdf"
-        else:
+        elif self._looks_like_html_or_text(content_type, data):
             html_text = data.decode(charset, errors="replace")
             parser = _VisibleTextParser()
             parser.feed(html_text)
             raw_text = "\n".join(parser.parts)
             source_type = "company_results"
+        else:
+            media_type = content_type.split(";", 1)[0].strip() or "<missing>"
+            raise RuntimeError(
+                f"manual official release returned unsupported content type: {media_type}"
+            )
 
         raw_text = raw_text.strip()
         if len(raw_text) < self.MIN_DOCUMENT_CHARS:
@@ -89,6 +94,21 @@ class ManualOfficialReleaseProvider:
             path.lower().endswith(".pdf")
             or "pdf" in content_type.lower()
             or data.lstrip().startswith(b"%PDF-")
+        )
+
+    @staticmethod
+    def _looks_like_html_or_text(content_type: str, data: bytes) -> bool:
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if media_type in {"text/html", "application/xhtml+xml", "text/plain"}:
+            return True
+        if media_type:
+            return False
+        prefix = data.lstrip()[:256].lower()
+        return (
+            prefix.startswith(b"<!doctype html")
+            or prefix.startswith(b"<html")
+            or prefix.startswith(b"<head")
+            or prefix.startswith(b"<body")
         )
 
     @staticmethod
