@@ -16,10 +16,11 @@ _RAW_HREF_RE = re.compile(
 _NUMERIC_ENTITY_RE = re.compile(r"&#(?:x([0-9a-fA-F]+)|([0-9]+));?")
 _RENDERED_BREAK_START_TAGS = frozenset(
     {
-        "address", "article", "aside", "blockquote", "br", "dd", "div", "dl", "dt",
+        "address", "article", "aside", "blockquote", "br", "center", "dd", "dir", "div", "dl", "dt",
         "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
-        "h5", "h6", "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section",
-        "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
+        "h5", "h6", "header", "hr", "li", "listing", "main", "nav", "ol", "p", "plaintext",
+        "pre", "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
+        "xmp",
     }
 )
 _RENDERED_BREAK_END_TAGS = _RENDERED_BREAK_START_TAGS - {"br", "hr"}
@@ -33,9 +34,9 @@ _VOID_TAGS = frozenset(
 _HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
 _P_IMPLIED_CLOSE_START_TAGS = frozenset(
     {
-        "address", "article", "aside", "blockquote", "center", "details", "dialog", "dir",
-        "div", "dl", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2",
-        "h3", "h4", "h5", "h6", "header", "hgroup", "hr", "listing", "main", "menu",
+        "address", "article", "aside", "blockquote", "center", "dd", "details", "dialog", "dir",
+        "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2",
+        "h3", "h4", "h5", "h6", "header", "hgroup", "hr", "li", "listing", "main", "menu",
         "nav", "ol", "p", "plaintext", "pre", "search", "section", "summary", "table", "ul",
         "xmp",
     }
@@ -161,6 +162,7 @@ class _ResultsPageLinkParser(HTMLParser):
         self._annotation_xml_html_integration: list[bool] = []
         self._active_anchor_index: int | None = None
         self._formatting_anchor_index: int | None = None
+        self._formatting_anchor_active = False
 
     def _inside_non_rendered_content(self) -> bool:
         return bool(self._non_rendered_tags)
@@ -176,6 +178,10 @@ class _ResultsPageLinkParser(HTMLParser):
         self._text_parts = []
         self._open_break_tags = []
         self._active_anchor_index = None
+
+    def _clear_formatting_anchor(self) -> None:
+        self._formatting_anchor_active = False
+        self._formatting_anchor_index = None
 
     def _finalize_anchor(self) -> None:
         if self._href is None:
@@ -279,15 +285,19 @@ class _ResultsPageLinkParser(HTMLParser):
                 return None
         return None
 
-    def _delete_open_elements_from(self, index: int) -> None:
+    def _delete_open_elements_from(self, index: int, *, clear_formatting_anchor: bool = False) -> None:
         if (
-            self._href is not None
-            and self._active_anchor_index is not None
+            self._active_anchor_index is not None
             and index <= self._active_anchor_index
         ):
-            self._finalize_anchor()
+            if clear_formatting_anchor or not self._formatting_anchor_active:
+                self._finalize_anchor()
+            else:
+                self._active_anchor_index = None
         if self._formatting_anchor_index is not None and index <= self._formatting_anchor_index:
             self._formatting_anchor_index = None
+            if clear_formatting_anchor:
+                self._clear_formatting_anchor()
         removed_non_rendered = [
             tag
             for (tag, _), namespace in zip(self._open_elements[index:], self._open_namespaces[index:])
@@ -419,12 +429,15 @@ class _ResultsPageLinkParser(HTMLParser):
         if (
             normalized_tag == "a"
             and incoming_namespace == "html"
-            and self._formatting_anchor_index is not None
+            and self._formatting_anchor_active
             and not ancestor_non_rendered
         ):
             formatting_anchor_index = self._formatting_anchor_index
-            if formatting_anchor_index < len(self._open_elements):
-                self._delete_open_elements_from(formatting_anchor_index)
+            self._finalize_anchor()
+            if formatting_anchor_index is not None and formatting_anchor_index < len(self._open_elements):
+                self._delete_open_elements_from(formatting_anchor_index, clear_formatting_anchor=True)
+            else:
+                self._clear_formatting_anchor()
             ancestor_hidden = self._inside_hidden_content()
             incoming_namespace = self._namespace_for_new_element(normalized_tag, attrs)
 
@@ -439,6 +452,7 @@ class _ResultsPageLinkParser(HTMLParser):
                 return
             if ancestor_non_rendered:
                 return
+            self._formatting_anchor_active = True
             self._formatting_anchor_index = len(self._open_elements) - 1
             if ancestor_hidden or self._inside_hidden_content():
                 self._reset_anchor()
@@ -476,6 +490,7 @@ class _ResultsPageLinkParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         if (
             self._href is not None
+            and self._formatting_anchor_active
             and not self._inside_non_rendered_content()
             and not self._inside_hidden_content()
         ):
@@ -509,11 +524,15 @@ class _ResultsPageLinkParser(HTMLParser):
 
         if normalized_tag == "a":
             anchor_index = self._find_open_element_index(normalized_tag)
-            if anchor_index is None:
+            if anchor_index is not None:
+                if self._active_anchor_index == anchor_index:
+                    self._finalize_anchor()
+                self._delete_open_elements_from(anchor_index, clear_formatting_anchor=True)
+                self._clear_formatting_anchor()
                 return
-            if self._active_anchor_index == anchor_index:
+            if self._formatting_anchor_active:
                 self._finalize_anchor()
-            self._delete_open_elements_from(anchor_index)
+                self._clear_formatting_anchor()
             return
 
         if (
@@ -532,6 +551,7 @@ class _ResultsPageLinkParser(HTMLParser):
     def close(self) -> None:
         super().close()
         self._finalize_anchor()
+        self._clear_formatting_anchor()
 
 
 def _https_origin(url: str) -> tuple[str, str, int] | None:
