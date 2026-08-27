@@ -15,7 +15,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
-      - name: Track Autodesk and approve official results page via production API
+      - name: Approve Autodesk official results page via production API and run release discovery
         shell: bash
         run: |
           set -euo pipefail
@@ -29,16 +29,8 @@ jobs:
           set +a
 
           API=http://127.0.0.1:8001
-          CALENDAR_ID=24b20d87-f7cf-408f-80e4-b7a94624229f
-          EVENT_ID="calendar:${CALENDAR_ID}"
-
-          echo "Tracking Autodesk calendar event ${CALENDAR_ID}"
-          curl --fail-with-body --silent --show-error \
-            -X POST \
-            -H "X-MarketAI-Control-Key: ${MARKETAI_CONTROL_API_KEY}" \
-            "${API}/api/v1/calendar/${CALENDAR_ID}/track" \
-            | tee /tmp/marketai-adsk-track.json
-          echo
+          EVENT_ID="calendar:24b20d87-f7cf-408f-80e4-b7a94624229f"
+          PY=/home/marko/marketai-repo/.venv/bin/python
 
           echo "Reading current official-source generation"
           curl --fail-with-body --silent --show-error \
@@ -48,15 +40,14 @@ jobs:
           cat /tmp/marketai-adsk-source-before.json
           echo
 
-          EXPECTED_VERSION="$(python - <<'PY'
+          EXPECTED_VERSION="$(${PY} - <<'PY'
           import json
           with open('/tmp/marketai-adsk-source-before.json', encoding='utf-8') as fh:
               print(int(json.load(fh)['version']))
           PY
           )"
 
-          echo "Approving Autodesk official event/results page at expected_version=${EXPECTED_VERSION}"
-          python - <<'PY' >/tmp/marketai-adsk-source-body.json
+          ${PY} - <<'PY' >/tmp/marketai-adsk-source-body.json
           import json
           with open('/tmp/marketai-adsk-source-before.json', encoding='utf-8') as fh:
               expected = int(json.load(fh)['version'])
@@ -68,6 +59,7 @@ jobs:
           }))
           PY
 
+          echo "Approving Autodesk official event/results page at expected_version=${EXPECTED_VERSION}"
           curl --fail-with-body --silent --show-error \
             -X PUT \
             -H "Content-Type: application/json" \
@@ -82,7 +74,7 @@ jobs:
           sudo /usr/bin/systemctl start marketai-calendar-release.service
           /usr/bin/systemctl show marketai-calendar-release.service \
             --property=Result,ExecMainStatus,ActiveState,SubState --no-pager
-          sudo /usr/bin/journalctl -u marketai-calendar-release.service -n 30 --no-pager
+          sudo /usr/bin/journalctl -u marketai-calendar-release.service -n 40 --no-pager
 
           echo "API health"
           curl --fail --silent "${API}/health"
