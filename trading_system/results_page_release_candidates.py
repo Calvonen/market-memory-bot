@@ -746,6 +746,19 @@ def _canonical_candidate_url(base_url: str, href: str) -> str | None:
     return _canonical_https_url(candidate)
 
 
+def canonical_same_origin_url(approved_url: str, url: str) -> str | None:
+    """Canonicalise ``url`` under the candidate URL policy, or ``None`` if unsafe.
+
+    Same rules the candidate links go through: resolved against the approved
+    URL, HTTPS only, no credentials, valid host, dot segments removed, fragment
+    dropped - and rejected outright if it leaves the approved origin. Exposed so
+    callers that fetch a candidate can compare the URL they actually landed on
+    against the page URLs under exactly the same normalisation, rather than
+    string-matching two spellings of the same resource.
+    """
+    return _canonical_candidate_url(approved_url, url)
+
+
 def extract_results_page_candidates(
     source: OfficialReleaseSource,
     html_text: str,

@@ -505,6 +505,109 @@ class ResultsPageOfficialReleaseProviderTests(unittest.TestCase):
                 page_url="https://cdn.example.net/reports/",
             )
 
+    # Codex P1 (round 2): a candidate that redirects back to the results page
+    # is the listing page, not a release - whatever its size.
+    def test_selected_candidate_redirected_to_the_served_results_page_is_rejected(self) -> None:
+        served_page_url = "https://investor.example.com/investors/results/"
+        candidate_url = "https://investor.example.com/releases/q2-2026-08-26.html"
+        page_markup = (
+            f'<a href="{candidate_url}">Half-year results</a><p>{BODY_TEXT}</p>'
+        )
+        provider = self._provider()
+        with patch.object(
+            ResultsPageOfficialReleaseProvider, "_interpret_document"
+        ) as interpret:
+            document, opener = self._discover(
+                provider,
+                {
+                    PAGE_URL: self._page(page_markup, final_url=served_page_url),
+                    candidate_url: self._page(page_markup, final_url=served_page_url),
+                },
+            )
+
+        self.assertIsNone(document)
+        # The results page is long enough to pass MIN_DOCUMENT_CHARS, so only
+        # the URL check keeps it out of the release store.
+        self.assertGreater(
+            len(BODY_TEXT), ResultsPageOfficialReleaseProvider.MIN_DOCUMENT_CHARS
+        )
+        interpret.assert_not_called()
+        self.assertEqual(opener.opened, [PAGE_URL, candidate_url])
+
+    def test_selected_candidate_redirected_to_the_approved_results_page_is_rejected(self) -> None:
+        served_page_url = "https://investor.example.com/investors/results/"
+        candidate_url = "https://investor.example.com/releases/q2-2026-08-26.html"
+        page_markup = f'<a href="{candidate_url}">Half-year results</a><p>{BODY_TEXT}</p>'
+        provider = self._provider()
+        with patch.object(
+            ResultsPageOfficialReleaseProvider, "_interpret_document"
+        ) as interpret:
+            document, _ = self._discover(
+                provider,
+                {
+                    PAGE_URL: self._page(page_markup, final_url=served_page_url),
+                    # Redirected back to the pre-redirect approved page instead.
+                    candidate_url: self._page(page_markup, final_url=PAGE_URL),
+                },
+            )
+
+        self.assertIsNone(document)
+        interpret.assert_not_called()
+
+    def test_results_page_self_redirect_is_reported_as_an_auditable_reason(self) -> None:
+        served_page_url = "https://investor.example.com/investors/results/"
+        candidate_url = "https://investor.example.com/releases/q2-2026-08-26.html"
+        page_markup = f'<a href="{candidate_url}">Half-year results</a><p>{BODY_TEXT}</p>'
+        provider = self._provider()
+        self._discover(
+            provider,
+            {
+                PAGE_URL: self._page(page_markup, final_url=served_page_url),
+                candidate_url: self._page(page_markup, final_url=served_page_url),
+            },
+        )
+
+        reason = provider.describe_no_release()
+        assert reason is not None
+        self.assertIn("redirected to the results page", reason)
+        self.assertIn(candidate_url, reason)
+        self.assertIn(served_page_url, reason)
+
+    def test_same_origin_redirect_to_a_different_document_is_accepted(self) -> None:
+        candidate_url = "https://investor.example.com/reports/2026-08-26-results.html"
+        served_document_url = "https://investor.example.com/reports/final/2026-08-26-results.html"
+        provider = self._provider()
+        document, opener = self._discover(
+            provider,
+            {
+                PAGE_URL: self._page(f'<a href="{candidate_url}">Half-year results</a>'),
+                candidate_url: _Response(_release_html(), final_url=served_document_url),
+            },
+        )
+
+        self.assertIsNotNone(document)
+        # The contract for this provider is the URL the document was served
+        # from, not the link that pointed at it.
+        self.assertEqual(document.source_url, served_document_url)
+        self.assertEqual(document.source_title, "Half-year results")
+        self.assertEqual(opener.opened, [PAGE_URL, candidate_url])
+
+    def test_selected_document_source_url_is_canonicalised(self) -> None:
+        candidate_url = "https://investor.example.com/reports/2026-08-26-results.html"
+        provider = self._provider()
+        document, _ = self._discover(
+            provider,
+            {
+                PAGE_URL: self._page(f'<a href="{candidate_url}">Results</a>'),
+                candidate_url: _Response(
+                    _release_html(),
+                    final_url="https://INVESTOR.example.com:443/reports/./final/../2026-08-26-results.html#top",
+                ),
+            },
+        )
+
+        self.assertEqual(document.source_url, candidate_url)
+
     # Codex P2: a fail-closed outcome always says why
     def test_no_release_reason_is_empty_before_and_after_a_successful_discovery(self) -> None:
         document_url = "https://investor.example.com/reports/2026-08-26-results.html"

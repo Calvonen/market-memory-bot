@@ -5,7 +5,10 @@ from datetime import date
 from trading_system.manual_release_ingestion import ApprovedOriginDocumentFetcher
 from trading_system.official_release_source_repository import OfficialReleaseSource
 from trading_system.release_ingestion import ReleaseDocument
-from trading_system.results_page_release_candidates import extract_results_page_candidates
+from trading_system.results_page_release_candidates import (
+    canonical_same_origin_url,
+    extract_results_page_candidates,
+)
 from trading_system.results_page_release_selection import (
     ResultsPageSelectionContext,
     ResultsPageSelectionStatus,
@@ -128,9 +131,27 @@ class ResultsPageOfficialReleaseProvider(ApprovedOriginDocumentFetcher):
         # download.
         self._validate_final_url(self.source.source_url, candidate.source_url)
 
-        data, content_type, http_charset = self._fetch_bytes(candidate.source_url)
+        data, content_type, http_charset, served_url = self._fetch_resource(candidate.source_url)
+        document_url = canonical_same_origin_url(self.source.source_url, served_url)
+        if document_url is None:
+            raise RuntimeError(
+                "results page official release document left the approved HTTPS origin"
+            )
+        if document_url in self._results_page_urls(page_url):
+            # A candidate that redirects back to the results page is not a
+            # release. Without this the listing page itself would be read as a
+            # release document whenever it carries enough visible text, and
+            # persisted under a URL it was never served from. Nothing is
+            # interpreted or stored: the bytes are dropped here.
+            self._no_release_reason = (
+                f"results_page selected document redirected to the results page: "
+                f"{candidate.source_url} was served from {document_url}, which is the results "
+                "page itself, not a release document"
+            )
+            return None
+
         raw_text, source_type = self._interpret_document(
-            candidate.source_url,
+            document_url,
             data,
             content_type,
             http_charset,
@@ -139,7 +160,7 @@ class ResultsPageOfficialReleaseProvider(ApprovedOriginDocumentFetcher):
         raw_text = raw_text.strip()
         if len(raw_text) < self.MIN_DOCUMENT_CHARS:
             self._no_release_reason = (
-                f"results_page selected document too short: {candidate.source_url} yielded "
+                f"results_page selected document too short: {document_url} yielded "
                 f"{len(raw_text)} characters, below the {self.MIN_DOCUMENT_CHARS} character minimum"
             )
             return None
@@ -147,10 +168,22 @@ class ResultsPageOfficialReleaseProvider(ApprovedOriginDocumentFetcher):
         return ReleaseDocument(
             event_id=event_id,
             source_type=source_type,
-            source_url=candidate.source_url,
+            # The URL the document was actually served from, not the link that
+            # pointed at it. Only this provider resolves a link it did not
+            # choose, so only this provider needs the distinction; the
+            # direct_url contract is deliberately left alone.
+            source_url=document_url,
             source_title=self._document_title(candidate.source_title),
             raw_text=raw_text,
         )
+
+    def _results_page_urls(self, page_url: str) -> frozenset[str]:
+        """Both canonical spellings of the results page: approved and served."""
+        canonical = (
+            canonical_same_origin_url(self.source.source_url, self.source.source_url),
+            canonical_same_origin_url(self.source.source_url, page_url),
+        )
+        return frozenset(url for url in canonical if url is not None)
 
     def _selection_reason(
         self,
