@@ -13,7 +13,7 @@ class OfficialReleaseSourceMissingGenerationRecoverySqlTests(unittest.TestCase):
 
     def test_missing_or_stale_generation_is_reconciled_from_latest_audit(self):
         self.assertIn("select distinct on (audit.event_id)", self.sql)
-        self.assertIn("order by audit.event_id, audit.id desc", self.sql)
+        self.assertIn("order by audit.event_id, audit.version desc, audit.id desc", self.sql)
         self.assertIn("left join public.event_official_release_sources source", self.sql)
         self.assertIn("source.event_id is null", self.sql)
         self.assertIn("source.version < latest.version", self.sql)
@@ -31,9 +31,9 @@ class OfficialReleaseSourceMissingGenerationRecoverySqlTests(unittest.TestCase):
         self.assertLess(event_lock, source_lock)
         self.assertLess(source_lock, snapshot)
 
-    def test_schema_gate_requires_recovery_contract_v7(self):
-        self.assertIn("    7;", self.sql)
-        self.assertIn("REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 7", self.schema_gate)
+    def test_schema_gate_requires_recovery_contract_v8(self):
+        self.assertIn("    8;", self.sql)
+        self.assertIn("REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 8", self.schema_gate)
 
 
 if __name__ == "__main__":

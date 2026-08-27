@@ -16,7 +16,7 @@ with latest_audit as (
     audit.action,
     audit.version
   from public.event_official_release_source_audit audit
-  order by audit.event_id, audit.id desc
+  order by audit.event_id, audit.version desc, audit.id desc
 )
 select
   latest.event_id,
@@ -91,8 +91,8 @@ where not exists (
     and audit.version = recovered.version
 );
 
--- v7 means the v5 trigger contract plus recovery of missing or stale durable
--- generations lost/recreated in the historical 1040 -> 1050 cascade window.
+-- v8 means the v7 recovery contract plus selecting the highest retained audit
+-- generation by version, using audit id only as a deterministic tie-breaker.
 drop function public.verify_official_release_source_schema();
 
 create function public.verify_official_release_source_schema()
@@ -138,7 +138,7 @@ as $$
           and function_namespace.nspname = 'public'
           and trigger_function.proname = 'tombstone_official_release_source_before_event_delete'
       ),
-    7;
+    8;
 $$;
 
 revoke all on function public.verify_official_release_source_schema() from public, anon, authenticated;
