@@ -15,91 +15,14 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 15
     steps:
-      - name: Patch Home event presentation and validate
+      - name: Patch and validate
         run: |
           set -euo pipefail
           WORK=/tmp/marketai-home-event-unification
           rm -rf "$WORK"
           git clone --branch fix/home-event-unification --single-branch https://github.com/Calvonen/market-memory-bot.git "$WORK"
           cd "$WORK"
-          python3 - <<'PY'
-          from pathlib import Path
-
-          index = Path('mobile/src/app/(tabs)/index.tsx')
-          text = index.read_text()
-          text = text.replace(
-              "type TrackedEventSnapshot = { count: number; calendarEventIds: string[] };",
-              "type TrackedEventSnapshot = {\n  count: number;\n  calendarEventIds: string[];\n  statusByCalendarEventId: Record<string, string>;\n};",
-          )
-          text = text.replace(
-              "  const [persistentCalendarEventIds, setPersistentCalendarEventIds] = useState<Set<string>>(\n    () => new Set(),\n  );",
-              "  const [persistentCalendarEventIds, setPersistentCalendarEventIds] = useState<Set<string>>(\n    () => new Set(),\n  );\n  const [persistentStatusByCalendarEventId, setPersistentStatusByCalendarEventId] = useState<\n    Record<string, string>\n  >({});\n  const [trackedRefreshToken, setTrackedRefreshToken] = useState(0);",
-          )
-          text = text.replace(
-              "  const handleTrackedEventSnapshot = useCallback((snapshot: TrackedEventSnapshot) => {\n    setTrackedEventCount(snapshot.count);\n    setPersistentCalendarEventIds(new Set(snapshot.calendarEventIds));\n  }, []);",
-              "  const handleTrackedEventSnapshot = useCallback((snapshot: TrackedEventSnapshot) => {\n    setTrackedEventCount(snapshot.count);\n    setPersistentCalendarEventIds(new Set(snapshot.calendarEventIds));\n    setPersistentStatusByCalendarEventId(snapshot.statusByCalendarEventId);\n  }, []);\n\n  const expectationCalendarEventIds = useMemo(() => {\n    const ids = new Set<string>();\n    for (const event of events ?? []) {\n      if (!event.event_id.startsWith('calendar:')) continue;\n      const calendarEventId = event.event_id.slice('calendar:'.length);\n      if (calendarEventId) ids.add(calendarEventId);\n    }\n    return ids;\n  }, [events]);",
-          )
-          text = text.replace(
-              "  const onRefresh = useCallback(async () => {\n    setRefreshing(true);\n    await loadEvents();\n    setRefreshing(false);\n  }, [loadEvents]);",
-              "  const onRefresh = useCallback(async () => {\n    setRefreshing(true);\n    setTrackedRefreshToken((value) => value + 1);\n    await loadEvents();\n    setRefreshing(false);\n  }, [loadEvents]);",
-          )
-          text = text.replace(
-              "      {events?.map((event) => (\n        <EventCard key={event.event_id} event={event} status={statuses[event.event_id]} />\n      ))}\n\n      <TrackedEventsSection onSnapshot={handleTrackedEventSnapshot} />",
-              "      {events?.map((event) => {\n        const calendarEventId = event.event_id.startsWith('calendar:')\n          ? event.event_id.slice('calendar:'.length)\n          : null;\n        return (\n          <EventCard\n            key={event.event_id}\n            event={event}\n            status={statuses[event.event_id]}\n            runtimeStatus={\n              calendarEventId ? persistentStatusByCalendarEventId[calendarEventId] : undefined\n            }\n          />\n        );\n      })}\n\n      <TrackedEventsSection\n        onSnapshot={handleTrackedEventSnapshot}\n        excludeCalendarEventIds={expectationCalendarEventIds}\n        refreshToken={trackedRefreshToken}\n      />",
-          )
-          text = text.replace(
-              "function EventCard({ event, status }: { event: EventExpectation; status?: EventStatus }) {",
-              "function EventCard({\n  event,\n  status,\n  runtimeStatus,\n}: {\n  event: EventExpectation;\n  status?: EventStatus;\n  runtimeStatus?: string;\n}) {",
-          )
-          old = """  const statusText = !status
-    ? 'Ladataan...'
-    : isStale
-      ? 'Vanhentunut analyysi'
-      : describeStatus(status.run, status.statusError);"""
-          new = """  const statusText = isStale
-    ? 'Vanhentunut analyysi'
-    : run
-      ? describeStatus(run, false)
-      : runtimeStatus
-        ? runtimeStatus
-        : !status
-          ? 'Ladataan...'
-          : describeStatus(null, status.statusError);"""
-          if old not in text:
-              raise SystemExit('index statusText anchor not found')
-          text = text.replace(old, new)
-          index.write_text(text)
-
-          component = Path('mobile/src/components/TrackedEventsSection.tsx')
-          text = component.read_text()
-          text = text.replace(
-              "type Snapshot = {\n  count: number;\n  calendarEventIds: string[];\n};",
-              "type Snapshot = {\n  count: number;\n  calendarEventIds: string[];\n  statusByCalendarEventId: Record<string, string>;\n};",
-          )
-          text = text.replace(
-              "type Props = {\n  onSnapshot?: (snapshot: Snapshot) => void;\n};",
-              "type Props = {\n  onSnapshot?: (snapshot: Snapshot) => void;\n  excludeCalendarEventIds?: ReadonlySet<string>;\n  refreshToken?: number;\n};",
-          )
-          text = text.replace(
-              "export function TrackedEventsSection({ onSnapshot }: Props) {",
-              "export function TrackedEventsSection({\n  onSnapshot,\n  excludeCalendarEventIds,\n  refreshToken = 0,\n}: Props) {",
-          )
-          text = text.replace(
-              "          calendarEventIds: list\n            .map((event) => event.calendar_event_id)\n            .filter((value): value is string => Boolean(value)),\n        });",
-              "          calendarEventIds: list\n            .map((event) => event.calendar_event_id)\n            .filter((value): value is string => Boolean(value)),\n          statusByCalendarEventId: Object.fromEntries(\n            list\n              .filter((event) => Boolean(event.calendar_event_id))\n              .map((event) => [event.calendar_event_id as string, describeTrackedEvent(event).status]),\n          ),\n        });",
-          )
-          text = text.replace(
-              "    }, [load]),\n  );",
-              "    }, [load, refreshToken]),\n  );",
-              1,
-          )
-          text = text.replace(
-              "      {events?.map((event) => (\n        <TrackedEventCard key={event.event_id} event={event} />\n      ))}",
-              "      {events\n        ?.filter(\n          (event) =>\n            !event.calendar_event_id || !excludeCalendarEventIds?.has(event.calendar_event_id),\n        )\n        .map((event) => <TrackedEventCard key={event.event_id} event={event} />)}",
-          )
-          component.write_text(text)
-          PY
-
+          python3 scripts/tmp_patch_home_event_unification.py
           cd mobile
           npm ci
           npx tsc --noEmit
@@ -109,6 +32,6 @@ jobs:
           git status --short
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add mobile/src/app/'(tabs)'/index.tsx mobile/src/components/TrackedEventsSection.tsx
+          git add "mobile/src/app/(tabs)/index.tsx" mobile/src/components/TrackedEventsSection.tsx
           git commit -m "fix: unify Home event cards"
           git push origin HEAD:fix/home-event-unification
