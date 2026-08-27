@@ -16,6 +16,24 @@ class OfficialReleaseSourceApprovalAuditSqlTests(unittest.TestCase):
         self.assertIn("revoke all on table public.event_official_release_source_audit", self.sql)
         self.assertIn("grant select on table public.event_official_release_source_audit to service_role", self.sql)
 
+    def test_pre_audit_active_sources_are_recorded_then_invalidated(self):
+        self.assertIn("migration:legacy-pre-audit-source", self.sql)
+        self.assertIn("migration:legacy-pre-audit-invalidation", self.sql)
+        self.assertIn("from public.event_official_release_sources\nwhere is_active", self.sql)
+        self.assertIn("update public.event_official_release_sources", self.sql)
+        self.assertIn("source_kind = null", self.sql)
+        self.assertIn("source_url = null", self.sql)
+        self.assertIn("source_title = null", self.sql)
+        self.assertIn("is_active = false", self.sql)
+        self.assertIn("version = version + 1", self.sql)
+        self.assertIn("from invalidated", self.sql)
+
+        legacy_set = self.sql.index("migration:legacy-pre-audit-source")
+        invalidation_update = self.sql.index("update public.event_official_release_sources")
+        legacy_clear = self.sql.index("migration:legacy-pre-audit-invalidation")
+        self.assertLess(legacy_set, invalidation_update)
+        self.assertLess(invalidation_update, legacy_clear)
+
     def test_old_unaudited_rpcs_are_revoked_from_service_role(self):
         self.assertIn("revoke all on function public.set_event_official_release_source(text, text, text, text, integer)\n  from service_role", self.sql)
         self.assertIn("revoke all on function public.clear_event_official_release_source(text, integer)\n  from service_role", self.sql)
@@ -24,7 +42,7 @@ class OfficialReleaseSourceApprovalAuditSqlTests(unittest.TestCase):
         self.assertIn("set_event_official_release_source_approved", self.sql)
         self.assertIn("clear_event_official_release_source_approved", self.sql)
         self.assertGreaterEqual(self.sql.count("input_actor text"), 2)
-        self.assertGreaterEqual(self.sql.count("insert into public.event_official_release_source_audit"), 2)
+        self.assertGreaterEqual(self.sql.count("insert into public.event_official_release_source_audit"), 4)
 
     def test_schema_gate_has_distinct_audited_contract_version(self):
         self.assertIn("drop function public.verify_official_release_source_schema()", self.sql)
