@@ -1,0 +1,69 @@
+name: PR177 P2 marker collision fix
+
+on:
+  push:
+    branches:
+      - feature/results-page-release-provider
+    paths:
+      - .github/workflows/pr177-p2-marker-collision.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/results-page-release-provider
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply focused P2 fix and regressions
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          source_path = Path('trading_system/results_page_release_candidates.py')
+          text = source_path.read_text()
+          old = '''    lowered = html_text.lower()\n    if any(prefix in lowered for _tag, prefix, _offsets in plans):\n        return None\n\n    nonce = secrets.token_hex(8)\n    markers = {tag: f"{prefix}{nonce}" for tag, prefix, _offsets in plans}\n'''
+          new = '''    lowered = html_text.lower()\n    markers: dict[str, str] = {}\n    used_markers: set[str] = set()\n    for tag, prefix, _offsets in plans:\n        # The prefix itself is not reserved input. Only the complete generated\n        # attribute name must be absent from the page. This lets unrelated page\n        # markup mention our conventional prefix without disabling identity\n        # tracking for hidden/dropped malformed anchors.\n        for _attempt in range(32):\n            marker = f"{prefix}{secrets.token_hex(8)}"\n            if marker not in lowered and marker not in used_markers:\n                markers[tag] = marker\n                used_markers.add(marker)\n                break\n        else:\n            return None\n'''
+          if old not in text:
+              raise SystemExit('source replacement anchor not found')
+          text = text.replace(old, new, 1)
+          old_doc = '''    ``plans`` is one ``(tag name, reserved prefix, source offsets)`` per tag\n    kind. Returns the instrumented source and each kind's marker attribute name,\n    or None when instrumentation cannot be trusted - the caller then fails\n    closed. The markers are never read from the page: a source that spells any\n    reserved prefix at all is refused, and the names carry a per-parse nonce on\n    top of that, so a page cannot forge or predict one. Only the listed start\n    tags are touched, and none of them carries text, so raw href safety - which\n'''
+          new_doc = '''    ``plans`` is one ``(tag name, marker prefix, source offsets)`` per tag\n    kind. Returns the instrumented source and each kind's marker attribute name,\n    or None when instrumentation cannot be trusted - the caller then fails\n    closed. The markers are never trusted from the page: each complete marker\n    name carries a fresh per-parse nonce and is accepted only when that exact\n    attribute name is absent from the original source. Prefix text by itself is\n    harmless, so unrelated markup cannot disable identity tracking. Only the\n    listed start tags are touched, and none of them carries text, so raw href safety - which\n'''
+          if old_doc not in text:
+              raise SystemExit('doc replacement anchor not found')
+          text = text.replace(old_doc, new_doc, 1)
+          source_path.write_text(text)
+
+          test_path = Path('tests/test_results_page_release_provider.py')
+          tests = test_path.read_text()
+          anchor = '''    def test_template_local_malformed_anchor_does_not_poison_visible_release_candidate(self) -> None:\n'''
+          addition = '''    def test_reserved_anchor_marker_prefix_does_not_poison_hidden_malformed_anchor(self) -> None:\n        document_url = "https://investor.example.com/reports/2026-08-26-results.html"\n        provider = self._provider()\n        document, opener = self._discover(\n            provider,\n            {\n                PAGE_URL: self._page(\n                    '<div data-mmb-anchor-token-spoof="0">Unrelated marker-like markup</div>'\n                    '<div hidden><a href href="/bad">Hidden malformed</a></div>'\n                    '<a href="/reports/2026-08-26-results.html">Half-year results</a>'\n                ),\n                document_url: _Response(_release_html(), final_url=document_url),\n            },\n        )\n        self.assertIsNotNone(document)\n        self.assertEqual(document.source_url, document_url)\n        self.assertEqual(opener.opened, [PAGE_URL, document_url])\n\n'''
+          if anchor not in tests:
+              raise SystemExit('test insertion anchor not found')
+          tests = tests.replace(anchor, addition + anchor, 1)
+          test_path.write_text(tests)
+          PY
+      - name: Validate
+        shell: bash
+        run: |
+          python -m pip install -r requirements.txt
+          python -m py_compile trading_system/results_page_release_candidates.py tests/test_results_page_release_provider.py
+          git diff --check
+          python -m unittest tests.test_results_page_release_provider -v
+          python -m unittest discover -s tests -v
+      - name: Commit fix and remove temporary workflow
+        shell: bash
+        run: |
+          rm .github/workflows/pr177-p2-marker-collision.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add trading_system/results_page_release_candidates.py tests/test_results_page_release_provider.py .github/workflows/pr177-p2-marker-collision.yml
+          git commit -m "fix: keep marker-like markup from disabling anchor identity"
+          git push origin HEAD:feature/results-page-release-provider
