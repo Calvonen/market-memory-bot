@@ -859,7 +859,7 @@ class ResultsPageOfficialReleaseProviderTests(unittest.TestCase):
 
     def test_selected_candidate_redirected_to_percent_encoded_results_page_is_rejected(self) -> None:
         candidate_url = "https://investor.example.com/releases/q2-2026-08-26.html"
-        encoded_page_url = "https://investor.example.com/%72esults"
+        encoded_page_url = "https://investor.example.com/%72eports"
         page_markup = (
             f'<a href="{candidate_url}">Half-year results</a><p>{BODY_TEXT}</p>'
         )
