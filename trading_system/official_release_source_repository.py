@@ -10,6 +10,31 @@ from urllib.parse import urlparse
 _ALLOWED_SOURCE_KINDS = {"direct_url", "results_page"}
 
 
+class OfficialReleaseSourceVersionConflict(RuntimeError):
+    pass
+
+
+class OfficialReleaseSourceEventNotFound(RuntimeError):
+    pass
+
+
+def _raise_official_release_source_write_error(
+    exc: Exception, *, operation: str
+) -> None:
+    code = getattr(exc, "code", None)
+    message = getattr(exc, "message", None)
+    message_text = str(message) if message is not None else str(exc)
+    if code == "40001" or "version_conflict:" in message_text:
+        raise OfficialReleaseSourceVersionConflict(
+            "official release source version conflict"
+        ) from exc
+    if code == "P0002" or "event_not_found:" in message_text:
+        raise OfficialReleaseSourceEventNotFound(
+            "official release source event not found"
+        ) from exc
+    raise RuntimeError(f"official release source {operation} failed") from exc
+
+
 def _is_valid_host(hostname: str) -> bool:
     try:
         ipaddress.ip_address(hostname)
@@ -162,16 +187,20 @@ class SupabaseOfficialReleaseSourceRepository:
     ) -> OfficialReleaseSource:
         if expected_version < 0:
             raise ValueError("expected_version must be zero or positive")
-        response = self.client.rpc(
-            self.SET_RPC,
-            {
-                "input_event_id": source.event_id,
-                "input_source_kind": source.source_kind,
-                "input_source_url": source.source_url,
-                "input_source_title": source.source_title,
-                "input_expected_version": expected_version,
-            },
-        ).execute()
+        try:
+            response = self.client.rpc(
+                self.SET_RPC,
+                {
+                    "input_event_id": source.event_id,
+                    "input_source_kind": source.source_kind,
+                    "input_source_url": source.source_url,
+                    "input_source_title": source.source_title,
+                    "input_expected_version": expected_version,
+                },
+            ).execute()
+        except Exception as exc:
+            _raise_official_release_source_write_error(exc, operation="write")
+            raise AssertionError("unreachable")
         rows = response.data or []
         if len(rows) != 1 or not isinstance(rows[0], dict):
             raise RuntimeError("official release source write did not return exactly one canonical row")
@@ -189,13 +218,17 @@ class SupabaseOfficialReleaseSourceRepository:
         canonical_event_id = self._canonical_event_id(event_id)
         if expected_version < 1:
             raise ValueError("expected_version must be positive")
-        response = self.client.rpc(
-            self.CLEAR_RPC,
-            {
-                "input_event_id": canonical_event_id,
-                "input_expected_version": expected_version,
-            },
-        ).execute()
+        try:
+            response = self.client.rpc(
+                self.CLEAR_RPC,
+                {
+                    "input_event_id": canonical_event_id,
+                    "input_expected_version": expected_version,
+                },
+            ).execute()
+        except Exception as exc:
+            _raise_official_release_source_write_error(exc, operation="clear")
+            raise AssertionError("unreachable")
         try:
             new_version = int(response.data)
         except (TypeError, ValueError) as exc:
