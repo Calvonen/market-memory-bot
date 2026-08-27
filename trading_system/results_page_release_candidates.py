@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import secrets
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -20,28 +21,30 @@ _RAW_HREF_RE = re.compile(
 )
 _NUMERIC_ENTITY_RE = re.compile(r"&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));?")
 
-# Results pages only need a conservative subset of ordinary rendered HTML. Anything
-# outside this allowlist is an evidence boundary: html5lib still repairs the tree,
-# but we do not try to emulate browser rendering for SVG/MathML, custom elements,
-# fallback containers, metadata, or other stateful/conditional content.
 _SIMPLE_HTML_TEXT_TAGS = frozenset(
     {
         "a", "abbr", "address", "article", "aside", "b", "bdi", "bdo", "blockquote", "br",
-        "button", "caption", "center", "cite", "code", "dd", "del", "details", "dfn", "dialog", "div", "dl",
-        "dt", "em", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
-        "h5", "h6", "header", "hgroup", "hr", "i", "ins", "kbd", "label", "legend", "li", "listing", "main",
-        "mark", "menu", "nav", "ol", "p", "plaintext", "pre", "q", "s", "samp", "search", "section",
-        "small", "span", "strong", "sub", "summary", "sup", "table", "tbody", "td", "tfoot", "th",
-        "thead", "time", "tr", "u", "ul", "var", "wbr", "xmp",
+        "button", "caption", "center", "cite", "code", "data", "dd", "del", "details", "dfn",
+        "dialog", "div", "dl", "dt", "em", "fieldset", "figcaption", "figure", "footer", "form",
+        "h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "hr", "i", "ins", "kbd",
+        "label", "legend", "li", "listing", "main", "mark", "menu", "nav", "ol", "p", "plaintext",
+        "pre", "q", "s", "samp", "search", "section", "small", "span", "strong", "sub", "summary",
+        "sup", "table", "tbody", "td", "tfoot", "th", "thead", "time", "tr", "u", "ul", "var",
+        "wbr", "xmp",
     }
 )
+_FOREIGN_ROOT_TAGS = frozenset({"svg", "math"})
+# Reserved attribute prefix used to give each raw <template> start tag an identity
+# html5lib carries through reparenting. Never read from user input: a page that
+# spells the prefix itself refuses instrumentation and falls back to fail-closed.
+_TEMPLATE_MARKER_PREFIX = "data-mmb-template-token-"
 _RENDERED_BREAK_TAGS = frozenset(
     {
         "address", "article", "aside", "blockquote", "br", "caption", "center", "dd", "details", "dialog",
         "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3",
-        "h4", "h5", "h6", "header", "hgroup", "hr", "legend", "li", "listing", "main", "menu", "nav", "ol",
-        "p", "plaintext", "pre", "search", "section", "summary", "table", "tbody", "td", "tfoot", "th",
-        "thead", "tr", "ul", "xmp",
+        "h4", "h5", "h6", "header", "hgroup", "hr", "legend", "li", "listing", "main", "menu", "nav",
+        "ol", "p", "plaintext", "pre", "search", "section", "summary", "table", "tbody", "td", "tfoot",
+        "th", "thead", "tr", "ul", "xmp",
     }
 )
 
@@ -59,10 +62,7 @@ def _contains_ascii_control(value: str) -> bool:
 
 
 def _contains_text_control(value: str) -> bool:
-    return any(
-        unicodedata.category(char) == "Cc" and char not in _HTML_WHITESPACE
-        for char in value
-    )
+    return any(unicodedata.category(char) == "Cc" and char not in _HTML_WHITESPACE for char in value)
 
 
 def _raw_href_contains_encoded_control(raw_href: str) -> bool:
@@ -88,8 +88,7 @@ def _raw_href_is_safe(raw_start_tag: str, decoded_href: str | None) -> bool:
     matches = list(_RAW_HREF_RE.finditer(raw_start_tag))
     if len(matches) != 1:
         return False
-    match = matches[0]
-    raw_href = next((value for value in match.groups() if value is not None), "")
+    raw_href = next((value for value in matches[0].groups() if value is not None), "")
     return not _raw_href_contains_encoded_control(raw_href)
 
 
@@ -104,9 +103,8 @@ def _safe_normalized_text(value: str) -> str | None:
 
 
 def _is_unicode_noncharacter(codepoint: int) -> bool:
-    return (
-        0xFDD0 <= codepoint <= 0xFDEF
-        or (0 <= codepoint <= 0x10FFFF and codepoint & 0xFFFF in {0xFFFE, 0xFFFF})
+    return 0xFDD0 <= codepoint <= 0xFDEF or (
+        0 <= codepoint <= 0x10FFFF and codepoint & 0xFFFF in {0xFFFE, 0xFFFF}
     )
 
 
@@ -121,12 +119,7 @@ def _literal_requires_rejection_sentinel(char: str) -> bool:
 
 
 def _preserve_invalid_scalars_as_control(html_text: str) -> str:
-    """Preserve malformed evidence as a rejection sentinel before HTML5 repair."""
-
-    html_text = "".join(
-        "\u000b" if _literal_requires_rejection_sentinel(char) else char
-        for char in html_text
-    )
+    html_text = "".join("\u000b" if _literal_requires_rejection_sentinel(char) else char for char in html_text)
 
     def replace_invalid(match: re.Match[str]) -> str:
         raw_codepoint = match.group(1) or match.group(2)
@@ -148,23 +141,133 @@ def _preserve_invalid_scalars_as_control(html_text: str) -> str:
     return _NUMERIC_ENTITY_RE.sub(replace_invalid, html_text)
 
 
-class _RawAnchorHrefSafetyScanner(HTMLParser):
-    """Track href spellings only; html5lib owns all HTML tree construction semantics."""
+class _RawTemplateAndHrefScanner(HTMLParser):
+    """Raw href safety plus the lexical <template> nesting html5lib cannot preserve.
 
-    def __init__(self) -> None:
+    html5lib 1.1 has no <template> support: it never pushes the
+    active-formatting-elements marker HTML5 requires, so the anchor adoption
+    agency can hoist a template-local anchor out of its template and into
+    rendered content, where the tree no longer shows it was template content.
+    That lexical nesting - which <template> tokens enclose which anchor - is the
+    single fact the tree cannot be asked for, so it is the only thing inferred
+    here.
+
+    Everything else about the parse is read back off html5lib's tree instead of
+    re-derived: above all *which namespace* a <template> lands in, which depends
+    on integration points, annotation-xml encodings, MathML child exceptions,
+    breakout tags, special-element scope barriers and implied end tags. html5lib
+    already resolves all of that, so this scanner deliberately knows nothing
+    about it and cannot drift into being a second tree builder.
+
+    The one exception is the foreign-root stack, which exists only because two
+    tokenizer-level facts have no tree to read them from: a </svg> or </math>
+    also closes the templates opened inside it, and inside foreign content the
+    text-only HTML elements hold markup rather than text. Both are needed to
+    keep the raw token sequence aligned with the tree.
+    """
+
+    def __init__(self, html_template_tokens: frozenset[int] | None = None) -> None:
         super().__init__(convert_charrefs=True)
         self.unsafe_hrefs: set[str] = set()
+        # href -> one entry per anchor occurrence in source order, each the set of
+        # <template> token indices enclosing it. Which of those tokens are HTML
+        # templates is decided later, from the tree.
+        self.anchor_occurrences: dict[str, list[frozenset[int]]] = {}
+        self.template_token_count = 0
+        # Source offset of each <template> start tag, so each token can be given
+        # an identity html5lib preserves through foster parenting.
+        self.template_spans: list[int] = []
+        self._html_template_tokens = html_template_tokens
+        self._open_templates: list[int] = []
+        # (name, templates open when this root was opened). Used for the tokenizer
+        # question below and, with the tree's answer, to retire foreign templates.
+        # It never decides a template's namespace.
+        self._foreign_roots: list[tuple[str, int]] = []
+        self._line_starts = [0]
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.lower() != "a":
-            return
+    def _record_anchor(self, attrs: list[tuple[str, str | None]]) -> None:
         hrefs = [value for key, value in attrs if key.lower() == "href" and value is not None]
         raw_start_tag = self.get_starttag_text() or ""
         if len(hrefs) != 1 or not _raw_href_is_safe(raw_start_tag, hrefs[0] if hrefs else None):
             self.unsafe_hrefs.update(hrefs)
+        enclosing = frozenset(self._open_templates)
+        for href in hrefs:
+            self.anchor_occurrences.setdefault(href, []).append(enclosing)
+
+    def feed(self, data: str) -> None:
+        for index, character in enumerate(data):
+            if character == "\n":
+                self._line_starts.append(index + 1)
+        super().feed(data)
+
+    def _source_offset(self) -> int:
+        line, column = self.getpos()
+        return self._line_starts[line - 1] + column
+
+    def _open_element(self, lowered: str, self_closing: bool) -> None:
+        if lowered in _FOREIGN_ROOT_TAGS:
+            # A foreign element acknowledges the self-closing flag.
+            if not self_closing:
+                self._foreign_roots.append((lowered, len(self._open_templates)))
+        elif lowered == "template":
+            # Opened unconditionally. A foreign <template> is tracked too, so its
+            # own end tag closes it rather than an enclosing HTML template; the
+            # tree decides which of the two this token turned out to be.
+            self.template_spans.append(self._source_offset())
+            self._open_templates.append(self.template_token_count)
+            self.template_token_count += 1
+
+    def _retire_foreign_templates(self, depth: int) -> None:
+        """Closing a foreign root also closes the foreign templates it held open.
+
+        A token the tree proved to be an HTML template is never retired here. A
+        foreign root can be stale - html5lib pops it at a breakout this scanner
+        deliberately does not model - and a stale root must never be able to
+        release an HTML template's suppression scope. Leaving such a token open
+        can only over-suppress, which is the safe direction.
+        """
+
+        while len(self._open_templates) > depth:
+            token = self._open_templates[-1]
+            if self._html_template_tokens is None or token in self._html_template_tokens:
+                return
+            self._open_templates.pop()
+
+    def set_cdata_mode(self, elem: str, **kwargs) -> None:
+        # script/style/title/textarea and friends are text-only in HTML, but as
+        # foreign elements their children are markup. Staying in normal mode
+        # inside foreign content keeps anchors from going unrecorded, which would
+        # otherwise let an occurrence slip past the match on the fast path.
+        if self._foreign_roots:
+            return
+        super().set_cdata_mode(elem, **kwargs)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        lowered = tag.lower()
+        self._open_element(lowered, self_closing=False)
+        if lowered == "a":
+            self._record_anchor(attrs)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.handle_starttag(tag, attrs)
+        lowered = tag.lower()
+        self._open_element(lowered, self_closing=True)
+        if lowered == "a":
+            self._record_anchor(attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        lowered = tag.lower()
+        if lowered in _FOREIGN_ROOT_TAGS:
+            for index in range(len(self._foreign_roots) - 1, -1, -1):
+                name, template_depth = self._foreign_roots[index]
+                if name == lowered:
+                    del self._foreign_roots[index:]
+                    self._retire_foreign_templates(template_depth)
+                    return
+            # No matching opener: HTML5 ignores the token, and so do we.
+        elif lowered == "template" and self._open_templates:
+            # Close the innermost open template token. With nothing open it
+            # releases nothing at all.
+            self._open_templates.pop()
 
 
 def _element_name(tag: object) -> tuple[str | None, str]:
@@ -196,11 +299,7 @@ def _element_allows_simple_text(element) -> bool:
 
 def _closed_details_summary(element):
     namespace, local = _element_name(element.tag)
-    if (
-        namespace != _HTML_NAMESPACE
-        or local != "details"
-        or _element_has_attribute(element, "open")
-    ):
+    if namespace != _HTML_NAMESPACE or local != "details" or _element_has_attribute(element, "open"):
         return None
     for child in list(element):
         child_namespace, child_local = _element_name(child.tag)
@@ -244,24 +343,15 @@ def _visible_anchor_text_fields(anchor) -> tuple[str, ...]:
             child_namespace, child_local = _element_name(child.tag)
             child_is_element = isinstance(child.tag, str)
             child_hidden = child_is_element and _element_hidden(child)
-            child_visible = (
-                child_is_element
-                and not child_hidden
-                and _element_allows_simple_text(child)
-            )
+            child_visible = child_is_element and not child_hidden and _element_allows_simple_text(child)
             rendered_break = (
-                child_visible
-                and child_namespace == _HTML_NAMESPACE
-                and child_local in _RENDERED_BREAK_TAGS
+                child_visible and child_namespace == _HTML_NAMESPACE and child_local in _RENDERED_BREAK_TAGS
             )
             if rendered_break:
                 append_break()
             if child_visible:
                 visit(child)
             elif child_is_element and not child_hidden:
-                # The subtree is intentionally unevaluated. Keep text on each side
-                # in independent evidence fields so a fiscal token cannot be
-                # manufactured across the ambiguity boundary.
                 split_ambiguous_boundary()
             if rendered_break:
                 append_break()
@@ -277,22 +367,207 @@ def _visible_anchor_text_fields(anchor) -> tuple[str, ...]:
     return tuple(fields)
 
 
+def _element_is_foreign(element) -> bool:
+    namespace, _ = _element_name(element.tag)
+    return namespace is not None and namespace != _HTML_NAMESPACE
+
+
+def _iter_all_tree_anchors(root):
+    for element in root.iter():
+        _, local = _element_name(element.tag)
+        if local == "a":
+            yield element
+
+
+def _instrument_template_tokens(html_text: str, spans: list[int]) -> tuple[str, str] | None:
+    """Give every raw <template> start tag an identity that survives reparenting.
+
+    Tree preorder is not an identity: foster parenting can move a later template
+    ahead of an earlier one while the counts still match, so position alone would
+    map a token to the wrong element. A marker attribute travels with the element
+    instead, so a token can be matched to exactly its own element wherever
+    html5lib puts it.
+
+    Returns the instrumented source and the marker's attribute name, or None when
+    instrumentation cannot be trusted - the caller then fails closed. The marker
+    is never read from the page: a source that spells the reserved prefix at all
+    is refused, and the name carries a per-parse nonce on top of that, so a page
+    cannot forge or predict one. Only <template> start tags are touched, so raw
+    href safety - which is analysed on the original source anyway - is unaffected.
+    """
+
+    if _TEMPLATE_MARKER_PREFIX in html_text.lower():
+        return None
+
+    marker = f"{_TEMPLATE_MARKER_PREFIX}{secrets.token_hex(8)}"
+    pieces: list[str] = []
+    previous = 0
+    for token, offset in enumerate(spans):
+        opening = offset + len("<template")
+        if html_text[offset:opening].lower() != "<template":
+            return None
+        pieces.append(html_text[previous:opening])
+        pieces.append(f' {marker}="{token}"')
+        previous = opening
+    pieces.append(html_text[previous:])
+    return "".join(pieces), marker
+
+
+def _html_template_token_indices(
+    root,
+    template_token_count: int,
+    marker: str | None,
+) -> frozenset[int]:
+    """Ask the tree which <template> tokens turned out to be HTML templates.
+
+    Whether a <template> carries HTML template semantics depends on the whole of
+    foreign-content tree construction - integration points, the exact
+    annotation-xml encoding, the MathML mglyph/malignmark child exceptions,
+    breakout start tags, special-element scope barriers and implied end tags.
+    html5lib resolves all of it, so the namespaces are read back off the tree in
+    document order rather than re-derived from the raw source.
+
+    When the tree does not hold one element per token - html5lib dropped a
+    <template> in an insertion mode that ignores it - the tokens cannot be
+    matched, so every one of them is treated as an HTML template. That fails
+    closed: hidden template evidence stays suppressed.
+    """
+
+    everything_html = frozenset(range(template_token_count))
+    if marker is None:
+        return everything_html
+
+    namespaces: dict[int, str | None] = {}
+    for element in root.iter():
+        namespace, local = _element_name(element.tag)
+        if local != "template":
+            continue
+        values = [
+            value
+            for key, value in element.attrib.items()
+            if str(key).lower().split("}")[-1] == marker
+        ]
+        if len(values) != 1:
+            return everything_html
+        try:
+            token = int(values[0])
+        except (TypeError, ValueError):
+            return everything_html
+        if token in namespaces or not 0 <= token < template_token_count:
+            return everything_html
+        namespaces[token] = namespace
+    if len(namespaces) != template_token_count:
+        return everything_html
+    return frozenset(
+        token for token, namespace in namespaces.items() if namespace == _HTML_NAMESPACE
+    )
+
+
+def _scan_and_parse(html_text: str):
+    """Resolve the raw source against html5lib's tree, in that order.
+
+    A first pass locates the <template> start tags so they can be marked; the
+    marked source is parsed, and the tree answers which tokens are HTML
+    templates. The second pass then knows enough to retire a foreign template at
+    its foreign root without ever retiring an HTML one.
+    """
+
+    probe = _RawTemplateAndHrefScanner()
+    probe.feed(html_text)
+    probe.close()
+
+    instrumented = _instrument_template_tokens(html_text, probe.template_spans)
+    source, marker = instrumented if instrumented is not None else (html_text, None)
+    fragment = html5lib.parseFragment(
+        _preserve_invalid_scalars_as_control(source),
+        treebuilder="etree",
+        namespaceHTMLElements=True,
+    )
+    html_templates = _html_template_token_indices(
+        fragment, probe.template_token_count, marker
+    )
+
+    scanner = _RawTemplateAndHrefScanner(html_template_tokens=html_templates)
+    scanner.feed(html_text)
+    scanner.close()
+    return scanner, fragment, html_templates
+
+
+def _template_local_occurrence_flags(html_text: str) -> dict[str, list[bool]]:
+    """Resolved template-local classification per href, in source order.
+
+    The scanner alone cannot answer this any more - it records which <template>
+    tokens enclose each anchor, and the tree says which of those tokens are HTML
+    templates. This seam exposes the combined answer, which is what suppression
+    actually acts on.
+    """
+
+    scanner, _fragment, html_templates = _scan_and_parse(html_text)
+    return {
+        href: [bool(enclosing & html_templates) for enclosing in occurrences]
+        for href, occurrences in scanner.anchor_occurrences.items()
+    }
+
+
+def _template_local_tree_anchors(root, safety_scanner, html_templates: frozenset[int]) -> set:
+    """Match each tree anchor back to the raw occurrence it came from.
+
+    Both sequences are in document order and count every anchor in any
+    namespace, so a foreign anchor cannot consume an index belonging to an HTML
+    one. When their lengths disagree - html5lib cloned an anchor through the
+    adoption agency, or dropped one the scanner still saw - no occurrence can be
+    tied to its source spelling, so the whole href fails closed.
+    """
+
+    template_hrefs = {
+        href
+        for href, occurrences in safety_scanner.anchor_occurrences.items()
+        if any(enclosing & html_templates for enclosing in occurrences)
+    }
+    if not template_hrefs:
+        return set()
+
+    grouped: dict[str, list] = {}
+    for anchor in _iter_all_tree_anchors(root):
+        href = anchor.attrib.get("href")
+        if href is None or href not in template_hrefs:
+            continue
+        grouped.setdefault(href, []).append(anchor)
+
+    suppressed = set()
+    for href, anchors in grouped.items():
+        occurrences = safety_scanner.anchor_occurrences[href]
+        if len(anchors) != len(occurrences):
+            suppressed.update(anchors)
+            continue
+        suppressed.update(
+            anchor
+            for anchor, enclosing in zip(anchors, occurrences)
+            if enclosing & html_templates
+        )
+    return suppressed
+
+
 def _iter_visible_html_anchors(root):
     def walk(element, is_fragment_root: bool = False):
         if not isinstance(element.tag, str):
             return
         if not is_fragment_root:
-            if _element_hidden(element) or not _element_allows_simple_text(element):
+            if _element_hidden(element):
                 return
-            namespace, local = _element_name(element.tag)
-            if namespace == _HTML_NAMESPACE and local == "a":
-                yield element
+            if not _element_allows_simple_text(element):
+                if not _element_is_foreign(element):
+                    return
+            else:
+                namespace, local = _element_name(element.tag)
+                if namespace == _HTML_NAMESPACE and local == "a":
+                    yield element
 
-            details_summary = _closed_details_summary(element)
-            if details_summary is not None:
-                if details_summary is not False:
-                    yield from walk(details_summary)
-                return
+                details_summary = _closed_details_summary(element)
+                if details_summary is not None:
+                    if details_summary is not False:
+                        yield from walk(details_summary)
+                    return
 
         for child in list(element):
             yield from walk(child)
@@ -301,14 +576,9 @@ def _iter_visible_html_anchors(root):
 
 
 def _parse_html5_links(html_text: str) -> list[tuple[str, str | None, tuple[str, ...]]]:
-    safety_scanner = _RawAnchorHrefSafetyScanner()
-    safety_scanner.feed(html_text)
-    safety_scanner.close()
-
-    fragment = html5lib.parseFragment(
-        _preserve_invalid_scalars_as_control(html_text),
-        treebuilder="etree",
-        namespaceHTMLElements=True,
+    safety_scanner, fragment, html_templates = _scan_and_parse(html_text)
+    template_local_anchors = _template_local_tree_anchors(
+        fragment, safety_scanner, html_templates
     )
 
     links: list[tuple[str, str | None, tuple[str, ...]]] = []
@@ -316,14 +586,12 @@ def _parse_html5_links(html_text: str) -> list[tuple[str, str | None, tuple[str,
         href = anchor.attrib.get("href")
         if href is None or href in safety_scanner.unsafe_hrefs or _contains_ascii_control(href):
             continue
+        if anchor in template_local_anchors:
+            continue
         aria_label = _safe_normalized_text(anchor.attrib.get("aria-label", ""))
         title_attr = _safe_normalized_text(anchor.attrib.get("title", ""))
         visible_text_fields = _visible_anchor_text_fields(anchor)
-        evidence_fields = tuple(
-            value
-            for value in (aria_label, title_attr, *visible_text_fields)
-            if value
-        )
+        evidence_fields = tuple(value for value in (aria_label, title_attr, *visible_text_fields) if value)
         title = " ".join(evidence_fields) or None
         links.append((href, title, evidence_fields))
     return links
@@ -375,6 +643,7 @@ def _remove_dot_segments(path: str) -> str:
             output = _remove_last_path_segment(output)
         elif input_buffer == "/..":
             input_buffer = "/"
+            output = _remove_last_path_segment(output)
         elif input_buffer in {".", ".."}:
             input_buffer = ""
         else:
@@ -425,7 +694,11 @@ def _resolve_reference(base_url: str, href: str) -> str | None:
                 target_path = base.path
                 target_query = reference.query if reference.query else base.query
             else:
-                merged_path = reference.path if reference.path.startswith("/") else _merge_paths(base.path, reference.path, bool(base.netloc))
+                merged_path = (
+                    reference.path
+                    if reference.path.startswith("/")
+                    else _merge_paths(base.path, reference.path, bool(base.netloc))
+                )
                 target_path = _remove_dot_segments(merged_path)
                 target_query = reference.query
 
@@ -477,7 +750,6 @@ def extract_results_page_candidates(
     source: OfficialReleaseSource,
     html_text: str,
 ) -> tuple[ResultsPageReleaseCandidate, ...]:
-    """Extract deterministic same-origin HTTPS candidates from an HTML5-repaired results page."""
     if source.source_kind != "results_page":
         raise ValueError("results page candidate extraction requires source_kind=results_page")
 
@@ -492,11 +764,11 @@ def extract_results_page_candidates(
         if candidate_url is None or candidate_url == page_url:
             continue
         if candidate_url not in aggregated:
-            aggregated[candidate_url] = {"titles": [], "fields": []}
+            aggregated[candidate_url] = {"title": None, "fields": []}
             order.append(candidate_url)
         record = aggregated[candidate_url]
-        if title:
-            record["titles"].append(title)
+        if title and record["title"] is None:
+            record["title"] = title
         for field in evidence_fields:
             if field not in record["fields"]:
                 record["fields"].append(field)
@@ -504,14 +776,12 @@ def extract_results_page_candidates(
     candidates: list[ResultsPageReleaseCandidate] = []
     for candidate_url in order:
         record = aggregated[candidate_url]
-        fields = tuple(record["fields"])
-        titles = record["titles"]
         candidates.append(
             ResultsPageReleaseCandidate(
                 event_id=source.event_id,
                 source_url=candidate_url,
-                source_title=" ".join(titles) or None,
-                evidence_fields=fields,
+                source_title=record["title"],
+                evidence_fields=tuple(record["fields"]),
             )
         )
     return tuple(candidates)

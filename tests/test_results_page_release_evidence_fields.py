@@ -147,12 +147,20 @@ class ResultsPageReleaseEvidenceFieldTests(unittest.TestCase):
         self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
 
     def test_non_rendered_subtrees_do_not_supply_evidence(self):
+        """Non-rendered subtrees stay unevaluated and split the evidence fields.
+
+        The merged ``"DownloadReport"`` expectation predates the conservative
+        policy that keeps text on each side of an unevaluated subtree in separate
+        evidence fields, so a fiscal token can never be manufactured across the
+        boundary. The suppressed text is still never exposed and the selection
+        still finds no period.
+        """
         for tag in ("script", "style", "template"):
             html = f'<a href="/release.pdf">Download<{tag}> Q2-2026 </{tag}>Report</a>'
             with self.subTest(tag=tag):
                 candidates = extract_results_page_candidates(self._source(), html)
                 self.assertEqual(len(candidates), 1)
-                self.assertEqual(candidates[0].evidence_fields, ("DownloadReport",))
+                self.assertEqual(candidates[0].evidence_fields, ("Download", "Report"))
                 self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
 
     def test_hidden_anchors_are_not_release_candidates(self):
@@ -168,12 +176,19 @@ class ResultsPageReleaseEvidenceFieldTests(unittest.TestCase):
                 self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
 
     def test_self_closing_non_rendered_tags_remain_suppressed_until_end_tag(self):
+        """A self-closing spelling stays suppressed and still splits the fields.
+
+        Same conservative evidence-boundary policy as
+        ``test_non_rendered_subtrees_do_not_supply_evidence``: the suppressed text
+        never reaches the evidence, and the surviving text stays in separate
+        fields.
+        """
         for tag in ("script", "style", "template"):
             html = f'<a href="/release.pdf">Download<{tag}/> Q2-2026 </{tag}>Report</a>'
             with self.subTest(tag=tag):
                 candidates = extract_results_page_candidates(self._source(), html)
                 self.assertEqual(len(candidates), 1)
-                self.assertEqual(candidates[0].evidence_fields, ("DownloadReport",))
+                self.assertEqual(candidates[0].evidence_fields, ("Download", "Report"))
                 self.assertEqual(self._select(candidates[0]), ResultsPageSelectionStatus.NO_MATCH)
 
     def test_hidden_ancestor_suppresses_descendant_anchors(self):
