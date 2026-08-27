@@ -1,0 +1,32 @@
+name: Temporary runtime deploy diagnostic
+
+on:
+  push:
+    branches:
+      - ops/runtime-deploy-diagnostic
+    paths:
+      - .github/workflows/tmp-runtime-deploy-diagnostic.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    steps:
+      - name: Inspect deployment repository without modifying it
+        run: |
+          set -u
+          cd /home/marko/marketai-repo
+          echo "DEPLOY_REPO_BRANCH=$(git branch --show-current)"
+          echo "DEPLOY_REPO_HEAD=$(git rev-parse HEAD)"
+          echo "DEPLOY_REPO_STATUS_BEGIN"
+          git status --short --branch
+          echo "DEPLOY_REPO_STATUS_END"
+          echo "DEPLOY_REPO_TRACKED_CHANGES_BEGIN"
+          git status --porcelain --untracked-files=no
+          echo "DEPLOY_REPO_TRACKED_CHANGES_END"
+          echo "DEPLOY_REPO_REMOTES_BEGIN"
+          git remote -v
+          echo "DEPLOY_REPO_REMOTES_END"
