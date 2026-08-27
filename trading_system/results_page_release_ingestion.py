@@ -109,7 +109,8 @@ class ResultsPageOfficialReleaseProvider(ApprovedOriginDocumentFetcher):
         candidates = extract_results_page_candidates(self.source, html_text, page_url=page_url)
         if not candidates:
             self._no_release_reason = (
-                f"results_page selection no_candidates: {page_url} offered no same-origin HTTPS release link"
+                f"results_page selection no_candidates: {page_url} offered no usable same-origin "
+                "HTTPS release link"
             )
             return None
 

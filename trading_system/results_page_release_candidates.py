@@ -173,6 +173,10 @@ class _RawTemplateAndHrefScanner(HTMLParser):
         # <template> token indices enclosing it. Which of those tokens are HTML
         # templates is decided later, from the tree.
         self.anchor_occurrences: dict[str, list[frozenset[int]]] = {}
+        # One entry per raw <base> start tag in source order:
+        # (the tag carries exactly one safe href, the <template> tokens enclosing
+        # it). Which of those tokens are HTML templates is decided from the tree.
+        self.base_occurrences: list[tuple[bool, frozenset[int]]] = []
         self.template_token_count = 0
         # Source offset of each <template> start tag, so each token can be given
         # an identity html5lib preserves through foster parenting.
@@ -193,6 +197,12 @@ class _RawTemplateAndHrefScanner(HTMLParser):
         enclosing = frozenset(self._open_templates)
         for href in hrefs:
             self.anchor_occurrences.setdefault(href, []).append(enclosing)
+
+    def _record_base(self, attrs: list[tuple[str, str | None]]) -> None:
+        hrefs = [value for key, value in attrs if key.lower() == "href" and value is not None]
+        raw_start_tag = self.get_starttag_text() or ""
+        safe_href = len(hrefs) == 1 and _raw_href_is_safe(raw_start_tag, hrefs[0])
+        self.base_occurrences.append((safe_href, frozenset(self._open_templates)))
 
     def feed(self, data: str) -> None:
         for index, character in enumerate(data):
@@ -247,12 +257,16 @@ class _RawTemplateAndHrefScanner(HTMLParser):
         self._open_element(lowered, self_closing=False)
         if lowered == "a":
             self._record_anchor(attrs)
+        elif lowered == "base":
+            self._record_base(attrs)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lowered = tag.lower()
         self._open_element(lowered, self_closing=True)
         if lowered == "a":
             self._record_anchor(attrs)
+        elif lowered == "base":
+            self._record_base(attrs)
 
     def handle_endtag(self, tag: str) -> None:
         lowered = tag.lower()
@@ -376,6 +390,13 @@ def _iter_all_tree_anchors(root):
     for element in root.iter():
         _, local = _element_name(element.tag)
         if local == "a":
+            yield element
+
+
+def _iter_all_tree_bases(root):
+    for element in root.iter():
+        _, local = _element_name(element.tag)
+        if local == "base":
             yield element
 
 
@@ -575,8 +596,52 @@ def _iter_visible_html_anchors(root):
     yield from walk(root, True)
 
 
-def _parse_html5_links(html_text: str) -> list[tuple[str, str | None, tuple[str, ...]]]:
+_BASE_FAILED_CLOSED = object()
+
+
+def _effective_base_href(root, safety_scanner, html_templates: frozenset[int]):
+    """The one ``<base href>`` that sets the document base, per HTML tree order.
+
+    Only the first ``<base>`` carrying an href sets the base; later ones and
+    href-less ones change nothing, template contents are inert, and an
+    ``<svg><base>`` is not the HTML base element. The tree answers the namespace
+    question and holds the parsed href; the raw scan answers which ``<template>``
+    tokens enclosed each tag and whether its href was spelled safely - the same
+    split the anchors already use.
+
+    Returns the raw href, ``None`` when the page sets no base, or
+    ``_BASE_FAILED_CLOSED`` when the effective base cannot be identified
+    unambiguously: the raw tags and the tree elements no longer line up (one was
+    dropped or moved), or the tag that does set the base spelled its href in a
+    way the anchor policy already refuses. Guessing a base silently repoints
+    every link on the page, so an unclear one is never resolved at all.
+    """
+
+    tree_bases = list(_iter_all_tree_bases(root))
+    if len(tree_bases) != len(safety_scanner.base_occurrences):
+        return _BASE_FAILED_CLOSED
+
+    for (safe_href, enclosing), element in zip(safety_scanner.base_occurrences, tree_bases):
+        if enclosing & html_templates:
+            continue
+        namespace, _ = _element_name(element.tag)
+        if namespace != _HTML_NAMESPACE:
+            continue
+        href = element.attrib.get("href")
+        if href is None:
+            continue
+        if not safe_href or _contains_ascii_control(href):
+            return _BASE_FAILED_CLOSED
+        return href
+    return None
+
+
+def _parse_html5_page(html_text: str):
+    """Return ``(base href or None, links)``, or ``None`` when the page fails closed."""
     safety_scanner, fragment, html_templates = _scan_and_parse(html_text)
+    base_href = _effective_base_href(fragment, safety_scanner, html_templates)
+    if base_href is _BASE_FAILED_CLOSED:
+        return None
     template_local_anchors = _template_local_tree_anchors(
         fragment, safety_scanner, html_templates
     )
@@ -594,7 +659,7 @@ def _parse_html5_links(html_text: str) -> list[tuple[str, str | None, tuple[str,
         evidence_fields = tuple(value for value in (aria_label, title_attr, *visible_text_fields) if value)
         title = " ".join(evidence_fields) or None
         links.append((href, title, evidence_fields))
-    return links
+    return base_href, links
 
 
 def _https_origin(url: str) -> tuple[str, str, int] | None:
@@ -775,6 +840,11 @@ def extract_results_page_candidates(
     the approved origin, and every candidate is still resolved and origin-checked
     exactly as before. Callers that hold no final URL keep the previous
     behaviour by omitting it.
+
+    A document ``<base href>`` overrides that base, as it does in a browser, and
+    is held to the same origin policy; a page whose effective base is unusable or
+    off-origin yields no candidates at all rather than links resolved against a
+    base the page did not declare.
     """
     if source.source_kind != "results_page":
         raise ValueError("results page candidate extraction requires source_kind=results_page")
@@ -794,9 +864,25 @@ def extract_results_page_candidates(
             )
         base_url = page_url
 
+    parsed = _parse_html5_page(html_text)
+    if parsed is None:
+        return ()
+    base_href, links = parsed
+
+    if base_href is not None:
+        # A document base repoints every relative link on the page, so it goes
+        # through exactly the candidate URL policy: resolved against the URL the
+        # page was served from, HTTPS, no credentials, on the approved origin.
+        # An unusable base is never quietly ignored - falling back to the
+        # response URL would resolve links the page did not mean.
+        resolved_base = _canonical_candidate_url(base_url, base_href)
+        if resolved_base is None:
+            return ()
+        base_url = resolved_base
+
     aggregated: dict[str, dict[str, object]] = {}
     order: list[str] = []
-    for href, title, evidence_fields in _parse_html5_links(html_text):
+    for href, title, evidence_fields in links:
         candidate_url = _canonical_candidate_url(base_url, href)
         # Neither spelling of the results page is itself a release document.
         if candidate_url is None or candidate_url in {served_page_url, approved_page_url}:

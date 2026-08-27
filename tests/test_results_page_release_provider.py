@@ -505,6 +505,196 @@ class ResultsPageOfficialReleaseProviderTests(unittest.TestCase):
                 page_url="https://cdn.example.net/reports/",
             )
 
+    # Codex P2 (round 2): a document <base href> repoints relative links
+    def _candidates(self, body_html: str, *, page_url: str | None = None):
+        return extract_results_page_candidates(
+            self._source(),
+            f"<html><head></head><body>{body_html}</body></html>",
+            page_url=page_url,
+        )
+
+    def _candidate_urls(self, body_html: str, *, page_url: str | None = None):
+        return tuple(c.source_url for c in self._candidates(body_html, page_url=page_url))
+
+    def test_relative_base_href_repoints_relative_links(self) -> None:
+        self.assertEqual(
+            self._candidate_urls(
+                '<base href="/downloads/"><a href="2026-08-26-results.pdf">Q2 2026</a>'
+            ),
+            ("https://investor.example.com/downloads/2026-08-26-results.pdf",),
+        )
+
+    def test_base_href_in_head_repoints_relative_links(self) -> None:
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<html><head><base href="/downloads/"></head><body>'
+            '<a href="2026-08-26-results.pdf">Q2 2026</a></body></html>',
+        )
+        self.assertEqual(
+            tuple(c.source_url for c in candidates),
+            ("https://investor.example.com/downloads/2026-08-26-results.pdf",),
+        )
+
+    def test_absolute_same_origin_base_href_is_accepted(self) -> None:
+        self.assertEqual(
+            self._candidate_urls(
+                '<base href="https://investor.example.com/downloads/">'
+                '<a href="2026-08-26-results.pdf">Q2 2026</a>'
+            ),
+            ("https://investor.example.com/downloads/2026-08-26-results.pdf",),
+        )
+
+    def test_base_href_dot_segments_are_canonicalised(self) -> None:
+        self.assertEqual(
+            self._candidate_urls(
+                '<base href="/investors/reports/../../downloads/#anchor">'
+                '<a href="2026-08-26-results.pdf">Q2 2026</a>'
+            ),
+            ("https://investor.example.com/downloads/2026-08-26-results.pdf",),
+        )
+
+    def test_first_base_with_an_href_wins(self) -> None:
+        self.assertEqual(
+            self._candidate_urls(
+                '<base href="/first/"><base href="/second/">'
+                '<a href="2026-08-26-results.pdf">Q2 2026</a>'
+            ),
+            ("https://investor.example.com/first/2026-08-26-results.pdf",),
+        )
+
+    def test_base_without_an_href_does_not_set_the_base(self) -> None:
+        self.assertEqual(
+            self._candidate_urls(
+                '<base target="_blank"><base href="/downloads/">'
+                '<a href="2026-08-26-results.pdf">Q2 2026</a>'
+            ),
+            ("https://investor.example.com/downloads/2026-08-26-results.pdf",),
+        )
+
+    def test_unusable_base_href_fails_the_whole_page_closed(self) -> None:
+        for base in (
+            "https://cdn.example.net/downloads/",
+            "http://investor.example.com/downloads/",
+            "https://user:pass@investor.example.com/downloads/",
+            "https://investor.example.com:99999/downloads/",
+            "https://investor.example.com:8443/downloads/",
+            "https://-invalid-.example.com/downloads/",
+            "javascript:void(0)",
+        ):
+            with self.subTest(base=base):
+                self.assertEqual(
+                    self._candidate_urls(
+                        f'<base href="{base}"><a href="/reports/2026-08-26-results.html">Q2</a>'
+                    ),
+                    (),
+                )
+
+    def test_base_href_never_silently_falls_back_to_the_response_url(self) -> None:
+        # Without the fail-closed rule this page would still yield the anchor
+        # resolved against the response URL.
+        self.assertEqual(
+            self._candidate_urls('<a href="/reports/2026-08-26-results.html">Q2</a>'),
+            ("https://investor.example.com/reports/2026-08-26-results.html",),
+        )
+        self.assertEqual(
+            self._candidate_urls(
+                '<base href="http://investor.example.com/downloads/">'
+                '<a href="/reports/2026-08-26-results.html">Q2</a>'
+            ),
+            (),
+        )
+
+    def test_absolute_candidate_hrefs_ignore_the_base(self) -> None:
+        self.assertEqual(
+            self._candidate_urls(
+                '<base href="/downloads/">'
+                '<a href="https://investor.example.com/reports/2026-08-26-results.html">Q2</a>'
+                '<a href="/reports/2026-08-27-results.html">Q3</a>'
+            ),
+            (
+                "https://investor.example.com/reports/2026-08-26-results.html",
+                "https://investor.example.com/reports/2026-08-27-results.html",
+            ),
+        )
+
+    def test_base_href_resolves_against_the_redirected_results_page_url(self) -> None:
+        self.assertEqual(
+            self._candidate_urls(
+                '<base href="downloads/"><a href="2026-08-26-results.pdf">Q2 2026</a>',
+                page_url="https://investor.example.com/investors/results/",
+            ),
+            ("https://investor.example.com/investors/results/downloads/2026-08-26-results.pdf",),
+        )
+
+    def test_self_page_exclusion_applies_to_base_resolved_candidates(self) -> None:
+        served_page_url = "https://investor.example.com/investors/results/"
+        body = (
+            '<base href="/investors/results/">'
+            '<a href="">This page</a>'
+            '<a href="../../reports">Approved page</a>'
+            '<a href="2026-08-26-results.pdf">Q2 2026</a>'
+        )
+        self.assertEqual(
+            self._candidate_urls(body, page_url=served_page_url),
+            ("https://investor.example.com/investors/results/2026-08-26-results.pdf",),
+        )
+
+    def test_base_href_reaches_the_provider_end_to_end(self) -> None:
+        document_url = "https://investor.example.com/downloads/2026-08-26-results.pdf"
+        provider = self._provider()
+        with patch.object(
+            ResultsPageOfficialReleaseProvider, "_extract_pdf_text", return_value=BODY_TEXT
+        ):
+            document, opener = self._discover(
+                provider,
+                {
+                    PAGE_URL: self._page(
+                        '<base href="/downloads/"><a href="2026-08-26-results.pdf">Q2 2026</a>'
+                    ),
+                    document_url: _Response(
+                        b"%PDF-1.7 binary", final_url=document_url, content_type="application/pdf"
+                    ),
+                },
+            )
+
+        self.assertEqual(document.source_url, document_url)
+        self.assertEqual(opener.opened, [PAGE_URL, document_url])
+
+    def test_template_local_base_never_sets_the_document_base(self) -> None:
+        self.assertEqual(
+            self._candidate_urls(
+                '<template><base href="/injected/"></template><base href="/downloads/">'
+                '<a href="2026-08-26-results.pdf">Q2 2026</a>'
+            ),
+            ("https://investor.example.com/downloads/2026-08-26-results.pdf",),
+        )
+
+    def test_foreign_base_never_sets_the_document_base(self) -> None:
+        self.assertEqual(
+            self._candidate_urls(
+                '<svg><base href="/injected/"></svg><base href="/downloads/">'
+                '<a href="2026-08-26-results.pdf">Q2 2026</a>'
+            ),
+            ("https://investor.example.com/downloads/2026-08-26-results.pdf",),
+        )
+
+    def test_base_href_smuggling_a_control_character_fails_closed(self) -> None:
+        self.assertEqual(
+            self._candidate_urls(
+                '<base href="/down&#10;loads/"><a href="2026-08-26-results.pdf">Q2</a>'
+            ),
+            (),
+        )
+
+    def test_duplicate_href_on_the_effective_base_fails_closed(self) -> None:
+        self.assertEqual(
+            self._candidate_urls(
+                '<base href="/downloads/" href="/other/">'
+                '<a href="2026-08-26-results.pdf">Q2</a>'
+            ),
+            (),
+        )
+
     # Codex P1 (round 2): a candidate that redirects back to the results page
     # is the listing page, not a release - whatever its size.
     def test_selected_candidate_redirected_to_the_served_results_page_is_rejected(self) -> None:
