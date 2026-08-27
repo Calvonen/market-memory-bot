@@ -24,6 +24,50 @@ alter table public.event_official_release_source_audit enable row level security
 revoke all on table public.event_official_release_source_audit from public, anon, authenticated, service_role;
 grant select on table public.event_official_release_source_audit to service_role;
 
+-- Rows approved before the audited control surface existed must not remain
+-- trusted silently. Preserve their exact pre-audit state under an explicit
+-- synthetic migration actor, then invalidate them by advancing the version
+-- and converting them to tombstones. A human/backend approver must explicitly
+-- approve a source again through the audited RPC before ingestion can trust it.
+insert into public.event_official_release_source_audit (
+  event_id, action, actor, version, source_kind, source_url, source_title
+)
+select
+  event_id,
+  'set',
+  'migration:legacy-pre-audit-source',
+  version,
+  source_kind,
+  source_url,
+  source_title
+from public.event_official_release_sources
+where is_active;
+
+with invalidated as (
+  update public.event_official_release_sources
+  set
+    source_kind = null,
+    source_url = null,
+    source_title = null,
+    is_active = false,
+    version = version + 1,
+    updated_at = clock_timestamp()
+  where is_active
+  returning event_id, version
+)
+insert into public.event_official_release_source_audit (
+  event_id, action, actor, version, source_kind, source_url, source_title
+)
+select
+  event_id,
+  'clear',
+  'migration:legacy-pre-audit-invalidation',
+  version,
+  null,
+  null,
+  null
+from invalidated;
+
 create function public.set_event_official_release_source_approved(
   input_event_id text,
   input_source_kind text,
