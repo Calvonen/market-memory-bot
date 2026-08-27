@@ -136,7 +136,18 @@ class MobileSourceTests(unittest.TestCase):
         self.assertIn("<TrackedEventResult state={latestReactionState} />", component)
         self.assertIn("formatTrackingConfigSnapshot(event.tracking_config_snapshot)", component)
         self.assertIn("trackedEvent={", self.home_source)
-        self.assertIn("<TrackedEventDetails event={trackedEvent} />", self.home_source)
+        self.assertIn("<TrackedEventDetails event={trackedEvent} refreshToken={refreshToken} showSchedule />", self.home_source)
+
+    def test_linked_tracked_details_refresh_and_preserve_runtime_schedule(self) -> None:
+        component = Path("mobile/src/components/TrackedEventsSection.tsx").read_text(encoding="utf-8")
+        self.assertIn("key={`${event.event_id}:${trackedRefreshToken}`}", self.home_source)
+        self.assertIn("refreshToken={trackedRefreshToken}", self.home_source)
+        self.assertIn("<TrackedEventDetails event={trackedEvent} refreshToken={refreshToken} showSchedule />", self.home_source)
+        self.assertIn("refreshToken?: number", component)
+        self.assertIn("showSchedule?: boolean", component)
+        self.assertIn("[event.event_id, refreshToken]", component)
+        self.assertIn("Runtime {scheduleText}", component)
+        self.assertIn("formatTrackedEventSchedule(event)", component)
 
     # -- event card navigates to the detail route with the event id --------
 

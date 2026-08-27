@@ -124,7 +124,15 @@ export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
   );
 }
 
-export function TrackedEventDetails({ event }: { event: TrackedMarketEvent }) {
+export function TrackedEventDetails({
+  event,
+  refreshToken = 0,
+  showSchedule = false,
+}: {
+  event: TrackedMarketEvent;
+  refreshToken?: number;
+  showSchedule?: boolean;
+}) {
   const presentation = describeTrackedEvent(event);
   const configText = formatTrackingConfigSnapshot(event.tracking_config_snapshot);
   const [latestReactionState, setLatestReactionState] = useState<LatestReactionState>({
@@ -150,11 +158,14 @@ export function TrackedEventDetails({ event }: { event: TrackedMarketEvent }) {
       return () => {
         active = false;
       };
-    }, [event.event_id]),
+    }, [event.event_id, refreshToken]),
   );
+
+  const scheduleText = showSchedule ? formatTrackedEventSchedule(event) : null;
 
   return (
     <>
+      {scheduleText ? <Text style={styles.detailText}>Runtime {scheduleText}</Text> : null}
       <View style={styles.statusBlock}>
         <Text style={styles.statusText}>{presentation.status}</Text>
         {presentation.detail ? <Text style={styles.detailText}>{presentation.detail}</Text> : null}

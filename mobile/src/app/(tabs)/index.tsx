@@ -295,7 +295,7 @@ export default function HomeScreen() {
           : null;
         return (
           <EventCard
-            key={event.event_id}
+            key={`${event.event_id}:${trackedRefreshToken}`}
             event={event}
             status={statuses[event.event_id]}
             runtimeStatus={
@@ -304,6 +304,7 @@ export default function HomeScreen() {
             trackedEvent={
               calendarEventId ? persistentEventByCalendarEventId[calendarEventId] : undefined
             }
+            refreshToken={trackedRefreshToken}
           />
         );
       })}
@@ -345,11 +346,13 @@ function EventCard({
   status,
   runtimeStatus,
   trackedEvent,
+  refreshToken = 0,
 }: {
   event: EventExpectation;
   status?: EventStatus;
   runtimeStatus?: string;
   trackedEvent?: TrackedMarketEvent;
+  refreshToken?: number;
 }) {
   const run = status?.run ?? null;
   // A run computed against an older expectation version (the event was
@@ -396,7 +399,9 @@ function EventCard({
           ) : null}
         </View>
 
-        {trackedEvent ? <TrackedEventDetails event={trackedEvent} /> : null}
+        {trackedEvent ? (
+          <TrackedEventDetails event={trackedEvent} refreshToken={refreshToken} showSchedule />
+        ) : null}
       </Pressable>
     </Link>
   );
