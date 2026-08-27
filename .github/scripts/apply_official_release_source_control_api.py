@@ -291,3 +291,7 @@ if new_clear not in text:
         raise SystemExit("clear RPC insertion point not found")
     text = text.replace(old_clear, new_clear, 1)
 repo.write_text(text)
+
+for path in (api, repo):
+    normalized = "\n".join(line.rstrip() for line in path.read_text().splitlines()) + "\n"
+    path.write_text(normalized)
