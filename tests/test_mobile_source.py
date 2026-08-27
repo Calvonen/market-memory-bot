@@ -100,8 +100,10 @@ class MobileSourceTests(unittest.TestCase):
         card_start = self.home_source.index("function EventCard(")
         card_end = self.home_source.index("const scheduled =", card_start)
         loading_fallback = self.home_source[card_start:card_end]
-        self.assertIn("!status", loading_fallback)
-        self.assertIn("? 'Ladataan...'", loading_fallback)
+        self.assertRegex(
+            loading_fallback,
+            r"!status\s*\?\s*'Ladataan\.\.\.'",
+        )
 
     def test_home_refresh_waits_for_persistent_tracked_events_to_settle(self) -> None:
         # Pull-to-refresh may keep the established Promise.race policy for
