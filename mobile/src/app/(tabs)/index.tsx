@@ -10,7 +10,7 @@ import {
   View,
 } from 'react-native';
 
-import { TrackedEventsSection } from '@/components/TrackedEventsSection';
+import { TrackedEventDetails, TrackedEventsSection } from '@/components/TrackedEventsSection';
 import {
   CalendarEvent,
   EventExpectation,
@@ -19,12 +19,14 @@ import {
   getUpcomingCalendarEvents,
   PaperRun,
 } from '@/services/api';
+import { TrackedMarketEvent } from '@/services/tracked-events';
 
 type EventStatus = { run: PaperRun | null; statusError: boolean };
 type TrackedEventSnapshot = {
   count: number;
   calendarEventIds: string[];
   statusByCalendarEventId: Record<string, string>;
+  eventByCalendarEventId: Record<string, TrackedMarketEvent>;
 };
 
 // Mirrors MAX_CALENDAR_LOOKAHEAD_DAYS in trading_system/api.py - the widest
@@ -67,6 +69,9 @@ export default function HomeScreen() {
   );
   const [persistentStatusByCalendarEventId, setPersistentStatusByCalendarEventId] = useState<
     Record<string, string>
+  >({});
+  const [persistentEventByCalendarEventId, setPersistentEventByCalendarEventId] = useState<
+    Record<string, TrackedMarketEvent>
   >({});
   const [trackedRefreshToken, setTrackedRefreshToken] = useState(0);
   const nextTrackedRefreshToken = useRef(0);
@@ -157,6 +162,7 @@ export default function HomeScreen() {
     setTrackedEventCount(snapshot.count);
     setPersistentCalendarEventIds(new Set(snapshot.calendarEventIds));
     setPersistentStatusByCalendarEventId(snapshot.statusByCalendarEventId);
+    setPersistentEventByCalendarEventId(snapshot.eventByCalendarEventId);
   }, []);
 
   const expectationCalendarEventIds = useMemo(() => {
@@ -295,6 +301,9 @@ export default function HomeScreen() {
             runtimeStatus={
               calendarEventId ? persistentStatusByCalendarEventId[calendarEventId] : undefined
             }
+            trackedEvent={
+              calendarEventId ? persistentEventByCalendarEventId[calendarEventId] : undefined
+            }
           />
         );
       })}
@@ -335,10 +344,12 @@ function EventCard({
   event,
   status,
   runtimeStatus,
+  trackedEvent,
 }: {
   event: EventExpectation;
   status?: EventStatus;
   runtimeStatus?: string;
+  trackedEvent?: TrackedMarketEvent;
 }) {
   const run = status?.run ?? null;
   // A run computed against an older expectation version (the event was
@@ -384,6 +395,8 @@ function EventCard({
             </Text>
           ) : null}
         </View>
+
+        {trackedEvent ? <TrackedEventDetails event={trackedEvent} /> : null}
       </Pressable>
     </Link>
   );

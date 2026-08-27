@@ -129,6 +129,15 @@ class MobileSourceTests(unittest.TestCase):
         self.assertIn("getTrackedEventLatestReaction(event.event_id)", component)
         self.assertIn("if (refreshToken > 0) onRefreshSettled?.(refreshToken);", component)
 
+    def test_unified_expectation_card_preserves_linked_tracked_event_details(self) -> None:
+        component = Path("mobile/src/components/TrackedEventsSection.tsx").read_text(encoding="utf-8")
+        self.assertIn("eventByCalendarEventId", component)
+        self.assertIn("export function TrackedEventDetails", component)
+        self.assertIn("<TrackedEventResult state={latestReactionState} />", component)
+        self.assertIn("formatTrackingConfigSnapshot(event.tracking_config_snapshot)", component)
+        self.assertIn("trackedEvent={", self.home_source)
+        self.assertIn("<TrackedEventDetails event={trackedEvent} />", self.home_source)
+
     # -- event card navigates to the detail route with the event id --------
 
     def test_event_card_navigates_to_detail_with_event_id(self) -> None:
