@@ -437,8 +437,8 @@ def create_app(
     def require_event_exists(event_id: str) -> None:
         try:
             event = get_repository().get(event_id)
-        except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Event repository read failed") from exc
         if event is None:
             raise HTTPException(status_code=404, detail="Event not found")
 
@@ -870,8 +870,8 @@ def create_app(
         require_event_exists(event_id)
         try:
             state = get_official_release_source_repository().get_state(event_id)
-        except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Official release source read failed") from exc
         return _official_release_source_payload(
             event_id, state.source, version=state.version
         )

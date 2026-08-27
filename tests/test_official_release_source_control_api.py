@@ -21,10 +21,13 @@ ACTOR = "marko"
 
 
 class _EventRepository:
-    def __init__(self, exists: bool = True):
+    def __init__(self, exists: bool = True, error: Exception | None = None):
         self.exists = exists
+        self.error = error
 
     def get(self, event_id: str):
+        if self.error is not None:
+            raise self.error
         return object() if self.exists and event_id == EVENT_ID else None
 
 
@@ -36,9 +39,12 @@ class _SourceRepository:
         self.set_calls = []
         self.clear_calls = []
         self.set_error = None
+        self.read_error = None
 
     def get_state(self, event_id: str):
         self.state_calls.append(event_id)
+        if self.read_error is not None:
+            raise self.read_error
         return OfficialReleaseSourceState(self.source, self.version)
 
     def set(self, source: OfficialReleaseSource, *, expected_version: int, actor: str):
@@ -189,6 +195,26 @@ class OfficialReleaseSourceControlApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 404)
         self.assertEqual(source_repository.set_calls, [])
+
+    def test_source_read_client_exception_is_503(self):
+        source_repository = _SourceRepository()
+        source_repository.read_error = _ApiError("08006", "connection failure")
+        client = _client(source_repository)
+        response = client.get(
+            f"/api/v1/events/{EVENT_ID}/official-release-source",
+            headers={"X-MarketAI-Key": READ_KEY},
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"], "Official release source read failed")
+
+    def test_event_precheck_client_exception_is_503(self):
+        client = _client(event_repository=_EventRepository(error=_ApiError("08006", "connection failure")))
+        response = client.get(
+            f"/api/v1/events/{EVENT_ID}/official-release-source",
+            headers={"X-MarketAI-Key": READ_KEY},
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"], "Event repository read failed")
 
     def test_repository_failure_is_503(self):
         source_repository = _SourceRepository()
