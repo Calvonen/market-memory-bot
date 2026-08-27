@@ -1,0 +1,79 @@
+name: Temporary PR178 two P2 fix
+
+on:
+  push:
+    branches:
+      - feature/official-release-source-control-api
+    paths:
+      - .github/workflows/tmp-pr178-two-p2-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/official-release-source-control-api
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply fixes and tests
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('scripts/verify_supabase_schema.py')
+          s = p.read_text()
+          s = s.replace('REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 5', 'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 6')
+          p.write_text(s)
+
+          p = Path('tests/test_verify_supabase_schema.py')
+          s = p.read_text()
+          s = s.replace('"official_release_source_schema_version": 5,', '"official_release_source_schema_version": 6,', 1)
+          s = s.replace('"official_release_source_schema_version": 4,', '"official_release_source_schema_version": 5,', 1)
+          s = s.replace('official-release-source schema version 5', 'official-release-source schema version 6', 1)
+          s = s.replace('deployed: 4', 'deployed: 5', 1)
+          p.write_text(s)
+
+          p = Path('trading_system/official_release_source_repository.py')
+          s = p.read_text()
+          anchor = '        if source_kind not in _ALLOWED_SOURCE_KINDS:\n            raise ValueError("official release source_kind must be direct_url or results_page")\n'
+          addition = anchor + '        if "\\x00" in source_url or (source_title is not None and "\\x00" in source_title):\n            raise ValueError("official release source text must not contain NUL")\n'
+          if anchor not in s:
+              raise SystemExit('repository NUL anchor not found')
+          s = s.replace(anchor, addition, 1)
+          p.write_text(s)
+
+          p = Path('tests/test_official_release_source_repository.py')
+          s = p.read_text()
+          anchor = '        with self.assertRaisesRegex(ValueError, "absolute HTTPS URL"):\n            OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://example.com/a b")\n'
+          addition = anchor + '        with self.assertRaisesRegex(ValueError, "must not contain NUL"):\n            OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://example.com/a\\x00b")\n        with self.assertRaisesRegex(ValueError, "must not contain NUL"):\n            OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://example.com/a", source_title="bad\\x00title")\n'
+          if anchor not in s:
+              raise SystemExit('repository test NUL anchor not found')
+          s = s.replace(anchor, addition, 1)
+          p.write_text(s)
+
+          p = Path('tests/test_official_release_source_missing_generation_recovery_sql.py')
+          p.write_text('''from pathlib import Path\nimport unittest\n\nMIGRATION = Path("supabase/migrations/20260902108000_official_release_source_missing_generation_recovery.sql")\nSCHEMA_GATE = Path("scripts/verify_supabase_schema.py")\n\n\nclass OfficialReleaseSourceMissingGenerationRecoverySqlTests(unittest.TestCase):\n    @classmethod\n    def setUpClass(cls):\n        cls.sql = MIGRATION.read_text()\n        cls.schema_gate = SCHEMA_GATE.read_text()\n\n    def test_missing_generation_is_reconstructed_from_latest_audit(self):\n        self.assertIn("select distinct on (audit.event_id)", self.sql)\n        self.assertIn("order by audit.event_id, audit.id desc", self.sql)\n        self.assertIn("where not exists (", self.sql)\n        self.assertIn("missing.action = 'clear'", self.sql)\n        self.assertIn("missing.action = 'set'", self.sql)\n        self.assertIn("missing.version + 1", self.sql)\n        self.assertIn("migration:pre-durable-delete-recovery", self.sql)\n\n    def test_recovery_runs_under_event_and_source_locks(self):\n        event_lock = self.sql.index("lock table public.market_events in share mode")\n        source_lock = self.sql.index("lock table public.event_official_release_sources in access exclusive mode")\n        snapshot = self.sql.index("select distinct on (audit.event_id)")\n        self.assertLess(event_lock, source_lock)\n        self.assertLess(source_lock, snapshot)\n\n    def test_schema_gate_requires_recovery_contract_v6(self):\n        self.assertIn("    6;", self.sql)\n        self.assertIn("REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 6", self.schema_gate)\n\n\nif __name__ == "__main__":\n    unittest.main()\n''')
+          PY
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install pytest
+      - name: Validate
+        run: |
+          python -m py_compile trading_system/official_release_source_repository.py scripts/verify_supabase_schema.py tests/test_official_release_source_repository.py tests/test_official_release_source_missing_generation_recovery_sql.py tests/test_verify_supabase_schema.py
+          git diff --check
+          python -m unittest discover -s tests -p 'test_official_release_source*.py' -v
+          python -m unittest tests.test_verify_supabase_schema -v
+          python -m unittest discover -s tests -v
+      - name: Commit fixes
+        run: |
+          git config user.name 'Calvonen'
+          git config user.email 'marko.raitanen@gmail.com'
+          git add scripts/verify_supabase_schema.py trading_system/official_release_source_repository.py tests/test_official_release_source_repository.py tests/test_official_release_source_missing_generation_recovery_sql.py tests/test_verify_supabase_schema.py
+          git commit -m 'fix: recover source generations and reject NUL input'
+          git push origin HEAD:feature/official-release-source-control-api
