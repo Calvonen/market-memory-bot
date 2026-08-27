@@ -3,6 +3,7 @@ import unittest
 
 MIGRATION = Path("supabase/migrations/20260902104000_official_release_source_approval_audit.sql")
 INTEGRITY_MIGRATION = Path("supabase/migrations/20260902105000_official_release_source_audit_integrity.sql")
+GENERATION_MIGRATION = Path("supabase/migrations/20260902106000_official_release_source_generation_integrity.sql")
 SCHEMA_GATE = Path("scripts/verify_supabase_schema.py")
 
 
@@ -12,6 +13,7 @@ class OfficialReleaseSourceApprovalAuditSqlTests(unittest.TestCase):
         cls.sql = MIGRATION.read_text()
         cls.schema_gate = SCHEMA_GATE.read_text()
         cls.integrity_sql = INTEGRITY_MIGRATION.read_text()
+        cls.generation_sql = GENERATION_MIGRATION.read_text()
 
     def test_audit_is_append_only_service_readable(self):
         self.assertIn("create table public.event_official_release_source_audit", self.sql)
@@ -116,13 +118,44 @@ class OfficialReleaseSourceApprovalAuditSqlTests(unittest.TestCase):
         self.assertIn("before delete on public.market_events", self.integrity_sql)
         self.assertIn("    3;", self.integrity_sql)
 
+    def test_v4_matches_only_latest_audit_generation(self):
+        self.assertIn("select distinct on (event_id)", self.generation_sql)
+        self.assertIn("order by event_id, id desc", self.generation_sql)
+        self.assertIn("migration:stale-generation-source", self.generation_sql)
+        self.assertIn("migration:stale-generation-invalidation", self.generation_sql)
+        self.assertIn("order by id desc\n    limit 1", self.generation_sql)
+        self.assertIn("latest_audit.action = 'set'", self.generation_sql)
+        self.assertIn("latest_audit.version = source_row.version", self.generation_sql)
+
+    def test_v4_clear_checks_live_parent_under_advisory_lock(self):
+        clear_start = self.generation_sql.index(
+            "create or replace function public.clear_event_official_release_source_approved"
+        )
+        lock_pos = self.generation_sql.index(
+            "pg_advisory_xact_lock(hashtextextended(input_event_id, 2))",
+            clear_start,
+        )
+        parent_check = self.generation_sql.index(
+            "from public.market_events",
+            lock_pos,
+        )
+        missing_error = self.generation_sql.index("event_not_found:%", parent_check)
+        clear_call = self.generation_sql.index(
+            "public.clear_event_official_release_source(",
+            missing_error,
+        )
+        self.assertLess(lock_pos, parent_check)
+        self.assertLess(parent_check, missing_error)
+        self.assertLess(missing_error, clear_call)
+
     def test_schema_gate_has_distinct_audited_contract_version(self):
         self.assertIn("drop function public.verify_official_release_source_schema()", self.sql)
         self.assertIn("official_release_source_schema_version integer", self.sql)
         self.assertIn("event_official_release_source_audit", self.sql)
         self.assertIn("set_event_official_release_source_approved", self.sql)
         self.assertIn("clear_event_official_release_source_approved", self.sql)
-        self.assertIn("REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 3", self.schema_gate)
+        self.assertIn("REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 4", self.schema_gate)
+        self.assertIn("    4;", self.generation_sql)
         self.assertIn(
             '"official_release_source_schema_version"',
             self.schema_gate,
