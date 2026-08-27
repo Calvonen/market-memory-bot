@@ -42,16 +42,12 @@ replacements = [
         "  }, [onRefreshSettled, onSnapshot, refreshToken]);",
     ),
     (
+        "    }, [load, refreshToken]),",
+        "    }, [load]),",
+    ),
+    (
         ".map((event) => <TrackedEventCard key={event.event_id} event={event} />)}",
-        ".map((event) => (\n          <TrackedEventCard key={event.event_id} event={event} refreshToken={refreshToken} />\n        ))}",
-    ),
-    (
-        "export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {",
-        "export function TrackedEventCard({\n  event,\n  refreshToken = 0,\n}: {\n  event: TrackedMarketEvent;\n  refreshToken?: number;\n}) {",
-    ),
-    (
-        "    }, [event.event_id]),",
-        "    }, [event.event_id, refreshToken]),",
+        ".map((event) => (\n          <TrackedEventCard key={`${event.event_id}:${refreshToken}`} event={event} />\n        ))}",
     ),
 ]
 for old, new in replacements:
@@ -67,4 +63,10 @@ new = "        card_start = self.home_source.index(\"function EventCard(\")\n   
 if old not in text:
     raise SystemExit("test loading assertion anchor missing")
 text = text.replace(old, new, 1)
+
+insert_anchor = "    # -- event card navigates to the detail route with the event id --------\n"
+extra_tests = '''    def test_home_refresh_waits_for_persistent_tracked_events_to_settle(self) -> None:\n        # Pull-to-refresh may keep the established Promise.race policy for\n        # expectation/calendar sources so one hung source cannot wedge the\n        # screen, but the newly-triggered persistent tracked-event refresh\n        # must settle before the spinner is cleared.\n        refresh_start = self.home_source.index("const onRefresh = useCallback(async () => {")\n        refresh_end = self.home_source.index("}, [loadEvents]);", refresh_start)\n        refresh_body = self.home_source[refresh_start:refresh_end]\n        self.assertIn("const trackedRefresh = new Promise<void>", refresh_body)\n        self.assertIn("setTrackedRefreshToken(token);", refresh_body)\n        self.assertIn("await loadEvents();", refresh_body)\n        self.assertIn("await trackedRefresh;", refresh_body)\n        self.assertLess(refresh_body.index("await trackedRefresh;"), refresh_body.index("setRefreshing(false);"))\n        self.assertIn("onRefreshSettled={handleTrackedRefreshSettled}", self.home_source)\n\n    def test_home_refresh_reloads_latest_reaction_for_surviving_tracked_cards(self) -> None:\n        component = Path("mobile/src/components/TrackedEventsSection.tsx").read_text(encoding="utf-8")\n        # A refresh generation changes the card key, remounting a surviving\n        # event card even when event_id itself did not change. Its existing\n        # focus effect therefore issues a fresh latest-reaction request.\n        self.assertIn("key={`${event.event_id}:${refreshToken}`}", component)\n        self.assertIn("getTrackedEventLatestReaction(event.event_id)", component)\n        self.assertIn("if (refreshToken > 0) onRefreshSettled?.(refreshToken);", component)\n\n'''
+if insert_anchor not in text:
+    raise SystemExit("test insertion anchor missing")
+text = text.replace(insert_anchor, extra_tests + insert_anchor, 1)
 test.write_text(text, encoding="utf-8")
