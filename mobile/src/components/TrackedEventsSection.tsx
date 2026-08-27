@@ -12,10 +12,15 @@ import {
 type Snapshot = {
   count: number;
   calendarEventIds: string[];
+  statusByCalendarEventId: Record<string, string>;
+  eventByCalendarEventId: Record<string, TrackedMarketEvent>;
 };
 
 type Props = {
   onSnapshot?: (snapshot: Snapshot) => void;
+  excludeCalendarEventIds?: ReadonlySet<string>;
+  refreshToken?: number;
+  onRefreshSettled?: (token: number) => void;
 };
 
 type LatestReactionState =
@@ -23,7 +28,12 @@ type LatestReactionState =
   | { status: 'ready'; reaction: TrackedEventLatestReaction | null }
   | { status: 'error' };
 
-export function TrackedEventsSection({ onSnapshot }: Props) {
+export function TrackedEventsSection({
+  onSnapshot,
+  excludeCalendarEventIds,
+  refreshToken = 0,
+  onRefreshSettled,
+}: Props) {
   const [events, setEvents] = useState<TrackedMarketEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const latestLoadId = useRef(0);
@@ -40,13 +50,27 @@ export function TrackedEventsSection({ onSnapshot }: Props) {
           calendarEventIds: list
             .map((event) => event.calendar_event_id)
             .filter((value): value is string => Boolean(value)),
+          statusByCalendarEventId: Object.fromEntries(
+            list
+              .filter((event) => Boolean(event.calendar_event_id))
+              .map((event) => [event.calendar_event_id as string, describeTrackedEvent(event).status]),
+          ),
+          eventByCalendarEventId: Object.fromEntries(
+            list
+              .filter((event) => Boolean(event.calendar_event_id))
+              .map((event) => [event.calendar_event_id as string, event]),
+          ),
         });
       })
       .catch((err) => {
         if (loadId !== latestLoadId.current) return;
         setError(err instanceof Error ? err.message : 'Seurantatietoja ei juuri nyt saatu haettua.');
+      })
+      .finally(() => {
+        if (loadId !== latestLoadId.current) return;
+        if (refreshToken > 0) onRefreshSettled?.(refreshToken);
       });
-  }, [onSnapshot]);
+  }, [onRefreshSettled, onSnapshot, refreshToken]);
 
   useFocusEffect(
     useCallback(() => {
@@ -68,15 +92,47 @@ export function TrackedEventsSection({ onSnapshot }: Props) {
         </View>
       ) : null}
 
-      {events?.map((event) => (
-        <TrackedEventCard key={event.event_id} event={event} />
-      ))}
+      {events
+        ?.filter(
+          (event) =>
+            !event.calendar_event_id || !excludeCalendarEventIds?.has(event.calendar_event_id),
+        )
+        .map((event) => (
+          <TrackedEventCard key={`${event.event_id}:${refreshToken}`} event={event} />
+        ))}
     </>
   );
 }
 
 export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
   const scheduleText = formatTrackedEventSchedule(event);
+
+  return (
+    <View style={styles.eventCard}>
+      <View style={styles.rowBetween}>
+        <View style={styles.titleBlock}>
+          <Text style={styles.company} numberOfLines={1}>
+            {event.company_name || event.title}
+          </Text>
+          <Text style={styles.symbol}>{event.instrument}</Text>
+        </View>
+        <Text style={styles.dateText}>{scheduleText}</Text>
+      </View>
+
+      <TrackedEventDetails event={event} />
+    </View>
+  );
+}
+
+export function TrackedEventDetails({
+  event,
+  refreshToken = 0,
+  showSchedule = false,
+}: {
+  event: TrackedMarketEvent;
+  refreshToken?: number;
+  showSchedule?: boolean;
+}) {
   const presentation = describeTrackedEvent(event);
   const configText = formatTrackingConfigSnapshot(event.tracking_config_snapshot);
   const [latestReactionState, setLatestReactionState] = useState<LatestReactionState>({
@@ -102,21 +158,14 @@ export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
       return () => {
         active = false;
       };
-    }, [event.event_id]),
+    }, [event.event_id, refreshToken]),
   );
 
-  return (
-    <View style={styles.eventCard}>
-      <View style={styles.rowBetween}>
-        <View style={styles.titleBlock}>
-          <Text style={styles.company} numberOfLines={1}>
-            {event.company_name || event.title}
-          </Text>
-          <Text style={styles.symbol}>{event.instrument}</Text>
-        </View>
-        <Text style={styles.dateText}>{scheduleText}</Text>
-      </View>
+  const scheduleText = showSchedule ? formatTrackedEventSchedule(event) : null;
 
+  return (
+    <>
+      {scheduleText ? <Text style={styles.detailText}>Runtime {scheduleText}</Text> : null}
       <View style={styles.statusBlock}>
         <Text style={styles.statusText}>{presentation.status}</Text>
         {presentation.detail ? <Text style={styles.detailText}>{presentation.detail}</Text> : null}
@@ -128,7 +177,7 @@ export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
       </View>
 
       <TrackedEventResult state={latestReactionState} />
-    </View>
+    </>
   );
 }
 
