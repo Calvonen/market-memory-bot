@@ -1,0 +1,67 @@
+name: Temporary PR178 integer bound fix
+
+on:
+  push:
+    branches:
+      - feature/official-release-source-control-api
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-validate:
+    if: github.event.head_commit.message == 'chore: apply PR178 expected version bounds'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/official-release-source-control-api
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply bounded integer fix and regression tests
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          api = Path('trading_system/api.py')
+          text = api.read_text()
+          old = '    expected_version: int = Field(ge=0)\n'
+          new = '    expected_version: int = Field(ge=0, le=2147483647)\n'
+          if old not in text:
+              raise SystemExit('PUT expected_version field anchor not found')
+          text = text.replace(old, new, 1)
+          old = '        expected_version: int = Query(..., ge=1),\n'
+          new = '        expected_version: int = Query(..., ge=1, le=2147483647),\n'
+          if old not in text:
+              raise SystemExit('DELETE expected_version query anchor not found')
+          text = text.replace(old, new, 1)
+          api.write_text(text)
+
+          test = Path('tests/test_official_release_source_control_api.py')
+          text = test.read_text()
+          anchor = '''    def test_put_version_conflict_is_409(self):\n'''
+          addition = '''    def test_expected_version_is_bounded_to_postgres_integer_range(self):\n        source_repository = _SourceRepository()\n        client = _client(source_repository)\n        too_large = 2147483648\n\n        put_response = client.put(\n            f"/api/v1/events/{EVENT_ID}/official-release-source",\n            headers={"X-Admin-Token": ADMIN_TOKEN, "X-MarketAI-Actor": ACTOR},\n            json={\n                "source_kind": "direct_url",\n                "source_url": "https://investor.example.com/results.pdf",\n                "expected_version": too_large,\n            },\n        )\n        delete_response = client.delete(\n            f"/api/v1/events/{EVENT_ID}/official-release-source?expected_version={too_large}",\n            headers={"X-Admin-Token": ADMIN_TOKEN, "X-MarketAI-Actor": ACTOR},\n        )\n\n        self.assertEqual(put_response.status_code, 422)\n        self.assertEqual(delete_response.status_code, 422)\n        self.assertEqual(source_repository.set_calls, [])\n        self.assertEqual(source_repository.clear_calls, [])\n\n'''
+          if anchor not in text:
+              raise SystemExit('test insertion anchor not found')
+          text = text.replace(anchor, addition + anchor, 1)
+          test.write_text(text)
+          PY
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install pytest
+      - name: Validate
+        run: |
+          python -m py_compile trading_system/api.py tests/test_official_release_source_control_api.py
+          git diff --check
+          python -m unittest tests.test_official_release_source_control_api -v
+          python -m unittest discover -s tests -p 'test_official_release_source*.py' -v
+          python -m unittest discover -s tests -v
+      - name: Commit fix
+        run: |
+          git config user.name 'Calvonen'
+          git config user.email 'marko.raitanen@gmail.com'
+          git add trading_system/api.py tests/test_official_release_source_control_api.py
+          git commit -m 'fix: bound official source expected versions'
+          git push origin HEAD:feature/official-release-source-control-api
