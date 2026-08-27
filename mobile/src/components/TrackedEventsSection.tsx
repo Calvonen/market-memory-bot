@@ -12,10 +12,13 @@ import {
 type Snapshot = {
   count: number;
   calendarEventIds: string[];
+  statusByCalendarEventId: Record<string, string>;
 };
 
 type Props = {
   onSnapshot?: (snapshot: Snapshot) => void;
+  excludeCalendarEventIds?: ReadonlySet<string>;
+  refreshToken?: number;
 };
 
 type LatestReactionState =
@@ -23,7 +26,11 @@ type LatestReactionState =
   | { status: 'ready'; reaction: TrackedEventLatestReaction | null }
   | { status: 'error' };
 
-export function TrackedEventsSection({ onSnapshot }: Props) {
+export function TrackedEventsSection({
+  onSnapshot,
+  excludeCalendarEventIds,
+  refreshToken = 0,
+}: Props) {
   const [events, setEvents] = useState<TrackedMarketEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const latestLoadId = useRef(0);
@@ -40,6 +47,11 @@ export function TrackedEventsSection({ onSnapshot }: Props) {
           calendarEventIds: list
             .map((event) => event.calendar_event_id)
             .filter((value): value is string => Boolean(value)),
+          statusByCalendarEventId: Object.fromEntries(
+            list
+              .filter((event) => Boolean(event.calendar_event_id))
+              .map((event) => [event.calendar_event_id as string, describeTrackedEvent(event).status]),
+          ),
         });
       })
       .catch((err) => {
@@ -54,7 +66,7 @@ export function TrackedEventsSection({ onSnapshot }: Props) {
         void load();
       }, 0);
       return () => clearTimeout(timer);
-    }, [load]),
+    }, [load, refreshToken]),
   );
 
   return (
@@ -68,9 +80,12 @@ export function TrackedEventsSection({ onSnapshot }: Props) {
         </View>
       ) : null}
 
-      {events?.map((event) => (
-        <TrackedEventCard key={event.event_id} event={event} />
-      ))}
+      {events
+        ?.filter(
+          (event) =>
+            !event.calendar_event_id || !excludeCalendarEventIds?.has(event.calendar_event_id),
+        )
+        .map((event) => <TrackedEventCard key={event.event_id} event={event} />)}
     </>
   );
 }

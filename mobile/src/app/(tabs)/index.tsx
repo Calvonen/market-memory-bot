@@ -21,7 +21,11 @@ import {
 } from '@/services/api';
 
 type EventStatus = { run: PaperRun | null; statusError: boolean };
-type TrackedEventSnapshot = { count: number; calendarEventIds: string[] };
+type TrackedEventSnapshot = {
+  count: number;
+  calendarEventIds: string[];
+  statusByCalendarEventId: Record<string, string>;
+};
 
 // Mirrors MAX_CALENDAR_LOOKAHEAD_DAYS in trading_system/api.py - the widest
 // window the backend accepts, and what an omitted from_date/to_date used to
@@ -61,6 +65,10 @@ export default function HomeScreen() {
   const [persistentCalendarEventIds, setPersistentCalendarEventIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const [persistentStatusByCalendarEventId, setPersistentStatusByCalendarEventId] = useState<
+    Record<string, string>
+  >({});
+  const [trackedRefreshToken, setTrackedRefreshToken] = useState(0);
   // Separate from `error` (EventExpectation-only) - a calendar failure must
   // never be conflated with an EventExpectation failure, or silently
   // swallowed. calendarEvents itself is left untouched on failure (see the
@@ -146,7 +154,18 @@ export default function HomeScreen() {
   const handleTrackedEventSnapshot = useCallback((snapshot: TrackedEventSnapshot) => {
     setTrackedEventCount(snapshot.count);
     setPersistentCalendarEventIds(new Set(snapshot.calendarEventIds));
+    setPersistentStatusByCalendarEventId(snapshot.statusByCalendarEventId);
   }, []);
+
+  const expectationCalendarEventIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const event of events ?? []) {
+      if (!event.event_id.startsWith('calendar:')) continue;
+      const calendarEventId = event.event_id.slice('calendar:'.length);
+      if (calendarEventId) ids.add(calendarEventId);
+    }
+    return ids;
+  }, [events]);
 
   // Tracked calendar rows for display: status = 'tracked' only, and never
   // an occurrence already tracked through the real trading system - same
@@ -184,6 +203,7 @@ export default function HomeScreen() {
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
+    setTrackedRefreshToken((value) => value + 1);
     await loadEvents();
     setRefreshing(false);
   }, [loadEvents]);
@@ -249,11 +269,27 @@ export default function HomeScreen() {
         </View>
       ) : null}
 
-      {events?.map((event) => (
-        <EventCard key={event.event_id} event={event} status={statuses[event.event_id]} />
-      ))}
+      {events?.map((event) => {
+        const calendarEventId = event.event_id.startsWith('calendar:')
+          ? event.event_id.slice('calendar:'.length)
+          : null;
+        return (
+          <EventCard
+            key={event.event_id}
+            event={event}
+            status={statuses[event.event_id]}
+            runtimeStatus={
+              calendarEventId ? persistentStatusByCalendarEventId[calendarEventId] : undefined
+            }
+          />
+        );
+      })}
 
-      <TrackedEventsSection onSnapshot={handleTrackedEventSnapshot} />
+      <TrackedEventsSection
+        onSnapshot={handleTrackedEventSnapshot}
+        excludeCalendarEventIds={expectationCalendarEventIds}
+        refreshToken={trackedRefreshToken}
+      />
 
       {trackedCalendarEvents?.map((event) => (
         <CalendarEventCard key={event.calendar_event_id} event={event} />
@@ -280,7 +316,15 @@ export default function HomeScreen() {
   );
 }
 
-function EventCard({ event, status }: { event: EventExpectation; status?: EventStatus }) {
+function EventCard({
+  event,
+  status,
+  runtimeStatus,
+}: {
+  event: EventExpectation;
+  status?: EventStatus;
+  runtimeStatus?: string;
+}) {
   const run = status?.run ?? null;
   // A run computed against an older expectation version (the event was
   // edited afterwards) must not present its status/direction/confidence as
@@ -288,11 +332,15 @@ function EventCard({ event, status }: { event: EventExpectation; status?: EventS
   // opened, but the card is what the user sees first.
   const isStale =
     run?.expectation_version !== undefined && run.expectation_version !== event.version;
-  const statusText = !status
-    ? 'Ladataan...'
-    : isStale
-      ? 'Vanhentunut analyysi'
-      : describeStatus(status.run, status.statusError);
+  const statusText = isStale
+    ? 'Vanhentunut analyysi'
+    : run
+      ? describeStatus(run, false)
+      : runtimeStatus
+        ? runtimeStatus
+        : !status
+          ? 'Ladataan...'
+          : describeStatus(null, status.statusError);
   const scheduled = new Date(`${event.scheduled_date}T12:00:00`);
   const dateText = Number.isNaN(scheduled.getTime())
     ? event.scheduled_date
