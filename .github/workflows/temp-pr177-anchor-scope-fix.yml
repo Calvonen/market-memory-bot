@@ -31,7 +31,6 @@ jobs:
           text = source_path.read_text()
 
           replacements = []
-
           replacements.append((
           '''# The same identity mechanism for <base>: a base can be foster parented or
           # dropped, so tree position is not an identity for it either.
@@ -45,7 +44,6 @@ jobs:
           # candidates instead of poisoning an otherwise valid results page.
           _ANCHOR_MARKER_PREFIX = "data-mmb-anchor-token-"
           '''))
-
           replacements.append((
           '''        self.unsafe_hrefs: set[str] = set()
                   self.unsafe_anchor_structure = False
@@ -57,7 +55,6 @@ jobs:
                   self.anchor_templates: list[frozenset[int]] = []
                   # href -> one entry per anchor occurrence in source order, each the set of
           '''))
-
           replacements.append((
           '''    def _record_anchor(self, attrs: list[tuple[str, str | None]]) -> None:
                   href_attrs = [value for key, value in attrs if key.lower() == "href"]
@@ -88,9 +85,6 @@ jobs:
                       len(href_attrs) != 1 or len(hrefs) != 1
                   )
                   if malformed_structure:
-                      # Do not poison every anchor sharing one of these href strings. The
-                      # raw token is matched back to its own tree node below, where normal
-                      # visibility/template scope decides whether it can be a candidate.
                       self.malformed_anchor_tokens.add(token)
                   elif len(hrefs) == 1 and not _raw_href_is_safe(raw_start_tag, hrefs[0]):
                       self.unsafe_hrefs.add(hrefs[0])
@@ -98,7 +92,6 @@ jobs:
                   for href in hrefs:
                       self.anchor_occurrences.setdefault(href, []).append(enclosing)
           '''))
-
           replacements.append((
           '''            ("template", _TEMPLATE_MARKER_PREFIX, probe.template_spans),
                       ("base", _BASE_MARKER_PREFIX, probe.base_spans),
@@ -107,19 +100,16 @@ jobs:
                       ("base", _BASE_MARKER_PREFIX, probe.base_spans),
                       ("a", _ANCHOR_MARKER_PREFIX, probe.anchor_spans),
           '''))
-
           replacements.append((
           '''    return scanner, fragment, html_templates, markers.get("base")
           ''',
           '''    return scanner, fragment, html_templates, markers.get("base"), markers.get("a")
           '''))
-
           replacements.append((
           '''    scanner, _fragment, html_templates, _base_marker = _scan_and_parse(html_text)
           ''',
           '''    scanner, _fragment, html_templates, _base_marker, _anchor_marker = _scan_and_parse(html_text)
           '''))
-
           replacements.append((
           '''    safety_scanner, fragment, html_templates, base_marker = _scan_and_parse(html_text)
           ''',
@@ -131,25 +121,15 @@ jobs:
                   raise SystemExit(f'expected source snippet not found:\n{old[:180]}')
               text = text.replace(old, new, 1)
 
-          marker = '''def _iter_visible_html_anchors(root):
-          '''
-          start = text.index(marker)
-          sentinel = '''\n\n_BASE_FAILED_CLOSED = object()\n'''
-          end = text.index(sentinel, start)
-          iterator_block = text[start:end]
+          start = text.index('def _iter_visible_html_anchors(root):\n')
+          end = text.index('\n\n_BASE_FAILED_CLOSED = object()\n', start)
           helper = '''\n\ndef _has_candidate_relevant_malformed_anchor(
               root,
               safety_scanner,
               html_templates: frozenset[int],
               anchor_marker: str | None,
           ) -> bool:
-              """Return whether malformed href structure can become a visible candidate.
-
-              Duplicate/valueless href syntax is unsafe only when that exact raw anchor
-              survives tree construction as a visible HTML anchor. HTML-template-local,
-              hidden and dropped anchors are inert. Token markers keep this decision tied
-              to the source occurrence instead of an href string shared by other anchors.
-              """
+              """Whether malformed href structure can survive as a visible candidate."""
               relevant_tokens = {
                   token
                   for token in safety_scanner.malformed_anchor_tokens
@@ -158,16 +138,11 @@ jobs:
               if not relevant_tokens:
                   return False
               if anchor_marker is None:
-                  # Without a trustworthy raw/tree identity we cannot prove that a
-                  # candidate-visible malformed occurrence is absent.
                   return True
 
               for anchor in _iter_visible_html_anchors(root):
                   token = _marker_token(anchor, anchor_marker)
                   if token is None:
-                      # Instrumentation should survive on every parsed anchor. If a
-                      # visible tree node cannot be tied back while malformed source
-                      # tokens exist, fail closed rather than guess correspondence.
                       return True
                   if token in relevant_tokens:
                       return True
@@ -186,73 +161,67 @@ jobs:
           if old not in text:
               raise SystemExit('parse anchor-structure branch not found')
           text = text.replace(old, new, 1)
-
           source_path.write_text(text)
 
           test_path = Path('tests/test_results_page_release_provider.py')
           tests = test_path.read_text()
-          insertion_point = '''    def test_single_empty_href_does_not_poison_other_candidates(self) -> None:
-          '''
+          insertion_point = '    def test_single_empty_href_does_not_poison_other_candidates(self) -> None:\n'
           if insertion_point not in tests:
               raise SystemExit('test insertion point not found')
           new_tests = '''    def test_hidden_malformed_anchor_does_not_poison_visible_release_candidate(self) -> None:
-              document_url = "https://investor.example.com/reports/2026-08-26-results.html"
-              provider = self._provider()
-              document, opener = self._discover(
-                  provider,
-                  {
-                      PAGE_URL: self._page(
-                          '<div hidden><a href href="/bad">Hidden malformed</a></div>'
-                          '<a href="/reports/2026-08-26-results.html">Half-year results</a>'
-                      ),
-                      document_url: _Response(_release_html(), final_url=document_url),
-                  },
-              )
+                  document_url = "https://investor.example.com/reports/2026-08-26-results.html"
+                  provider = self._provider()
+                  document, opener = self._discover(
+                      provider,
+                      {
+                          PAGE_URL: self._page(
+                              '<div hidden><a href href="/bad">Hidden malformed</a></div>'
+                              '<a href="/reports/2026-08-26-results.html">Half-year results</a>'
+                          ),
+                          document_url: _Response(_release_html(), final_url=document_url),
+                      },
+                  )
 
-              self.assertIsNotNone(document)
-              self.assertEqual(document.source_url, document_url)
-              self.assertEqual(opener.opened, [PAGE_URL, document_url])
+                  self.assertIsNotNone(document)
+                  self.assertEqual(document.source_url, document_url)
+                  self.assertEqual(opener.opened, [PAGE_URL, document_url])
 
               def test_template_local_malformed_anchor_does_not_poison_visible_release_candidate(self) -> None:
-              document_url = "https://investor.example.com/reports/2026-08-26-results.html"
-              provider = self._provider()
-              document, opener = self._discover(
-                  provider,
-                  {
-                      PAGE_URL: self._page(
-                          '<template><a href href="/bad">Template malformed</a></template>'
-                          '<a href="/reports/2026-08-26-results.html">Half-year results</a>'
-                      ),
-                      document_url: _Response(_release_html(), final_url=document_url),
-                  },
-              )
+                  document_url = "https://investor.example.com/reports/2026-08-26-results.html"
+                  provider = self._provider()
+                  document, opener = self._discover(
+                      provider,
+                      {
+                          PAGE_URL: self._page(
+                              '<template><a href href="/bad">Template malformed</a></template>'
+                              '<a href="/reports/2026-08-26-results.html">Half-year results</a>'
+                          ),
+                          document_url: _Response(_release_html(), final_url=document_url),
+                      },
+                  )
 
-              self.assertIsNotNone(document)
-              self.assertEqual(document.source_url, document_url)
-              self.assertEqual(opener.opened, [PAGE_URL, document_url])
+                  self.assertIsNotNone(document)
+                  self.assertEqual(document.source_url, document_url)
+                  self.assertEqual(opener.opened, [PAGE_URL, document_url])
 
               def test_visible_malformed_anchor_still_fails_before_document_fetch(self) -> None:
-              provider = self._provider()
-              document, opener = self._discover(
-                  provider,
-                  {
-                      PAGE_URL: self._page(
-                          '<a href href="/reports/2026-08-26-results.html">Half-year results</a>'
-                      )
-                  },
-              )
+                  provider = self._provider()
+                  document, opener = self._discover(
+                      provider,
+                      {
+                          PAGE_URL: self._page(
+                              '<a href href="/reports/2026-08-26-results.html">Half-year results</a>'
+                          )
+                      },
+                  )
 
-              self.assertIsNone(document)
-              self.assertEqual(opener.opened, [PAGE_URL])
-              reason = provider.describe_no_release()
-              self.assertIsNotNone(reason)
-              self.assertIn("anchor_structure_failed", reason)
+                  self.assertIsNone(document)
+                  self.assertEqual(opener.opened, [PAGE_URL])
+                  reason = provider.describe_no_release()
+                  self.assertIsNotNone(reason)
+                  self.assertIn("anchor_structure_failed", reason)
 
           '''
-          # Correct indentation in the literal above: the nested `def` lines are
-          # intentionally normalized here to keep the workflow YAML readable.
-          new_tests = new_tests.replace('\n    def test_template_local_', '\n    def test_template_local_')
-          new_tests = new_tests.replace('\n    def test_visible_', '\n    def test_visible_')
           tests = tests.replace(insertion_point, new_tests + insertion_point, 1)
           test_path.write_text(tests)
           PY
