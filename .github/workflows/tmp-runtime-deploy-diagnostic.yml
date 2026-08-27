@@ -1,4 +1,4 @@
-name: Temporary Autodesk end-to-end setup
+name: Temporary Autodesk source adjustment
 
 on:
   push:
@@ -11,11 +11,11 @@ permissions:
   contents: read
 
 jobs:
-  setup:
+  adjust:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
-      - name: Approve Autodesk official results page via production API and run release discovery
+      - name: Switch Autodesk to dated press-release listing and run discovery
         shell: bash
         run: |
           set -euo pipefail
@@ -32,7 +32,6 @@ jobs:
           EVENT_ID="calendar:24b20d87-f7cf-408f-80e4-b7a94624229f"
           PY=/home/marko/marketai-repo/.venv/bin/python
 
-          echo "Reading current official-source generation"
           curl --fail-with-body --silent --show-error \
             -H "X-MarketAI-Key: ${MARKETAI_READ_API_KEY}" \
             "${API}/api/v1/events/${EVENT_ID}/official-release-source" \
@@ -40,42 +39,30 @@ jobs:
           cat /tmp/marketai-adsk-source-before.json
           echo
 
-          EXPECTED_VERSION="$(${PY} - <<'PY'
-          import json
-          with open('/tmp/marketai-adsk-source-before.json', encoding='utf-8') as fh:
-              print(int(json.load(fh)['version']))
-          PY
-          )"
-
           ${PY} - <<'PY' >/tmp/marketai-adsk-source-body.json
           import json
           with open('/tmp/marketai-adsk-source-before.json', encoding='utf-8') as fh:
               expected = int(json.load(fh)['version'])
           print(json.dumps({
               'source_kind': 'results_page',
-              'source_url': 'https://investors.autodesk.com/events/event-details/q2-fy27-autodesk-earnings-conference-call',
-              'source_title': 'Q2 FY27 Autodesk Earnings Conference Call',
+              'source_url': 'https://investors.autodesk.com/news-events/press-releases?page=23',
+              'source_title': 'Autodesk Press Releases',
               'expected_version': expected,
           }))
           PY
 
-          echo "Approving Autodesk official event/results page at expected_version=${EXPECTED_VERSION}"
           curl --fail-with-body --silent --show-error \
             -X PUT \
             -H "Content-Type: application/json" \
             -H "X-Admin-Token: ${MARKETAI_ADMIN_API_KEY}" \
-            -H "X-MarketAI-Actor: e2e-test-setup" \
+            -H "X-MarketAI-Actor: e2e-test-source-adjustment" \
             --data-binary @/tmp/marketai-adsk-source-body.json \
             "${API}/api/v1/events/${EVENT_ID}/official-release-source" \
             | tee /tmp/marketai-adsk-source-after.json
           echo
 
-          echo "Running release discovery once after setup"
           sudo /usr/bin/systemctl start marketai-calendar-release.service
           /usr/bin/systemctl show marketai-calendar-release.service \
             --property=Result,ExecMainStatus,ActiveState,SubState --no-pager
-          sudo /usr/bin/journalctl -u marketai-calendar-release.service -n 40 --no-pager
-
-          echo "API health"
           curl --fail --silent "${API}/health"
           echo
