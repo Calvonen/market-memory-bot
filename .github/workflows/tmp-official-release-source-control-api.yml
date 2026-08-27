@@ -32,27 +32,28 @@ jobs:
       - name: Full canonical suite
         run: |
           set +e
-          python -m unittest discover -s tests -v > full-suite-failure.log 2>&1
+          python -m unittest discover -s tests -v > full-suite-failure.txt 2>&1
           rc=$?
-          cat full-suite-failure.log
+          cat full-suite-failure.txt
           exit $rc
       - name: Persist failure log
         if: failure()
         run: |
-          if [ -f full-suite-failure.log ]; then
+          if [ -f full-suite-failure.txt ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add full-suite-failure.log
+            git add -f full-suite-failure.txt
             git commit -m "chore: capture full-suite failure [skip ci]"
             git push origin HEAD:feature/official-release-source-control-api
           fi
       - name: Commit validated implementation
         if: success()
         run: |
+          rm -f full-suite-failure.txt
           rm .github/workflows/tmp-official-release-source-control-api.yml
           rm .github/scripts/apply_official_release_source_control_api.py
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add trading_system/api.py trading_system/official_release_source_repository.py tests/test_official_release_source_control_api.py .github/workflows/tmp-official-release-source-control-api.yml .github/scripts/apply_official_release_source_control_api.py
+          git add -A trading_system/api.py trading_system/official_release_source_repository.py tests/test_official_release_source_control_api.py .github/workflows/tmp-official-release-source-control-api.yml .github/scripts/apply_official_release_source_control_api.py full-suite-failure.txt
           git commit -m "feat: add official release source control API"
           git push origin HEAD:feature/official-release-source-control-api
