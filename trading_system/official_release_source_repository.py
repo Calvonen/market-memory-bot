@@ -87,6 +87,8 @@ class OfficialReleaseSource:
             raise ValueError("official release source event_id is required")
         if source_kind not in _ALLOWED_SOURCE_KINDS:
             raise ValueError("official release source_kind must be direct_url or results_page")
+        if "\x00" in source_url or (source_title is not None and "\x00" in source_title):
+            raise ValueError("official release source text must not contain NUL")
         parsed = urlparse(source_url)
         try:
             parsed_port = parsed.port

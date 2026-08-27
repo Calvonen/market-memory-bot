@@ -105,6 +105,10 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "http://example.com/results")
         with self.assertRaisesRegex(ValueError, "absolute HTTPS URL"):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://example.com/a b")
+        with self.assertRaisesRegex(ValueError, "must not contain NUL"):
+            OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://example.com/a\x00b")
+        with self.assertRaisesRegex(ValueError, "must not contain NUL"):
+            OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://example.com/a", source_title="bad\x00title")
         with self.assertRaisesRegex(ValueError, "no credentials"):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://user:pass@example.com/results")
         with self.assertRaisesRegex(ValueError, "no credentials"):
