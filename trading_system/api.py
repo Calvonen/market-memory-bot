@@ -32,6 +32,7 @@ from trading_system.paper_trade_repository import SupabasePaperTradeRepository
 from trading_system.official_release_source_repository import (
     OfficialReleaseSource,
     OfficialReleaseSourceEventNotFound,
+    OfficialReleaseSourceState,
     OfficialReleaseSourceVersionConflict,
     SupabaseOfficialReleaseSourceRepository,
 )
@@ -73,12 +74,13 @@ class PaperStatusRepository(Protocol):
 
 
 class OfficialReleaseSourceRepository(Protocol):
-    def get(self, event_id: str) -> OfficialReleaseSource | None: ...
-    def get_version(self, event_id: str) -> int: ...
+    def get_state(self, event_id: str) -> OfficialReleaseSourceState: ...
     def set(
-        self, source: OfficialReleaseSource, *, expected_version: int
+        self, source: OfficialReleaseSource, *, expected_version: int, actor: str
     ) -> OfficialReleaseSource: ...
-    def clear(self, event_id: str, *, expected_version: int) -> int: ...
+    def clear(
+        self, event_id: str, *, expected_version: int, actor: str
+    ) -> int: ...
 
 
 class ExpectationVersionRequest(BaseModel):
@@ -274,6 +276,15 @@ def _require_valid_tracked_event_id(event_id: str) -> str:
             status_code=400, detail="event_id must be a valid UUID"
         )
     return event_id
+
+
+def _require_approval_actor(actor: str | None) -> str:
+    canonical_actor = actor.strip() if actor is not None else ""
+    if not canonical_actor:
+        raise HTTPException(status_code=422, detail="X-MarketAI-Actor is required")
+    if len(canonical_actor) > 200:
+        raise HTTPException(status_code=422, detail="X-MarketAI-Actor is too long")
+    return canonical_actor
 
 
 class OfficialReleaseSourceSetRequest(BaseModel):
@@ -858,26 +869,22 @@ def create_app(
         require_read(x_marketai_key)
         require_event_exists(event_id)
         try:
-            source_repository = get_official_release_source_repository()
-            source = source_repository.get(event_id)
-            version = (
-                source.version
-                if source is not None and source.version is not None
-                else source_repository.get_version(event_id)
-            )
+            state = get_official_release_source_repository().get_state(event_id)
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        return _official_release_source_payload(event_id, source, version=version)
+        return _official_release_source_payload(
+            event_id, state.source, version=state.version
+        )
 
     @app.put("/api/v1/events/{event_id}/official-release-source")
     def set_official_release_source(
         event_id: str,
         request: OfficialReleaseSourceSetRequest,
-        x_marketai_control_key: str | None = Header(
-            default=None, alias="X-MarketAI-Control-Key"
-        ),
+        x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+        x_marketai_actor: str | None = Header(default=None, alias="X-MarketAI-Actor"),
     ) -> dict[str, Any]:
-        require_control(x_marketai_control_key)
+        require_admin(x_admin_token)
+        actor = _require_approval_actor(x_marketai_actor)
         require_event_exists(event_id)
         try:
             source = OfficialReleaseSource(
@@ -887,7 +894,7 @@ def create_app(
                 source_title=request.source_title,
             )
             saved = get_official_release_source_repository().set(
-                source, expected_version=request.expected_version
+                source, expected_version=request.expected_version, actor=actor
             )
         except OfficialReleaseSourceVersionConflict as exc:
             raise HTTPException(
@@ -906,15 +913,15 @@ def create_app(
     def clear_official_release_source(
         event_id: str,
         expected_version: int = Query(..., ge=1),
-        x_marketai_control_key: str | None = Header(
-            default=None, alias="X-MarketAI-Control-Key"
-        ),
+        x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+        x_marketai_actor: str | None = Header(default=None, alias="X-MarketAI-Actor"),
     ) -> dict[str, Any]:
-        require_control(x_marketai_control_key)
+        require_admin(x_admin_token)
+        actor = _require_approval_actor(x_marketai_actor)
         require_event_exists(event_id)
         try:
             new_version = get_official_release_source_repository().clear(
-                event_id, expected_version=expected_version
+                event_id, expected_version=expected_version, actor=actor
             )
         except OfficialReleaseSourceVersionConflict as exc:
             raise HTTPException(

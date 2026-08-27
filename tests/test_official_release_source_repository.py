@@ -171,16 +171,17 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
             source_title="FY2026",
         )
 
-        saved = repository.set(source, expected_version=1)
+        saved = repository.set(source, expected_version=1, actor="marko")
 
         self.assertEqual(saved.version, 2)
         self.assertEqual(len(client.rpc_calls), 1)
         rpc_name, payload = client.rpc_calls[0]
-        self.assertEqual(rpc_name, "set_event_official_release_source")
+        self.assertEqual(rpc_name, "set_event_official_release_source_approved")
         self.assertEqual(payload["input_event_id"], self.EVENT_ID)
         self.assertEqual(payload["input_source_kind"], "direct_url")
         self.assertEqual(payload["input_source_url"], "https://investor.example.com/fy2026.pdf")
         self.assertEqual(payload["input_expected_version"], 1)
+        self.assertEqual(payload["input_actor"], "marko")
 
     def test_set_requires_explicit_nonnegative_expected_version(self):
         repository = SupabaseOfficialReleaseSourceRepository(_Client())
@@ -190,32 +191,33 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
             "https://investor.example.com/fy2026.pdf",
         )
         with self.assertRaisesRegex(ValueError, "zero or positive"):
-            repository.set(source, expected_version=-1)
+            repository.set(source, expected_version=-1, actor="marko")
 
     def test_clear_uses_atomic_rpc_and_returns_advanced_version(self):
         client = _Client(rpc_rows=4)
         repository = SupabaseOfficialReleaseSourceRepository(client)
 
-        new_version = repository.clear(self.EVENT_ID, expected_version=3)
+        new_version = repository.clear(self.EVENT_ID, expected_version=3, actor="marko")
 
         self.assertEqual(new_version, 4)
         self.assertEqual(client.rpc_calls, [(
-            "clear_event_official_release_source",
+            "clear_event_official_release_source_approved",
             {
                 "input_event_id": self.EVENT_ID,
                 "input_expected_version": 3,
+                "input_actor": "marko",
             },
         )])
 
     def test_clear_requires_positive_expected_version(self):
         repository = SupabaseOfficialReleaseSourceRepository(_Client())
         with self.assertRaisesRegex(ValueError, "expected_version must be positive"):
-            repository.clear(self.EVENT_ID, expected_version=0)
+            repository.clear(self.EVENT_ID, expected_version=0, actor="marko")
 
     def test_clear_must_advance_version(self):
         repository = SupabaseOfficialReleaseSourceRepository(_Client(rpc_rows=3))
         with self.assertRaisesRegex(RuntimeError, "advance the version"):
-            repository.clear(self.EVENT_ID, expected_version=3)
+            repository.clear(self.EVENT_ID, expected_version=3, actor="marko")
 
 
 if __name__ == "__main__":
