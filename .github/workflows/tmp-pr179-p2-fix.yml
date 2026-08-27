@@ -20,18 +20,21 @@ jobs:
         run: |
           set -euo pipefail
           WORK=/tmp/marketai-pr179-p2
+          PY=/home/marko/marketai-repo/.venv/bin/python
+          PIP=/home/marko/marketai-repo/.venv/bin/pip
           rm -rf "$WORK"
           git clone --branch fix/home-event-unification --single-branch https://github.com/Calvonen/market-memory-bot.git "$WORK"
           cd "$WORK"
+          "$PIP" install -r requirements.txt
           python3 scripts/tmp_fix_pr179_p2.py
-          python3 -m unittest tests.test_mobile_source -v
+          "$PY" -m unittest tests.test_mobile_source -v
           cd mobile
           npm ci
           npx tsc --noEmit
           npm run lint
           cd ..
           git diff --check
-          python3 -m unittest discover -s tests -v
+          "$PY" -m unittest discover -s tests -v
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "mobile/src/app/(tabs)/index.tsx" mobile/src/components/TrackedEventsSection.tsx tests/test_mobile_source.py
