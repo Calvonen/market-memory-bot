@@ -176,6 +176,7 @@ class _RawTemplateAndHrefScanner(HTMLParser):
     def __init__(self, html_template_tokens: frozenset[int] | None = None) -> None:
         super().__init__(convert_charrefs=True)
         self.unsafe_hrefs: set[str] = set()
+        self.unsafe_anchor_structure = False
         # href -> one entry per anchor occurrence in source order, each the set of
         # <template> token indices enclosing it. Which of those tokens are HTML
         # templates is decided later, from the tree.
@@ -209,6 +210,8 @@ class _RawTemplateAndHrefScanner(HTMLParser):
             or not _raw_href_is_safe(raw_start_tag, hrefs[0])
         ):
             self.unsafe_hrefs.update(hrefs)
+            if href_attrs and (len(href_attrs) != 1 or len(hrefs) != 1):
+                self.unsafe_anchor_structure = True
         enclosing = frozenset(self._open_templates)
         for href in hrefs:
             self.anchor_occurrences.setdefault(href, []).append(enclosing)
@@ -647,6 +650,7 @@ def _iter_visible_html_anchors(root):
 
 _BASE_FAILED_CLOSED = object()
 _BASE_VALUE_FAILED_CLOSED = object()
+_ANCHOR_STRUCTURE_FAILED_CLOSED = object()
 
 
 def _base_token_elements(root, base_token_count: int, marker: str | None) -> dict[int, object] | None:
@@ -726,6 +730,8 @@ def _parse_html5_page(html_text: str):
         return None
     if base_href is _BASE_VALUE_FAILED_CLOSED:
         return _BASE_VALUE_FAILED_CLOSED
+    if safety_scanner.unsafe_anchor_structure:
+        return _ANCHOR_STRUCTURE_FAILED_CLOSED
     template_local_anchors = _template_local_tree_anchors(
         fragment, safety_scanner, html_templates
     )
@@ -972,6 +978,8 @@ def extract_results_page_candidates_with_reason(
         return (), "base_identity_failed"
     if parsed is _BASE_VALUE_FAILED_CLOSED:
         return (), "base_resolution_failed"
+    if parsed is _ANCHOR_STRUCTURE_FAILED_CLOSED:
+        return (), "anchor_structure_failed"
     base_href, links = parsed
 
     if base_href is not None:

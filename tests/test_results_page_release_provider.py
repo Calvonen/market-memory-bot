@@ -800,6 +800,33 @@ class ResultsPageOfficialReleaseProviderTests(unittest.TestCase):
             (),
         )
 
+    def test_valueless_duplicate_anchor_href_fails_closed(self) -> None:
+        provider = self._provider()
+        document, opener = self._discover(
+            provider,
+            {
+                PAGE_URL: self._page(
+                    '<base href="/downloads/release.html">'
+                    '<a href href="/intended.html">Q2 2026</a>'
+                )
+            },
+        )
+
+        self.assertIsNone(document)
+        self.assertEqual(opener.opened, [PAGE_URL])
+        reason = provider.describe_no_release()
+        self.assertIsNotNone(reason)
+        self.assertIn("anchor_structure_failed", reason)
+
+    def test_single_empty_href_does_not_poison_other_candidates(self) -> None:
+        self.assertEqual(
+            self._candidate_urls(
+                '<a href="">Listing</a>'
+                '<a href="/reports/2026-08-26-results.html">Q2 2026</a>'
+            ),
+            ("https://investor.example.com/reports/2026-08-26-results.html",),
+        )
+
     def test_valueless_duplicate_href_on_effective_base_is_resolution_failure(self) -> None:
         provider = self._provider()
         document, opener = self._discover(

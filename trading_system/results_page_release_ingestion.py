@@ -123,6 +123,11 @@ class ResultsPageOfficialReleaseProvider(ApprovedOriginDocumentFetcher):
                     f"results_page candidate extraction base_resolution_failed: {page_url} declared "
                     "an unusable or off-origin document base; refusing to resolve or fetch release links"
                 )
+            elif failure_reason == "anchor_structure_failed":
+                self._no_release_reason = (
+                    f"results_page candidate extraction anchor_structure_failed: {page_url} contained "
+                    "an ambiguous or duplicated href structure; refusing to resolve or fetch release links"
+                )
             else:
                 self._no_release_reason = (
                     f"results_page selection no_candidates: {page_url} offered no usable same-origin "
