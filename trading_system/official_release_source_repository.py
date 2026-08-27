@@ -8,6 +8,12 @@ from urllib.parse import urlparse
 
 
 _ALLOWED_SOURCE_KINDS = {"direct_url", "results_page"}
+_SQL_INPUT_VALIDATION_MARKERS = {
+    "invalid_expected_version",
+    "invalid_source_kind",
+    "invalid_source_url",
+    "invalid_actor",
+}
 
 
 class OfficialReleaseSourceVersionConflict(RuntimeError):
@@ -32,6 +38,10 @@ def _raise_official_release_source_write_error(
         raise OfficialReleaseSourceEventNotFound(
             "official release source event not found"
         ) from exc
+    if code == "22023" and any(
+        marker in message_text for marker in _SQL_INPUT_VALIDATION_MARKERS
+    ):
+        raise ValueError("official release source input is invalid") from exc
     raise RuntimeError(f"official release source {operation} failed") from exc
 
 
@@ -82,7 +92,8 @@ class OfficialReleaseSource:
         except ValueError as exc:
             raise ValueError("official release source_url must use a valid port") from exc
         if (
-            parsed.scheme != "https"
+            any(ch.isspace() for ch in source_url)
+            or parsed.scheme != "https"
             or not parsed.hostname
             or not _is_valid_host(parsed.hostname)
             or "@" in parsed.netloc
