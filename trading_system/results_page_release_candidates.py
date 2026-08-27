@@ -20,6 +20,10 @@ _RAW_HREF_RE = re.compile(
     re.IGNORECASE,
 )
 _NUMERIC_ENTITY_RE = re.compile(r"&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));?")
+_PERCENT_OCTET_RE = re.compile(r"%([0-9a-fA-F]{2})")
+_URI_UNRESERVED = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+)
 
 _SIMPLE_HTML_TEXT_TAGS = frozenset(
     {
@@ -196,18 +200,28 @@ class _RawTemplateAndHrefScanner(HTMLParser):
         self._line_starts = [0]
 
     def _record_anchor(self, attrs: list[tuple[str, str | None]]) -> None:
-        hrefs = [value for key, value in attrs if key.lower() == "href" and value is not None]
+        href_attrs = [value for key, value in attrs if key.lower() == "href"]
+        hrefs = [value for value in href_attrs if value is not None]
         raw_start_tag = self.get_starttag_text() or ""
-        if len(hrefs) != 1 or not _raw_href_is_safe(raw_start_tag, hrefs[0] if hrefs else None):
+        if (
+            len(href_attrs) != 1
+            or len(hrefs) != 1
+            or not _raw_href_is_safe(raw_start_tag, hrefs[0])
+        ):
             self.unsafe_hrefs.update(hrefs)
         enclosing = frozenset(self._open_templates)
         for href in hrefs:
             self.anchor_occurrences.setdefault(href, []).append(enclosing)
 
     def _record_base(self, attrs: list[tuple[str, str | None]]) -> None:
-        hrefs = [value for key, value in attrs if key.lower() == "href" and value is not None]
+        href_attrs = [value for key, value in attrs if key.lower() == "href"]
+        hrefs = [value for value in href_attrs if value is not None]
         raw_start_tag = self.get_starttag_text() or ""
-        safe_href = len(hrefs) == 1 and _raw_href_is_safe(raw_start_tag, hrefs[0])
+        safe_href = (
+            len(href_attrs) == 1
+            and len(hrefs) == 1
+            and _raw_href_is_safe(raw_start_tag, hrefs[0])
+        )
         self.base_spans.append(self._source_offset())
         self.base_occurrences.append((safe_href, frozenset(self._open_templates)))
 
@@ -792,8 +806,26 @@ def _remove_dot_segments(path: str) -> str:
     return output
 
 
+def _decode_percent_encoded_unreserved(value: str) -> str:
+    """Canonicalize percent-encoded RFC3986 unreserved octets.
+
+    Reserved octets stay encoded because decoding them can change URL
+    structure. Unreserved octets have equivalent URI semantics and must share
+    one identity, especially for results-page self-redirect comparisons.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        char = chr(int(match.group(1), 16))
+        return char if char in _URI_UNRESERVED else match.group(0).upper()
+
+    return _PERCENT_OCTET_RE.sub(replace, value)
+
+
 def _normalize_url_path(path: str) -> str:
-    normalized = _remove_dot_segments(path or "/")
+    # Decode unreserved octets before dot-segment removal so encoded "." and
+    # ".." spellings cannot retain a distinct canonical identity.
+    decoded = _decode_percent_encoded_unreserved(path or "/")
+    normalized = _remove_dot_segments(decoded)
     return normalized or "/"
 
 
@@ -862,7 +894,8 @@ def _canonical_https_url(url: str) -> str | None:
     rendered_host = f"[{canonical_host}]" if is_ipv6 else canonical_host
     canonical_netloc = rendered_host if port in (None, 443) else f"{rendered_host}:{port}"
     canonical_path = _normalize_url_path(parsed.path)
-    return urlunsplit(("https", canonical_netloc, canonical_path, parsed.query, ""))
+    canonical_query = _decode_percent_encoded_unreserved(parsed.query)
+    return urlunsplit(("https", canonical_netloc, canonical_path, canonical_query, ""))
 
 
 def _canonical_candidate_url(base_url: str, href: str) -> str | None:

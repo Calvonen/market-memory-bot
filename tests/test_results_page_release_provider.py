@@ -800,6 +800,25 @@ class ResultsPageOfficialReleaseProviderTests(unittest.TestCase):
             (),
         )
 
+    def test_valueless_duplicate_href_on_effective_base_is_resolution_failure(self) -> None:
+        provider = self._provider()
+        document, opener = self._discover(
+            provider,
+            {
+                PAGE_URL: self._page(
+                    '<base href href="/downloads/">'
+                    '<a href="2026-08-26-results.html">Results</a>'
+                )
+            },
+        )
+
+        self.assertIsNone(document)
+        self.assertEqual(opener.opened, [PAGE_URL])
+        reason = provider.describe_no_release()
+        self.assertIsNotNone(reason)
+        self.assertIn("base_resolution_failed", reason)
+        self.assertNotIn("base_identity_failed", reason)
+
     def test_duplicate_href_on_the_effective_base_fails_closed(self) -> None:
         self.assertEqual(
             self._candidate_urls(
@@ -837,6 +856,35 @@ class ResultsPageOfficialReleaseProviderTests(unittest.TestCase):
         )
         interpret.assert_not_called()
         self.assertEqual(opener.opened, [PAGE_URL, candidate_url])
+
+    def test_selected_candidate_redirected_to_percent_encoded_results_page_is_rejected(self) -> None:
+        candidate_url = "https://investor.example.com/releases/q2-2026-08-26.html"
+        encoded_page_url = "https://investor.example.com/%72esults"
+        page_markup = (
+            f'<a href="{candidate_url}">Half-year results</a><p>{BODY_TEXT}</p>'
+        )
+        provider = self._provider()
+
+        with patch.object(
+            ResultsPageOfficialReleaseProvider, "_interpret_document"
+        ) as interpret:
+            document, opener = self._discover(
+                provider,
+                {
+                    PAGE_URL: self._page(page_markup),
+                    candidate_url: self._page(
+                        page_markup,
+                        final_url=encoded_page_url,
+                    ),
+                },
+            )
+
+        self.assertIsNone(document)
+        interpret.assert_not_called()
+        self.assertEqual(opener.opened, [PAGE_URL, candidate_url])
+        reason = provider.describe_no_release()
+        self.assertIsNotNone(reason)
+        self.assertIn("redirected to the results page", reason)
 
     def test_selected_candidate_redirected_to_the_approved_results_page_is_rejected(self) -> None:
         served_page_url = "https://investor.example.com/investors/results/"
