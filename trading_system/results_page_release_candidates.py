@@ -632,6 +632,7 @@ def _iter_visible_html_anchors(root):
 
 
 _BASE_FAILED_CLOSED = object()
+_BASE_VALUE_FAILED_CLOSED = object()
 
 
 def _base_token_elements(root, base_token_count: int, marker: str | None) -> dict[int, object] | None:
@@ -698,7 +699,7 @@ def _effective_base_href(root, safety_scanner, html_templates: frozenset[int], b
         if href is None:
             continue
         if not safe_href or _contains_ascii_control(href):
-            return _BASE_FAILED_CLOSED
+            return _BASE_VALUE_FAILED_CLOSED
         return href
     return None
 
@@ -709,6 +710,8 @@ def _parse_html5_page(html_text: str):
     base_href = _effective_base_href(fragment, safety_scanner, html_templates, base_marker)
     if base_href is _BASE_FAILED_CLOSED:
         return None
+    if base_href is _BASE_VALUE_FAILED_CLOSED:
+        return _BASE_VALUE_FAILED_CLOSED
     template_local_anchors = _template_local_tree_anchors(
         fragment, safety_scanner, html_templates
     )
@@ -934,6 +937,8 @@ def extract_results_page_candidates_with_reason(
     parsed = _parse_html5_page(html_text)
     if parsed is None:
         return (), "base_identity_failed"
+    if parsed is _BASE_VALUE_FAILED_CLOSED:
+        return (), "base_resolution_failed"
     base_href, links = parsed
 
     if base_href is not None:

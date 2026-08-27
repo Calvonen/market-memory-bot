@@ -268,6 +268,45 @@ class ResultsPageOfficialReleaseProviderTests(unittest.TestCase):
         self.assertIsNotNone(reason)
         self.assertIn("base_resolution_failed", reason)
 
+
+    def test_duplicate_base_href_is_auditable_as_resolution_failure(self) -> None:
+        provider = self._provider()
+        document, opener = self._discover(
+            provider,
+            {
+                PAGE_URL: self._page(
+                    '<base href="/downloads/" href="/other/">'
+                    '<a href="2026-08-26-results.html">Results</a>'
+                )
+            },
+        )
+
+        self.assertIsNone(document)
+        self.assertEqual(opener.opened, [PAGE_URL])
+        reason = provider.describe_no_release()
+        self.assertIsNotNone(reason)
+        self.assertIn("base_resolution_failed", reason)
+        self.assertNotIn("base_identity_failed", reason)
+
+    def test_encoded_control_base_href_is_auditable_as_resolution_failure(self) -> None:
+        provider = self._provider()
+        document, opener = self._discover(
+            provider,
+            {
+                PAGE_URL: self._page(
+                    '<base href="/down&#9;loads/">'
+                    '<a href="2026-08-26-results.html">Results</a>'
+                )
+            },
+        )
+
+        self.assertIsNone(document)
+        self.assertEqual(opener.opened, [PAGE_URL])
+        reason = provider.describe_no_release()
+        self.assertIsNotNone(reason)
+        self.assertIn("base_resolution_failed", reason)
+        self.assertNotIn("base_identity_failed", reason)
+
     # 4 ----------------------------------------------------------------
     def test_ambiguous_candidates_return_none_without_fetching_a_document(self) -> None:
         provider = self._provider()
