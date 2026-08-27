@@ -24,7 +24,7 @@ def _raise_official_release_source_write_error(
     code = getattr(exc, "code", None)
     message = getattr(exc, "message", None)
     message_text = str(message) if message is not None else str(exc)
-    if code == "40001" or "version_conflict:" in message_text:
+    if code == "40001" and "version_conflict:" in message_text:
         raise OfficialReleaseSourceVersionConflict(
             "official release source version conflict"
         ) from exc
@@ -98,12 +98,18 @@ class OfficialReleaseSource:
         object.__setattr__(self, "source_title", source_title)
 
 
+@dataclass(frozen=True)
+class OfficialReleaseSourceState:
+    source: OfficialReleaseSource | None
+    version: int
+
+
 class SupabaseOfficialReleaseSourceRepository:
     """Canonical control surface for user-approved official release sources."""
 
     TABLE = "event_official_release_sources"
-    SET_RPC = "set_event_official_release_source"
-    CLEAR_RPC = "clear_event_official_release_source"
+    SET_RPC = "set_event_official_release_source_approved"
+    CLEAR_RPC = "clear_event_official_release_source_approved"
 
     def __init__(self, client: Any) -> None:
         self.client = client
@@ -141,6 +147,15 @@ class SupabaseOfficialReleaseSourceRepository:
             raise ValueError("event_id is required")
         return canonical_event_id
 
+    @staticmethod
+    def _canonical_actor(actor: str) -> str:
+        canonical_actor = actor.strip()
+        if not canonical_actor:
+            raise ValueError("actor is required")
+        if len(canonical_actor) > 200:
+            raise ValueError("actor is too long")
+        return canonical_actor
+
     def _get_state_row(self, event_id: str) -> dict[str, Any] | None:
         canonical_event_id = self._canonical_event_id(event_id)
         response = (
@@ -157,36 +172,46 @@ class SupabaseOfficialReleaseSourceRepository:
             raise RuntimeError("official release source repository returned an invalid canonical row")
         return rows[0]
 
-    def get(self, event_id: str) -> OfficialReleaseSource | None:
+    def get_state(self, event_id: str) -> OfficialReleaseSourceState:
         row = self._get_state_row(event_id)
         if row is None:
-            return None
-        if row.get("is_active") is not True:
-            if row.get("is_active") is False and row.get("source_kind") is None and row.get("source_url") is None:
-                return None
-            raise RuntimeError("official release source row is malformed")
-        return self._from_row(row)
-
-    def get_version(self, event_id: str) -> int:
-        row = self._get_state_row(event_id)
-        if row is None:
-            return 0
+            return OfficialReleaseSourceState(source=None, version=0)
         try:
             version = int(row["version"])
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError("official release source row is malformed") from exc
         if version < 1:
             raise RuntimeError("official release source row is malformed")
-        return version
+        if row.get("is_active") is True:
+            source = self._from_row(row)
+            if source.version != version:
+                raise RuntimeError("official release source row is malformed")
+            return OfficialReleaseSourceState(source=source, version=version)
+        if (
+            row.get("is_active") is False
+            and row.get("source_kind") is None
+            and row.get("source_url") is None
+            and row.get("source_title") is None
+        ):
+            return OfficialReleaseSourceState(source=None, version=version)
+        raise RuntimeError("official release source row is malformed")
+
+    def get(self, event_id: str) -> OfficialReleaseSource | None:
+        return self.get_state(event_id).source
+
+    def get_version(self, event_id: str) -> int:
+        return self.get_state(event_id).version
 
     def set(
         self,
         source: OfficialReleaseSource,
         *,
         expected_version: int,
+        actor: str,
     ) -> OfficialReleaseSource:
         if expected_version < 0:
             raise ValueError("expected_version must be zero or positive")
+        canonical_actor = self._canonical_actor(actor)
         try:
             response = self.client.rpc(
                 self.SET_RPC,
@@ -196,6 +221,7 @@ class SupabaseOfficialReleaseSourceRepository:
                     "input_source_url": source.source_url,
                     "input_source_title": source.source_title,
                     "input_expected_version": expected_version,
+                    "input_actor": canonical_actor,
                 },
             ).execute()
         except Exception as exc:
@@ -214,8 +240,15 @@ class SupabaseOfficialReleaseSourceRepository:
         }
         return self._from_row(canonical_row)
 
-    def clear(self, event_id: str, *, expected_version: int) -> int:
+    def clear(
+        self,
+        event_id: str,
+        *,
+        expected_version: int,
+        actor: str,
+    ) -> int:
         canonical_event_id = self._canonical_event_id(event_id)
+        canonical_actor = self._canonical_actor(actor)
         if expected_version < 1:
             raise ValueError("expected_version must be positive")
         try:
@@ -224,6 +257,7 @@ class SupabaseOfficialReleaseSourceRepository:
                 {
                     "input_event_id": canonical_event_id,
                     "input_expected_version": expected_version,
+                    "input_actor": canonical_actor,
                 },
             ).execute()
         except Exception as exc:
