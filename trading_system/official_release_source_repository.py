@@ -8,6 +8,42 @@ from urllib.parse import urlparse
 
 
 _ALLOWED_SOURCE_KINDS = {"direct_url", "results_page"}
+_POSTGRES_INTEGER_MAX = 2147483647
+_SQL_INPUT_VALIDATION_MARKERS = {
+    "invalid_expected_version",
+    "invalid_source_kind",
+    "invalid_source_url",
+    "invalid_actor",
+}
+
+
+class OfficialReleaseSourceVersionConflict(RuntimeError):
+    pass
+
+
+class OfficialReleaseSourceEventNotFound(RuntimeError):
+    pass
+
+
+def _raise_official_release_source_write_error(
+    exc: Exception, *, operation: str
+) -> None:
+    code = getattr(exc, "code", None)
+    message = getattr(exc, "message", None)
+    message_text = str(message) if message is not None else str(exc)
+    if code == "40001" and "version_conflict:" in message_text:
+        raise OfficialReleaseSourceVersionConflict(
+            "official release source version conflict"
+        ) from exc
+    if code == "P0002" or "event_not_found:" in message_text:
+        raise OfficialReleaseSourceEventNotFound(
+            "official release source event not found"
+        ) from exc
+    if code == "22023" and any(
+        marker in message_text for marker in _SQL_INPUT_VALIDATION_MARKERS
+    ):
+        raise ValueError("official release source input is invalid") from exc
+    raise RuntimeError(f"official release source {operation} failed") from exc
 
 
 def _is_valid_host(hostname: str) -> bool:
@@ -51,13 +87,16 @@ class OfficialReleaseSource:
             raise ValueError("official release source event_id is required")
         if source_kind not in _ALLOWED_SOURCE_KINDS:
             raise ValueError("official release source_kind must be direct_url or results_page")
+        if "\x00" in source_url or (source_title is not None and "\x00" in source_title):
+            raise ValueError("official release source text must not contain NUL")
         parsed = urlparse(source_url)
         try:
             parsed_port = parsed.port
         except ValueError as exc:
             raise ValueError("official release source_url must use a valid port") from exc
         if (
-            parsed.scheme != "https"
+            any(ch.isspace() for ch in source_url)
+            or parsed.scheme != "https"
             or not parsed.hostname
             or not _is_valid_host(parsed.hostname)
             or "@" in parsed.netloc
@@ -73,12 +112,19 @@ class OfficialReleaseSource:
         object.__setattr__(self, "source_title", source_title)
 
 
+@dataclass(frozen=True)
+class OfficialReleaseSourceState:
+    source: OfficialReleaseSource | None
+    version: int
+
+
 class SupabaseOfficialReleaseSourceRepository:
     """Canonical control surface for user-approved official release sources."""
 
     TABLE = "event_official_release_sources"
-    SET_RPC = "set_event_official_release_source"
-    CLEAR_RPC = "clear_event_official_release_source"
+    STATE_RPC = "get_audited_official_release_source_state"
+    SET_RPC = "set_event_official_release_source_approved"
+    CLEAR_RPC = "clear_event_official_release_source_approved"
 
     def __init__(self, client: Any) -> None:
         self.client = client
@@ -116,62 +162,106 @@ class SupabaseOfficialReleaseSourceRepository:
             raise ValueError("event_id is required")
         return canonical_event_id
 
-    def _get_state_row(self, event_id: str) -> dict[str, Any] | None:
+    @staticmethod
+    def _canonical_actor(actor: str) -> str:
+        canonical_actor = actor.strip()
+        if not canonical_actor:
+            raise ValueError("actor is required")
+        if len(canonical_actor) > 200:
+            raise ValueError("actor is too long")
+        return canonical_actor
+
+    @staticmethod
+    def _validate_expected_version(expected_version: int, *, allow_zero: bool) -> None:
+        minimum = 0 if allow_zero else 1
+        if expected_version < minimum or expected_version > _POSTGRES_INTEGER_MAX:
+            if allow_zero:
+                raise ValueError(
+                    "expected_version must be between 0 and 2147483647"
+                )
+            raise ValueError(
+                "expected_version must be between 1 and 2147483647"
+            )
+
+    def _get_state_row(self, event_id: str) -> dict[str, Any]:
         canonical_event_id = self._canonical_event_id(event_id)
-        response = (
-            self.client.table(self.TABLE)
-            .select("event_id,source_kind,source_url,source_title,is_active,version")
-            .eq("event_id", canonical_event_id)
-            .limit(1)
-            .execute()
-        )
+        response = self.client.rpc(
+            self.STATE_RPC, {"input_event_id": canonical_event_id}
+        ).execute()
         rows = response.data or []
-        if not rows:
-            return None
         if len(rows) != 1 or not isinstance(rows[0], dict):
             raise RuntimeError("official release source repository returned an invalid canonical row")
-        return rows[0]
+        row = rows[0]
+        return {
+            "event_id": row.get("out_event_id"),
+            "source_kind": row.get("out_source_kind"),
+            "source_url": row.get("out_source_url"),
+            "source_title": row.get("out_source_title"),
+            "is_active": row.get("out_is_active"),
+            "version": row.get("out_version"),
+        }
 
-    def get(self, event_id: str) -> OfficialReleaseSource | None:
+    def get_state(self, event_id: str) -> OfficialReleaseSourceState:
         row = self._get_state_row(event_id)
-        if row is None:
-            return None
-        if row.get("is_active") is not True:
-            if row.get("is_active") is False and row.get("source_kind") is None and row.get("source_url") is None:
-                return None
-            raise RuntimeError("official release source row is malformed")
-        return self._from_row(row)
-
-    def get_version(self, event_id: str) -> int:
-        row = self._get_state_row(event_id)
-        if row is None:
-            return 0
         try:
             version = int(row["version"])
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError("official release source row is malformed") from exc
-        if version < 1:
+        if version < 0:
             raise RuntimeError("official release source row is malformed")
-        return version
+        if version == 0:
+            if (
+                row.get("is_active") is False
+                and row.get("source_kind") is None
+                and row.get("source_url") is None
+                and row.get("source_title") is None
+            ):
+                return OfficialReleaseSourceState(source=None, version=0)
+            raise RuntimeError("official release source row is malformed")
+        if row.get("is_active") is True:
+            source = self._from_row(row)
+            if source.version != version:
+                raise RuntimeError("official release source row is malformed")
+            return OfficialReleaseSourceState(source=source, version=version)
+        if (
+            row.get("is_active") is False
+            and row.get("source_kind") is None
+            and row.get("source_url") is None
+            and row.get("source_title") is None
+        ):
+            return OfficialReleaseSourceState(source=None, version=version)
+        raise RuntimeError("official release source row is malformed")
+
+    def get(self, event_id: str) -> OfficialReleaseSource | None:
+        return self.get_state(event_id).source
+
+    def get_version(self, event_id: str) -> int:
+        return self.get_state(event_id).version
 
     def set(
         self,
         source: OfficialReleaseSource,
         *,
         expected_version: int,
+        actor: str,
     ) -> OfficialReleaseSource:
-        if expected_version < 0:
-            raise ValueError("expected_version must be zero or positive")
-        response = self.client.rpc(
-            self.SET_RPC,
-            {
-                "input_event_id": source.event_id,
-                "input_source_kind": source.source_kind,
-                "input_source_url": source.source_url,
-                "input_source_title": source.source_title,
-                "input_expected_version": expected_version,
-            },
-        ).execute()
+        self._validate_expected_version(expected_version, allow_zero=True)
+        canonical_actor = self._canonical_actor(actor)
+        try:
+            response = self.client.rpc(
+                self.SET_RPC,
+                {
+                    "input_event_id": source.event_id,
+                    "input_source_kind": source.source_kind,
+                    "input_source_url": source.source_url,
+                    "input_source_title": source.source_title,
+                    "input_expected_version": expected_version,
+                    "input_actor": canonical_actor,
+                },
+            ).execute()
+        except Exception as exc:
+            _raise_official_release_source_write_error(exc, operation="write")
+            raise AssertionError("unreachable")
         rows = response.data or []
         if len(rows) != 1 or not isinstance(rows[0], dict):
             raise RuntimeError("official release source write did not return exactly one canonical row")
@@ -185,17 +275,28 @@ class SupabaseOfficialReleaseSourceRepository:
         }
         return self._from_row(canonical_row)
 
-    def clear(self, event_id: str, *, expected_version: int) -> int:
+    def clear(
+        self,
+        event_id: str,
+        *,
+        expected_version: int,
+        actor: str,
+    ) -> int:
         canonical_event_id = self._canonical_event_id(event_id)
-        if expected_version < 1:
-            raise ValueError("expected_version must be positive")
-        response = self.client.rpc(
-            self.CLEAR_RPC,
-            {
-                "input_event_id": canonical_event_id,
-                "input_expected_version": expected_version,
-            },
-        ).execute()
+        canonical_actor = self._canonical_actor(actor)
+        self._validate_expected_version(expected_version, allow_zero=False)
+        try:
+            response = self.client.rpc(
+                self.CLEAR_RPC,
+                {
+                    "input_event_id": canonical_event_id,
+                    "input_expected_version": expected_version,
+                    "input_actor": canonical_actor,
+                },
+            ).execute()
+        except Exception as exc:
+            _raise_official_release_source_write_error(exc, operation="clear")
+            raise AssertionError("unreachable")
         try:
             new_version = int(response.data)
         except (TypeError, ValueError) as exc:

@@ -123,6 +123,7 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
 )
 
 REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 3
+REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 8
 REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 10
 POSTGRES_IDENTIFIER_MAX_BYTES = 63
 
@@ -230,6 +231,15 @@ def main() -> int:
         for key_name, label in REQUIRED_OFFICIAL_RELEASE_SOURCE_CHECKS
         if not _check_value(official_source_row, key_name)
     )
+    deployed_official_source_version = _check_value(
+        official_source_row, "official_release_source_schema_version"
+    )
+    if deployed_official_source_version != REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION:
+        missing.append(
+            "official-release-source schema version "
+            f"{REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION} "
+            f"(deployed: {deployed_official_source_version!r})"
+        )
 
     try:
         tracked_response = client.rpc("verify_tracked_event_runtime_schema", {}).execute()
