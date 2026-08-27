@@ -1,0 +1,74 @@
+name: Temporary PR178 highest audit generation fix
+
+on:
+  push:
+    branches:
+      - feature/official-release-source-control-api
+    paths:
+      - .github/workflows/tmp-pr178-highest-audit-generation-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/official-release-source-control-api
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply fix and tests
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('supabase/migrations/20260902108000_official_release_source_missing_generation_recovery.sql')
+          s = p.read_text()
+          s = s.replace('order by audit.event_id, audit.id desc', 'order by audit.event_id, audit.version desc, audit.id desc', 1)
+          s = s.replace('-- v7 means the v5 trigger contract plus recovery of missing or stale durable\n-- generations lost/recreated in the historical 1040 -> 1050 cascade window.', '-- v8 means the v7 recovery contract plus selecting the highest retained audit\n-- generation by version, using audit id only as a deterministic tie-breaker.')
+          s = s.replace('    7;\n$$;', '    8;\n$$;', 1)
+          p.write_text(s)
+
+          p = Path('scripts/verify_supabase_schema.py')
+          p.write_text(p.read_text().replace('REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 7', 'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 8'))
+
+          p = Path('tests/test_verify_supabase_schema.py')
+          s = p.read_text()
+          s = s.replace('"official_release_source_schema_version": 7,', '"official_release_source_schema_version": 8,', 1)
+          s = s.replace('"official_release_source_schema_version": 6,', '"official_release_source_schema_version": 7,', 1)
+          s = s.replace('official-release-source schema version 7', 'official-release-source schema version 8', 1)
+          s = s.replace('deployed: 6', 'deployed: 7', 1)
+          p.write_text(s)
+
+          p = Path('tests/test_official_release_source_approval_audit_sql.py')
+          p.write_text(p.read_text().replace('REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 7', 'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 8'))
+
+          p = Path('tests/test_official_release_source_missing_generation_recovery_sql.py')
+          s = p.read_text()
+          s = s.replace('order by audit.event_id, audit.id desc', 'order by audit.event_id, audit.version desc, audit.id desc')
+          s = s.replace('test_schema_gate_requires_recovery_contract_v7', 'test_schema_gate_requires_recovery_contract_v8')
+          s = s.replace('self.assertIn("    7;", self.sql)', 'self.assertIn("    8;", self.sql)')
+          s = s.replace('REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 7', 'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 8')
+          p.write_text(s)
+          PY
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install pytest
+      - name: Validate
+        run: |
+          python -m py_compile scripts/verify_supabase_schema.py tests/test_official_release_source_missing_generation_recovery_sql.py tests/test_official_release_source_approval_audit_sql.py tests/test_verify_supabase_schema.py
+          git diff --check
+          python -m unittest discover -s tests -p 'test_official_release_source*.py' -v
+          python -m unittest tests.test_verify_supabase_schema -v
+          python -m unittest discover -s tests -v
+      - name: Commit fix
+        run: |
+          git config user.name 'Calvonen'
+          git config user.email 'marko.raitanen@gmail.com'
+          git add supabase/migrations/20260902108000_official_release_source_missing_generation_recovery.sql scripts/verify_supabase_schema.py tests/test_official_release_source_missing_generation_recovery_sql.py tests/test_official_release_source_approval_audit_sql.py tests/test_verify_supabase_schema.py
+          git commit -m 'fix: recover highest retained audit generation'
+          git push origin HEAD:feature/official-release-source-control-api
