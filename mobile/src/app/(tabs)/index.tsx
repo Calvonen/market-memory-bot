@@ -69,6 +69,8 @@ export default function HomeScreen() {
     Record<string, string>
   >({});
   const [trackedRefreshToken, setTrackedRefreshToken] = useState(0);
+  const nextTrackedRefreshToken = useRef(0);
+  const trackedRefreshWaiters = useRef(new Map<number, () => void>());
   // Separate from `error` (EventExpectation-only) - a calendar failure must
   // never be conflated with an EventExpectation failure, or silently
   // swallowed. calendarEvents itself is left untouched on failure (see the
@@ -201,10 +203,22 @@ export default function HomeScreen() {
     }, [loadEvents]),
   );
 
+  const handleTrackedRefreshSettled = useCallback((token: number) => {
+    const resolve = trackedRefreshWaiters.current.get(token);
+    if (!resolve) return;
+    trackedRefreshWaiters.current.delete(token);
+    resolve();
+  }, []);
+
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    setTrackedRefreshToken((value) => value + 1);
+    const token = ++nextTrackedRefreshToken.current;
+    const trackedRefresh = new Promise<void>((resolve) => {
+      trackedRefreshWaiters.current.set(token, resolve);
+    });
+    setTrackedRefreshToken(token);
     await loadEvents();
+    await trackedRefresh;
     setRefreshing(false);
   }, [loadEvents]);
 
@@ -289,6 +303,7 @@ export default function HomeScreen() {
         onSnapshot={handleTrackedEventSnapshot}
         excludeCalendarEventIds={expectationCalendarEventIds}
         refreshToken={trackedRefreshToken}
+        onRefreshSettled={handleTrackedRefreshSettled}
       />
 
       {trackedCalendarEvents?.map((event) => (

@@ -19,6 +19,7 @@ type Props = {
   onSnapshot?: (snapshot: Snapshot) => void;
   excludeCalendarEventIds?: ReadonlySet<string>;
   refreshToken?: number;
+  onRefreshSettled?: (token: number) => void;
 };
 
 type LatestReactionState =
@@ -30,6 +31,7 @@ export function TrackedEventsSection({
   onSnapshot,
   excludeCalendarEventIds,
   refreshToken = 0,
+  onRefreshSettled,
 }: Props) {
   const [events, setEvents] = useState<TrackedMarketEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -57,8 +59,12 @@ export function TrackedEventsSection({
       .catch((err) => {
         if (loadId !== latestLoadId.current) return;
         setError(err instanceof Error ? err.message : 'Seurantatietoja ei juuri nyt saatu haettua.');
+      })
+      .finally(() => {
+        if (loadId !== latestLoadId.current) return;
+        if (refreshToken > 0) onRefreshSettled?.(refreshToken);
       });
-  }, [onSnapshot]);
+  }, [onRefreshSettled, onSnapshot, refreshToken]);
 
   useFocusEffect(
     useCallback(() => {
@@ -66,7 +72,7 @@ export function TrackedEventsSection({
         void load();
       }, 0);
       return () => clearTimeout(timer);
-    }, [load, refreshToken]),
+    }, [load]),
   );
 
   return (
@@ -85,7 +91,9 @@ export function TrackedEventsSection({
           (event) =>
             !event.calendar_event_id || !excludeCalendarEventIds?.has(event.calendar_event_id),
         )
-        .map((event) => <TrackedEventCard key={event.event_id} event={event} />)}
+        .map((event) => (
+          <TrackedEventCard key={`${event.event_id}:${refreshToken}`} event={event} />
+        ))}
     </>
   );
 }

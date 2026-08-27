@@ -97,7 +97,35 @@ class MobileSourceTests(unittest.TestCase):
         # with an explicit "still loading" state rather than nothing/undefined
         # while its own request is still in flight.
         self.assertIn("status={statuses[event.event_id]}", self.home_source)
-        self.assertIn("!status\n    ? 'Ladataan...'", self.home_source)
+        card_start = self.home_source.index("function EventCard(")
+        card_end = self.home_source.index("const scheduled =", card_start)
+        loading_fallback = self.home_source[card_start:card_end]
+        self.assertIn("!status", loading_fallback)
+        self.assertIn("? 'Ladataan...'", loading_fallback)
+
+    def test_home_refresh_waits_for_persistent_tracked_events_to_settle(self) -> None:
+        # Pull-to-refresh may keep the established Promise.race policy for
+        # expectation/calendar sources so one hung source cannot wedge the
+        # screen, but the newly-triggered persistent tracked-event refresh
+        # must settle before the spinner is cleared.
+        refresh_start = self.home_source.index("const onRefresh = useCallback(async () => {")
+        refresh_end = self.home_source.index("}, [loadEvents]);", refresh_start)
+        refresh_body = self.home_source[refresh_start:refresh_end]
+        self.assertIn("const trackedRefresh = new Promise<void>", refresh_body)
+        self.assertIn("setTrackedRefreshToken(token);", refresh_body)
+        self.assertIn("await loadEvents();", refresh_body)
+        self.assertIn("await trackedRefresh;", refresh_body)
+        self.assertLess(refresh_body.index("await trackedRefresh;"), refresh_body.index("setRefreshing(false);"))
+        self.assertIn("onRefreshSettled={handleTrackedRefreshSettled}", self.home_source)
+
+    def test_home_refresh_reloads_latest_reaction_for_surviving_tracked_cards(self) -> None:
+        component = Path("mobile/src/components/TrackedEventsSection.tsx").read_text(encoding="utf-8")
+        # A refresh generation changes the card key, remounting a surviving
+        # event card even when event_id itself did not change. Its existing
+        # focus effect therefore issues a fresh latest-reaction request.
+        self.assertIn("key={`${event.event_id}:${refreshToken}`}", component)
+        self.assertIn("getTrackedEventLatestReaction(event.event_id)", component)
+        self.assertIn("if (refreshToken > 0) onRefreshSettled?.(refreshToken);", component)
 
     # -- event card navigates to the detail route with the event id --------
 
