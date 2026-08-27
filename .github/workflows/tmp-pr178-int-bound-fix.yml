@@ -4,13 +4,14 @@ on:
   push:
     branches:
       - feature/official-release-source-control-api
+    paths:
+      - .github/workflows/tmp-pr178-int-bound-fix.yml
 
 permissions:
   contents: write
 
 jobs:
   fix-and-validate:
-    if: github.event.head_commit.message == 'chore: apply PR178 expected version bounds'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,8 +41,32 @@ jobs:
 
           test = Path('tests/test_official_release_source_control_api.py')
           text = test.read_text()
-          anchor = '''    def test_put_version_conflict_is_409(self):\n'''
-          addition = '''    def test_expected_version_is_bounded_to_postgres_integer_range(self):\n        source_repository = _SourceRepository()\n        client = _client(source_repository)\n        too_large = 2147483648\n\n        put_response = client.put(\n            f"/api/v1/events/{EVENT_ID}/official-release-source",\n            headers={"X-Admin-Token": ADMIN_TOKEN, "X-MarketAI-Actor": ACTOR},\n            json={\n                "source_kind": "direct_url",\n                "source_url": "https://investor.example.com/results.pdf",\n                "expected_version": too_large,\n            },\n        )\n        delete_response = client.delete(\n            f"/api/v1/events/{EVENT_ID}/official-release-source?expected_version={too_large}",\n            headers={"X-Admin-Token": ADMIN_TOKEN, "X-MarketAI-Actor": ACTOR},\n        )\n\n        self.assertEqual(put_response.status_code, 422)\n        self.assertEqual(delete_response.status_code, 422)\n        self.assertEqual(source_repository.set_calls, [])\n        self.assertEqual(source_repository.clear_calls, [])\n\n'''
+          anchor = '    def test_put_version_conflict_is_409(self):\n'
+          addition = '''    def test_expected_version_is_bounded_to_postgres_integer_range(self):
+        source_repository = _SourceRepository()
+        client = _client(source_repository)
+        too_large = 2147483648
+
+        put_response = client.put(
+            f"/api/v1/events/{EVENT_ID}/official-release-source",
+            headers={"X-Admin-Token": ADMIN_TOKEN, "X-MarketAI-Actor": ACTOR},
+            json={
+                "source_kind": "direct_url",
+                "source_url": "https://investor.example.com/results.pdf",
+                "expected_version": too_large,
+            },
+        )
+        delete_response = client.delete(
+            f"/api/v1/events/{EVENT_ID}/official-release-source?expected_version={too_large}",
+            headers={"X-Admin-Token": ADMIN_TOKEN, "X-MarketAI-Actor": ACTOR},
+        )
+
+        self.assertEqual(put_response.status_code, 422)
+        self.assertEqual(delete_response.status_code, 422)
+        self.assertEqual(source_repository.set_calls, [])
+        self.assertEqual(source_repository.clear_calls, [])
+
+'''
           if anchor not in text:
               raise SystemExit('test insertion anchor not found')
           text = text.replace(anchor, addition + anchor, 1)
