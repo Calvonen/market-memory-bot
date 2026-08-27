@@ -41,28 +41,43 @@ jobs:
           text = text.replace(old_doc, new_doc, 1)
           source_path.write_text(text)
 
-          test_path = Path('tests/test_results_page_release_provider.py')
-          tests = test_path.read_text()
+          provider_path = Path('tests/test_results_page_release_provider.py')
+          tests = provider_path.read_text()
           old_reserved_base = '''    def test_reserved_base_marker_failure_is_auditable(self) -> None:\n        provider = self._provider()\n        document, opener = self._discover(\n            provider,\n            {\n                PAGE_URL: self._page(\n                    '<base data-mmb-base-token-spoof="0" href="/downloads/">'\n                    '<a href="2026-08-26-results.html">Results</a>'\n                )\n            },\n        )\n\n        self.assertIsNone(document)\n        self.assertEqual(opener.opened, [PAGE_URL])\n        reason = provider.describe_no_release()\n        self.assertIsNotNone(reason)\n        self.assertIn("base_identity_failed", reason)\n\n'''
           new_reserved_base = '''    def test_reserved_base_marker_prefix_does_not_disable_identity_tracking(self) -> None:\n        document_url = "https://investor.example.com/downloads/2026-08-26-results.html"\n        provider = self._provider()\n        document, opener = self._discover(\n            provider,\n            {\n                PAGE_URL: self._page(\n                    '<base data-mmb-base-token-spoof="0" href="/downloads/">'\n                    '<a href="2026-08-26-results.html">Results</a>'\n                ),\n                document_url: _Response(_release_html(), final_url=document_url),\n            },\n        )\n\n        self.assertIsNotNone(document)\n        self.assertEqual(document.source_url, document_url)\n        self.assertEqual(opener.opened, [PAGE_URL, document_url])\n        self.assertIsNone(provider.describe_no_release())\n\n'''
           if old_reserved_base not in tests:
               raise SystemExit('reserved base test replacement anchor not found')
           tests = tests.replace(old_reserved_base, new_reserved_base, 1)
-
           anchor = '''    def test_template_local_malformed_anchor_does_not_poison_visible_release_candidate(self) -> None:\n'''
           addition = '''    def test_reserved_anchor_marker_prefix_does_not_poison_hidden_malformed_anchor(self) -> None:\n        document_url = "https://investor.example.com/reports/2026-08-26-results.html"\n        provider = self._provider()\n        document, opener = self._discover(\n            provider,\n            {\n                PAGE_URL: self._page(\n                    '<div data-mmb-anchor-token-spoof="0">Unrelated marker-like markup</div>'\n                    '<div hidden><a href href="/bad">Hidden malformed</a></div>'\n                    '<a href="/reports/2026-08-26-results.html">Half-year results</a>'\n                ),\n                document_url: _Response(_release_html(), final_url=document_url),\n            },\n        )\n        self.assertIsNotNone(document)\n        self.assertEqual(document.source_url, document_url)\n        self.assertEqual(opener.opened, [PAGE_URL, document_url])\n\n'''
           if anchor not in tests:
               raise SystemExit('test insertion anchor not found')
           tests = tests.replace(anchor, addition + anchor, 1)
-          test_path.write_text(tests)
+          provider_path.write_text(tests)
+
+          base_path = Path('tests/test_results_page_release_base_identity.py')
+          base_tests = base_path.read_text()
+          old_base_test = '''    def test_a_source_spelling_a_reserved_marker_prefix_fails_closed(self) -> None:\n        for attribute in (\n            f'{_BASE_MARKER_PREFIX}deadbeef="0"',\n            f'{_BASE_MARKER_PREFIX.upper()}DEADBEEF="0"',\n            f'{_TEMPLATE_MARKER_PREFIX}deadbeef="0"',\n        ):\n            with self.subTest(attribute=attribute):\n                self.assertEqual(\n                    self._urls(f'<div {attribute}></div><base href="/real/">'),\n                    (),\n                )\n\n'''
+          new_base_test = '''    def test_marker_prefix_text_does_not_disable_base_identity(self) -> None:\n        for attribute in (\n            f'{_BASE_MARKER_PREFIX}deadbeef="0"',\n            f'{_BASE_MARKER_PREFIX.upper()}DEADBEEF="0"',\n            f'{_TEMPLATE_MARKER_PREFIX}deadbeef="0"',\n        ):\n            with self.subTest(attribute=attribute):\n                self.assertEqual(\n                    self._urls(f'<div {attribute}></div><base href="/real/">'),\n                    self._resolved("/real/"),\n                )\n\n'''
+          if old_base_test not in base_tests:
+              raise SystemExit('base identity invariant test anchor not found')
+          base_path.write_text(base_tests.replace(old_base_test, new_base_test, 1))
+
+          template_path = Path('tests/test_results_page_release_template_identity.py')
+          template_tests = template_path.read_text()
+          old_template_test = '''    def test_a_marker_shaped_source_attribute_cannot_steer_the_match(self):\n        """A page spelling the reserved prefix is refused instrumentation, not trusted."""\n\n        for attribute in (\n            f'{_TEMPLATE_MARKER_PREFIX}deadbeef="7"',\n            f'{_TEMPLATE_MARKER_PREFIX.upper()}DEADBEEF="0"',\n            f'{_TEMPLATE_MARKER_PREFIX}x="not-a-number"',\n        ):\n            with self.subTest(attribute=attribute):\n                html = (\n                    f"<svg><template {attribute}>"\n                    '<div><a href="/release.pdf">Q2-2026</a></div>'\n                    "</template></svg>"\n                )\n                # Without the spoof this template is foreign and the anchor renders;\n                # the spoof can only push it the fail-closed way.\n                self.assertEqual(self._flags(html), [True])\n                self.assertNotIn("https://investor.example.com/release.pdf", self._urls(html))\n\n'''
+          new_template_test = '''    def test_a_marker_shaped_source_attribute_cannot_steer_the_match(self):\n        """Prefix-shaped page attributes cannot impersonate the generated marker."""\n\n        for attribute in (\n            f'{_TEMPLATE_MARKER_PREFIX}deadbeef="7"',\n            f'{_TEMPLATE_MARKER_PREFIX.upper()}DEADBEEF="0"',\n            f'{_TEMPLATE_MARKER_PREFIX}x="not-a-number"',\n        ):\n            with self.subTest(attribute=attribute):\n                html = (\n                    f"<svg><template {attribute}>"\n                    '<div><a href="/release.pdf">Q2-2026</a></div>'\n                    "</template></svg>"\n                )\n                # The source attribute is not the fresh generated marker, so the\n                # foreign template keeps its normal rendered-tree semantics.\n                self.assertEqual(self._flags(html), [False])\n                self.assertIn("https://investor.example.com/release.pdf", self._urls(html))\n\n'''
+          if old_template_test not in template_tests:
+              raise SystemExit('template identity invariant test anchor not found')
+          template_path.write_text(template_tests.replace(old_template_test, new_template_test, 1))
           PY
       - name: Validate
         shell: bash
         run: |
-          python -m pip install -r requirements.txt
-          python -m py_compile trading_system/results_page_release_candidates.py tests/test_results_page_release_provider.py
+          python -m pip install -r requirements.txt pytest
+          python -m py_compile trading_system/results_page_release_candidates.py tests/test_results_page_release_provider.py tests/test_results_page_release_base_identity.py tests/test_results_page_release_template_identity.py
           git diff --check
-          python -m unittest tests.test_results_page_release_provider -v
+          python -m unittest tests.test_results_page_release_provider tests.test_results_page_release_base_identity tests.test_results_page_release_template_identity -v
           python -m unittest discover -s tests -v
       - name: Commit fix and remove temporary workflow
         shell: bash
@@ -70,6 +85,6 @@ jobs:
           rm .github/workflows/pr177-p2-marker-collision.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add trading_system/results_page_release_candidates.py tests/test_results_page_release_provider.py .github/workflows/pr177-p2-marker-collision.yml
+          git add trading_system/results_page_release_candidates.py tests/test_results_page_release_provider.py tests/test_results_page_release_base_identity.py tests/test_results_page_release_template_identity.py .github/workflows/pr177-p2-marker-collision.yml
           git commit -m "fix: keep marker-like markup from disabling anchor identity"
           git push origin HEAD:feature/results-page-release-provider
