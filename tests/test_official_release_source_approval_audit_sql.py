@@ -2,12 +2,14 @@ from pathlib import Path
 import unittest
 
 MIGRATION = Path("supabase/migrations/20260902104000_official_release_source_approval_audit.sql")
+SCHEMA_GATE = Path("scripts/verify_supabase_schema.py")
 
 
 class OfficialReleaseSourceApprovalAuditSqlTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.sql = MIGRATION.read_text()
+        cls.schema_gate = SCHEMA_GATE.read_text()
 
     def test_audit_is_append_only_service_readable(self):
         self.assertIn("create table public.event_official_release_source_audit", self.sql)
@@ -24,12 +26,18 @@ class OfficialReleaseSourceApprovalAuditSqlTests(unittest.TestCase):
         self.assertGreaterEqual(self.sql.count("input_actor text"), 2)
         self.assertGreaterEqual(self.sql.count("insert into public.event_official_release_source_audit"), 2)
 
-    def test_schema_gate_requires_audit_contract_without_shape_change(self):
-        self.assertIn("create or replace function public.verify_official_release_source_schema()", self.sql)
-        self.assertIn("event_official_release_sources_table_exists boolean", self.sql)
+    def test_schema_gate_has_distinct_audited_contract_version(self):
+        self.assertIn("drop function public.verify_official_release_source_schema()", self.sql)
+        self.assertIn("official_release_source_schema_version integer", self.sql)
         self.assertIn("event_official_release_source_audit", self.sql)
         self.assertIn("set_event_official_release_source_approved", self.sql)
         self.assertIn("clear_event_official_release_source_approved", self.sql)
+        self.assertIn("REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 2", self.schema_gate)
+        self.assertIn(
+            '"official_release_source_schema_version"',
+            self.schema_gate,
+        )
+        self.assertIn("deployed_official_source_version", self.schema_gate)
 
 
 if __name__ == "__main__":
