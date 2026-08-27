@@ -49,7 +49,7 @@ OFFICIAL_SOURCE_PRESENT_ROW = {
     "event_official_release_sources_table_exists": True,
     "set_event_official_release_source_function_exists": True,
     "clear_event_official_release_source_function_exists": True,
-    "official_release_source_schema_version": 2,
+    "official_release_source_schema_version": 3,
 }
 
 TRACKED_PRESENT_ROW = {
@@ -134,7 +134,7 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
             _FakeClient(_responses(official_source_row=legacy_row))
         )
         self.assertEqual(exit_code, 1)
-        self.assertIn("official-release-source schema version 2", err)
+        self.assertIn("official-release-source schema version 3", err)
         self.assertIn("deployed: None", err)
 
     def test_fails_closed_on_old_runtime_schema_version(self) -> None:

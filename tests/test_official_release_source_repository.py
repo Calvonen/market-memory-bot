@@ -42,9 +42,10 @@ class _RpcQuery:
 
 
 class _Client:
-    def __init__(self, *, response_rows=None, rpc_rows=None):
+    def __init__(self, *, response_rows=None, rpc_rows=None, rpc_rows_by_name=None):
         self.response_rows = response_rows
         self.rpc_rows = [] if rpc_rows is None else rpc_rows
+        self.rpc_rows_by_name = rpc_rows_by_name or {}
         self.queries = []
         self.rpc_calls = []
 
@@ -56,7 +57,8 @@ class _Client:
 
     def rpc(self, name, payload):
         self.rpc_calls.append((name, payload))
-        return _RpcQuery(self.rpc_rows)
+        rows = self.rpc_rows_by_name.get(name, self.rpc_rows)
+        return _RpcQuery(rows)
 
 
 class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
@@ -103,53 +105,45 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "version must be positive"):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://example.com/results", version=0)
 
+    def _state_client(self, *, active, version, kind=None, url=None, title=None):
+        return _Client(rpc_rows_by_name={
+            "get_audited_official_release_source_state": [{
+                "out_event_id": self.EVENT_ID,
+                "out_source_kind": kind,
+                "out_source_url": url,
+                "out_source_title": title,
+                "out_is_active": active,
+                "out_version": version,
+            }]
+        })
+
     def test_get_returns_validated_canonical_source(self):
-        client = _Client(response_rows=[{
-            "event_id": self.EVENT_ID,
-            "source_kind": "results_page",
-            "source_url": "https://investor.example.com/results",
-            "source_title": "Investor results",
-            "is_active": True,
-            "version": 3,
-        }])
+        client = self._state_client(active=True, version=3, kind="results_page", url="https://investor.example.com/results", title="Investor results")
         repository = SupabaseOfficialReleaseSourceRepository(client)
-
         source = repository.get(self.EVENT_ID)
-
         self.assertIsNotNone(source)
         assert source is not None
         self.assertEqual(source.source_kind, "results_page")
         self.assertEqual(source.version, 3)
-        self.assertIn(("eq", "event_id", self.EVENT_ID), client.queries[0].calls)
-        self.assertIn(("limit", 1), client.queries[0].calls)
+        self.assertEqual(client.rpc_calls, [("get_audited_official_release_source_state", {"input_event_id": self.EVENT_ID})])
 
     def test_get_missing_source_returns_none_and_version_zero(self):
-        repository = SupabaseOfficialReleaseSourceRepository(_Client(response_rows=[]))
-        self.assertIsNone(repository.get(self.EVENT_ID))
-        self.assertEqual(repository.get_version(self.EVENT_ID), 0)
+        state = SupabaseOfficialReleaseSourceRepository(self._state_client(active=False, version=0)).get_state(self.EVENT_ID)
+        self.assertIsNone(state.source)
+        self.assertEqual(state.version, 0)
 
     def test_get_tombstone_returns_none_but_preserves_version(self):
-        repository = SupabaseOfficialReleaseSourceRepository(_Client(response_rows=[{
-            "event_id": self.EVENT_ID,
-            "source_kind": None,
-            "source_url": None,
-            "source_title": None,
-            "is_active": False,
-            "version": 4,
-        }]))
+        state = SupabaseOfficialReleaseSourceRepository(self._state_client(active=False, version=4)).get_state(self.EVENT_ID)
+        self.assertIsNone(state.source)
+        self.assertEqual(state.version, 4)
 
-        self.assertIsNone(repository.get(self.EVENT_ID))
-        self.assertEqual(repository.get_version(self.EVENT_ID), 4)
+    def test_unaudited_active_source_is_returned_inactive_by_state_rpc(self):
+        state = SupabaseOfficialReleaseSourceRepository(self._state_client(active=False, version=7)).get_state(self.EVENT_ID)
+        self.assertIsNone(state.source)
+        self.assertEqual(state.version, 7)
 
     def test_get_malformed_persisted_source_fails_closed(self):
-        repository = SupabaseOfficialReleaseSourceRepository(_Client(response_rows=[{
-            "event_id": self.EVENT_ID,
-            "source_kind": "direct_url",
-            "source_url": "not-a-url",
-            "source_title": None,
-            "is_active": True,
-            "version": 1,
-        }]))
+        repository = SupabaseOfficialReleaseSourceRepository(self._state_client(active=True, version=1, kind="direct_url", url="not-a-url"))
         with self.assertRaisesRegex(RuntimeError, "row is malformed"):
             repository.get(self.EVENT_ID)
 

@@ -2,6 +2,7 @@ from pathlib import Path
 import unittest
 
 MIGRATION = Path("supabase/migrations/20260902104000_official_release_source_approval_audit.sql")
+INTEGRITY_MIGRATION = Path("supabase/migrations/20260902105000_official_release_source_audit_integrity.sql")
 SCHEMA_GATE = Path("scripts/verify_supabase_schema.py")
 
 
@@ -10,6 +11,7 @@ class OfficialReleaseSourceApprovalAuditSqlTests(unittest.TestCase):
     def setUpClass(cls):
         cls.sql = MIGRATION.read_text()
         cls.schema_gate = SCHEMA_GATE.read_text()
+        cls.integrity_sql = INTEGRITY_MIGRATION.read_text()
 
     def test_audit_is_append_only_service_readable(self):
         self.assertIn("create table public.event_official_release_source_audit", self.sql)
@@ -73,13 +75,28 @@ class OfficialReleaseSourceApprovalAuditSqlTests(unittest.TestCase):
         self.assertGreaterEqual(self.sql.count("input_actor text"), 2)
         self.assertGreaterEqual(self.sql.count("insert into public.event_official_release_source_audit"), 4)
 
+    def test_v3_drains_advisory_queues_and_rejects_unaudited_active_rows(self):
+        self.assertIn("pg_advisory_xact_lock(hashtextextended(item.event_id, 2))", self.integrity_sql)
+        self.assertIn("migration:post-revoke-unaudited-source", self.integrity_sql)
+        self.assertIn("migration:post-revoke-unaudited-invalidation", self.integrity_sql)
+        self.assertIn("get_audited_official_release_source_state", self.integrity_sql)
+        self.assertIn("audit.version = source_row.version", self.integrity_sql)
+        self.assertIn("source_row.is_active and audited_active", self.integrity_sql)
+
+    def test_v3_preserves_source_generation_across_event_deletion(self):
+        self.assertIn("drop constraint if exists event_official_release_sources_event_id_fkey", self.integrity_sql)
+        self.assertIn("tombstone_official_release_source_before_event_delete", self.integrity_sql)
+        self.assertIn("system:market-event-delete", self.integrity_sql)
+        self.assertIn("before delete on public.market_events", self.integrity_sql)
+        self.assertIn("    3;", self.integrity_sql)
+
     def test_schema_gate_has_distinct_audited_contract_version(self):
         self.assertIn("drop function public.verify_official_release_source_schema()", self.sql)
         self.assertIn("official_release_source_schema_version integer", self.sql)
         self.assertIn("event_official_release_source_audit", self.sql)
         self.assertIn("set_event_official_release_source_approved", self.sql)
         self.assertIn("clear_event_official_release_source_approved", self.sql)
-        self.assertIn("REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 2", self.schema_gate)
+        self.assertIn("REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 3", self.schema_gate)
         self.assertIn(
             '"official_release_source_schema_version"',
             self.schema_gate,
