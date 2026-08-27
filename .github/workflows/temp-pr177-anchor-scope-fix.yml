@@ -39,9 +39,9 @@ jobs:
           '''# The same identity mechanism for <base>: a base can be foster parented or
           # dropped, so tree position is not an identity for it either.
           _BASE_MARKER_PREFIX = "data-mmb-base-token-"
-          # Malformed duplicate/valueless anchor hrefs need token identity too: their
-          # failure is scoped to anchors that can actually survive as visible HTML
-          # candidates instead of poisoning an otherwise valid results page.
+          # Only malformed duplicate/valueless anchor hrefs receive identity markers.
+          # Instrumenting ordinary anchors can perturb malformed-HTML tree repair, so
+          # safe anchors deliberately remain byte-for-byte unchanged before html5lib.
           _ANCHOR_MARKER_PREFIX = "data-mmb-anchor-token-"
           '''))
           replacements.append((
@@ -50,9 +50,9 @@ jobs:
                   # href -> one entry per anchor occurrence in source order, each the set of
           ''',
           '''        self.unsafe_hrefs: set[str] = set()
-                  self.malformed_anchor_tokens: set[int] = set()
-                  self.anchor_spans: list[int] = []
-                  self.anchor_templates: list[frozenset[int]] = []
+                  # Stable identity is needed only for structurally malformed anchors.
+                  self.malformed_anchor_spans: list[int] = []
+                  self.malformed_anchor_templates: list[frozenset[int]] = []
                   # href -> one entry per anchor occurrence in source order, each the set of
           '''))
           replacements.append((
@@ -73,19 +73,16 @@ jobs:
                       self.anchor_occurrences.setdefault(href, []).append(enclosing)
           ''',
           '''    def _record_anchor(self, attrs: list[tuple[str, str | None]]) -> None:
-                  token = len(self.anchor_spans)
-                  self.anchor_spans.append(self._source_offset())
-                  enclosing = frozenset(self._open_templates)
-                  self.anchor_templates.append(enclosing)
-
                   href_attrs = [value for key, value in attrs if key.lower() == "href"]
                   hrefs = [value for value in href_attrs if value is not None]
                   raw_start_tag = self.get_starttag_text() or ""
+                  enclosing = frozenset(self._open_templates)
                   malformed_structure = bool(href_attrs) and (
                       len(href_attrs) != 1 or len(hrefs) != 1
                   )
                   if malformed_structure:
-                      self.malformed_anchor_tokens.add(token)
+                      self.malformed_anchor_spans.append(self._source_offset())
+                      self.malformed_anchor_templates.append(enclosing)
                   elif len(hrefs) == 1 and not _raw_href_is_safe(raw_start_tag, hrefs[0]):
                       self.unsafe_hrefs.add(hrefs[0])
 
@@ -93,12 +90,21 @@ jobs:
                       self.anchor_occurrences.setdefault(href, []).append(enclosing)
           '''))
           replacements.append((
-          '''            ("template", _TEMPLATE_MARKER_PREFIX, probe.template_spans),
+          '''    instrumented = _instrument_raw_start_tags(
+                  html_text,
+                  (
+                      ("template", _TEMPLATE_MARKER_PREFIX, probe.template_spans),
                       ("base", _BASE_MARKER_PREFIX, probe.base_spans),
+                  ),
+              )
           ''',
-          '''            ("template", _TEMPLATE_MARKER_PREFIX, probe.template_spans),
-                      ("base", _BASE_MARKER_PREFIX, probe.base_spans),
-                      ("a", _ANCHOR_MARKER_PREFIX, probe.anchor_spans),
+          '''    plans: list[tuple[str, str, list[int]]] = [
+                  ("template", _TEMPLATE_MARKER_PREFIX, probe.template_spans),
+                  ("base", _BASE_MARKER_PREFIX, probe.base_spans),
+              ]
+              if probe.malformed_anchor_spans:
+                  plans.append(("a", _ANCHOR_MARKER_PREFIX, probe.malformed_anchor_spans))
+              instrumented = _instrument_raw_start_tags(html_text, tuple(plans))
           '''))
           replacements.append((
           '''    return scanner, fragment, html_templates, markers.get("base")
@@ -118,7 +124,7 @@ jobs:
 
           for old, new in replacements:
               if old not in text:
-                  raise SystemExit(f'expected source snippet not found:\n{old[:180]}')
+                  raise SystemExit(f'expected source snippet not found:\n{old[:200]}')
               text = text.replace(old, new, 1)
 
           start = text.index('def _iter_visible_html_anchors(root):\n')
@@ -129,20 +135,26 @@ jobs:
               html_templates: frozenset[int],
               anchor_marker: str | None,
           ) -> bool:
-              """Whether malformed href structure can survive as a visible candidate."""
+              """Whether a malformed href occurrence can survive as a visible candidate."""
               relevant_tokens = {
                   token
-                  for token in safety_scanner.malformed_anchor_tokens
-                  if not (safety_scanner.anchor_templates[token] & html_templates)
+                  for token, enclosing in enumerate(safety_scanner.malformed_anchor_templates)
+                  if not (enclosing & html_templates)
               }
               if not relevant_tokens:
                   return False
               if anchor_marker is None:
+                  # Marker instrumentation was refused, so candidate relevance cannot
+                  # be proven safely for the remaining malformed occurrences.
                   return True
 
+              token_count = len(safety_scanner.malformed_anchor_templates)
               for anchor in _iter_visible_html_anchors(root):
                   token = _marker_token(anchor, anchor_marker)
                   if token is None:
+                      # Ordinary safe anchors are intentionally not instrumented.
+                      continue
+                  if not 0 <= token < token_count:
                       return True
                   if token in relevant_tokens:
                       return True
@@ -237,6 +249,9 @@ jobs:
       - name: Run focused results-page tests
         run: |
           python -m pytest -q tests/test_results_page_release_provider.py tests/test_results_page_release_candidates_review_regressions_round18.py tests/test_results_page_release_parser_final_edge_regressions.py
+
+      - name: Run full suite
+        run: python -m pytest -q
 
       - name: Commit fix and remove temporary workflow
         if: success()
