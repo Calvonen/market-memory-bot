@@ -61,6 +61,29 @@ class _Client:
         return _RpcQuery(rows)
 
 
+class _ApiError(Exception):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+class _ErrorRpc:
+    def __init__(self, error):
+        self.error = error
+
+    def execute(self):
+        raise self.error
+
+
+class _ErrorClient:
+    def __init__(self, error):
+        self.error = error
+
+    def rpc(self, name, payload):
+        return _ErrorRpc(self.error)
+
+
 class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
     EVENT_ID = "calendar:22648076-6e43-40fc-ac6e-f57a79ceee31"
 
@@ -80,6 +103,8 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
             OfficialReleaseSource(self.EVENT_ID, "auto_discovery", "https://example.com/results")
         with self.assertRaisesRegex(ValueError, "absolute HTTPS URL"):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "http://example.com/results")
+        with self.assertRaisesRegex(ValueError, "absolute HTTPS URL"):
+            OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://example.com/a b")
         with self.assertRaisesRegex(ValueError, "no credentials"):
             OfficialReleaseSource(self.EVENT_ID, "direct_url", "https://user:pass@example.com/results")
         with self.assertRaisesRegex(ValueError, "no credentials"):
@@ -186,6 +211,30 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "zero or positive"):
             repository.set(source, expected_version=-1, actor="marko")
+
+    def test_sql_input_validation_marker_becomes_value_error(self):
+        repository = SupabaseOfficialReleaseSourceRepository(
+            _ErrorClient(_ApiError("22023", "invalid_source_url"))
+        )
+        source = OfficialReleaseSource(
+            self.EVENT_ID,
+            "direct_url",
+            "https://investor.example.com/fy2026.pdf",
+        )
+        with self.assertRaisesRegex(ValueError, "input is invalid"):
+            repository.set(source, expected_version=0, actor="marko")
+
+    def test_unmarked_22023_stays_service_failure(self):
+        repository = SupabaseOfficialReleaseSourceRepository(
+            _ErrorClient(_ApiError("22023", "unexpected database validation failure"))
+        )
+        source = OfficialReleaseSource(
+            self.EVENT_ID,
+            "direct_url",
+            "https://investor.example.com/fy2026.pdf",
+        )
+        with self.assertRaisesRegex(RuntimeError, "write failed"):
+            repository.set(source, expected_version=0, actor="marko")
 
     def test_clear_uses_atomic_rpc_and_returns_advanced_version(self):
         client = _Client(rpc_rows=4)
