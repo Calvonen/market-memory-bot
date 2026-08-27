@@ -13,9 +13,18 @@ commit;
 
 begin;
 
+-- Freeze the canonical event identity set before taking the drain snapshot.
+-- INSERT/UPDATE/DELETE on market_events require ROW EXCLUSIVE and therefore
+-- cannot race this SHARE lock. This closes both migration windows: an unknown
+-- event_id cannot be created after the identity snapshot for a pre-revoke
+-- legacy writer, and an existing event cannot be deleted under the old source
+-- FK cascade before the FK is detached and the tombstone trigger is installed.
+lock table public.market_events in share mode;
+
 -- A legacy call that passed EXECUTE before the revoke can be queued on the
--- per-event advisory lock before touching event_official_release_sources. Drain
--- those queues explicitly for every currently meaningful event/source identity.
+-- per-event advisory lock before touching event_official_release_sources. With
+-- market_events frozen above, every event identity that could make such a call
+-- succeed is stable and enumerable for the duration of this transaction.
 do $$
 declare
   item record;
