@@ -7,96 +7,92 @@ begin;
 lock table public.market_events in share mode;
 lock table public.event_official_release_sources in access exclusive mode;
 
-create temporary table official_release_source_missing_generation
+create temporary table official_release_source_generation_recovery
 on commit drop
 as
-select distinct on (audit.event_id)
-  audit.event_id,
-  audit.action,
-  audit.version
-from public.event_official_release_source_audit audit
-where not exists (
-  select 1
-  from public.event_official_release_sources source
-  where source.event_id = audit.event_id
-)
-order by audit.event_id, audit.id desc;
-
--- If the retained latest audit is already a clear, recreate that exact
--- tombstone/version. No new audit row is needed because the clear already
--- explains the durable inactive state.
-insert into public.event_official_release_sources (
-  event_id,
-  source_kind,
-  source_url,
-  source_title,
-  is_active,
-  version,
-  created_at,
-  updated_at
+with latest_audit as (
+  select distinct on (audit.event_id)
+    audit.event_id,
+    audit.action,
+    audit.version
+  from public.event_official_release_source_audit audit
+  order by audit.event_id, audit.id desc
 )
 select
-  missing.event_id,
-  null,
-  null,
-  null,
-  false,
-  missing.version,
-  clock_timestamp(),
-  clock_timestamp()
-from official_release_source_missing_generation missing
-where missing.action = 'clear';
+  latest.event_id,
+  latest.action,
+  latest.version,
+  source.version as source_version
+from latest_audit latest
+left join public.event_official_release_sources source
+  on source.event_id = latest.event_id
+where source.event_id is null
+   or source.version < latest.version;
 
--- If the latest retained audit is a set, the missing source row proves the old
--- cascade removed an active generation before the deletion tombstone trigger
--- existed. Materialize the logically missing clear as version + 1 and record
--- that recovery explicitly so the audit history and CAS generation stay
--- monotonic across event deletion/recreation.
+-- If the retained latest audit is already a clear, restore or advance the
+-- durable tombstone to that exact audited generation. This also repairs stale
+-- low-version tombstones recreated by pre-revoke legacy calls.
+insert into public.event_official_release_sources (
+  event_id, source_kind, source_url, source_title, is_active, version, created_at, updated_at
+)
+select
+  recovery.event_id, null, null, null, false, recovery.version,
+  clock_timestamp(), clock_timestamp()
+from official_release_source_generation_recovery recovery
+where recovery.action = 'clear'
+on conflict (event_id) do update
+set
+  source_kind = null,
+  source_url = null,
+  source_title = null,
+  is_active = false,
+  version = excluded.version,
+  updated_at = clock_timestamp()
+where public.event_official_release_sources.version < excluded.version;
+
+-- If the latest retained audit is a set, the durable row is absent or trails
+-- that generation. Materialize the logically missing deletion clear at the
+-- next version and record it explicitly so future CAS writes remain monotonic.
 with recovered as (
   insert into public.event_official_release_sources (
-    event_id,
-    source_kind,
-    source_url,
-    source_title,
-    is_active,
-    version,
-    created_at,
-    updated_at
+    event_id, source_kind, source_url, source_title, is_active, version, created_at, updated_at
   )
   select
-    missing.event_id,
-    null,
-    null,
-    null,
-    false,
-    missing.version + 1,
-    clock_timestamp(),
-    clock_timestamp()
-  from official_release_source_missing_generation missing
-  where missing.action = 'set'
+    recovery.event_id, null, null, null, false, recovery.version + 1,
+    clock_timestamp(), clock_timestamp()
+  from official_release_source_generation_recovery recovery
+  where recovery.action = 'set'
+  on conflict (event_id) do update
+  set
+    source_kind = null,
+    source_url = null,
+    source_title = null,
+    is_active = false,
+    version = excluded.version,
+    updated_at = clock_timestamp()
+  where public.event_official_release_sources.version < excluded.version
   returning event_id, version
 )
 insert into public.event_official_release_source_audit (
-  event_id,
-  action,
-  actor,
-  version,
-  source_kind,
-  source_url,
-  source_title
+  event_id, action, actor, version, source_kind, source_url, source_title
 )
 select
   recovered.event_id,
   'clear',
   'migration:pre-durable-delete-recovery',
   recovered.version,
-  null,
-  null,
-  null
-from recovered;
+  null, null, null
+from recovered
+where not exists (
+  select 1
+  from public.event_official_release_source_audit audit
+  where audit.event_id = recovered.event_id
+    and audit.action = 'clear'
+    and audit.version = recovered.version
+);
 
--- v6 means the v5 trigger contract plus recovery of any durable generation
--- lost in the historical 1040 -> 1050 cascade window.
+-- v7 means the v5 trigger contract plus recovery of missing or stale durable
+-- generations lost/recreated in the historical 1040 -> 1050 cascade window.
 drop function public.verify_official_release_source_schema();
 
 create function public.verify_official_release_source_schema()
@@ -142,7 +138,7 @@ as $$
           and function_namespace.nspname = 'public'
           and trigger_function.proname = 'tombstone_official_release_source_before_event_delete'
       ),
-    6;
+    7;
 $$;
 
 revoke all on function public.verify_official_release_source_schema() from public, anon, authenticated;

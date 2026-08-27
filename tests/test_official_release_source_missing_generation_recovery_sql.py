@@ -11,13 +11,17 @@ class OfficialReleaseSourceMissingGenerationRecoverySqlTests(unittest.TestCase):
         cls.sql = MIGRATION.read_text()
         cls.schema_gate = SCHEMA_GATE.read_text()
 
-    def test_missing_generation_is_reconstructed_from_latest_audit(self):
+    def test_missing_or_stale_generation_is_reconciled_from_latest_audit(self):
         self.assertIn("select distinct on (audit.event_id)", self.sql)
         self.assertIn("order by audit.event_id, audit.id desc", self.sql)
-        self.assertIn("where not exists (", self.sql)
-        self.assertIn("missing.action = 'clear'", self.sql)
-        self.assertIn("missing.action = 'set'", self.sql)
-        self.assertIn("missing.version + 1", self.sql)
+        self.assertIn("left join public.event_official_release_sources source", self.sql)
+        self.assertIn("source.event_id is null", self.sql)
+        self.assertIn("source.version < latest.version", self.sql)
+        self.assertIn("on conflict (event_id) do update", self.sql)
+        self.assertIn("public.event_official_release_sources.version < excluded.version", self.sql)
+        self.assertIn("recovery.action = 'clear'", self.sql)
+        self.assertIn("recovery.action = 'set'", self.sql)
+        self.assertIn("recovery.version + 1", self.sql)
         self.assertIn("migration:pre-durable-delete-recovery", self.sql)
 
     def test_recovery_runs_under_event_and_source_locks(self):
@@ -27,9 +31,9 @@ class OfficialReleaseSourceMissingGenerationRecoverySqlTests(unittest.TestCase):
         self.assertLess(event_lock, source_lock)
         self.assertLess(source_lock, snapshot)
 
-    def test_schema_gate_requires_recovery_contract_v6(self):
-        self.assertIn("    6;", self.sql)
-        self.assertIn("REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 6", self.schema_gate)
+    def test_schema_gate_requires_recovery_contract_v7(self):
+        self.assertIn("    7;", self.sql)
+        self.assertIn("REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 7", self.schema_gate)
 
 
 if __name__ == "__main__":

@@ -173,7 +173,7 @@ class OfficialReleaseSourceApprovalAuditSqlTests(unittest.TestCase):
         self.assertIn("event_official_release_source_audit", self.sql)
         self.assertIn("set_event_official_release_source_approved", self.sql)
         self.assertIn("clear_event_official_release_source_approved", self.sql)
-        self.assertIn("REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 6", self.schema_gate)
+        self.assertIn("REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 7", self.schema_gate)
         self.assertIn("    5;", self.trigger_gate_sql)
         self.assertIn(
             '"official_release_source_schema_version"',
