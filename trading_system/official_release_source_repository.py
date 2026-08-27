@@ -108,6 +108,7 @@ class SupabaseOfficialReleaseSourceRepository:
     """Canonical control surface for user-approved official release sources."""
 
     TABLE = "event_official_release_sources"
+    STATE_RPC = "get_audited_official_release_source_state"
     SET_RPC = "set_event_official_release_source_approved"
     CLEAR_RPC = "clear_event_official_release_source_approved"
 
@@ -156,31 +157,40 @@ class SupabaseOfficialReleaseSourceRepository:
             raise ValueError("actor is too long")
         return canonical_actor
 
-    def _get_state_row(self, event_id: str) -> dict[str, Any] | None:
+    def _get_state_row(self, event_id: str) -> dict[str, Any]:
         canonical_event_id = self._canonical_event_id(event_id)
-        response = (
-            self.client.table(self.TABLE)
-            .select("event_id,source_kind,source_url,source_title,is_active,version")
-            .eq("event_id", canonical_event_id)
-            .limit(1)
-            .execute()
-        )
+        response = self.client.rpc(
+            self.STATE_RPC, {"input_event_id": canonical_event_id}
+        ).execute()
         rows = response.data or []
-        if not rows:
-            return None
         if len(rows) != 1 or not isinstance(rows[0], dict):
             raise RuntimeError("official release source repository returned an invalid canonical row")
-        return rows[0]
+        row = rows[0]
+        return {
+            "event_id": row.get("out_event_id"),
+            "source_kind": row.get("out_source_kind"),
+            "source_url": row.get("out_source_url"),
+            "source_title": row.get("out_source_title"),
+            "is_active": row.get("out_is_active"),
+            "version": row.get("out_version"),
+        }
 
     def get_state(self, event_id: str) -> OfficialReleaseSourceState:
         row = self._get_state_row(event_id)
-        if row is None:
-            return OfficialReleaseSourceState(source=None, version=0)
         try:
             version = int(row["version"])
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError("official release source row is malformed") from exc
-        if version < 1:
+        if version < 0:
+            raise RuntimeError("official release source row is malformed")
+        if version == 0:
+            if (
+                row.get("is_active") is False
+                and row.get("source_kind") is None
+                and row.get("source_url") is None
+                and row.get("source_title") is None
+            ):
+                return OfficialReleaseSourceState(source=None, version=0)
             raise RuntimeError("official release source row is malformed")
         if row.get("is_active") is True:
             source = self._from_row(row)
