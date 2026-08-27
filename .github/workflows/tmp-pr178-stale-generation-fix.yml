@@ -36,8 +36,7 @@ jobs:
           p.write_text(s)
 
           p = Path('scripts/verify_supabase_schema.py')
-          s = p.read_text().replace('REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 6', 'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 7')
-          p.write_text(s)
+          p.write_text(p.read_text().replace('REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 6', 'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 7'))
 
           p = Path('tests/test_verify_supabase_schema.py')
           s = p.read_text()
@@ -48,13 +47,15 @@ jobs:
           p.write_text(s)
 
           p = Path('tests/test_official_release_source_approval_audit_sql.py')
-          s = p.read_text().replace('REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 6', 'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 7')
-          p.write_text(s)
+          p.write_text(p.read_text().replace('REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 6', 'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 7'))
 
           p = Path('tests/test_official_release_source_missing_generation_recovery_sql.py')
           s = p.read_text()
           s = s.replace('test_missing_generation_is_reconstructed_from_latest_audit', 'test_missing_or_stale_generation_is_reconciled_from_latest_audit')
           s = s.replace('self.assertIn("where not exists (", self.sql)', 'self.assertIn("left join public.event_official_release_sources source", self.sql)\n        self.assertIn("source.event_id is null", self.sql)\n        self.assertIn("source.version < latest.version", self.sql)\n        self.assertIn("on conflict (event_id) do update", self.sql)\n        self.assertIn("public.event_official_release_sources.version < excluded.version", self.sql)')
+          s = s.replace('self.assertIn("missing.action = \'clear\'", self.sql)', 'self.assertIn("recovery.action = \'clear\'", self.sql)')
+          s = s.replace('self.assertIn("missing.action = \'set\'", self.sql)', 'self.assertIn("recovery.action = \'set\'", self.sql)')
+          s = s.replace('self.assertIn("missing.version + 1", self.sql)', 'self.assertIn("recovery.version + 1", self.sql)')
           s = s.replace('test_schema_gate_requires_recovery_contract_v6', 'test_schema_gate_requires_recovery_contract_v7')
           s = s.replace('self.assertIn("    6;", self.sql)', 'self.assertIn("    7;", self.sql)')
           s = s.replace('REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 6', 'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 7')
