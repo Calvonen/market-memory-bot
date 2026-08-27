@@ -209,8 +209,20 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
             "direct_url",
             "https://investor.example.com/fy2026.pdf",
         )
-        with self.assertRaisesRegex(ValueError, "zero or positive"):
+        with self.assertRaisesRegex(ValueError, "between 0 and 2147483647"):
             repository.set(source, expected_version=-1, actor="marko")
+
+    def test_set_rejects_expected_version_above_postgres_integer_range(self):
+        client = _Client()
+        repository = SupabaseOfficialReleaseSourceRepository(client)
+        source = OfficialReleaseSource(
+            self.EVENT_ID,
+            "direct_url",
+            "https://investor.example.com/fy2026.pdf",
+        )
+        with self.assertRaisesRegex(ValueError, "between 0 and 2147483647"):
+            repository.set(source, expected_version=2147483648, actor="marko")
+        self.assertEqual(client.rpc_calls, [])
 
     def test_sql_input_validation_marker_becomes_value_error(self):
         repository = SupabaseOfficialReleaseSourceRepository(
@@ -254,8 +266,17 @@ class OfficialReleaseSourceRepositoryTests(unittest.TestCase):
 
     def test_clear_requires_positive_expected_version(self):
         repository = SupabaseOfficialReleaseSourceRepository(_Client())
-        with self.assertRaisesRegex(ValueError, "expected_version must be positive"):
+        with self.assertRaisesRegex(ValueError, "between 1 and 2147483647"):
             repository.clear(self.EVENT_ID, expected_version=0, actor="marko")
+
+    def test_clear_rejects_expected_version_above_postgres_integer_range(self):
+        client = _Client()
+        repository = SupabaseOfficialReleaseSourceRepository(client)
+        with self.assertRaisesRegex(ValueError, "between 1 and 2147483647"):
+            repository.clear(
+                self.EVENT_ID, expected_version=2147483648, actor="marko"
+            )
+        self.assertEqual(client.rpc_calls, [])
 
     def test_clear_must_advance_version(self):
         repository = SupabaseOfficialReleaseSourceRepository(_Client(rpc_rows=3))
