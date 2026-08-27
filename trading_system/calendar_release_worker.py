@@ -13,6 +13,9 @@ from trading_system.official_release_source_repository import (
 )
 from trading_system.release_repository import SupabaseReleaseRepository
 from trading_system.release_worker import EventReleaseMonitor, IngestionResult
+from trading_system.results_page_release_ingestion import (
+    ResultsPageOfficialReleaseProvider,
+)
 from trading_system.sec_release_ingestion import SecEdgarResultsProvider
 from trading_system.supabase_event_repository import SupabaseEventExpectationRepository
 
@@ -201,7 +204,19 @@ def run_calendar_release_ingestion_once(
                 else None
             )
             if approved_source is not None:
-                provider = ManualOfficialReleaseProvider(approved_source)
+                if approved_source.source_kind == "results_page":
+                    # The approved page defines the discovery origin; the
+                    # provider still selects fail-closed on explicit evidence.
+                    # No release_period is passed: the canonical release target
+                    # carries an event identity and a scheduled date, not a
+                    # fiscal period, and a quarter must never be guessed from a
+                    # date. Exact scheduled-date evidence remains available.
+                    provider = ResultsPageOfficialReleaseProvider.for_event(
+                        approved_source,
+                        scheduled_date=target.scheduled_date,
+                    )
+                else:
+                    provider = ManualOfficialReleaseProvider(approved_source)
             else:
                 normalized_market = target.market.strip().upper()
                 if normalized_market not in US_MARKET_LABELS:
