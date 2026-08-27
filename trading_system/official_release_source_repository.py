@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 
 _ALLOWED_SOURCE_KINDS = {"direct_url", "results_page"}
+_POSTGRES_INTEGER_MAX = 2147483647
 _SQL_INPUT_VALIDATION_MARKERS = {
     "invalid_expected_version",
     "invalid_source_kind",
@@ -168,6 +169,18 @@ class SupabaseOfficialReleaseSourceRepository:
             raise ValueError("actor is too long")
         return canonical_actor
 
+    @staticmethod
+    def _validate_expected_version(expected_version: int, *, allow_zero: bool) -> None:
+        minimum = 0 if allow_zero else 1
+        if expected_version < minimum or expected_version > _POSTGRES_INTEGER_MAX:
+            if allow_zero:
+                raise ValueError(
+                    "expected_version must be between 0 and 2147483647"
+                )
+            raise ValueError(
+                "expected_version must be between 1 and 2147483647"
+            )
+
     def _get_state_row(self, event_id: str) -> dict[str, Any]:
         canonical_event_id = self._canonical_event_id(event_id)
         response = self.client.rpc(
@@ -230,8 +243,7 @@ class SupabaseOfficialReleaseSourceRepository:
         expected_version: int,
         actor: str,
     ) -> OfficialReleaseSource:
-        if expected_version < 0:
-            raise ValueError("expected_version must be zero or positive")
+        self._validate_expected_version(expected_version, allow_zero=True)
         canonical_actor = self._canonical_actor(actor)
         try:
             response = self.client.rpc(
@@ -270,8 +282,7 @@ class SupabaseOfficialReleaseSourceRepository:
     ) -> int:
         canonical_event_id = self._canonical_event_id(event_id)
         canonical_actor = self._canonical_actor(actor)
-        if expected_version < 1:
-            raise ValueError("expected_version must be positive")
+        self._validate_expected_version(expected_version, allow_zero=False)
         try:
             response = self.client.rpc(
                 self.CLEAR_RPC,
