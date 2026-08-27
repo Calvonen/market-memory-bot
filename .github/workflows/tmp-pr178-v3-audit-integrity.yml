@@ -22,16 +22,6 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          repo = Path('trading_system/official_release_source_repository.py')
-          text = repo.read_text()
-          if 'STATE_RPC = "get_audited_official_release_source_state"' not in text:
-              text = text.replace('    TABLE = "event_official_release_sources"\n    SET_RPC = "set_event_official_release_source_approved"\n', '    TABLE = "event_official_release_sources"\n    STATE_RPC = "get_audited_official_release_source_state"\n    SET_RPC = "set_event_official_release_source_approved"\n', 1)
-              old = '''    def _get_state_row(self, event_id: str) -> dict[str, Any] | None:\n        canonical_event_id = self._canonical_event_id(event_id)\n        response = (\n            self.client.table(self.TABLE)\n            .select("event_id,source_kind,source_url,source_title,is_active,version")\n            .eq("event_id", canonical_event_id)\n            .limit(1)\n            .execute()\n        )\n        rows = response.data or []\n        if not rows:\n            return None\n        if len(rows) != 1 or not isinstance(rows[0], dict):\n            raise RuntimeError("official release source repository returned an invalid canonical row")\n        return rows[0]\n'''
-              new = '''    def _get_state_row(self, event_id: str) -> dict[str, Any]:\n        canonical_event_id = self._canonical_event_id(event_id)\n        response = self.client.rpc(\n            self.STATE_RPC, {"input_event_id": canonical_event_id}\n        ).execute()\n        rows = response.data or []\n        if len(rows) != 1 or not isinstance(rows[0], dict):\n            raise RuntimeError("official release source repository returned an invalid canonical row")\n        row = rows[0]\n        return {\n            "event_id": row.get("out_event_id"),\n            "source_kind": row.get("out_source_kind"),\n            "source_url": row.get("out_source_url"),\n            "source_title": row.get("out_source_title"),\n            "is_active": row.get("out_is_active"),\n            "version": row.get("out_version"),\n        }\n'''
-              if old not in text: raise SystemExit('repository state read marker not found')
-              text = text.replace(old, new, 1)
-              text = text.replace('''        row = self._get_state_row(event_id)\n        if row is None:\n            return OfficialReleaseSourceState(source=None, version=0)\n''', '''        row = self._get_state_row(event_id)\n''', 1)
-              repo.write_text(text)
 
           gate = Path('scripts/verify_supabase_schema.py')
           gate.write_text(gate.read_text().replace('REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 2', 'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 3', 1))
@@ -60,7 +50,10 @@ jobs:
           sqltests.write_text(text)
 
           verifytests = Path('tests/test_verify_supabase_schema.py')
-          verifytests.write_text(verifytests.read_text().replace('"official_release_source_schema_version": 2', '"official_release_source_schema_version": 3'))
+          text = verifytests.read_text()
+          text = text.replace('"official_release_source_schema_version": 2', '"official_release_source_schema_version": 3')
+          text = text.replace('official-release-source schema version 2', 'official-release-source schema version 3')
+          verifytests.write_text(text)
           PY
       - name: Install dependencies
         run: |
@@ -77,8 +70,8 @@ jobs:
         run: |
           git config user.name Calvonen
           git config user.email marko.raitanen@gmail.com
-          git add trading_system/official_release_source_repository.py scripts/verify_supabase_schema.py tests/test_official_release_source_repository.py tests/test_official_release_source_approval_audit_sql.py tests/test_verify_supabase_schema.py
+          git add scripts/verify_supabase_schema.py tests/test_official_release_source_repository.py tests/test_official_release_source_approval_audit_sql.py tests/test_verify_supabase_schema.py
           if ! git diff --cached --quiet; then
-            git commit -m 'fix: use audited official source state'
+            git commit -m 'test: cover official source audit integrity v3'
             git push
           fi
