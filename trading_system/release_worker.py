@@ -81,6 +81,24 @@ class EventReleaseMonitor:
         self.overdue_grace_hours = overdue_grace_hours
         self.clock = clock
 
+    def _provider_no_release_reason(self) -> str | None:
+        """Ask the provider why it discovered nothing, if it can say.
+
+        ``no_release`` stays the one status for "nothing to ingest" - the audit
+        log must not grow a new status per provider - but a provider that failed
+        closed for a specific, correctable reason (an ambiguous results page, a
+        page with no dated release) can explain itself here, and the explanation
+        rides in ``error_message`` next to the unchanged status. Providers that
+        do not implement ``describe_no_release`` are unaffected.
+        """
+        describe = getattr(self.provider, "describe_no_release", None)
+        if not callable(describe):
+            return None
+        reason = describe()
+        if not isinstance(reason, str):
+            return None
+        return reason.strip() or None
+
     def run_once(self, event_id: str) -> IngestionResult:
         expectation = self.expectations.get(event_id)
         if expectation is None:
@@ -93,13 +111,17 @@ class EventReleaseMonitor:
                 overdue = _is_release_overdue(
                     expectation, now, self.overdue_grace_hours
                 )
-                note = None
+                notes: list[str] = []
+                provider_reason = self._provider_no_release_reason()
+                if provider_reason is not None:
+                    notes.append(provider_reason)
                 if overdue:
-                    note = (
+                    notes.append(
                         f"release overdue: scheduled_date={expectation.scheduled_date.isoformat()} "
                         f"still no_release as of {now.isoformat()} (grace={self.overdue_grace_hours}h). "
                         "Not inventing a release; verify the source manually or use the release-url override."
                     )
+                note = " | ".join(notes) if notes else None
                 self.releases.record_run(
                     event_id=event_id,
                     provider=self.provider.name,

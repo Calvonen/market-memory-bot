@@ -3,11 +3,43 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import date
 from enum import Enum
+from typing import Protocol
 from urllib.parse import unquote
 
-from trading_system.calendar_repository import CalendarEvent
 from trading_system.results_page_release_candidates import ResultsPageReleaseCandidate
+
+
+class ResultsPageSelectionTarget(Protocol):
+    """The canonical event identity this selection actually reads.
+
+    ``CalendarEvent`` satisfies this protocol, so existing callers keep working
+    unchanged. Callers that legitimately hold only part of a calendar row - the
+    release worker knows an event's identity and scheduled date but not its
+    company name, provider source or occurrence key - pass
+    ``ResultsPageSelectionContext`` instead of fabricating canonical fields just
+    to fill a dataclass.
+    """
+
+    @property
+    def calendar_event_id(self) -> str: ...
+
+    @property
+    def scheduled_date(self) -> date: ...
+
+
+@dataclass(frozen=True)
+class ResultsPageSelectionContext:
+    """Minimal explicit selection identity: who the candidates must belong to.
+
+    ``calendar_event_id`` is compared against ``candidate.event_id``, which the
+    extractor stamps from the approved source's ``event_id``. It is an identity
+    to match exactly, never a value to re-derive from another string.
+    """
+
+    calendar_event_id: str
+    scheduled_date: date
 
 
 class ResultsPageSelectionStatus(str, Enum):
@@ -27,7 +59,7 @@ _PERCENT_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}")
 _ZERO_WIDTH_SPACE = "\u200b"
 
 
-def _scheduled_date_patterns(event: CalendarEvent) -> tuple[re.Pattern[str], ...]:
+def _scheduled_date_patterns(event: ResultsPageSelectionTarget) -> tuple[re.Pattern[str], ...]:
     value = event.scheduled_date
     tokens = (
         value.isoformat(),
@@ -122,7 +154,7 @@ def _candidate_evidence_fields(candidate: ResultsPageReleaseCandidate) -> tuple[
 
 
 def _matching_candidates(
-    event: CalendarEvent,
+    event: ResultsPageSelectionTarget,
     candidates: tuple[ResultsPageReleaseCandidate, ...],
     patterns: tuple[re.Pattern[str], ...],
     *,
@@ -141,7 +173,7 @@ def _matching_candidates(
 
 
 def select_results_page_release_candidate(
-    event: CalendarEvent,
+    event: ResultsPageSelectionTarget,
     candidates: tuple[ResultsPageReleaseCandidate, ...],
     *,
     release_period: str | None = None,

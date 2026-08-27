@@ -63,7 +63,7 @@ class _ApprovedOriginRedirectHandler(HTTPRedirectHandler):
         self.approved_url = approved_url
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
-        ManualOfficialReleaseProvider._validate_final_url(self.approved_url, newurl)
+        ApprovedOriginDocumentFetcher._validate_final_url(self.approved_url, newurl)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -126,6 +126,8 @@ def _pdf_extract_worker(
             raise RuntimeError("PDF worker inherited CPU limit leaves no execution headroom")
         resource.setrlimit(resource.RLIMIT_CPU, (cpu_soft_limit, inherited_cpu_hard))
 
+        # Pinned to the concrete provider rather than the shared fetcher so the
+        # spawned worker resolves the same attribute the in-process callers do.
         text = ManualOfficialReleaseProvider._extract_pdf_text_in_process(
             data,
             max_pages=max_pages,
@@ -141,17 +143,19 @@ def _pdf_extract_worker(
         send_conn.close()
 
 
-class ManualOfficialReleaseProvider:
-    """Fetch exactly one user-approved official release document.
+class ApprovedOriginDocumentFetcher:
+    """Shared fetch/decode policy for user-approved official release origins.
 
-    This provider intentionally supports only ``direct_url`` sources. A
-    ``results_page`` source is a discovery hint rather than a release document,
-    and automatically choosing a link from such a page belongs in a separate
-    provider with its own identity rules. Returning ``None`` for that kind keeps
-    this first manual path fail-closed and prevents generic link guessing.
+    Every approved-source provider downloads bytes the same way: HTTPS only,
+    redirects confined to the approved origin, a bounded download, explicit
+    charset decoding and OS-limited PDF extraction. That policy is security
+    surface, not provider behaviour, so it lives here once and is inherited
+    rather than re-implemented per source kind. The runtime error messages keep
+    their original "manual official release" wording: they describe the
+    user-approved official release fetch itself, which is exactly what both
+    subclasses perform.
     """
 
-    name = "manual_official_release"
     MIN_DOCUMENT_CHARS = 500
     MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
     MAX_PDF_PAGES = 500
@@ -169,22 +173,28 @@ class ManualOfficialReleaseProvider:
         self.source = source
         self.timeout_seconds = timeout_seconds
 
-    def discover(self, event_id: str) -> ReleaseDocument | None:
-        if event_id != self.source.event_id:
-            raise ValueError("manual official release source event_id mismatch")
-        if self.source.source_kind != "direct_url":
-            return None
+    @classmethod
+    def _interpret_document(
+        cls,
+        url: str,
+        data: bytes,
+        content_type: str,
+        http_charset: str | None,
+    ) -> tuple[str, str]:
+        """Map one downloaded approved document to (raw_text, source_type).
 
-        data, content_type, http_charset = self._fetch_bytes(self.source.source_url)
-        media_type = self._media_type(content_type)
-        if self._looks_like_pdf(self.source.source_url, content_type, data):
-            raw_text = self._extract_pdf_text(data)
-            source_type = "company_results_pdf"
-        elif media_type == "text/plain":
-            raw_text = self._decode_text(data, http_charset, allow_html_meta=False)
-            source_type = "company_results"
-        elif self._looks_like_html_or_text(content_type, data):
-            html_text = self._decode_text(
+        The content type decides, never the file extension alone: a PDF is
+        recognised by its declared type or its ``%PDF-`` header just as much as
+        by a ``.pdf`` path, and anything that is neither PDF, plain text nor
+        HTML fails closed instead of being persisted as a release.
+        """
+        media_type = cls._media_type(content_type)
+        if cls._looks_like_pdf(url, content_type, data):
+            return cls._extract_pdf_text(data), "company_results_pdf"
+        if media_type == "text/plain":
+            return cls._decode_text(data, http_charset, allow_html_meta=False), "company_results"
+        if cls._looks_like_html_or_text(content_type, data):
+            html_text = cls._decode_text(
                 data,
                 http_charset,
                 allow_html_meta=True,
@@ -192,23 +202,9 @@ class ManualOfficialReleaseProvider:
             )
             parser = _VisibleTextParser()
             parser.feed(html_text)
-            raw_text = "\n".join(parser.parts)
-            source_type = "company_results"
-        else:
-            raise RuntimeError(
-                f"manual official release returned unsupported content type: {media_type or '<missing>'}"
-            )
-
-        raw_text = raw_text.strip()
-        if len(raw_text) < self.MIN_DOCUMENT_CHARS:
-            return None
-
-        return ReleaseDocument(
-            event_id=event_id,
-            source_type=source_type,
-            source_url=self.source.source_url,
-            source_title=self.source.source_title or "manual-official-release",
-            raw_text=raw_text,
+            return "\n".join(parser.parts), "company_results"
+        raise RuntimeError(
+            f"manual official release returned unsupported content type: {media_type or '<missing>'}"
         )
 
     @staticmethod
@@ -423,7 +419,15 @@ class ManualOfficialReleaseProvider:
             raise RuntimeError("manual official release download exceeds size limit")
         return data
 
-    def _fetch_bytes(self, url: str) -> tuple[bytes, str, str | None]:
+    def _fetch_resource(self, url: str) -> tuple[bytes, str, str | None, str]:
+        """Fetch one approved-origin resource, reporting its validated final URL.
+
+        The final URL is part of the result because a body can contain relative
+        references, and those resolve against the URL the response actually came
+        from - a same-origin redirect into another directory would otherwise
+        silently repoint every relative link. It is the redirect-validated URL,
+        so it is always on the approved origin.
+        """
         request = Request(
             url,
             headers={
@@ -438,4 +442,50 @@ class ManualOfficialReleaseProvider:
             content_type = response.headers.get("Content-Type", "") or ""
             http_charset = response.headers.get_content_charset()
             data = self._read_bounded(response)
-            return data, content_type, http_charset
+            return data, content_type, http_charset, final_url
+
+    def _fetch_bytes(self, url: str) -> tuple[bytes, str, str | None]:
+        """Fetch when the response's final URL cannot change how it is read."""
+        data, content_type, http_charset, _final_url = self._fetch_resource(url)
+        return data, content_type, http_charset
+
+
+class ManualOfficialReleaseProvider(ApprovedOriginDocumentFetcher):
+    """Fetch exactly one user-approved official release document.
+
+    This provider intentionally supports only ``direct_url`` sources. A
+    ``results_page`` source is a discovery hint rather than a release document,
+    and automatically choosing a link from such a page belongs in a separate
+    provider with its own identity rules (see
+    ``trading_system.results_page_release_ingestion``). Returning ``None`` for
+    that kind keeps this first manual path fail-closed and prevents generic link
+    guessing.
+    """
+
+    name = "manual_official_release"
+
+    def discover(self, event_id: str) -> ReleaseDocument | None:
+        if event_id != self.source.event_id:
+            raise ValueError("manual official release source event_id mismatch")
+        if self.source.source_kind != "direct_url":
+            return None
+
+        data, content_type, http_charset = self._fetch_bytes(self.source.source_url)
+        raw_text, source_type = self._interpret_document(
+            self.source.source_url,
+            data,
+            content_type,
+            http_charset,
+        )
+
+        raw_text = raw_text.strip()
+        if len(raw_text) < self.MIN_DOCUMENT_CHARS:
+            return None
+
+        return ReleaseDocument(
+            event_id=event_id,
+            source_type=source_type,
+            source_url=self.source.source_url,
+            source_title=self.source.source_title or "manual-official-release",
+            raw_text=raw_text,
+        )
