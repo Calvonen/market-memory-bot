@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   validate:
-    if: github.event.head_commit.message != 'fix: use audited official source state'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,82 +22,45 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-
           repo = Path('trading_system/official_release_source_repository.py')
           text = repo.read_text()
-          text = text.replace(
-              '    TABLE = "event_official_release_sources"\n    SET_RPC = "set_event_official_release_source_approved"\n',
-              '    TABLE = "event_official_release_sources"\n    STATE_RPC = "get_audited_official_release_source_state"\n    SET_RPC = "set_event_official_release_source_approved"\n',
-              1,
-          )
-          old = '''    def _get_state_row(self, event_id: str) -> dict[str, Any] | None:\n        canonical_event_id = self._canonical_event_id(event_id)\n        response = (\n            self.client.table(self.TABLE)\n            .select("event_id,source_kind,source_url,source_title,is_active,version")\n            .eq("event_id", canonical_event_id)\n            .limit(1)\n            .execute()\n        )\n        rows = response.data or []\n        if not rows:\n            return None\n        if len(rows) != 1 or not isinstance(rows[0], dict):\n            raise RuntimeError("official release source repository returned an invalid canonical row")\n        return rows[0]\n'''
-          new = '''    def _get_state_row(self, event_id: str) -> dict[str, Any]:\n        canonical_event_id = self._canonical_event_id(event_id)\n        response = self.client.rpc(\n            self.STATE_RPC, {"input_event_id": canonical_event_id}\n        ).execute()\n        rows = response.data or []\n        if len(rows) != 1 or not isinstance(rows[0], dict):\n            raise RuntimeError("official release source repository returned an invalid canonical row")\n        row = rows[0]\n        return {\n            "event_id": row.get("out_event_id"),\n            "source_kind": row.get("out_source_kind"),\n            "source_url": row.get("out_source_url"),\n            "source_title": row.get("out_source_title"),\n            "is_active": row.get("out_is_active"),\n            "version": row.get("out_version"),\n        }\n'''
-          if old not in text:
-              raise SystemExit('repository state read marker not found')
-          text = text.replace(old, new, 1)
-          text = text.replace(
-              '''        row = self._get_state_row(event_id)\n        if row is None:\n            return OfficialReleaseSourceState(source=None, version=0)\n''',
-              '''        row = self._get_state_row(event_id)\n''',
-              1,
-          )
-          repo.write_text(text)
+          if 'STATE_RPC = "get_audited_official_release_source_state"' not in text:
+              text = text.replace('    TABLE = "event_official_release_sources"\n    SET_RPC = "set_event_official_release_source_approved"\n', '    TABLE = "event_official_release_sources"\n    STATE_RPC = "get_audited_official_release_source_state"\n    SET_RPC = "set_event_official_release_source_approved"\n', 1)
+              old = '''    def _get_state_row(self, event_id: str) -> dict[str, Any] | None:\n        canonical_event_id = self._canonical_event_id(event_id)\n        response = (\n            self.client.table(self.TABLE)\n            .select("event_id,source_kind,source_url,source_title,is_active,version")\n            .eq("event_id", canonical_event_id)\n            .limit(1)\n            .execute()\n        )\n        rows = response.data or []\n        if not rows:\n            return None\n        if len(rows) != 1 or not isinstance(rows[0], dict):\n            raise RuntimeError("official release source repository returned an invalid canonical row")\n        return rows[0]\n'''
+              new = '''    def _get_state_row(self, event_id: str) -> dict[str, Any]:\n        canonical_event_id = self._canonical_event_id(event_id)\n        response = self.client.rpc(\n            self.STATE_RPC, {"input_event_id": canonical_event_id}\n        ).execute()\n        rows = response.data or []\n        if len(rows) != 1 or not isinstance(rows[0], dict):\n            raise RuntimeError("official release source repository returned an invalid canonical row")\n        row = rows[0]\n        return {\n            "event_id": row.get("out_event_id"),\n            "source_kind": row.get("out_source_kind"),\n            "source_url": row.get("out_source_url"),\n            "source_title": row.get("out_source_title"),\n            "is_active": row.get("out_is_active"),\n            "version": row.get("out_version"),\n        }\n'''
+              if old not in text: raise SystemExit('repository state read marker not found')
+              text = text.replace(old, new, 1)
+              text = text.replace('''        row = self._get_state_row(event_id)\n        if row is None:\n            return OfficialReleaseSourceState(source=None, version=0)\n''', '''        row = self._get_state_row(event_id)\n''', 1)
+              repo.write_text(text)
 
           gate = Path('scripts/verify_supabase_schema.py')
-          text = gate.read_text().replace(
-              'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 2',
-              'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 3',
-              1,
-          )
-          gate.write_text(text)
+          gate.write_text(gate.read_text().replace('REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 2', 'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 3', 1))
 
           tests = Path('tests/test_official_release_source_repository.py')
           text = tests.read_text()
-          text = text.replace(
-              '''    def __init__(self, *, response_rows=None, rpc_rows=None):\n        self.response_rows = response_rows\n        self.rpc_rows = [] if rpc_rows is None else rpc_rows\n''',
-              '''    def __init__(self, *, response_rows=None, rpc_rows=None, rpc_rows_by_name=None):\n        self.response_rows = response_rows\n        self.rpc_rows = [] if rpc_rows is None else rpc_rows\n        self.rpc_rows_by_name = rpc_rows_by_name or {}\n''',
-              1,
-          )
-          text = text.replace(
-              '''    def rpc(self, name, payload):\n        self.rpc_calls.append((name, payload))\n        return _RpcQuery(self.rpc_rows)\n''',
-              '''    def rpc(self, name, payload):\n        self.rpc_calls.append((name, payload))\n        rows = self.rpc_rows_by_name.get(name, self.rpc_rows)\n        return _RpcQuery(rows)\n''',
-              1,
-          )
-          start = text.index('    def test_get_returns_validated_canonical_source(self):')
-          end = text.index('    def test_set_uses_atomic_rpc_with_expected_version(self):')
-          replacement = '''    def test_get_returns_validated_canonical_source(self):\n        client = _Client(rpc_rows_by_name={\n            "get_audited_official_release_source_state": [{\n                "out_event_id": self.EVENT_ID,\n                "out_source_kind": "results_page",\n                "out_source_url": "https://investor.example.com/results",\n                "out_source_title": "Investor results",\n                "out_is_active": True,\n                "out_version": 3,\n            }]\n        })\n        repository = SupabaseOfficialReleaseSourceRepository(client)\n\n        source = repository.get(self.EVENT_ID)\n\n        self.assertIsNotNone(source)\n        assert source is not None\n        self.assertEqual(source.source_kind, "results_page")\n        self.assertEqual(source.version, 3)\n        self.assertEqual(client.rpc_calls, [(\n            "get_audited_official_release_source_state",\n            {"input_event_id": self.EVENT_ID},\n        )])\n\n    def test_get_missing_source_returns_none_and_version_zero(self):\n        client = _Client(rpc_rows_by_name={\n            "get_audited_official_release_source_state": [{\n                "out_event_id": self.EVENT_ID,\n                "out_source_kind": None,\n                "out_source_url": None,\n                "out_source_title": None,\n                "out_is_active": False,\n                "out_version": 0,\n            }]\n        })\n        repository = SupabaseOfficialReleaseSourceRepository(client)\n        state = repository.get_state(self.EVENT_ID)\n        self.assertIsNone(state.source)\n        self.assertEqual(state.version, 0)\n\n    def test_get_tombstone_returns_none_but_preserves_version(self):\n        client = _Client(rpc_rows_by_name={\n            "get_audited_official_release_source_state": [{\n                "out_event_id": self.EVENT_ID,\n                "out_source_kind": None,\n                "out_source_url": None,\n                "out_source_title": None,\n                "out_is_active": False,\n                "out_version": 4,\n            }]\n        })\n        repository = SupabaseOfficialReleaseSourceRepository(client)\n        state = repository.get_state(self.EVENT_ID)\n        self.assertIsNone(state.source)\n        self.assertEqual(state.version, 4)\n\n    def test_unaudited_active_source_is_returned_inactive_by_state_rpc(self):\n        client = _Client(rpc_rows_by_name={\n            "get_audited_official_release_source_state": [{\n                "out_event_id": self.EVENT_ID,\n                "out_source_kind": None,\n                "out_source_url": None,\n                "out_source_title": None,\n                "out_is_active": False,\n                "out_version": 7,\n            }]\n        })\n        repository = SupabaseOfficialReleaseSourceRepository(client)\n        state = repository.get_state(self.EVENT_ID)\n        self.assertIsNone(state.source)\n        self.assertEqual(state.version, 7)\n\n    def test_get_malformed_persisted_source_fails_closed(self):\n        client = _Client(rpc_rows_by_name={\n            "get_audited_official_release_source_state": [{\n                "out_event_id": self.EVENT_ID,\n                "out_source_kind": "direct_url",\n                "out_source_url": "not-a-url",\n                "out_source_title": None,\n                "out_is_active": True,\n                "out_version": 1,\n            }]\n        })\n        repository = SupabaseOfficialReleaseSourceRepository(client)\n        with self.assertRaisesRegex(RuntimeError, "row is malformed"):\n            repository.get(self.EVENT_ID)\n\n'''
-          text = text[:start] + replacement + text[end:]
-          tests.write_text(text)
+          if 'rpc_rows_by_name' not in text:
+              text = text.replace('''    def __init__(self, *, response_rows=None, rpc_rows=None):\n        self.response_rows = response_rows\n        self.rpc_rows = [] if rpc_rows is None else rpc_rows\n''', '''    def __init__(self, *, response_rows=None, rpc_rows=None, rpc_rows_by_name=None):\n        self.response_rows = response_rows\n        self.rpc_rows = [] if rpc_rows is None else rpc_rows\n        self.rpc_rows_by_name = rpc_rows_by_name or {}\n''', 1)
+              text = text.replace('''    def rpc(self, name, payload):\n        self.rpc_calls.append((name, payload))\n        return _RpcQuery(self.rpc_rows)\n''', '''    def rpc(self, name, payload):\n        self.rpc_calls.append((name, payload))\n        rows = self.rpc_rows_by_name.get(name, self.rpc_rows)\n        return _RpcQuery(rows)\n''', 1)
+              start = text.index('    def test_get_returns_validated_canonical_source(self):')
+              end = text.index('    def test_set_uses_atomic_rpc_with_expected_version(self):')
+              replacement = '''    def _state_client(self, *, active, version, kind=None, url=None, title=None):\n        return _Client(rpc_rows_by_name={\n            "get_audited_official_release_source_state": [{\n                "out_event_id": self.EVENT_ID,\n                "out_source_kind": kind,\n                "out_source_url": url,\n                "out_source_title": title,\n                "out_is_active": active,\n                "out_version": version,\n            }]\n        })\n\n    def test_get_returns_validated_canonical_source(self):\n        client = self._state_client(active=True, version=3, kind="results_page", url="https://investor.example.com/results", title="Investor results")\n        repository = SupabaseOfficialReleaseSourceRepository(client)\n        source = repository.get(self.EVENT_ID)\n        self.assertIsNotNone(source)\n        assert source is not None\n        self.assertEqual(source.source_kind, "results_page")\n        self.assertEqual(source.version, 3)\n        self.assertEqual(client.rpc_calls, [("get_audited_official_release_source_state", {"input_event_id": self.EVENT_ID})])\n\n    def test_get_missing_source_returns_none_and_version_zero(self):\n        state = SupabaseOfficialReleaseSourceRepository(self._state_client(active=False, version=0)).get_state(self.EVENT_ID)\n        self.assertIsNone(state.source)\n        self.assertEqual(state.version, 0)\n\n    def test_get_tombstone_returns_none_but_preserves_version(self):\n        state = SupabaseOfficialReleaseSourceRepository(self._state_client(active=False, version=4)).get_state(self.EVENT_ID)\n        self.assertIsNone(state.source)\n        self.assertEqual(state.version, 4)\n\n    def test_unaudited_active_source_is_returned_inactive_by_state_rpc(self):\n        state = SupabaseOfficialReleaseSourceRepository(self._state_client(active=False, version=7)).get_state(self.EVENT_ID)\n        self.assertIsNone(state.source)\n        self.assertEqual(state.version, 7)\n\n    def test_get_malformed_persisted_source_fails_closed(self):\n        repository = SupabaseOfficialReleaseSourceRepository(self._state_client(active=True, version=1, kind="direct_url", url="not-a-url"))\n        with self.assertRaisesRegex(RuntimeError, "row is malformed"):\n            repository.get(self.EVENT_ID)\n\n'''
+              text = text[:start] + replacement + text[end:]
+              tests.write_text(text)
 
           sqltests = Path('tests/test_official_release_source_approval_audit_sql.py')
           text = sqltests.read_text()
-          text = text.replace(
-              'MIGRATION = Path("supabase/migrations/20260902104000_official_release_source_approval_audit.sql")\n',
-              'MIGRATION = Path("supabase/migrations/20260902104000_official_release_source_approval_audit.sql")\nINTEGRITY_MIGRATION = Path("supabase/migrations/20260902105000_official_release_source_audit_integrity.sql")\n',
-              1,
-          )
-          text = text.replace(
-              '        cls.schema_gate = SCHEMA_GATE.read_text()\n',
-              '        cls.schema_gate = SCHEMA_GATE.read_text()\n        cls.integrity_sql = INTEGRITY_MIGRATION.read_text()\n',
-              1,
-          )
-          marker = '    def test_schema_gate_has_distinct_audited_contract_version(self):\n'
-          addition = '''    def test_v3_drains_advisory_queues_and_rejects_unaudited_active_rows(self):\n        self.assertIn("pg_advisory_xact_lock(hashtextextended(item.event_id, 2))", self.integrity_sql)\n        self.assertIn("migration:post-revoke-unaudited-source", self.integrity_sql)\n        self.assertIn("migration:post-revoke-unaudited-invalidation", self.integrity_sql)\n        self.assertIn("get_audited_official_release_source_state", self.integrity_sql)\n        self.assertIn("audit.version = source_row.version", self.integrity_sql)\n        self.assertIn("source_row.is_active and audited_active", self.integrity_sql)\n\n    def test_v3_preserves_source_generation_across_event_deletion(self):\n        self.assertIn("drop constraint if exists event_official_release_sources_event_id_fkey", self.integrity_sql)\n        self.assertIn("tombstone_official_release_source_before_event_delete", self.integrity_sql)\n        self.assertIn("system:market-event-delete", self.integrity_sql)\n        self.assertIn("version = version + 1", self.integrity_sql)\n        self.assertIn("before delete on public.market_events", self.integrity_sql)\n        self.assertIn("official_release_source_schema_version integer", self.integrity_sql)\n        self.assertIn("    3;", self.integrity_sql)\n\n'''
-          if marker not in text:
-              raise SystemExit('sql test marker not found')
-          text = text.replace(marker, addition + marker, 1)
-          text = text.replace(
-              'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 2',
-              'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 3',
-          )
+          if 'INTEGRITY_MIGRATION' not in text:
+              text = text.replace('MIGRATION = Path("supabase/migrations/20260902104000_official_release_source_approval_audit.sql")\n', 'MIGRATION = Path("supabase/migrations/20260902104000_official_release_source_approval_audit.sql")\nINTEGRITY_MIGRATION = Path("supabase/migrations/20260902105000_official_release_source_audit_integrity.sql")\n', 1)
+              text = text.replace('        cls.schema_gate = SCHEMA_GATE.read_text()\n', '        cls.schema_gate = SCHEMA_GATE.read_text()\n        cls.integrity_sql = INTEGRITY_MIGRATION.read_text()\n', 1)
+              marker = '    def test_schema_gate_has_distinct_audited_contract_version(self):\n'
+              addition = '''    def test_v3_drains_advisory_queues_and_rejects_unaudited_active_rows(self):\n        self.assertIn("pg_advisory_xact_lock(hashtextextended(item.event_id, 2))", self.integrity_sql)\n        self.assertIn("migration:post-revoke-unaudited-source", self.integrity_sql)\n        self.assertIn("migration:post-revoke-unaudited-invalidation", self.integrity_sql)\n        self.assertIn("get_audited_official_release_source_state", self.integrity_sql)\n        self.assertIn("audit.version = source_row.version", self.integrity_sql)\n        self.assertIn("source_row.is_active and audited_active", self.integrity_sql)\n\n    def test_v3_preserves_source_generation_across_event_deletion(self):\n        self.assertIn("drop constraint if exists event_official_release_sources_event_id_fkey", self.integrity_sql)\n        self.assertIn("tombstone_official_release_source_before_event_delete", self.integrity_sql)\n        self.assertIn("system:market-event-delete", self.integrity_sql)\n        self.assertIn("before delete on public.market_events", self.integrity_sql)\n        self.assertIn("    3;", self.integrity_sql)\n\n'''
+              if marker not in text: raise SystemExit('sql test marker not found')
+              text = text.replace(marker, addition + marker, 1)
+          text = text.replace('REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 2', 'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 3')
           sqltests.write_text(text)
 
           verifytests = Path('tests/test_verify_supabase_schema.py')
-          if verifytests.exists():
-              text = verifytests.read_text().replace(
-                  '"official_release_source_schema_version": 2',
-                  '"official_release_source_schema_version": 3',
-              )
-              verifytests.write_text(text)
+          verifytests.write_text(verifytests.read_text().replace('"official_release_source_schema_version": 2', '"official_release_source_schema_version": 3'))
           PY
       - name: Install dependencies
         run: |
@@ -116,5 +78,7 @@ jobs:
           git config user.name Calvonen
           git config user.email marko.raitanen@gmail.com
           git add trading_system/official_release_source_repository.py scripts/verify_supabase_schema.py tests/test_official_release_source_repository.py tests/test_official_release_source_approval_audit_sql.py tests/test_verify_supabase_schema.py
-          git commit -m 'fix: use audited official source state'
-          git push
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix: use audited official source state'
+            git push
+          fi
