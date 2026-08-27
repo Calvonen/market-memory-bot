@@ -444,23 +444,34 @@ def _instrument_raw_start_tags(
     own element wherever html5lib puts it. ``<template>`` and ``<base>`` both
     need this, and both need it the same way, so it is done once here.
 
-    ``plans`` is one ``(tag name, reserved prefix, source offsets)`` per tag
+    ``plans`` is one ``(tag name, marker prefix, source offsets)`` per tag
     kind. Returns the instrumented source and each kind's marker attribute name,
     or None when instrumentation cannot be trusted - the caller then fails
-    closed. The markers are never read from the page: a source that spells any
-    reserved prefix at all is refused, and the names carry a per-parse nonce on
-    top of that, so a page cannot forge or predict one. Only the listed start
-    tags are touched, and none of them carries text, so raw href safety - which
+    closed. The markers are never trusted from the page: each complete marker
+    name carries a fresh per-parse nonce and is accepted only when that exact
+    attribute name is absent from the original source. Prefix text by itself is
+    harmless, so unrelated markup cannot disable identity tracking. Only the
+    listed start tags are touched, and none of them carries text, so raw href safety - which
     is analysed on the original source anyway - and candidate evidence are both
     unaffected.
     """
 
     lowered = html_text.lower()
-    if any(prefix in lowered for _tag, prefix, _offsets in plans):
-        return None
-
-    nonce = secrets.token_hex(8)
-    markers = {tag: f"{prefix}{nonce}" for tag, prefix, _offsets in plans}
+    markers: dict[str, str] = {}
+    used_markers: set[str] = set()
+    for tag, prefix, _offsets in plans:
+        # The prefix itself is not reserved input. Only the complete generated
+        # attribute name must be absent from the page. This lets unrelated page
+        # markup mention our conventional prefix without disabling identity
+        # tracking for hidden/dropped malformed anchors.
+        for _attempt in range(32):
+            marker = f"{prefix}{secrets.token_hex(8)}"
+            if marker not in lowered and marker not in used_markers:
+                markers[tag] = marker
+                used_markers.add(marker)
+                break
+        else:
+            return None
 
     insertions: list[tuple[int, str]] = []
     for tag, _prefix, offsets in plans:

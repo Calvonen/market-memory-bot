@@ -90,7 +90,7 @@ class TemplateTokenIdentityTests(_Base):
         self.assertNotIn("https://investor.example.com/release.pdf", self._urls(html))
 
     def test_a_marker_shaped_source_attribute_cannot_steer_the_match(self):
-        """A page spelling the reserved prefix is refused instrumentation, not trusted."""
+        """Prefix-shaped page attributes cannot impersonate the generated marker."""
 
         for attribute in (
             f'{_TEMPLATE_MARKER_PREFIX}deadbeef="7"',
@@ -103,10 +103,10 @@ class TemplateTokenIdentityTests(_Base):
                     '<div><a href="/release.pdf">Q2-2026</a></div>'
                     "</template></svg>"
                 )
-                # Without the spoof this template is foreign and the anchor renders;
-                # the spoof can only push it the fail-closed way.
-                self.assertEqual(self._flags(html), [True])
-                self.assertNotIn("https://investor.example.com/release.pdf", self._urls(html))
+                # The source attribute is not the fresh generated marker, so the
+                # foreign template keeps its normal rendered-tree semantics.
+                self.assertEqual(self._flags(html), [False])
+                self.assertIn("https://investor.example.com/release.pdf", self._urls(html))
 
     def test_the_marker_never_reaches_a_candidate(self):
         html = (

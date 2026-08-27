@@ -212,7 +212,8 @@ class ResultsPageOfficialReleaseProviderTests(unittest.TestCase):
         self.assertIn("base_identity_failed", reason)
         self.assertNotIn("selection no_candidates", reason)
 
-    def test_reserved_base_marker_failure_is_auditable(self) -> None:
+    def test_reserved_base_marker_prefix_does_not_disable_identity_tracking(self) -> None:
+        document_url = "https://investor.example.com/downloads/2026-08-26-results.html"
         provider = self._provider()
         document, opener = self._discover(
             provider,
@@ -220,15 +221,15 @@ class ResultsPageOfficialReleaseProviderTests(unittest.TestCase):
                 PAGE_URL: self._page(
                     '<base data-mmb-base-token-spoof="0" href="/downloads/">'
                     '<a href="2026-08-26-results.html">Results</a>'
-                )
+                ),
+                document_url: _Response(_release_html(), final_url=document_url),
             },
         )
 
-        self.assertIsNone(document)
-        self.assertEqual(opener.opened, [PAGE_URL])
-        reason = provider.describe_no_release()
-        self.assertIsNotNone(reason)
-        self.assertIn("base_identity_failed", reason)
+        self.assertIsNotNone(document)
+        self.assertEqual(document.source_url, document_url)
+        self.assertEqual(opener.opened, [PAGE_URL, document_url])
+        self.assertIsNone(provider.describe_no_release())
 
 
     def test_cross_origin_base_failure_is_auditable(self) -> None:
@@ -825,6 +826,24 @@ class ResultsPageOfficialReleaseProviderTests(unittest.TestCase):
             provider,
             {
                 PAGE_URL: self._page(
+                    '<div hidden><a href href="/bad">Hidden malformed</a></div>'
+                    '<a href="/reports/2026-08-26-results.html">Half-year results</a>'
+                ),
+                document_url: _Response(_release_html(), final_url=document_url),
+            },
+        )
+        self.assertIsNotNone(document)
+        self.assertEqual(document.source_url, document_url)
+        self.assertEqual(opener.opened, [PAGE_URL, document_url])
+
+    def test_reserved_anchor_marker_prefix_does_not_poison_hidden_malformed_anchor(self) -> None:
+        document_url = "https://investor.example.com/reports/2026-08-26-results.html"
+        provider = self._provider()
+        document, opener = self._discover(
+            provider,
+            {
+                PAGE_URL: self._page(
+                    '<div data-mmb-anchor-token-spoof="0">Unrelated marker-like markup</div>'
                     '<div hidden><a href href="/bad">Hidden malformed</a></div>'
                     '<a href="/reports/2026-08-26-results.html">Half-year results</a>'
                 ),

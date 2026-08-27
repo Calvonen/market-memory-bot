@@ -187,7 +187,7 @@ class BaseTokenIdentityTests(_Base):
                 (),
             )
 
-    def test_a_source_spelling_a_reserved_marker_prefix_fails_closed(self) -> None:
+    def test_marker_prefix_text_does_not_disable_base_identity(self) -> None:
         for attribute in (
             f'{_BASE_MARKER_PREFIX}deadbeef="0"',
             f'{_BASE_MARKER_PREFIX.upper()}DEADBEEF="0"',
@@ -196,7 +196,7 @@ class BaseTokenIdentityTests(_Base):
             with self.subTest(attribute=attribute):
                 self.assertEqual(
                     self._urls(f'<div {attribute}></div><base href="/real/">'),
-                    (),
+                    self._resolved("/real/"),
                 )
 
     def test_the_base_marker_never_reaches_a_candidate(self) -> None:
