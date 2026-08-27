@@ -10,12 +10,9 @@ permissions:
 
 jobs:
   validate:
-    if: github.event.head_commit.message != 'fix: normalize official source read failures'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -23,50 +20,42 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-
           api = Path('trading_system/api.py')
           text = api.read_text()
           old = '''    def require_event_exists(event_id: str) -> None:\n        try:\n            event = get_repository().get(event_id)\n        except RuntimeError as exc:\n            raise HTTPException(status_code=503, detail=str(exc)) from exc\n        if event is None:\n            raise HTTPException(status_code=404, detail="Event not found")\n'''
           new = '''    def require_event_exists(event_id: str) -> None:\n        try:\n            event = get_repository().get(event_id)\n        except Exception as exc:\n            raise HTTPException(status_code=503, detail="Event repository read failed") from exc\n        if event is None:\n            raise HTTPException(status_code=404, detail="Event not found")\n'''
-          if old not in text:
-              raise SystemExit('require_event_exists patch marker not found')
+          if old not in text: raise SystemExit('event precheck marker not found')
           text = text.replace(old, new, 1)
           old = '''        try:\n            state = get_official_release_source_repository().get_state(event_id)\n        except RuntimeError as exc:\n            raise HTTPException(status_code=503, detail=str(exc)) from exc\n'''
           new = '''        try:\n            state = get_official_release_source_repository().get_state(event_id)\n        except Exception as exc:\n            raise HTTPException(status_code=503, detail="Official release source read failed") from exc\n'''
-          if old not in text:
-              raise SystemExit('source GET patch marker not found')
+          if old not in text: raise SystemExit('source read marker not found')
           api.write_text(text.replace(old, new, 1))
 
           tests = Path('tests/test_official_release_source_control_api.py')
           text = tests.read_text()
-          text = text.replace(
-              '''class _EventRepository:\n    def __init__(self, exists: bool = True):\n        self.exists = exists\n\n    def get(self, event_id: str):\n        return object() if self.exists and event_id == EVENT_ID else None\n''',
-              '''class _EventRepository:\n    def __init__(self, exists: bool = True, error: Exception | None = None):\n        self.exists = exists\n        self.error = error\n\n    def get(self, event_id: str):\n        if self.error is not None:\n            raise self.error\n        return object() if self.exists and event_id == EVENT_ID else None\n''',
-              1,
-          )
-          text = text.replace(
-              '''        self.set_error = None\n\n    def get_state(self, event_id: str):\n        self.state_calls.append(event_id)\n        return OfficialReleaseSourceState(self.source, self.version)\n''',
-              '''        self.set_error = None\n        self.read_error = None\n\n    def get_state(self, event_id: str):\n        self.state_calls.append(event_id)\n        if self.read_error is not None:\n            raise self.read_error\n        return OfficialReleaseSourceState(self.source, self.version)\n''',
-              1,
-          )
+          old = '''class _EventRepository:\n    def __init__(self, exists: bool = True):\n        self.exists = exists\n\n    def get(self, event_id: str):\n        return object() if self.exists and event_id == EVENT_ID else None\n'''
+          new = '''class _EventRepository:\n    def __init__(self, exists: bool = True, error: Exception | None = None):\n        self.exists = exists\n        self.error = error\n\n    def get(self, event_id: str):\n        if self.error is not None:\n            raise self.error\n        return object() if self.exists and event_id == EVENT_ID else None\n'''
+          if old not in text: raise SystemExit('event repo fixture marker not found')
+          text = text.replace(old, new, 1)
+          old = '''        self.set_error = None\n\n    def get_state(self, event_id: str):\n        self.state_calls.append(event_id)\n        return OfficialReleaseSourceState(self.source, self.version)\n'''
+          new = '''        self.set_error = None\n        self.read_error = None\n\n    def get_state(self, event_id: str):\n        self.state_calls.append(event_id)\n        if self.read_error is not None:\n            raise self.read_error\n        return OfficialReleaseSourceState(self.source, self.version)\n'''
+          if old not in text: raise SystemExit('source repo fixture marker not found')
+          text = text.replace(old, new, 1)
           marker = '''    def test_repository_failure_is_503(self):\n'''
           addition = '''    def test_source_read_client_exception_is_503(self):\n        source_repository = _SourceRepository()\n        source_repository.read_error = _ApiError("08006", "connection failure")\n        client = _client(source_repository)\n        response = client.get(\n            f"/api/v1/events/{EVENT_ID}/official-release-source",\n            headers={"X-MarketAI-Key": READ_KEY},\n        )\n        self.assertEqual(response.status_code, 503)\n        self.assertEqual(response.json()["detail"], "Official release source read failed")\n\n    def test_event_precheck_client_exception_is_503(self):\n        client = _client(event_repository=_EventRepository(error=_ApiError("08006", "connection failure")))\n        response = client.get(\n            f"/api/v1/events/{EVENT_ID}/official-release-source",\n            headers={"X-MarketAI-Key": READ_KEY},\n        )\n        self.assertEqual(response.status_code, 503)\n        self.assertEqual(response.json()["detail"], "Event repository read failed")\n\n'''
-          if marker not in text:
-              raise SystemExit('test insertion marker not found')
+          if marker not in text: raise SystemExit('test marker not found')
           tests.write_text(text.replace(marker, addition + marker, 1))
           PY
       - name: Install dependencies
         run: |
           python -m pip install -r requirements.txt
           python -m pip install pytest
-      - name: Compile and diff check
+      - name: Validate
         run: |
           python -m py_compile trading_system/api.py tests/test_official_release_source_control_api.py
           git diff --check
-      - name: Focused tests
-        run: python -m unittest tests.test_official_release_source_control_api -v
-      - name: Full canonical suite
-        run: python -m unittest discover -s tests -v
+          python -m unittest tests.test_official_release_source_control_api -v
+          python -m unittest discover -s tests -v
       - name: Commit validated fix
         run: |
           git config user.name Calvonen
