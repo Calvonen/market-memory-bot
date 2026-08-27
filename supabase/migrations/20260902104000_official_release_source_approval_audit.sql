@@ -1,8 +1,28 @@
 begin;
 
+-- Close the unaudited write surface in its own committed transaction before
+-- scanning or invalidating any legacy rows. Calls that started before this
+-- revoke may still be running, so the next transaction takes an ACCESS
+-- EXCLUSIVE lock and waits for them to finish before it snapshots legacy state.
+revoke all on function public.set_event_official_release_source(text, text, text, text, integer)
+  from service_role;
+revoke all on function public.clear_event_official_release_source(text, integer)
+  from service_role;
+
+commit;
+
+begin;
+
+-- The revoke above is now visible to new callers. This lock drains any old
+-- invocation that was already executing when the revoke committed and prevents
+-- it from re-activating a source after the migration's tombstone update.
+lock table public.event_official_release_sources in access exclusive mode;
+
 create table public.event_official_release_source_audit (
   id bigint generated always as identity primary key,
-  event_id text not null references public.market_events(event_id) on delete cascade,
+  -- Keep the canonical event identifier as historical data rather than a
+  -- cascading foreign key: audit records must survive event cleanup/replacement.
+  event_id text not null,
   action text not null check (action in ('set', 'clear')),
   actor text not null check (length(btrim(actor)) > 0),
   version integer not null check (version > 0),
@@ -18,7 +38,7 @@ create table public.event_official_release_source_audit (
 );
 
 comment on table public.event_official_release_source_audit is
-  'Append-only audit trail for privileged official release source approvals and clears.';
+  'Append-only audit trail for privileged official release source approvals and clears; retained independently of market_events lifecycle.';
 
 alter table public.event_official_release_source_audit enable row level security;
 revoke all on table public.event_official_release_source_audit from public, anon, authenticated, service_role;
@@ -167,11 +187,6 @@ begin
   return new_version;
 end;
 $$;
-
-revoke all on function public.set_event_official_release_source(text, text, text, text, integer)
-  from service_role;
-revoke all on function public.clear_event_official_release_source(text, integer)
-  from service_role;
 
 revoke all on function public.set_event_official_release_source_approved(text, text, text, text, integer, text)
   from public, anon, authenticated;
