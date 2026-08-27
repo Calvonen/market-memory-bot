@@ -7,8 +7,7 @@ from trading_system.official_release_source_repository import OfficialReleaseSou
 from trading_system.release_ingestion import ReleaseDocument
 from trading_system.results_page_release_candidates import (
     canonical_same_origin_url,
-    extract_results_page_candidates,
-    results_page_candidate_failure_reason,
+    extract_results_page_candidates_with_reason,
 )
 from trading_system.results_page_release_selection import (
     ResultsPageSelectionContext,
@@ -107,14 +106,22 @@ class ResultsPageOfficialReleaseProvider(ApprovedOriginDocumentFetcher):
             return None
 
         html_text, page_url = self._fetch_results_page_html()
-        candidates = extract_results_page_candidates(self.source, html_text, page_url=page_url)
+        candidates, failure_reason = extract_results_page_candidates_with_reason(
+            self.source,
+            html_text,
+            page_url=page_url,
+        )
         if not candidates:
-            failure_reason = results_page_candidate_failure_reason(html_text)
             if failure_reason == "base_identity_failed":
                 self._no_release_reason = (
                     f"results_page candidate extraction base_identity_failed: {page_url} could not "
                     "prove a safe one-to-one correspondence for the document base; refusing to "
                     "resolve or fetch release links"
+                )
+            elif failure_reason == "base_resolution_failed":
+                self._no_release_reason = (
+                    f"results_page candidate extraction base_resolution_failed: {page_url} declared "
+                    "an unusable or off-origin document base; refusing to resolve or fetch release links"
                 )
             else:
                 self._no_release_reason = (

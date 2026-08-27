@@ -878,19 +878,6 @@ def _canonical_candidate_url(base_url: str, href: str) -> str | None:
     return _canonical_https_url(candidate)
 
 
-def results_page_candidate_failure_reason(html_text: str) -> str | None:
-    """Explain a fail-closed parse outcome without changing extraction semantics.
-
-    ``extract_results_page_candidates`` deliberately returns an empty tuple for
-    both a genuinely empty page and an unprovable base/token correspondence.
-    Runtime ingestion needs to distinguish those outcomes for auditability, so
-    this helper exposes only the already-existing parse failure classification.
-    It is intended to be called only after extraction returned no candidates.
-    """
-
-    return "base_identity_failed" if _parse_html5_page(html_text) is None else None
-
-
 def canonical_same_origin_url(approved_url: str, url: str) -> str | None:
     """Canonicalise ``url`` under the candidate URL policy, or ``None`` if unsafe.
 
@@ -904,12 +891,12 @@ def canonical_same_origin_url(approved_url: str, url: str) -> str | None:
     return _canonical_candidate_url(approved_url, url)
 
 
-def extract_results_page_candidates(
+def extract_results_page_candidates_with_reason(
     source: OfficialReleaseSource,
     html_text: str,
     *,
     page_url: str | None = None,
-) -> tuple[ResultsPageReleaseCandidate, ...]:
+) -> tuple[tuple[ResultsPageReleaseCandidate, ...], str | None]:
     """Collect the same-origin HTTPS release links an approved page offers.
 
     ``page_url`` is the URL the markup was actually served from, which differs
@@ -931,7 +918,7 @@ def extract_results_page_candidates(
 
     approved_page_url = _canonical_candidate_url(source.source_url, source.source_url)
     if approved_page_url is None:
-        return ()
+        return (), "approved_page_url_failed"
 
     if page_url is None:
         base_url = source.source_url
@@ -946,7 +933,7 @@ def extract_results_page_candidates(
 
     parsed = _parse_html5_page(html_text)
     if parsed is None:
-        return ()
+        return (), "base_identity_failed"
     base_href, links = parsed
 
     if base_href is not None:
@@ -957,7 +944,7 @@ def extract_results_page_candidates(
         # response URL would resolve links the page did not mean.
         resolved_base = _canonical_candidate_url(base_url, base_href)
         if resolved_base is None:
-            return ()
+            return (), "base_resolution_failed"
         base_url = resolved_base
 
     aggregated: dict[str, dict[str, object]] = {}
@@ -988,4 +975,21 @@ def extract_results_page_candidates(
                 evidence_fields=tuple(record["fields"]),
             )
         )
-    return tuple(candidates)
+    return tuple(candidates), None
+
+
+def extract_results_page_candidates(
+    source: OfficialReleaseSource,
+    html_text: str,
+    *,
+    page_url: str | None = None,
+) -> tuple[ResultsPageReleaseCandidate, ...]:
+    """Backward-compatible candidate extraction API."""
+
+    candidates, _failure_reason = extract_results_page_candidates_with_reason(
+        source,
+        html_text,
+        page_url=page_url,
+    )
+    return candidates
+
