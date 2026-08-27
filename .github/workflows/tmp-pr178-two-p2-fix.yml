@@ -38,6 +38,11 @@ jobs:
           s = s.replace('deployed: 4', 'deployed: 5', 1)
           p.write_text(s)
 
+          p = Path('tests/test_official_release_source_approval_audit_sql.py')
+          s = p.read_text()
+          s = s.replace('REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 5', 'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 6')
+          p.write_text(s)
+
           p = Path('trading_system/official_release_source_repository.py')
           s = p.read_text()
           anchor = '        if source_kind not in _ALLOWED_SOURCE_KINDS:\n            raise ValueError("official release source_kind must be direct_url or results_page")\n'
@@ -65,7 +70,7 @@ jobs:
           python -m pip install pytest
       - name: Validate
         run: |
-          python -m py_compile trading_system/official_release_source_repository.py scripts/verify_supabase_schema.py tests/test_official_release_source_repository.py tests/test_official_release_source_missing_generation_recovery_sql.py tests/test_verify_supabase_schema.py
+          python -m py_compile trading_system/official_release_source_repository.py scripts/verify_supabase_schema.py tests/test_official_release_source_repository.py tests/test_official_release_source_missing_generation_recovery_sql.py tests/test_official_release_source_approval_audit_sql.py tests/test_verify_supabase_schema.py
           git diff --check
           python -m unittest discover -s tests -p 'test_official_release_source*.py' -v
           python -m unittest tests.test_verify_supabase_schema -v
@@ -74,6 +79,6 @@ jobs:
         run: |
           git config user.name 'Calvonen'
           git config user.email 'marko.raitanen@gmail.com'
-          git add scripts/verify_supabase_schema.py trading_system/official_release_source_repository.py tests/test_official_release_source_repository.py tests/test_official_release_source_missing_generation_recovery_sql.py tests/test_verify_supabase_schema.py
+          git add scripts/verify_supabase_schema.py trading_system/official_release_source_repository.py tests/test_official_release_source_repository.py tests/test_official_release_source_missing_generation_recovery_sql.py tests/test_official_release_source_approval_audit_sql.py tests/test_verify_supabase_schema.py
           git commit -m 'fix: recover source generations and reject NUL input'
           git push origin HEAD:feature/official-release-source-control-api
