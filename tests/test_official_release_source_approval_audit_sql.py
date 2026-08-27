@@ -75,6 +75,32 @@ class OfficialReleaseSourceApprovalAuditSqlTests(unittest.TestCase):
         self.assertGreaterEqual(self.sql.count("input_actor text"), 2)
         self.assertGreaterEqual(self.sql.count("insert into public.event_official_release_source_audit"), 4)
 
+    def test_v3_freezes_event_identity_set_before_legacy_drain(self):
+        event_lock = self.integrity_sql.index("lock table public.market_events in share mode")
+        identity_snapshot = self.integrity_sql.index("select event_id from public.market_events")
+        advisory_drain = self.integrity_sql.index(
+            "pg_advisory_xact_lock(hashtextextended(item.event_id, 2))"
+        )
+        source_lock = self.integrity_sql.index(
+            "lock table public.event_official_release_sources in access exclusive mode"
+        )
+        self.assertLess(event_lock, identity_snapshot)
+        self.assertLess(event_lock, advisory_drain)
+        self.assertLess(advisory_drain, source_lock)
+
+    def test_v3_keeps_event_delete_blocked_until_fk_detached_and_trigger_installed(self):
+        event_lock = self.integrity_sql.index("lock table public.market_events in share mode")
+        fk_drop = self.integrity_sql.index(
+            "drop constraint if exists event_official_release_sources_event_id_fkey"
+        )
+        trigger_create = self.integrity_sql.index(
+            "create trigger tombstone_official_release_source_before_event_delete"
+        )
+        final_commit = self.integrity_sql.rindex("commit;")
+        self.assertLess(event_lock, fk_drop)
+        self.assertLess(fk_drop, trigger_create)
+        self.assertLess(trigger_create, final_commit)
+
     def test_v3_drains_advisory_queues_and_rejects_unaudited_active_rows(self):
         self.assertIn("pg_advisory_xact_lock(hashtextextended(item.event_id, 2))", self.integrity_sql)
         self.assertIn("migration:post-revoke-unaudited-source", self.integrity_sql)
