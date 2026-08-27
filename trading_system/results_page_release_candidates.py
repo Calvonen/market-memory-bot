@@ -33,37 +33,6 @@ _SIMPLE_HTML_TEXT_TAGS = frozenset(
     }
 )
 _FOREIGN_ROOT_TAGS = frozenset({"svg", "math"})
-_SVG_HTML_INTEGRATION_POINT_TAGS = frozenset({"desc", "foreignobject", "title"})
-_MATHML_TEXT_INTEGRATION_POINT_TAGS = frozenset({"mi", "mn", "mo", "ms", "mtext"})
-_INTEGRATION_NAME_COLLISIONS = frozenset(
-    {*_SVG_HTML_INTEGRATION_POINT_TAGS, *_MATHML_TEXT_INTEGRATION_POINT_TAGS, "annotation-xml"}
-)
-_FOREIGN_BREAKOUT_TAGS = frozenset(
-    {
-        "b", "big", "blockquote", "body", "br", "center", "code", "dd", "div", "dl", "dt",
-        "em", "embed", "font", "h1", "h2", "h3", "h4", "h5", "h6", "head", "hr", "i", "img",
-        "li", "listing", "menu", "meta", "nobr", "ol", "p", "pre", "ruby", "s", "small", "span",
-        "strong", "strike", "sub", "sup", "table", "tt", "u", "ul", "var",
-    }
-)
-_HTML_VOID_TAGS = frozenset(
-    {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
-)
-# A special HTML element above an integration point prevents an unrelated end tag
-# from reaching that integration point under the HTML "any other end tag" rules.
-# We only need these scope barriers while an integration point is active; ordinary
-# phrasing elements are intentionally not tracked so this scanner does not become
-# a second tree builder.
-_HTML_SCOPE_BARRIER_TAGS = frozenset(
-    {
-        "address", "article", "aside", "blockquote", "button", "caption", "center", "dd", "details",
-        "dialog", "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2",
-        "h3", "h4", "h5", "h6", "header", "hgroup", "li", "listing", "main", "marquee", "menu", "nav",
-        "noembed", "noframes", "noscript", "object", "ol", "p", "plaintext", "pre", "script", "search",
-        "section", "select", "style", "summary", "table", "tbody", "td", "textarea", "tfoot", "th", "thead",
-        "title", "tr", "ul", "xmp",
-    }
-)
 _RENDERED_BREAK_TAGS = frozenset(
     {
         "address", "article", "aside", "blockquote", "br", "caption", "center", "dd", "details", "dialog",
@@ -167,185 +136,103 @@ def _preserve_invalid_scalars_as_control(html_text: str) -> str:
     return _NUMERIC_ENTITY_RE.sub(replace_invalid, html_text)
 
 
-class _RawAnchorHrefSafetyScanner(HTMLParser):
-    """Track raw anchor occurrences while html5lib remains tree-construction authority."""
+class _RawTemplateAndHrefScanner(HTMLParser):
+    """Raw href safety plus the lexical <template> nesting html5lib cannot preserve.
+
+    html5lib 1.1 has no <template> support: it never pushes the
+    active-formatting-elements marker HTML5 requires, so the anchor adoption
+    agency can hoist a template-local anchor out of its template and into
+    rendered content, where the tree no longer shows it was template content.
+    That lexical nesting - which <template> tokens enclose which anchor - is the
+    single fact the tree cannot be asked for, so it is the only thing inferred
+    here.
+
+    Everything else about the parse is read back off html5lib's tree instead of
+    re-derived: above all *which namespace* a <template> lands in, which depends
+    on integration points, annotation-xml encodings, MathML child exceptions,
+    breakout tags, special-element scope barriers and implied end tags. html5lib
+    already resolves all of that, so this scanner deliberately knows nothing
+    about it and cannot drift into being a second tree builder.
+
+    The one exception is the foreign-root stack, which exists only because two
+    tokenizer-level facts have no tree to read them from: a </svg> or </math>
+    also closes the templates opened inside it, and inside foreign content the
+    text-only HTML elements hold markup rather than text. Both are needed to
+    keep the raw token sequence aligned with the tree.
+    """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.unsafe_hrefs: set[str] = set()
-        self.anchor_occurrences: dict[str, list[bool]] = {}
-        # (kind, local-name), newest last. This is deliberately scope bookkeeping,
-        # not a general DOM stack.
-        self._scope_stack: list[tuple[str, str]] = []
-        self._last_start_was_foreign = False
-
-    _FOREIGN_KINDS = frozenset({"foreign_root", "integration", "template_foreign"})
-    _TEMPLATE_KINDS = frozenset({"template_html", "template_foreign"})
-
-    @property
-    def template_hrefs(self) -> set[str]:
-        return {href for href, flags in self.anchor_occurrences.items() if any(flags)}
+        # href -> one entry per anchor occurrence in source order, each the set of
+        # <template> token indices enclosing it. Which of those tokens are HTML
+        # templates is decided later, from the tree.
+        self.anchor_occurrences: dict[str, list[frozenset[int]]] = {}
+        self.template_token_count = 0
+        self._open_templates: list[int] = []
+        # (name, number of templates open when this root was opened)
+        self._foreign_roots: list[tuple[str, int]] = []
 
     def _record_anchor(self, attrs: list[tuple[str, str | None]]) -> None:
         hrefs = [value for key, value in attrs if key.lower() == "href" and value is not None]
         raw_start_tag = self.get_starttag_text() or ""
         if len(hrefs) != 1 or not _raw_href_is_safe(raw_start_tag, hrefs[0] if hrefs else None):
             self.unsafe_hrefs.update(hrefs)
+        enclosing = frozenset(self._open_templates)
         for href in hrefs:
-            self.anchor_occurrences.setdefault(href, []).append(self._inside_html_template())
+            self.anchor_occurrences.setdefault(href, []).append(enclosing)
 
-    def _inside_html_template(self) -> bool:
-        return any(kind == "template_html" for kind, _ in self._scope_stack)
-
-    def _start_tag_mode(self) -> str:
-        if not self._scope_stack:
-            return "html"
-        return "foreign" if self._scope_stack[-1][0] in ("foreign_root", "template_foreign") else "html"
-
-    def _end_tag_mode(self) -> str:
-        if not self._scope_stack:
-            return "html"
-        return "foreign" if self._scope_stack[-1][0] in self._FOREIGN_KINDS else "html"
-
-    def _current_foreign_root(self) -> str | None:
-        for kind, name in reversed(self._scope_stack):
-            if kind == "foreign_root":
-                return name
-        return None
-
-    @staticmethod
-    def _attribute_value(attrs: list[tuple[str, str | None]], wanted: str) -> str | None:
-        wanted = wanted.lower()
-        for key, value in attrs:
-            if key.lower() == wanted:
-                return value
-        return None
-
-    def _is_html_integration_point(self, lowered: str, attrs: list[tuple[str, str | None]]) -> bool:
-        root = self._current_foreign_root()
-        if root == "svg":
-            return lowered in _SVG_HTML_INTEGRATION_POINT_TAGS
-        if root != "math":
-            return False
-        if lowered in _MATHML_TEXT_INTEGRATION_POINT_TAGS:
-            return True
-        if lowered != "annotation-xml":
-            return False
-        encoding = self._attribute_value(attrs, "encoding")
-        if encoding is None:
-            return False
-        return encoding.strip().lower() in {"text/html", "application/xhtml+xml"}
-
-    def _integration_active(self) -> bool:
-        return any(kind == "integration" for kind, _ in self._scope_stack)
-
-    def _open_element(
-        self,
-        lowered: str,
-        attrs: list[tuple[str, str | None]],
-        self_closing: bool,
-    ) -> None:
-        mode = self._start_tag_mode()
-
+    def _open_element(self, lowered: str, self_closing: bool) -> None:
         if lowered in _FOREIGN_ROOT_TAGS:
-            self._last_start_was_foreign = True
+            # A foreign element acknowledges the self-closing flag.
             if not self_closing:
-                self._scope_stack.append(("foreign_root", lowered))
-            return
-
-        if mode == "foreign":
-            if self._is_html_integration_point(lowered, attrs):
-                self._last_start_was_foreign = True
-                if not self_closing:
-                    self._scope_stack.append(("integration", lowered))
-                return
-            if lowered in _FOREIGN_BREAKOUT_TAGS:
-                while self._scope_stack and self._scope_stack[-1][0] in ("foreign_root", "template_foreign"):
-                    self._scope_stack.pop()
-                self._last_start_was_foreign = False
-                mode = "html"
-            else:
-                self._last_start_was_foreign = True
-                if lowered == "template" and not self_closing:
-                    self._scope_stack.append(("template_foreign", lowered))
-                return
-
-        self._last_start_was_foreign = False
-        if lowered == "template":
-            # HTML ignores the self-closing flag on non-void template.
-            self._scope_stack.append(("template_html", lowered))
-        elif lowered in _INTEGRATION_NAME_COLLISIONS:
-            # In HTML mode this is an ordinary HTML element sharing a name with a
-            # foreign integration point. Its end tag must close this occurrence,
-            # not the actual integration point underneath it.
-            self._scope_stack.append(("html_shadow", lowered))
-        elif (
-            self._integration_active()
-            and lowered in _HTML_SCOPE_BARRIER_TAGS
-            and lowered not in _HTML_VOID_TAGS
-        ):
-            # A special HTML child above an integration point blocks an unrelated
-            # integration-point end tag from reaching the foreign node. Tracking
-            # only these barriers keeps malformed input fail-closed without
-            # reproducing the whole HTML open-elements stack.
-            self._scope_stack.append(("html_barrier", lowered))
-
-    def _close_foreign(self, lowered: str) -> bool:
-        for index in range(len(self._scope_stack) - 1, -1, -1):
-            kind, name = self._scope_stack[index]
-            if kind in self._FOREIGN_KINDS:
-                if name == lowered:
-                    del self._scope_stack[index:]
-                    return True
-                continue
-            return False
-        return True
-
-    def _close_html(self, lowered: str) -> None:
-        if lowered == "template":
-            for index in range(len(self._scope_stack) - 1, -1, -1):
-                if self._scope_stack[index][0] in self._TEMPLATE_KINDS:
-                    del self._scope_stack[index:]
-                    return
-            return
-
-        for index in range(len(self._scope_stack) - 1, -1, -1):
-            kind, name = self._scope_stack[index]
-            if kind in {"html_shadow", "html_barrier"}:
-                if name == lowered:
-                    del self._scope_stack[index:]
-                    return
-                if kind == "html_barrier":
-                    # A special HTML node encountered before the requested element
-                    # makes the end tag a parse error; do not release underlying
-                    # foreign/integration/template scope.
-                    return
-                continue
-            return
+                self._foreign_roots.append((lowered, len(self._open_templates)))
+        elif lowered == "template":
+            # Opened unconditionally. A foreign <template> is tracked too, so its
+            # own end tag closes it rather than an enclosing HTML template; the
+            # tree decides which of the two this token turned out to be.
+            self._open_templates.append(self.template_token_count)
+            self.template_token_count += 1
 
     def set_cdata_mode(self, elem: str, **kwargs) -> None:
-        if self._last_start_was_foreign:
+        # script/style/title/textarea and friends are text-only in HTML, but as
+        # foreign elements their children are markup. Staying in normal mode
+        # inside foreign content keeps anchors from going unrecorded, which would
+        # otherwise let an occurrence slip past the match on the fast path.
+        if self._foreign_roots:
             return
         super().set_cdata_mode(elem, **kwargs)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lowered = tag.lower()
-        self._open_element(lowered, attrs, self_closing=False)
+        self._open_element(lowered, self_closing=False)
+        if lowered == "a":
+            self._record_anchor(attrs)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        lowered = tag.lower()
+        self._open_element(lowered, self_closing=True)
         if lowered == "a":
             self._record_anchor(attrs)
 
     def handle_endtag(self, tag: str) -> None:
         lowered = tag.lower()
-        self._last_start_was_foreign = False
-        if self._end_tag_mode() == "foreign" and self._close_foreign(lowered):
-            return
-        self._close_html(lowered)
-
-    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        lowered = tag.lower()
-        self._open_element(lowered, attrs, self_closing=True)
-        if lowered == "a":
-            self._record_anchor(attrs)
+        if lowered in _FOREIGN_ROOT_TAGS:
+            for index in range(len(self._foreign_roots) - 1, -1, -1):
+                name, template_depth = self._foreign_roots[index]
+                if name == lowered:
+                    # HTML5 pops through the matching opener, which also closes
+                    # the templates that root still held open. Retiring them here
+                    # is what keeps an unclosed foreign template from suppressing
+                    # the rest of the document.
+                    del self._foreign_roots[index:]
+                    del self._open_templates[template_depth:]
+                    return
+            # No matching opener: HTML5 ignores the token, and so do we.
+        elif lowered == "template" and self._open_templates:
+            # Close the innermost open template token. With nothing open it
+            # releases nothing at all.
+            self._open_templates.pop()
 
 
 def _element_name(tag: object) -> tuple[str | None, str]:
@@ -457,8 +344,74 @@ def _iter_all_tree_anchors(root):
             yield element
 
 
+def _html_template_token_indices(root, template_token_count: int) -> frozenset[int]:
+    """Ask the tree which <template> tokens turned out to be HTML templates.
+
+    Whether a <template> carries HTML template semantics depends on the whole of
+    foreign-content tree construction - integration points, the exact
+    annotation-xml encoding, the MathML mglyph/malignmark child exceptions,
+    breakout start tags, special-element scope barriers and implied end tags.
+    html5lib resolves all of it, so the namespaces are read back off the tree in
+    document order rather than re-derived from the raw source.
+
+    When the tree does not hold one element per token - html5lib dropped a
+    <template> in an insertion mode that ignores it - the tokens cannot be
+    matched, so every one of them is treated as an HTML template. That fails
+    closed: hidden template evidence stays suppressed.
+    """
+
+    namespaces = [
+        _element_name(element.tag)[0]
+        for element in root.iter()
+        if _element_name(element.tag)[1] == "template"
+    ]
+    if len(namespaces) != template_token_count:
+        return frozenset(range(template_token_count))
+    return frozenset(
+        index for index, namespace in enumerate(namespaces) if namespace == _HTML_NAMESPACE
+    )
+
+
+def _template_local_occurrence_flags(html_text: str) -> dict[str, list[bool]]:
+    """Resolved template-local classification per href, in source order.
+
+    The scanner alone cannot answer this any more - it records which <template>
+    tokens enclose each anchor, and the tree says which of those tokens are HTML
+    templates. This seam exposes the combined answer, which is what suppression
+    actually acts on.
+    """
+
+    scanner = _RawTemplateAndHrefScanner()
+    scanner.feed(html_text)
+    scanner.close()
+    fragment = html5lib.parseFragment(
+        _preserve_invalid_scalars_as_control(html_text),
+        treebuilder="etree",
+        namespaceHTMLElements=True,
+    )
+    html_templates = _html_template_token_indices(fragment, scanner.template_token_count)
+    return {
+        href: [bool(enclosing & html_templates) for enclosing in occurrences]
+        for href, occurrences in scanner.anchor_occurrences.items()
+    }
+
+
 def _template_local_tree_anchors(root, safety_scanner) -> set:
-    template_hrefs = safety_scanner.template_hrefs
+    """Match each tree anchor back to the raw occurrence it came from.
+
+    Both sequences are in document order and count every anchor in any
+    namespace, so a foreign anchor cannot consume an index belonging to an HTML
+    one. When their lengths disagree - html5lib cloned an anchor through the
+    adoption agency, or dropped one the scanner still saw - no occurrence can be
+    tied to its source spelling, so the whole href fails closed.
+    """
+
+    html_templates = _html_template_token_indices(root, safety_scanner.template_token_count)
+    template_hrefs = {
+        href
+        for href, occurrences in safety_scanner.anchor_occurrences.items()
+        if any(enclosing & html_templates for enclosing in occurrences)
+    }
     if not template_hrefs:
         return set()
 
@@ -476,7 +429,9 @@ def _template_local_tree_anchors(root, safety_scanner) -> set:
             suppressed.update(anchors)
             continue
         suppressed.update(
-            anchor for anchor, is_template_local in zip(anchors, occurrences) if is_template_local
+            anchor
+            for anchor, enclosing in zip(anchors, occurrences)
+            if enclosing & html_templates
         )
     return suppressed
 
@@ -509,7 +464,7 @@ def _iter_visible_html_anchors(root):
 
 
 def _parse_html5_links(html_text: str) -> list[tuple[str, str | None, tuple[str, ...]]]:
-    safety_scanner = _RawAnchorHrefSafetyScanner()
+    safety_scanner = _RawTemplateAndHrefScanner()
     safety_scanner.feed(html_text)
     safety_scanner.close()
 

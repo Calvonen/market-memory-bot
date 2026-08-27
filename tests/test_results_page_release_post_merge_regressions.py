@@ -4,7 +4,7 @@ import unittest
 
 from trading_system.official_release_source_repository import OfficialReleaseSource
 from trading_system.results_page_release_candidates import (
-    _RawAnchorHrefSafetyScanner,
+    _template_local_occurrence_flags,
     extract_results_page_candidates,
 )
 
@@ -883,18 +883,25 @@ class ResultsPageReleasePostMergeRegressionTests(unittest.TestCase):
 
 
 class ResultsPageReleaseScopeClassificationTests(unittest.TestCase):
-    """Classification of anchor occurrences, at the scanner rather than the tree.
+    """The resolved template-local classification, per anchor occurrence.
 
     html5lib sometimes leaves a misclassified anchor nested where the visible
     walk drops it anyway, so a leak is not always observable in the candidates.
-    These pin the classification itself, which is what suppression relies on.
+    These pin the classification itself, which is what suppression relies on:
+    the scanner supplies the lexical template nesting and the tree supplies the
+    namespace of each template token.
     """
 
+    def _source(self) -> OfficialReleaseSource:
+        return OfficialReleaseSource(
+            event_id="calendar:test-event",
+            source_kind="results_page",
+            source_url="https://investor.example.com/results/index.html",
+            version=1,
+        )
+
     def _template_local(self, html: str, href: str = "/release.pdf") -> list[bool]:
-        scanner = _RawAnchorHrefSafetyScanner()
-        scanner.feed(html)
-        scanner.close()
-        return scanner.anchor_occurrences.get(href, [])
+        return _template_local_occurrence_flags(html).get(href, [])
 
     def test_self_closing_child_of_integration_point_keeps_the_scope_open(self):
         self.assertEqual(
@@ -952,20 +959,40 @@ class ResultsPageReleaseScopeClassificationTests(unittest.TestCase):
             [False],
         )
 
-    def test_foreign_elements_hold_markup_while_html_text_elements_do_not(self):
-        # <svg><script> is a foreign element whose children are markup, so the
-        # anchor is recorded; inside foreignObject the same tag is HTML raw text.
+    def test_text_only_elements_in_foreign_content_hold_markup(self):
+        """Inside <svg> the text-only HTML elements are foreign and hold markup.
+
+        The scanner deliberately does not tell an integration point apart here -
+        that is html5lib's job - so an anchor inside <foreignObject><script>,
+        which html5lib treats as HTML raw text, is recorded even though the tree
+        has no such anchor. The occurrence count then disagrees and the href
+        fails closed rather than leaking.
+        """
         self.assertEqual(
             self._template_local('<svg><script><a href="/release.pdf">Q2-2026</a></script></svg>'),
             [False],
         )
-        self.assertEqual(
-            self._template_local(
-                '<svg><foreignObject><script><a href="/release.pdf">Q2-2026</a></script>'
-                '</foreignObject></svg>'
-            ),
-            [],
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<template><a href="/release.pdf">Q2-2026</a></template>'
+            '<svg><foreignObject><script><a href="/release.pdf">Q2-2026</a></script>'
+            '</foreignObject></svg>'
+            '<a href="/release.pdf">Annual report</a>',
         )
+        self.assertEqual(candidates, ())
+
+    def test_a_template_free_href_is_never_touched_by_that_fail_closed_path(self):
+        """The mismatch only costs hrefs a template also spells, never every page."""
+
+        candidates = extract_results_page_candidates(
+            self._source(),
+            '<svg><foreignObject><script><a href="/release.pdf">Q2-2026</a></script>'
+            '</foreignObject></svg>'
+            '<a href="/release.pdf">Annual report</a>',
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/release.pdf")
+        self.assertEqual(candidates[0].evidence_fields, ("Annual report",))
 
 
 if __name__ == "__main__":
