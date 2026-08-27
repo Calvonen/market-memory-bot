@@ -45,6 +45,10 @@ _TEMPLATE_MARKER_PREFIX = "data-mmb-template-token-"
 # The same identity mechanism for <base>: a base can be foster parented or
 # dropped, so tree position is not an identity for it either.
 _BASE_MARKER_PREFIX = "data-mmb-base-token-"
+# Only malformed duplicate/valueless anchor hrefs receive identity markers.
+# Instrumenting ordinary anchors can perturb malformed-HTML tree repair, so
+# safe anchors deliberately remain byte-for-byte unchanged before html5lib.
+_ANCHOR_MARKER_PREFIX = "data-mmb-anchor-token-"
 _RENDERED_BREAK_TAGS = frozenset(
     {
         "address", "article", "aside", "blockquote", "br", "caption", "center", "dd", "details", "dialog",
@@ -176,7 +180,9 @@ class _RawTemplateAndHrefScanner(HTMLParser):
     def __init__(self, html_template_tokens: frozenset[int] | None = None) -> None:
         super().__init__(convert_charrefs=True)
         self.unsafe_hrefs: set[str] = set()
-        self.unsafe_anchor_structure = False
+        # Stable identity is needed only for structurally malformed anchors.
+        self.malformed_anchor_spans: list[int] = []
+        self.malformed_anchor_templates: list[frozenset[int]] = []
         # href -> one entry per anchor occurrence in source order, each the set of
         # <template> token indices enclosing it. Which of those tokens are HTML
         # templates is decided later, from the tree.
@@ -204,15 +210,16 @@ class _RawTemplateAndHrefScanner(HTMLParser):
         href_attrs = [value for key, value in attrs if key.lower() == "href"]
         hrefs = [value for value in href_attrs if value is not None]
         raw_start_tag = self.get_starttag_text() or ""
-        if (
-            len(href_attrs) != 1
-            or len(hrefs) != 1
-            or not _raw_href_is_safe(raw_start_tag, hrefs[0])
-        ):
-            self.unsafe_hrefs.update(hrefs)
-            if href_attrs and (len(href_attrs) != 1 or len(hrefs) != 1):
-                self.unsafe_anchor_structure = True
         enclosing = frozenset(self._open_templates)
+        malformed_structure = bool(href_attrs) and (
+            len(href_attrs) != 1 or len(hrefs) != 1
+        )
+        if malformed_structure:
+            self.malformed_anchor_spans.append(self._source_offset())
+            self.malformed_anchor_templates.append(enclosing)
+        elif len(hrefs) == 1 and not _raw_href_is_safe(raw_start_tag, hrefs[0]):
+            self.unsafe_hrefs.add(hrefs[0])
+
         for href in hrefs:
             self.anchor_occurrences.setdefault(href, []).append(enclosing)
 
@@ -543,13 +550,13 @@ def _scan_and_parse(html_text: str):
     probe.feed(html_text)
     probe.close()
 
-    instrumented = _instrument_raw_start_tags(
-        html_text,
-        (
-            ("template", _TEMPLATE_MARKER_PREFIX, probe.template_spans),
-            ("base", _BASE_MARKER_PREFIX, probe.base_spans),
-        ),
-    )
+    plans: list[tuple[str, str, list[int]]] = [
+        ("template", _TEMPLATE_MARKER_PREFIX, probe.template_spans),
+        ("base", _BASE_MARKER_PREFIX, probe.base_spans),
+    ]
+    if probe.malformed_anchor_spans:
+        plans.append(("a", _ANCHOR_MARKER_PREFIX, probe.malformed_anchor_spans))
+    instrumented = _instrument_raw_start_tags(html_text, tuple(plans))
     source, markers = instrumented if instrumented is not None else (html_text, {})
     fragment = html5lib.parseFragment(
         _preserve_invalid_scalars_as_control(source),
@@ -563,7 +570,7 @@ def _scan_and_parse(html_text: str):
     scanner = _RawTemplateAndHrefScanner(html_template_tokens=html_templates)
     scanner.feed(html_text)
     scanner.close()
-    return scanner, fragment, html_templates, markers.get("base")
+    return scanner, fragment, html_templates, markers.get("base"), markers.get("a")
 
 
 def _template_local_occurrence_flags(html_text: str) -> dict[str, list[bool]]:
@@ -575,7 +582,7 @@ def _template_local_occurrence_flags(html_text: str) -> dict[str, list[bool]]:
     actually acts on.
     """
 
-    scanner, _fragment, html_templates, _base_marker = _scan_and_parse(html_text)
+    scanner, _fragment, html_templates, _base_marker, _anchor_marker = _scan_and_parse(html_text)
     return {
         href: [bool(enclosing & html_templates) for enclosing in occurrences]
         for href, occurrences in scanner.anchor_occurrences.items()
@@ -646,6 +653,35 @@ def _iter_visible_html_anchors(root):
             yield from walk(child)
 
     yield from walk(root, True)
+
+
+def _has_candidate_relevant_malformed_anchor(
+    root,
+    safety_scanner,
+    html_templates: frozenset[int],
+    anchor_marker: str | None,
+) -> bool:
+    """Whether a malformed href occurrence can survive as a visible candidate."""
+    relevant_tokens = {
+        token
+        for token, enclosing in enumerate(safety_scanner.malformed_anchor_templates)
+        if not (enclosing & html_templates)
+    }
+    if not relevant_tokens:
+        return False
+    if anchor_marker is None:
+        return True
+
+    token_count = len(safety_scanner.malformed_anchor_templates)
+    for anchor in _iter_visible_html_anchors(root):
+        token = _marker_token(anchor, anchor_marker)
+        if token is None:
+            continue
+        if not 0 <= token < token_count:
+            return True
+        if token in relevant_tokens:
+            return True
+    return False
 
 
 _BASE_FAILED_CLOSED = object()
@@ -724,13 +760,15 @@ def _effective_base_href(root, safety_scanner, html_templates: frozenset[int], b
 
 def _parse_html5_page(html_text: str):
     """Return ``(base href or None, links)``, or ``None`` when the page fails closed."""
-    safety_scanner, fragment, html_templates, base_marker = _scan_and_parse(html_text)
+    safety_scanner, fragment, html_templates, base_marker, anchor_marker = _scan_and_parse(html_text)
     base_href = _effective_base_href(fragment, safety_scanner, html_templates, base_marker)
     if base_href is _BASE_FAILED_CLOSED:
         return None
     if base_href is _BASE_VALUE_FAILED_CLOSED:
         return _BASE_VALUE_FAILED_CLOSED
-    if safety_scanner.unsafe_anchor_structure:
+    if _has_candidate_relevant_malformed_anchor(
+        fragment, safety_scanner, html_templates, anchor_marker
+    ):
         return _ANCHOR_STRUCTURE_FAILED_CLOSED
     template_local_anchors = _template_local_tree_anchors(
         fragment, safety_scanner, html_templates

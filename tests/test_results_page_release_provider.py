@@ -818,6 +818,56 @@ class ResultsPageOfficialReleaseProviderTests(unittest.TestCase):
         self.assertIsNotNone(reason)
         self.assertIn("anchor_structure_failed", reason)
 
+    def test_hidden_malformed_anchor_does_not_poison_visible_release_candidate(self) -> None:
+        document_url = "https://investor.example.com/reports/2026-08-26-results.html"
+        provider = self._provider()
+        document, opener = self._discover(
+            provider,
+            {
+                PAGE_URL: self._page(
+                    '<div hidden><a href href="/bad">Hidden malformed</a></div>'
+                    '<a href="/reports/2026-08-26-results.html">Half-year results</a>'
+                ),
+                document_url: _Response(_release_html(), final_url=document_url),
+            },
+        )
+        self.assertIsNotNone(document)
+        self.assertEqual(document.source_url, document_url)
+        self.assertEqual(opener.opened, [PAGE_URL, document_url])
+
+    def test_template_local_malformed_anchor_does_not_poison_visible_release_candidate(self) -> None:
+        document_url = "https://investor.example.com/reports/2026-08-26-results.html"
+        provider = self._provider()
+        document, opener = self._discover(
+            provider,
+            {
+                PAGE_URL: self._page(
+                    '<template><a href href="/bad">Template malformed</a></template>'
+                    '<a href="/reports/2026-08-26-results.html">Half-year results</a>'
+                ),
+                document_url: _Response(_release_html(), final_url=document_url),
+            },
+        )
+        self.assertIsNotNone(document)
+        self.assertEqual(document.source_url, document_url)
+        self.assertEqual(opener.opened, [PAGE_URL, document_url])
+
+    def test_visible_malformed_anchor_still_fails_before_document_fetch(self) -> None:
+        provider = self._provider()
+        document, opener = self._discover(
+            provider,
+            {
+                PAGE_URL: self._page(
+                    '<a href href="/reports/2026-08-26-results.html">Half-year results</a>'
+                )
+            },
+        )
+        self.assertIsNone(document)
+        self.assertEqual(opener.opened, [PAGE_URL])
+        reason = provider.describe_no_release()
+        self.assertIsNotNone(reason)
+        self.assertIn("anchor_structure_failed", reason)
+
     def test_single_empty_href_does_not_poison_other_candidates(self) -> None:
         self.assertEqual(
             self._candidate_urls(
