@@ -38,6 +38,9 @@ _FOREIGN_ROOT_TAGS = frozenset({"svg", "math"})
 # html5lib carries through reparenting. Never read from user input: a page that
 # spells the prefix itself refuses instrumentation and falls back to fail-closed.
 _TEMPLATE_MARKER_PREFIX = "data-mmb-template-token-"
+# The same identity mechanism for <base>: a base can be foster parented or
+# dropped, so tree position is not an identity for it either.
+_BASE_MARKER_PREFIX = "data-mmb-base-token-"
 _RENDERED_BREAK_TAGS = frozenset(
     {
         "address", "article", "aside", "blockquote", "br", "caption", "center", "dd", "details", "dialog",
@@ -177,6 +180,9 @@ class _RawTemplateAndHrefScanner(HTMLParser):
         # (the tag carries exactly one safe href, the <template> tokens enclosing
         # it). Which of those tokens are HTML templates is decided from the tree.
         self.base_occurrences: list[tuple[bool, frozenset[int]]] = []
+        # Source offset of each <base> start tag, so each token can be given an
+        # identity html5lib preserves through reparenting.
+        self.base_spans: list[int] = []
         self.template_token_count = 0
         # Source offset of each <template> start tag, so each token can be given
         # an identity html5lib preserves through foster parenting.
@@ -202,6 +208,7 @@ class _RawTemplateAndHrefScanner(HTMLParser):
         hrefs = [value for key, value in attrs if key.lower() == "href" and value is not None]
         raw_start_tag = self.get_starttag_text() or ""
         safe_href = len(hrefs) == 1 and _raw_href_is_safe(raw_start_tag, hrefs[0])
+        self.base_spans.append(self._source_offset())
         self.base_occurrences.append((safe_href, frozenset(self._open_templates)))
 
     def feed(self, data: str) -> None:
@@ -400,38 +407,70 @@ def _iter_all_tree_bases(root):
             yield element
 
 
-def _instrument_template_tokens(html_text: str, spans: list[int]) -> tuple[str, str] | None:
-    """Give every raw <template> start tag an identity that survives reparenting.
+def _instrument_raw_start_tags(
+    html_text: str,
+    plans: tuple[tuple[str, str, list[int]], ...],
+) -> tuple[str, dict[str, str]] | None:
+    """Give selected raw start tags an identity that survives reparenting.
 
-    Tree preorder is not an identity: foster parenting can move a later template
-    ahead of an earlier one while the counts still match, so position alone would
-    map a token to the wrong element. A marker attribute travels with the element
-    instead, so a token can be matched to exactly its own element wherever
-    html5lib puts it.
+    Tree preorder is not an identity: tree construction can move a later element
+    ahead of an earlier one - or drop it outright - while the counts still match,
+    so position alone would map a token to the wrong element. A marker attribute
+    travels with the element instead, so a token can be matched to exactly its
+    own element wherever html5lib puts it. ``<template>`` and ``<base>`` both
+    need this, and both need it the same way, so it is done once here.
 
-    Returns the instrumented source and the marker's attribute name, or None when
-    instrumentation cannot be trusted - the caller then fails closed. The marker
-    is never read from the page: a source that spells the reserved prefix at all
-    is refused, and the name carries a per-parse nonce on top of that, so a page
-    cannot forge or predict one. Only <template> start tags are touched, so raw
-    href safety - which is analysed on the original source anyway - is unaffected.
+    ``plans`` is one ``(tag name, reserved prefix, source offsets)`` per tag
+    kind. Returns the instrumented source and each kind's marker attribute name,
+    or None when instrumentation cannot be trusted - the caller then fails
+    closed. The markers are never read from the page: a source that spells any
+    reserved prefix at all is refused, and the names carry a per-parse nonce on
+    top of that, so a page cannot forge or predict one. Only the listed start
+    tags are touched, and none of them carries text, so raw href safety - which
+    is analysed on the original source anyway - and candidate evidence are both
+    unaffected.
     """
 
-    if _TEMPLATE_MARKER_PREFIX in html_text.lower():
+    lowered = html_text.lower()
+    if any(prefix in lowered for _tag, prefix, _offsets in plans):
         return None
 
-    marker = f"{_TEMPLATE_MARKER_PREFIX}{secrets.token_hex(8)}"
+    nonce = secrets.token_hex(8)
+    markers = {tag: f"{prefix}{nonce}" for tag, prefix, _offsets in plans}
+
+    insertions: list[tuple[int, str]] = []
+    for tag, _prefix, offsets in plans:
+        opening_tag = f"<{tag}"
+        for token, offset in enumerate(offsets):
+            opening = offset + len(opening_tag)
+            if html_text[offset:opening].lower() != opening_tag:
+                return None
+            insertions.append((opening, f' {markers[tag]}="{token}"'))
+    insertions.sort()
+
     pieces: list[str] = []
     previous = 0
-    for token, offset in enumerate(spans):
-        opening = offset + len("<template")
-        if html_text[offset:opening].lower() != "<template":
-            return None
+    for opening, attribute in insertions:
         pieces.append(html_text[previous:opening])
-        pieces.append(f' {marker}="{token}"')
+        pieces.append(attribute)
         previous = opening
     pieces.append(html_text[previous:])
-    return "".join(pieces), marker
+    return "".join(pieces), markers
+
+
+def _marker_token(element, marker: str) -> int | None:
+    """Read back the raw token index an instrumented element was given."""
+    values = [
+        value
+        for key, value in element.attrib.items()
+        if str(key).lower().split("}")[-1] == marker
+    ]
+    if len(values) != 1:
+        return None
+    try:
+        return int(values[0])
+    except (TypeError, ValueError):
+        return None
 
 
 def _html_template_token_indices(
@@ -463,18 +502,8 @@ def _html_template_token_indices(
         namespace, local = _element_name(element.tag)
         if local != "template":
             continue
-        values = [
-            value
-            for key, value in element.attrib.items()
-            if str(key).lower().split("}")[-1] == marker
-        ]
-        if len(values) != 1:
-            return everything_html
-        try:
-            token = int(values[0])
-        except (TypeError, ValueError):
-            return everything_html
-        if token in namespaces or not 0 <= token < template_token_count:
+        token = _marker_token(element, marker)
+        if token is None or token in namespaces or not 0 <= token < template_token_count:
             return everything_html
         namespaces[token] = namespace
     if len(namespaces) != template_token_count:
@@ -497,21 +526,27 @@ def _scan_and_parse(html_text: str):
     probe.feed(html_text)
     probe.close()
 
-    instrumented = _instrument_template_tokens(html_text, probe.template_spans)
-    source, marker = instrumented if instrumented is not None else (html_text, None)
+    instrumented = _instrument_raw_start_tags(
+        html_text,
+        (
+            ("template", _TEMPLATE_MARKER_PREFIX, probe.template_spans),
+            ("base", _BASE_MARKER_PREFIX, probe.base_spans),
+        ),
+    )
+    source, markers = instrumented if instrumented is not None else (html_text, {})
     fragment = html5lib.parseFragment(
         _preserve_invalid_scalars_as_control(source),
         treebuilder="etree",
         namespaceHTMLElements=True,
     )
     html_templates = _html_template_token_indices(
-        fragment, probe.template_token_count, marker
+        fragment, probe.template_token_count, markers.get("template")
     )
 
     scanner = _RawTemplateAndHrefScanner(html_template_tokens=html_templates)
     scanner.feed(html_text)
     scanner.close()
-    return scanner, fragment, html_templates
+    return scanner, fragment, html_templates, markers.get("base")
 
 
 def _template_local_occurrence_flags(html_text: str) -> dict[str, list[bool]]:
@@ -523,7 +558,7 @@ def _template_local_occurrence_flags(html_text: str) -> dict[str, list[bool]]:
     actually acts on.
     """
 
-    scanner, _fragment, html_templates = _scan_and_parse(html_text)
+    scanner, _fragment, html_templates, _base_marker = _scan_and_parse(html_text)
     return {
         href: [bool(enclosing & html_templates) for enclosing in occurrences]
         for href, occurrences in scanner.anchor_occurrences.items()
@@ -599,11 +634,38 @@ def _iter_visible_html_anchors(root):
 _BASE_FAILED_CLOSED = object()
 
 
-def _effective_base_href(root, safety_scanner, html_templates: frozenset[int]):
-    """The one ``<base href>`` that sets the document base, per HTML tree order.
+def _base_token_elements(root, base_token_count: int, marker: str | None) -> dict[int, object] | None:
+    """Match each raw ``<base>`` token to its own tree element, by marker.
 
-    Only the first ``<base>`` carrying an href sets the base; later ones and
-    href-less ones change nothing, template contents are inert, and an
+    Returns the mapping only when it is provably one-to-one. Anything else -
+    instrumentation refused, a marker missing or duplicated, a token out of
+    range, or a tag html5lib dropped so no element carries it - returns None and
+    the caller fails closed. Position is never used as a fallback: an element
+    that tree construction moved or discarded would otherwise be read as some
+    other tag's, which is exactly how an inert base gets mistaken for the
+    effective one.
+    """
+
+    if marker is None:
+        return None
+    elements: dict[int, object] = {}
+    for element in _iter_all_tree_bases(root):
+        token = _marker_token(element, marker)
+        if token is None or token in elements or not 0 <= token < base_token_count:
+            return None
+        elements[token] = element
+    if len(elements) != base_token_count:
+        return None
+    return elements
+
+
+def _effective_base_href(root, safety_scanner, html_templates: frozenset[int], base_marker: str | None):
+    """The one ``<base href>`` that sets the document base.
+
+    Candidates are walked in the order the page spells them, and each token is
+    resolved to its own element through the marker rather than through tree
+    position. Only the first ``<base>`` carrying an href sets the base; later
+    ones and href-less ones change nothing, template contents are inert, and an
     ``<svg><base>`` is not the HTML base element. The tree answers the namespace
     question and holds the parsed href; the raw scan answers which ``<template>``
     tokens enclosed each tag and whether its href was spelled safely - the same
@@ -611,17 +673,22 @@ def _effective_base_href(root, safety_scanner, html_templates: frozenset[int]):
 
     Returns the raw href, ``None`` when the page sets no base, or
     ``_BASE_FAILED_CLOSED`` when the effective base cannot be identified
-    unambiguously: the raw tags and the tree elements no longer line up (one was
-    dropped or moved), or the tag that does set the base spelled its href in a
-    way the anchor policy already refuses. Guessing a base silently repoints
-    every link on the page, so an unclear one is never resolved at all.
+    unambiguously: the tokens and the tree elements are not provably one-to-one,
+    or the tag that does set the base spelled its href in a way the anchor policy
+    already refuses. Guessing a base silently repoints every link on the page, so
+    an unclear one is never resolved at all.
     """
 
-    tree_bases = list(_iter_all_tree_bases(root))
-    if len(tree_bases) != len(safety_scanner.base_occurrences):
+    occurrences = safety_scanner.base_occurrences
+    if not occurrences:
+        return None
+
+    elements = _base_token_elements(root, len(occurrences), base_marker)
+    if elements is None:
         return _BASE_FAILED_CLOSED
 
-    for (safe_href, enclosing), element in zip(safety_scanner.base_occurrences, tree_bases):
+    for token, (safe_href, enclosing) in enumerate(occurrences):
+        element = elements[token]
         if enclosing & html_templates:
             continue
         namespace, _ = _element_name(element.tag)
@@ -638,8 +705,8 @@ def _effective_base_href(root, safety_scanner, html_templates: frozenset[int]):
 
 def _parse_html5_page(html_text: str):
     """Return ``(base href or None, links)``, or ``None`` when the page fails closed."""
-    safety_scanner, fragment, html_templates = _scan_and_parse(html_text)
-    base_href = _effective_base_href(fragment, safety_scanner, html_templates)
+    safety_scanner, fragment, html_templates, base_marker = _scan_and_parse(html_text)
+    base_href = _effective_base_href(fragment, safety_scanner, html_templates, base_marker)
     if base_href is _BASE_FAILED_CLOSED:
         return None
     template_local_anchors = _template_local_tree_anchors(
