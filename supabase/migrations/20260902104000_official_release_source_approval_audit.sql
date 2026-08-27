@@ -139,4 +139,31 @@ revoke all on function public.clear_event_official_release_source_approved(text,
 grant execute on function public.clear_event_official_release_source_approved(text, integer, text)
   to service_role;
 
+create or replace function public.verify_official_release_source_schema()
+returns table (
+  event_official_release_sources_table_exists boolean,
+  set_event_official_release_source_function_exists boolean,
+  clear_event_official_release_source_function_exists boolean
+)
+language sql
+security invoker
+set search_path = public
+as $$
+  select
+    to_regclass('public.event_official_release_sources') is not null
+      and to_regclass('public.event_official_release_source_audit') is not null,
+    to_regprocedure(
+      'public.set_event_official_release_source(text, text, text, text, integer)'
+    ) is not null
+      and to_regprocedure(
+        'public.set_event_official_release_source_approved(text, text, text, text, integer, text)'
+      ) is not null,
+    to_regprocedure(
+      'public.clear_event_official_release_source(text, integer)'
+    ) is not null
+      and to_regprocedure(
+        'public.clear_event_official_release_source_approved(text, integer, text)'
+      ) is not null;
+$$;
+
 commit;
