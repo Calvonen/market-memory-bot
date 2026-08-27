@@ -8,6 +8,7 @@ from trading_system.release_ingestion import ReleaseDocument
 from trading_system.results_page_release_candidates import (
     canonical_same_origin_url,
     extract_results_page_candidates,
+    results_page_candidate_failure_reason,
 )
 from trading_system.results_page_release_selection import (
     ResultsPageSelectionContext,
@@ -108,10 +109,18 @@ class ResultsPageOfficialReleaseProvider(ApprovedOriginDocumentFetcher):
         html_text, page_url = self._fetch_results_page_html()
         candidates = extract_results_page_candidates(self.source, html_text, page_url=page_url)
         if not candidates:
-            self._no_release_reason = (
-                f"results_page selection no_candidates: {page_url} offered no usable same-origin "
-                "HTTPS release link"
-            )
+            failure_reason = results_page_candidate_failure_reason(html_text)
+            if failure_reason == "base_identity_failed":
+                self._no_release_reason = (
+                    f"results_page candidate extraction base_identity_failed: {page_url} could not "
+                    "prove a safe one-to-one correspondence for the document base; refusing to "
+                    "resolve or fetch release links"
+                )
+            else:
+                self._no_release_reason = (
+                    f"results_page selection no_candidates: {page_url} offered no usable same-origin "
+                    "HTTPS release link"
+                )
             return None
 
         selection = select_results_page_release_candidate(

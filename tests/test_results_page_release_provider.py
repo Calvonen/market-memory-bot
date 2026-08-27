@@ -193,6 +193,43 @@ class ResultsPageOfficialReleaseProviderTests(unittest.TestCase):
         self.assertIsNone(document)
         self.assertEqual(opener.opened, [PAGE_URL])
 
+    def test_base_identity_failure_is_auditable_not_no_candidates(self) -> None:
+        provider = self._provider()
+        document, opener = self._discover(
+            provider,
+            {
+                PAGE_URL: self._page(
+                    '<table><base href="/downloads/"></table>'
+                    '<a href="2026-08-26-results.html">Results</a>'
+                )
+            },
+        )
+
+        self.assertIsNone(document)
+        self.assertEqual(opener.opened, [PAGE_URL])
+        reason = provider.describe_no_release()
+        self.assertIsNotNone(reason)
+        self.assertIn("base_identity_failed", reason)
+        self.assertNotIn("selection no_candidates", reason)
+
+    def test_reserved_base_marker_failure_is_auditable(self) -> None:
+        provider = self._provider()
+        document, opener = self._discover(
+            provider,
+            {
+                PAGE_URL: self._page(
+                    '<base data-mmb-base-token-spoof="0" href="/downloads/">'
+                    '<a href="2026-08-26-results.html">Results</a>'
+                )
+            },
+        )
+
+        self.assertIsNone(document)
+        self.assertEqual(opener.opened, [PAGE_URL])
+        reason = provider.describe_no_release()
+        self.assertIsNotNone(reason)
+        self.assertIn("base_identity_failed", reason)
+
     # 4 ----------------------------------------------------------------
     def test_ambiguous_candidates_return_none_without_fetching_a_document(self) -> None:
         provider = self._provider()

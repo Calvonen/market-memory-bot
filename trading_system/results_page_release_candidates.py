@@ -878,6 +878,19 @@ def _canonical_candidate_url(base_url: str, href: str) -> str | None:
     return _canonical_https_url(candidate)
 
 
+def results_page_candidate_failure_reason(html_text: str) -> str | None:
+    """Explain a fail-closed parse outcome without changing extraction semantics.
+
+    ``extract_results_page_candidates`` deliberately returns an empty tuple for
+    both a genuinely empty page and an unprovable base/token correspondence.
+    Runtime ingestion needs to distinguish those outcomes for auditability, so
+    this helper exposes only the already-existing parse failure classification.
+    It is intended to be called only after extraction returned no candidates.
+    """
+
+    return "base_identity_failed" if _parse_html5_page(html_text) is None else None
+
+
 def canonical_same_origin_url(approved_url: str, url: str) -> str | None:
     """Canonicalise ``url`` under the candidate URL policy, or ``None`` if unsafe.
 
