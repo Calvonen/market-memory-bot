@@ -16,6 +16,14 @@ class OfficialReleaseSourceApprovalAuditSqlTests(unittest.TestCase):
         self.assertIn("revoke all on table public.event_official_release_source_audit", self.sql)
         self.assertIn("grant select on table public.event_official_release_source_audit to service_role", self.sql)
 
+    def test_audit_survives_parent_event_deletion(self):
+        self.assertIn("event_id text not null,", self.sql)
+        self.assertNotIn(
+            "references public.market_events(event_id) on delete cascade",
+            self.sql,
+        )
+        self.assertIn("retained independently of market_events lifecycle", self.sql)
+
     def test_pre_audit_active_sources_are_recorded_then_invalidated(self):
         self.assertIn("migration:legacy-pre-audit-source", self.sql)
         self.assertIn("migration:legacy-pre-audit-invalidation", self.sql)
@@ -33,6 +41,27 @@ class OfficialReleaseSourceApprovalAuditSqlTests(unittest.TestCase):
         legacy_clear = self.sql.index("migration:legacy-pre-audit-invalidation")
         self.assertLess(legacy_set, invalidation_update)
         self.assertLess(invalidation_update, legacy_clear)
+
+    def test_legacy_writers_are_revoked_committed_and_drained_before_scan(self):
+        revoke_set = self.sql.index(
+            "revoke all on function public.set_event_official_release_source(text, text, text, text, integer)"
+        )
+        revoke_clear = self.sql.index(
+            "revoke all on function public.clear_event_official_release_source(text, integer)"
+        )
+        first_commit = self.sql.index("commit;", revoke_clear)
+        second_begin = self.sql.index("begin;", first_commit)
+        drain_lock = self.sql.index(
+            "lock table public.event_official_release_sources in access exclusive mode",
+            second_begin,
+        )
+        legacy_scan = self.sql.index("migration:legacy-pre-audit-source", drain_lock)
+
+        self.assertLess(revoke_set, first_commit)
+        self.assertLess(revoke_clear, first_commit)
+        self.assertLess(first_commit, second_begin)
+        self.assertLess(second_begin, drain_lock)
+        self.assertLess(drain_lock, legacy_scan)
 
     def test_old_unaudited_rpcs_are_revoked_from_service_role(self):
         self.assertIn("revoke all on function public.set_event_official_release_source(text, text, text, text, integer)\n  from service_role", self.sql)
