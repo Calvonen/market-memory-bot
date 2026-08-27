@@ -1,4 +1,4 @@
-name: Temporary PR179 linked refresh schedule fix
+name: Temporary PR179 linked refresh cleanup
 
 on:
   push:
@@ -6,34 +6,24 @@ on:
       - fix/home-event-unification
     paths:
       - .github/workflows/tmp-pr179-linked-refresh-schedule.yml
-      - scripts/tmp_fix_pr179_linked_refresh_schedule.py
 
 permissions:
   contents: write
 
 jobs:
-  patch-and-test:
+  cleanup:
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
-      - name: Patch and validate
+      - name: Remove temporary validation files
         run: |
           set -euo pipefail
-          WORK=/tmp/marketai-pr179-linked-refresh-schedule
-          PY=/home/marko/marketai-repo/.venv/bin/python
+          WORK=/tmp/marketai-pr179-linked-refresh-cleanup
           rm -rf "$WORK"
           git clone --branch fix/home-event-unification --single-branch https://github.com/Calvonen/market-memory-bot.git "$WORK"
           cd "$WORK"
-          python3 scripts/tmp_fix_pr179_linked_refresh_schedule.py
-          "$PY" -m unittest tests.test_mobile_source -v
-          cd mobile
-          npm ci
-          npx tsc --noEmit
-          npm run lint
-          cd ..
-          git diff --check
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "mobile/src/app/(tabs)/index.tsx" mobile/src/components/TrackedEventsSection.tsx tests/test_mobile_source.py
-          git commit -m "fix: refresh and timestamp linked tracked details"
+          git rm .github/workflows/tmp-pr179-linked-refresh-schedule.yml scripts/tmp_fix_pr179_linked_refresh_schedule.py
+          git commit -m "chore: remove temporary PR179 linked refresh validation"
           git push origin HEAD:fix/home-event-unification
