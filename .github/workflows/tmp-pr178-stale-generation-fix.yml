@@ -1,0 +1,80 @@
+name: Temporary PR178 stale generation fix
+
+on:
+  push:
+    branches:
+      - feature/official-release-source-control-api
+    paths:
+      - .github/workflows/tmp-pr178-stale-generation-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/official-release-source-control-api
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply fix and tests
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('supabase/migrations/20260902108000_official_release_source_missing_generation_recovery.sql')
+          s = p.read_text()
+          start = s.index('create temporary table official_release_source_missing_generation')
+          end = s.index('-- v6 means', start)
+          replacement = '''create temporary table official_release_source_generation_recovery\non commit drop\nas\nwith latest_audit as (\n  select distinct on (audit.event_id)\n    audit.event_id,\n    audit.action,\n    audit.version\n  from public.event_official_release_source_audit audit\n  order by audit.event_id, audit.id desc\n)\nselect\n  latest.event_id,\n  latest.action,\n  latest.version,\n  source.version as source_version\nfrom latest_audit latest\nleft join public.event_official_release_sources source\n  on source.event_id = latest.event_id\nwhere source.event_id is null\n   or source.version < latest.version;\n\n-- If the retained latest audit is already a clear, restore or advance the\n-- durable tombstone to that exact audited generation. This also repairs stale\n-- low-version tombstones recreated by pre-revoke legacy calls.\ninsert into public.event_official_release_sources (\n  event_id, source_kind, source_url, source_title, is_active, version, created_at, updated_at\n)\nselect\n  recovery.event_id, null, null, null, false, recovery.version,\n  clock_timestamp(), clock_timestamp()\nfrom official_release_source_generation_recovery recovery\nwhere recovery.action = 'clear'\non conflict (event_id) do update\nset\n  source_kind = null,\n  source_url = null,\n  source_title = null,\n  is_active = false,\n  version = excluded.version,\n  updated_at = clock_timestamp()\nwhere public.event_official_release_sources.version < excluded.version;\n\n-- If the latest retained audit is a set, the durable row is absent or trails\n-- that generation. Materialize the logically missing deletion clear at the\n-- next version and record it explicitly so future CAS writes remain monotonic.\nwith recovered as (\n  insert into public.event_official_release_sources (\n    event_id, source_kind, source_url, source_title, is_active, version, created_at, updated_at\n  )\n  select\n    recovery.event_id, null, null, null, false, recovery.version + 1,\n    clock_timestamp(), clock_timestamp()\n  from official_release_source_generation_recovery recovery\n  where recovery.action = 'set'\n  on conflict (event_id) do update\n  set\n    source_kind = null,\n    source_url = null,\n    source_title = null,\n    is_active = false,\n    version = excluded.version,\n    updated_at = clock_timestamp()\n  where public.event_official_release_sources.version < excluded.version\n  returning event_id, version\n)\ninsert into public.event_official_release_source_audit (\n  event_id, action, actor, version, source_kind, source_url, source_title\n)\nselect\n  recovered.event_id,\n  'clear',\n  'migration:pre-durable-delete-recovery',\n  recovered.version,\n  null, null, null\nfrom recovered\nwhere not exists (\n  select 1\n  from public.event_official_release_source_audit audit\n  where audit.event_id = recovered.event_id\n    and audit.action = 'clear'\n    and audit.version = recovered.version\n);\n\n'''
+          s = s[:start] + replacement + s[end:]
+          s = s.replace('-- v6 means the v5 trigger contract plus recovery of any durable generation\n-- lost in the historical 1040 -> 1050 cascade window.', '-- v7 means the v5 trigger contract plus recovery of missing or stale durable\n-- generations lost/recreated in the historical 1040 -> 1050 cascade window.')
+          s = s.replace('    6;\n$$;', '    7;\n$$;', 1)
+          p.write_text(s)
+
+          p = Path('scripts/verify_supabase_schema.py')
+          s = p.read_text().replace('REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 6', 'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 7')
+          p.write_text(s)
+
+          p = Path('tests/test_verify_supabase_schema.py')
+          s = p.read_text()
+          s = s.replace('"official_release_source_schema_version": 6,', '"official_release_source_schema_version": 7,', 1)
+          s = s.replace('"official_release_source_schema_version": 5,', '"official_release_source_schema_version": 6,', 1)
+          s = s.replace('official-release-source schema version 6', 'official-release-source schema version 7', 1)
+          s = s.replace('deployed: 5', 'deployed: 6', 1)
+          p.write_text(s)
+
+          p = Path('tests/test_official_release_source_approval_audit_sql.py')
+          s = p.read_text().replace('REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 6', 'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 7')
+          p.write_text(s)
+
+          p = Path('tests/test_official_release_source_missing_generation_recovery_sql.py')
+          s = p.read_text()
+          s = s.replace('test_missing_generation_is_reconstructed_from_latest_audit', 'test_missing_or_stale_generation_is_reconciled_from_latest_audit')
+          s = s.replace('self.assertIn("where not exists (", self.sql)', 'self.assertIn("left join public.event_official_release_sources source", self.sql)\n        self.assertIn("source.event_id is null", self.sql)\n        self.assertIn("source.version < latest.version", self.sql)\n        self.assertIn("on conflict (event_id) do update", self.sql)\n        self.assertIn("public.event_official_release_sources.version < excluded.version", self.sql)')
+          s = s.replace('test_schema_gate_requires_recovery_contract_v6', 'test_schema_gate_requires_recovery_contract_v7')
+          s = s.replace('self.assertIn("    6;", self.sql)', 'self.assertIn("    7;", self.sql)')
+          s = s.replace('REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 6', 'REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 7')
+          p.write_text(s)
+          PY
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install pytest
+      - name: Validate
+        run: |
+          python -m py_compile scripts/verify_supabase_schema.py tests/test_official_release_source_missing_generation_recovery_sql.py tests/test_official_release_source_approval_audit_sql.py tests/test_verify_supabase_schema.py
+          git diff --check
+          python -m unittest discover -s tests -p 'test_official_release_source*.py' -v
+          python -m unittest tests.test_verify_supabase_schema -v
+          python -m unittest discover -s tests -v
+      - name: Commit fix
+        run: |
+          git config user.name 'Calvonen'
+          git config user.email 'marko.raitanen@gmail.com'
+          git add supabase/migrations/20260902108000_official_release_source_missing_generation_recovery.sql scripts/verify_supabase_schema.py tests/test_official_release_source_missing_generation_recovery_sql.py tests/test_official_release_source_approval_audit_sql.py tests/test_verify_supabase_schema.py
+          git commit -m 'fix: reconcile stale source generations from audit'
+          git push origin HEAD:feature/official-release-source-control-api
