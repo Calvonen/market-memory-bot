@@ -30,6 +30,11 @@ class OfficialReleaseProvider(Protocol):
 
     def discover(self, event_id: str) -> ReleaseDocument | None: ...
 
+    # Optional. A provider that fails closed for a specific, correctable reason
+    # may also define ``describe_no_release(self) -> str | None``; the monitor
+    # records it in the run's error_message beside the unchanged ``no_release``
+    # status. Not part of the required protocol - providers omit it freely.
+
 
 class _LinkTextParser(HTMLParser):
     def __init__(self) -> None:

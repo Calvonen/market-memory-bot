@@ -749,19 +749,44 @@ def _canonical_candidate_url(base_url: str, href: str) -> str | None:
 def extract_results_page_candidates(
     source: OfficialReleaseSource,
     html_text: str,
+    *,
+    page_url: str | None = None,
 ) -> tuple[ResultsPageReleaseCandidate, ...]:
+    """Collect the same-origin HTTPS release links an approved page offers.
+
+    ``page_url`` is the URL the markup was actually served from, which differs
+    from ``source.source_url`` when the approved page redirects within its own
+    origin. Relative links must resolve against it, so a redirect from
+    ``/results`` to ``/investors/results/`` cannot repoint every candidate at a
+    different directory. It never widens what may be reached: it has to be on
+    the approved origin, and every candidate is still resolved and origin-checked
+    exactly as before. Callers that hold no final URL keep the previous
+    behaviour by omitting it.
+    """
     if source.source_kind != "results_page":
         raise ValueError("results page candidate extraction requires source_kind=results_page")
 
-    page_url = _canonical_candidate_url(source.source_url, source.source_url)
-    if page_url is None:
+    approved_page_url = _canonical_candidate_url(source.source_url, source.source_url)
+    if approved_page_url is None:
         return ()
+
+    if page_url is None:
+        base_url = source.source_url
+        served_page_url = approved_page_url
+    else:
+        served_page_url = _canonical_candidate_url(source.source_url, page_url)
+        if served_page_url is None:
+            raise ValueError(
+                "results page candidate extraction requires a page_url on the approved HTTPS origin"
+            )
+        base_url = page_url
 
     aggregated: dict[str, dict[str, object]] = {}
     order: list[str] = []
     for href, title, evidence_fields in _parse_html5_links(html_text):
-        candidate_url = _canonical_candidate_url(source.source_url, href)
-        if candidate_url is None or candidate_url == page_url:
+        candidate_url = _canonical_candidate_url(base_url, href)
+        # Neither spelling of the results page is itself a release document.
+        if candidate_url is None or candidate_url in {served_page_url, approved_page_url}:
             continue
         if candidate_url not in aggregated:
             aggregated[candidate_url] = {"title": None, "fields": []}

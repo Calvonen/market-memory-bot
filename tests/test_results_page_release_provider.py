@@ -15,7 +15,10 @@ from trading_system.manual_release_ingestion import (
 )
 from trading_system.models import EventExpectation
 from trading_system.official_release_source_repository import OfficialReleaseSource
-from trading_system.release_worker import IngestionResult
+from trading_system.release_worker import EventReleaseMonitor, IngestionResult
+from trading_system.results_page_release_candidates import (
+    extract_results_page_candidates,
+)
 from trading_system.results_page_release_ingestion import (
     ResultsPageOfficialReleaseProvider,
 )
@@ -425,6 +428,167 @@ class ResultsPageOfficialReleaseProviderTests(unittest.TestCase):
 
         self.assertEqual(document.source_title, "Approved results page")
 
+    # Codex P1: relative links resolve against the URL the page was served from
+    def test_relative_links_resolve_against_a_same_origin_redirect_target(self) -> None:
+        served_page_url = "https://investor.example.com/investors/reports/"
+        document_url = "https://investor.example.com/investors/reports/2026-08-26-results.html"
+        provider = self._provider()
+        document, opener = self._discover(
+            provider,
+            {
+                PAGE_URL: self._page(
+                    '<a href="2026-08-26-results.html">Half-year results</a>',
+                    final_url=served_page_url,
+                ),
+                document_url: _Response(_release_html(), final_url=document_url),
+            },
+        )
+
+        # Resolved against the approved URL instead, this would have been
+        # https://investor.example.com/2026-08-26-results.html - a different
+        # same-origin document.
+        self.assertEqual(document.source_url, document_url)
+        self.assertEqual(opener.opened, [PAGE_URL, document_url])
+
+    def test_relative_links_resolve_against_the_approved_url_without_a_redirect(self) -> None:
+        document_url = "https://investor.example.com/2026-08-26-results.html"
+        provider = self._provider()
+        document, opener = self._discover(
+            provider,
+            {
+                PAGE_URL: self._page('<a href="2026-08-26-results.html">Half-year results</a>'),
+                document_url: _Response(_release_html(), final_url=document_url),
+            },
+        )
+
+        self.assertEqual(document.source_url, document_url)
+        self.assertEqual(opener.opened, [PAGE_URL, document_url])
+
+    def test_redirect_target_does_not_widen_the_approved_origin(self) -> None:
+        served_page_url = "https://investor.example.com/investors/reports/"
+        provider = self._provider()
+        document, opener = self._discover(
+            provider,
+            {
+                PAGE_URL: self._page(
+                    '<a href="https://cdn.example.net/investors/reports/2026-08-26-results.html">Results</a>'
+                    '<a href="//cdn.example.net/2026-08-26-results.html">Results</a>',
+                    final_url=served_page_url,
+                )
+            },
+        )
+
+        self.assertIsNone(document)
+        self.assertEqual(opener.opened, [PAGE_URL])
+
+    def test_link_back_to_the_pre_redirect_results_page_is_not_a_candidate(self) -> None:
+        served_page_url = "https://investor.example.com/investors/reports/"
+        provider = self._provider(source=self._source(url="https://investor.example.com/2026-08-26"))
+        document, opener = self._discover(
+            provider,
+            {
+                "https://investor.example.com/2026-08-26": self._page(
+                    '<a href="/2026-08-26">Results home</a>',
+                    final_url=served_page_url,
+                )
+            },
+        )
+
+        self.assertIsNone(document)
+        self.assertEqual(opener.opened, ["https://investor.example.com/2026-08-26"])
+
+    def test_extractor_rejects_a_page_url_off_the_approved_origin(self) -> None:
+        with self.assertRaisesRegex(ValueError, "approved HTTPS origin"):
+            extract_results_page_candidates(
+                self._source(),
+                '<html><body><a href="/reports/2026-08-26-results.html">Results</a></body></html>',
+                page_url="https://cdn.example.net/reports/",
+            )
+
+    # Codex P2: a fail-closed outcome always says why
+    def test_no_release_reason_is_empty_before_and_after_a_successful_discovery(self) -> None:
+        document_url = "https://investor.example.com/reports/2026-08-26-results.html"
+        provider = self._provider()
+        self.assertIsNone(provider.describe_no_release())
+        self._discover(
+            provider,
+            {
+                PAGE_URL: self._page('<a href="/reports/2026-08-26-results.html">Results</a>'),
+                document_url: _Response(_release_html(), final_url=document_url),
+            },
+        )
+        self.assertIsNone(provider.describe_no_release())
+
+    def test_ambiguous_selection_is_reported_as_an_auditable_reason(self) -> None:
+        provider = self._provider()
+        self._discover(
+            provider,
+            {
+                PAGE_URL: self._page(
+                    '<a href="/reports/2026-08-26-results.html">Results release</a>'
+                    '<a href="/reports/2026-08-26-presentation.html">Results presentation</a>'
+                )
+            },
+        )
+
+        reason = provider.describe_no_release()
+        assert reason is not None
+        self.assertIn("ambiguous", reason)
+        self.assertIn("2026-08-26", reason)
+        self.assertIn(PAGE_URL, reason)
+
+    def test_no_match_selection_is_reported_as_an_auditable_reason(self) -> None:
+        provider = self._provider()
+        self._discover(
+            provider,
+            {PAGE_URL: self._page('<a href="/reports/2025-08-26-results.html">Older results</a>')},
+        )
+
+        reason = provider.describe_no_release()
+        assert reason is not None
+        self.assertIn("no_match", reason)
+        self.assertIn("scheduled_date=2026-08-26", reason)
+        self.assertIn("release_period=<none>", reason)
+
+    def test_page_without_candidates_is_reported_as_an_auditable_reason(self) -> None:
+        provider = self._provider()
+        self._discover(provider, {PAGE_URL: self._page("<p>No links here</p>")})
+
+        reason = provider.describe_no_release()
+        assert reason is not None
+        self.assertIn("no_candidates", reason)
+
+    def test_too_short_document_is_reported_as_an_auditable_reason(self) -> None:
+        document_url = "https://investor.example.com/reports/2026-08-26-results.html"
+        provider = self._provider()
+        self._discover(
+            provider,
+            {
+                PAGE_URL: self._page('<a href="/reports/2026-08-26-results.html">Results</a>'),
+                document_url: _Response(_release_html("Results published."), final_url=document_url),
+            },
+        )
+
+        reason = provider.describe_no_release()
+        assert reason is not None
+        self.assertIn("too short", reason)
+        self.assertIn(document_url, reason)
+
+    def test_a_stale_reason_never_survives_into_the_next_discovery(self) -> None:
+        document_url = "https://investor.example.com/reports/2026-08-26-results.html"
+        provider = self._provider()
+        self._discover(provider, {PAGE_URL: self._page("<p>No links here</p>")})
+        self.assertIsNotNone(provider.describe_no_release())
+
+        self._discover(
+            provider,
+            {
+                PAGE_URL: self._page('<a href="/reports/2026-08-26-results.html">Results</a>'),
+                document_url: _Response(_release_html(), final_url=document_url),
+            },
+        )
+        self.assertIsNone(provider.describe_no_release())
+
     def test_untitled_link_without_approved_title_uses_an_explicit_fallback(self) -> None:
         document_url = "https://investor.example.com/reports/2026-08-26-results.html"
         provider = self._provider()
@@ -437,6 +601,119 @@ class ResultsPageOfficialReleaseProviderTests(unittest.TestCase):
         )
 
         self.assertEqual(document.source_title, "results-page-official-release")
+
+
+class _FakeReleaseRepository:
+    def __init__(self) -> None:
+        self.runs: list[dict] = []
+
+    def record_run(self, **kwargs):
+        self.runs.append(kwargs)
+        return kwargs
+
+
+class _StubProvider:
+    name = "results_page_official_release"
+
+    def __init__(self, reason=None) -> None:
+        self.reason = reason
+
+    def discover(self, event_id):
+        return None
+
+    def describe_no_release(self):
+        return self.reason
+
+
+class _SilentProvider:
+    name = "results_page_official_release"
+
+    def discover(self, event_id):
+        return None
+
+
+class ResultsPageNoReleaseAuditTrailTests(unittest.TestCase):
+    """Codex P2: an ambiguous or unmatched page must not look like plain silence."""
+
+    def _run(self, provider, *, now=datetime(2026, 8, 25, 12, 0, tzinfo=UTC)):
+        releases = _FakeReleaseRepository()
+        analyzer = MagicMock()
+        monitor = EventReleaseMonitor(
+            expectation_repository=_Expectations(),
+            release_repository=releases,
+            analyzer=analyzer,
+            provider=provider,
+            overdue_grace_hours=24.0,
+            clock=lambda: now,
+        )
+        return monitor.run_once(EVENT_ID), releases, analyzer
+
+    def test_selection_reason_reaches_the_result_and_the_audit_log(self) -> None:
+        reason = "results_page selection ambiguous: more than one of the 2 candidates matched"
+        result, releases, analyzer = self._run(_StubProvider(reason))
+
+        # The shared status semantics are unchanged; the explanation rides along.
+        self.assertEqual(result.status, "no_release")
+        self.assertEqual(result.message, reason)
+        self.assertEqual(releases.runs[-1]["status"], "no_release")
+        self.assertEqual(releases.runs[-1]["error_message"], reason)
+        analyzer.analyze.assert_not_called()
+
+    def test_selection_reason_is_kept_alongside_the_overdue_note(self) -> None:
+        reason = "results_page selection no_match: none of the 3 candidates carried evidence"
+        result, releases, _ = self._run(
+            _StubProvider(reason),
+            now=datetime(2026, 8, 28, 12, 0, tzinfo=UTC),
+        )
+
+        self.assertEqual(result.status, "no_release")
+        self.assertTrue(result.overdue)
+        assert result.message is not None
+        self.assertIn(reason, result.message)
+        self.assertIn("overdue", result.message.lower())
+        self.assertIn(reason, releases.runs[-1]["error_message"])
+
+    def test_provider_without_a_reason_keeps_the_previous_silent_behaviour(self) -> None:
+        result, releases, _ = self._run(_SilentProvider())
+
+        self.assertEqual(result.status, "no_release")
+        self.assertIsNone(result.message)
+        self.assertIsNone(releases.runs[-1]["error_message"])
+
+    def test_blank_reason_is_treated_as_no_reason(self) -> None:
+        result, releases, _ = self._run(_StubProvider("   "))
+
+        self.assertIsNone(result.message)
+        self.assertIsNone(releases.runs[-1]["error_message"])
+
+    def test_worker_surfaces_the_selection_reason_for_the_event(self) -> None:
+        source = OfficialReleaseSource(
+            event_id=EVENT_ID,
+            source_kind="results_page",
+            source_url=PAGE_URL,
+            version=1,
+        )
+        reason = "results_page selection ambiguous: more than one of the 2 candidates matched"
+        provider = _StubProvider(reason)
+        releases = _FakeReleaseRepository()
+        releases.has_analysis_for_event_version = lambda **kwargs: False
+
+        with patch(
+            "trading_system.calendar_release_worker.ResultsPageOfficialReleaseProvider"
+        ) as results_cls:
+            results_cls.for_event.return_value = provider
+            results = run_calendar_release_ingestion_once(
+                targets=_Targets(),
+                expectations=_Expectations(),
+                releases=releases,
+                analyzer=MagicMock(),
+                official_sources=_OfficialSources(source),
+                clock=lambda: datetime(2026, 8, 26, 12, 0, tzinfo=UTC),
+            )
+
+        self.assertEqual(results[0].status, "no_release")
+        assert results[0].message is not None
+        self.assertIn("ambiguous", results[0].message)
 
 
 class _Targets:

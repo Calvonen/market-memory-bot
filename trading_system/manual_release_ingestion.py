@@ -419,7 +419,15 @@ class ApprovedOriginDocumentFetcher:
             raise RuntimeError("manual official release download exceeds size limit")
         return data
 
-    def _fetch_bytes(self, url: str) -> tuple[bytes, str, str | None]:
+    def _fetch_resource(self, url: str) -> tuple[bytes, str, str | None, str]:
+        """Fetch one approved-origin resource, reporting its validated final URL.
+
+        The final URL is part of the result because a body can contain relative
+        references, and those resolve against the URL the response actually came
+        from - a same-origin redirect into another directory would otherwise
+        silently repoint every relative link. It is the redirect-validated URL,
+        so it is always on the approved origin.
+        """
         request = Request(
             url,
             headers={
@@ -434,7 +442,12 @@ class ApprovedOriginDocumentFetcher:
             content_type = response.headers.get("Content-Type", "") or ""
             http_charset = response.headers.get_content_charset()
             data = self._read_bounded(response)
-            return data, content_type, http_charset
+            return data, content_type, http_charset, final_url
+
+    def _fetch_bytes(self, url: str) -> tuple[bytes, str, str | None]:
+        """Fetch when the response's final URL cannot change how it is read."""
+        data, content_type, http_charset, _final_url = self._fetch_resource(url)
+        return data, content_type, http_charset
 
 
 class ManualOfficialReleaseProvider(ApprovedOriginDocumentFetcher):

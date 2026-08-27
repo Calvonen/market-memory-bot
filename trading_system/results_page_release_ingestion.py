@@ -55,6 +55,7 @@ class ResultsPageOfficialReleaseProvider(ApprovedOriginDocumentFetcher):
         super().__init__(source, timeout_seconds=timeout_seconds)
         self.selection_context = selection_context
         self.release_period = release_period
+        self._no_release_reason: str | None = None
 
     @classmethod
     def for_event(
@@ -82,15 +83,31 @@ class ResultsPageOfficialReleaseProvider(ApprovedOriginDocumentFetcher):
             timeout_seconds=timeout_seconds,
         )
 
+    def describe_no_release(self) -> str | None:
+        """Why the last ``discover`` call selected nothing, for the audit log.
+
+        ``no_release`` is the correct status for every outcome here - nothing was
+        published that this provider is willing to ingest - but "no release
+        link at all", "several releases matched" and "none carried the required
+        evidence" need very different corrections. ``EventReleaseMonitor``
+        records this alongside the unchanged status so an operator can tell them
+        apart instead of guessing which one happened.
+        """
+        return self._no_release_reason
+
     def discover(self, event_id: str) -> ReleaseDocument | None:
         if event_id != self.source.event_id:
             raise ValueError("results page official release source event_id mismatch")
+        self._no_release_reason = None
         if self.source.source_kind != "results_page":
             return None
 
-        html_text = self._fetch_results_page_html()
-        candidates = extract_results_page_candidates(self.source, html_text)
+        html_text, page_url = self._fetch_results_page_html()
+        candidates = extract_results_page_candidates(self.source, html_text, page_url=page_url)
         if not candidates:
+            self._no_release_reason = (
+                f"results_page selection no_candidates: {page_url} offered no same-origin HTTPS release link"
+            )
             return None
 
         selection = select_results_page_release_candidate(
@@ -99,6 +116,9 @@ class ResultsPageOfficialReleaseProvider(ApprovedOriginDocumentFetcher):
             release_period=self.release_period,
         )
         if selection.status is not ResultsPageSelectionStatus.SELECTED or selection.candidate is None:
+            self._no_release_reason = self._selection_reason(
+                selection.status, page_url, len(candidates)
+            )
             return None
         candidate = selection.candidate
 
@@ -118,6 +138,10 @@ class ResultsPageOfficialReleaseProvider(ApprovedOriginDocumentFetcher):
 
         raw_text = raw_text.strip()
         if len(raw_text) < self.MIN_DOCUMENT_CHARS:
+            self._no_release_reason = (
+                f"results_page selected document too short: {candidate.source_url} yielded "
+                f"{len(raw_text)} characters, below the {self.MIN_DOCUMENT_CHARS} character minimum"
+            )
             return None
 
         return ReleaseDocument(
@@ -128,6 +152,26 @@ class ResultsPageOfficialReleaseProvider(ApprovedOriginDocumentFetcher):
             raw_text=raw_text,
         )
 
+    def _selection_reason(
+        self,
+        status: ResultsPageSelectionStatus,
+        page_url: str,
+        candidate_count: int,
+    ) -> str:
+        evidence = (
+            f"scheduled_date={self.selection_context.scheduled_date.isoformat()}, "
+            f"release_period={self.release_period or '<none>'}"
+        )
+        if status is ResultsPageSelectionStatus.AMBIGUOUS:
+            return (
+                f"results_page selection ambiguous: more than one of the {candidate_count} candidates on "
+                f"{page_url} matched {evidence}; refusing to guess which release is the right one"
+            )
+        return (
+            f"results_page selection no_match: none of the {candidate_count} candidates on {page_url} "
+            f"carried {evidence} evidence"
+        )
+
     def _document_title(self, candidate_title: str | None) -> str:
         """Prefer the link text the page itself gave the selected release."""
         for value in (candidate_title, self.source.source_title):
@@ -136,8 +180,13 @@ class ResultsPageOfficialReleaseProvider(ApprovedOriginDocumentFetcher):
                 return cleaned
         return "results-page-official-release"
 
-    def _fetch_results_page_html(self) -> str:
+    def _fetch_results_page_html(self) -> tuple[str, str]:
         """Download the approved results page as HTML, decoded by its charset.
+
+        Returns the markup together with the redirect-validated URL it was
+        served from, because the page's relative links resolve against that URL
+        and not against the approved URL a same-origin redirect may have moved
+        away from.
 
         The raw markup is what the candidate extractor needs, so this
         deliberately does not run the visible-text extraction the release
@@ -145,7 +194,7 @@ class ResultsPageOfficialReleaseProvider(ApprovedOriginDocumentFetcher):
         text body, anything the HTML sniffing does not recognise - fails closed
         rather than being handed to the extractor.
         """
-        data, content_type, http_charset = self._fetch_bytes(self.source.source_url)
+        data, content_type, http_charset, page_url = self._fetch_resource(self.source.source_url)
         media_type = self._media_type(content_type)
         if media_type not in {"", "text/html", "application/xhtml+xml"} or not self._looks_like_html_or_text(
             content_type, data
@@ -153,9 +202,10 @@ class ResultsPageOfficialReleaseProvider(ApprovedOriginDocumentFetcher):
             raise RuntimeError(
                 f"results page official release returned unsupported content type: {media_type or '<missing>'}"
             )
-        return self._decode_text(
+        html_text = self._decode_text(
             data,
             http_charset,
             allow_html_meta=True,
             allow_xml_declaration=media_type == "application/xhtml+xml",
         )
+        return html_text, page_url
