@@ -139,11 +139,17 @@ revoke all on function public.clear_event_official_release_source_approved(text,
 grant execute on function public.clear_event_official_release_source_approved(text, integer, text)
   to service_role;
 
-create or replace function public.verify_official_release_source_schema()
+-- The 1030 migration exposed a three-column verifier. Drop it before changing
+-- the return shape so deploy tooling can distinguish the audited contract from
+-- the older unaudited schema instead of accepting three legacy true values.
+drop function public.verify_official_release_source_schema();
+
+create function public.verify_official_release_source_schema()
 returns table (
   event_official_release_sources_table_exists boolean,
   set_event_official_release_source_function_exists boolean,
-  clear_event_official_release_source_function_exists boolean
+  clear_event_official_release_source_function_exists boolean,
+  official_release_source_schema_version integer
 )
 language sql
 security invoker
@@ -163,7 +169,11 @@ as $$
     ) is not null
       and to_regprocedure(
         'public.clear_event_official_release_source_approved(text, integer, text)'
-      ) is not null;
+      ) is not null,
+    2;
 $$;
+
+revoke all on function public.verify_official_release_source_schema() from public, anon, authenticated;
+grant execute on function public.verify_official_release_source_schema() to service_role;
 
 commit;
