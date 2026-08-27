@@ -1,0 +1,386 @@
+name: Temporary official release source control API validation
+
+on:
+  push:
+    branches:
+      - feature/official-release-source-control-api
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/official-release-source-control-api
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply focused control API patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          api = Path('trading_system/api.py')
+          text = api.read_text()
+          import_needle = 'from trading_system.paper_trade_repository import SupabasePaperTradeRepository\n'
+          import_block = '''from trading_system.official_release_source_repository import (\n    OfficialReleaseSource,\n    OfficialReleaseSourceEventNotFound,\n    OfficialReleaseSourceVersionConflict,\n    SupabaseOfficialReleaseSourceRepository,\n)\n'''
+          if import_block not in text:
+              text = text.replace(import_needle, import_needle + import_block, 1)
+
+          protocol_needle = '''class PaperStatusRepository(Protocol):\n    def get_latest_for_event(self, event_id: str) -> dict[str, Any] | None: ...\n\n\n'''
+          protocol_block = '''class OfficialReleaseSourceRepository(Protocol):\n    def get(self, event_id: str) -> OfficialReleaseSource | None: ...\n    def get_version(self, event_id: str) -> int: ...\n    def set(\n        self, source: OfficialReleaseSource, *, expected_version: int\n    ) -> OfficialReleaseSource: ...\n    def clear(self, event_id: str, *, expected_version: int) -> int: ...\n\n\n'''
+          if protocol_block not in text:
+              text = text.replace(protocol_needle, protocol_needle + protocol_block, 1)
+
+          request_needle = '''class ManualCalendarEventRequest(BaseModel):\n'''
+          request_block = '''class OfficialReleaseSourceSetRequest(BaseModel):\n    source_kind: Literal["direct_url", "results_page"]\n    source_url: str = Field(min_length=1, max_length=2000)\n    source_title: str | None = Field(default=None, max_length=500)\n    expected_version: int = Field(ge=0)\n\n\n'''
+          if request_block not in text:
+              text = text.replace(request_needle, request_block + request_needle, 1)
+
+          payload_needle = '''def _tracked_event_latest_reaction_payload(\n    reaction: TrackedEventLatestReaction,\n) -> dict[str, Any]:\n'''
+          payload_block = '''def _official_release_source_payload(\n    event_id: str,\n    source: OfficialReleaseSource | None,\n    *,\n    version: int,\n) -> dict[str, Any]:\n    return {\n        "event_id": event_id,\n        "active": source is not None,\n        "version": version,\n        "source_kind": source.source_kind if source is not None else None,\n        "source_url": source.source_url if source is not None else None,\n        "source_title": source.source_title if source is not None else None,\n    }\n\n\n'''
+          if payload_block not in text:
+              text = text.replace(payload_needle, payload_block + payload_needle, 1)
+
+          arg_needle = '''    tracked_event_repository: SupabaseTrackedEventRepository | None = None,\n    admin_token: str | None = None,\n'''
+          arg_repl = '''    tracked_event_repository: SupabaseTrackedEventRepository | None = None,\n    official_release_source_repository: OfficialReleaseSourceRepository | None = None,\n    admin_token: str | None = None,\n'''
+          text = text.replace(arg_needle, arg_repl, 1)
+
+          cache_needle = '''    tracked_event_repo_cache: SupabaseTrackedEventRepository | None = tracked_event_repository\n    configured_admin_token = admin_token or os.environ.get("MARKETAI_ADMIN_API_KEY")\n'''
+          cache_repl = '''    tracked_event_repo_cache: SupabaseTrackedEventRepository | None = tracked_event_repository\n    official_release_source_repo_cache: OfficialReleaseSourceRepository | None = (\n        official_release_source_repository\n    )\n    configured_admin_token = admin_token or os.environ.get("MARKETAI_ADMIN_API_KEY")\n'''
+          text = text.replace(cache_needle, cache_repl, 1)
+
+          getter_needle = '''    def require_admin(x_admin_token: str | None) -> None:\n'''
+          getter_block = '''    def get_official_release_source_repository() -> OfficialReleaseSourceRepository:\n        nonlocal official_release_source_repo_cache\n        if official_release_source_repo_cache is None:\n            official_release_source_repo_cache = (\n                SupabaseOfficialReleaseSourceRepository.from_env()\n            )\n        return official_release_source_repo_cache\n\n    def require_event_exists(event_id: str) -> None:\n        try:\n            event = get_repository().get(event_id)\n        except RuntimeError as exc:\n            raise HTTPException(status_code=503, detail=str(exc)) from exc\n        if event is None:\n            raise HTTPException(status_code=404, detail="Event not found")\n\n'''
+          if getter_block not in text:
+              text = text.replace(getter_needle, getter_block + getter_needle, 1)
+
+          route_block = '''\n    @app.get("/api/v1/events/{event_id}/official-release-source")\n    def get_official_release_source(\n        event_id: str,\n        x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),\n    ) -> dict[str, Any]:\n        require_read(x_marketai_key)\n        require_event_exists(event_id)\n        try:\n            source_repository = get_official_release_source_repository()\n            source = source_repository.get(event_id)\n            version = (\n                source.version\n                if source is not None and source.version is not None\n                else source_repository.get_version(event_id)\n            )\n        except RuntimeError as exc:\n            raise HTTPException(status_code=503, detail=str(exc)) from exc\n        return _official_release_source_payload(\n            event_id, source, version=version\n        )\n\n    @app.put("/api/v1/events/{event_id}/official-release-source")\n    def set_official_release_source(\n        event_id: str,\n        request: OfficialReleaseSourceSetRequest,\n        x_marketai_control_key: str | None = Header(\n            default=None, alias="X-MarketAI-Control-Key"\n        ),\n    ) -> dict[str, Any]:\n        require_control(x_marketai_control_key)\n        require_event_exists(event_id)\n        try:\n            source = OfficialReleaseSource(\n                event_id=event_id,\n                source_kind=request.source_kind,\n                source_url=request.source_url,\n                source_title=request.source_title,\n            )\n            saved = get_official_release_source_repository().set(\n                source, expected_version=request.expected_version\n            )\n        except OfficialReleaseSourceVersionConflict as exc:\n            raise HTTPException(\n                status_code=409, detail="Official release source version conflict"\n            ) from exc\n        except OfficialReleaseSourceEventNotFound as exc:\n            raise HTTPException(status_code=404, detail="Event not found") from exc\n        except ValueError as exc:\n            raise HTTPException(status_code=422, detail=str(exc)) from exc\n        except RuntimeError as exc:\n            raise HTTPException(status_code=503, detail=str(exc)) from exc\n        assert saved.version is not None\n        return _official_release_source_payload(\n            event_id, saved, version=saved.version\n        )\n\n    @app.delete("/api/v1/events/{event_id}/official-release-source")\n    def clear_official_release_source(\n        event_id: str,\n        expected_version: int = Query(..., ge=1),\n        x_marketai_control_key: str | None = Header(\n            default=None, alias="X-MarketAI-Control-Key"\n        ),\n    ) -> dict[str, Any]:\n        require_control(x_marketai_control_key)\n        require_event_exists(event_id)\n        try:\n            new_version = get_official_release_source_repository().clear(\n                event_id, expected_version=expected_version\n            )\n        except OfficialReleaseSourceVersionConflict as exc:\n            raise HTTPException(\n                status_code=409, detail="Official release source version conflict"\n            ) from exc\n        except OfficialReleaseSourceEventNotFound as exc:\n            raise HTTPException(status_code=404, detail="Event not found") from exc\n        except ValueError as exc:\n            raise HTTPException(status_code=422, detail=str(exc)) from exc\n        except RuntimeError as exc:\n            raise HTTPException(status_code=503, detail=str(exc)) from exc\n        return _official_release_source_payload(\n            event_id, None, version=new_version\n        )\n'''
+          return_needle = '\n    return app\n'
+          if route_block not in text:
+              if return_needle not in text:
+                  raise SystemExit('return app insertion point not found')
+              text = text.replace(return_needle, route_block + return_needle, 1)
+          api.write_text(text)
+
+          repo = Path('trading_system/official_release_source_repository.py')
+          text = repo.read_text()
+          exception_needle = '_ALLOWED_SOURCE_KINDS = {"direct_url", "results_page"}\n\n\n'
+          exception_block = '''class OfficialReleaseSourceVersionConflict(RuntimeError):\n    pass\n\n\nclass OfficialReleaseSourceEventNotFound(RuntimeError):\n    pass\n\n\ndef _raise_official_release_source_write_error(\n    exc: Exception, *, operation: str\n) -> None:\n    code = getattr(exc, "code", None)\n    message = getattr(exc, "message", None)\n    message_text = str(message) if message is not None else str(exc)\n    if code == "40001" or "version_conflict:" in message_text:\n        raise OfficialReleaseSourceVersionConflict(\n            "official release source version conflict"\n        ) from exc\n    if code == "P0002" or "event_not_found:" in message_text:\n        raise OfficialReleaseSourceEventNotFound(\n            "official release source event not found"\n        ) from exc\n    raise RuntimeError(f"official release source {operation} failed") from exc\n\n\n'''
+          if exception_block not in text:
+              text = text.replace(exception_needle, exception_needle + exception_block, 1)
+
+          old_set = '''        response = self.client.rpc(\n            self.SET_RPC,\n            {\n                "input_event_id": source.event_id,\n                "input_source_kind": source.source_kind,\n                "input_source_url": source.source_url,\n                "input_source_title": source.source_title,\n                "input_expected_version": expected_version,\n            },\n        ).execute()\n'''
+          new_set = '''        try:\n            response = self.client.rpc(\n                self.SET_RPC,\n                {\n                    "input_event_id": source.event_id,\n                    "input_source_kind": source.source_kind,\n                    "input_source_url": source.source_url,\n                    "input_source_title": source.source_title,\n                    "input_expected_version": expected_version,\n                },\n            ).execute()\n        except Exception as exc:\n            _raise_official_release_source_write_error(exc, operation="write")\n            raise AssertionError("unreachable")\n'''
+          if new_set not in text:
+              if old_set not in text:
+                  raise SystemExit('set RPC insertion point not found')
+              text = text.replace(old_set, new_set, 1)
+
+          old_clear = '''        response = self.client.rpc(\n            self.CLEAR_RPC,\n            {\n                "input_event_id": canonical_event_id,\n                "input_expected_version": expected_version,\n            },\n        ).execute()\n'''
+          new_clear = '''        try:\n            response = self.client.rpc(\n                self.CLEAR_RPC,\n                {\n                    "input_event_id": canonical_event_id,\n                    "input_expected_version": expected_version,\n                },\n            ).execute()\n        except Exception as exc:\n            _raise_official_release_source_write_error(exc, operation="clear")\n            raise AssertionError("unreachable")\n'''
+          if new_clear not in text:
+              if old_clear not in text:
+                  raise SystemExit('clear RPC insertion point not found')
+              text = text.replace(old_clear, new_clear, 1)
+          repo.write_text(text)
+
+          Path('tests/test_official_release_source_control_api.py').write_text(r'''from __future__ import annotations
+
+import unittest
+from types import SimpleNamespace
+
+from fastapi.testclient import TestClient
+
+from trading_system.api import create_app
+from trading_system.official_release_source_repository import (
+    OfficialReleaseSource,
+    OfficialReleaseSourceEventNotFound,
+    OfficialReleaseSourceVersionConflict,
+    SupabaseOfficialReleaseSourceRepository,
+)
+
+
+EVENT_ID = "calendar:22648076-6e43-40fc-ac6e-f57a79ceee31"
+READ_KEY = "read-key"
+CONTROL_KEY = "control-key"
+
+
+class _EventRepository:
+    def __init__(self, exists: bool = True):
+        self.exists = exists
+
+    def get(self, event_id: str):
+        return object() if self.exists and event_id == EVENT_ID else None
+
+
+class _SourceRepository:
+    def __init__(self):
+        self.source = None
+        self.version = 0
+        self.set_calls = []
+        self.clear_calls = []
+        self.set_error = None
+        self.clear_error = None
+
+    def get(self, event_id: str):
+        return self.source
+
+    def get_version(self, event_id: str):
+        return self.version
+
+    def set(self, source: OfficialReleaseSource, *, expected_version: int):
+        self.set_calls.append((source, expected_version))
+        if self.set_error is not None:
+            raise self.set_error
+        if expected_version != self.version:
+            raise OfficialReleaseSourceVersionConflict()
+        self.version += 1
+        self.source = OfficialReleaseSource(
+            event_id=source.event_id,
+            source_kind=source.source_kind,
+            source_url=source.source_url,
+            source_title=source.source_title,
+            version=self.version,
+        )
+        return self.source
+
+    def clear(self, event_id: str, *, expected_version: int):
+        self.clear_calls.append((event_id, expected_version))
+        if self.clear_error is not None:
+            raise self.clear_error
+        if expected_version != self.version:
+            raise OfficialReleaseSourceVersionConflict()
+        self.version += 1
+        self.source = None
+        return self.version
+
+
+def _client(source_repository=None, event_repository=None):
+    return TestClient(
+        create_app(
+            repository=event_repository or _EventRepository(),
+            official_release_source_repository=source_repository or _SourceRepository(),
+            read_api_key=READ_KEY,
+            control_api_key=CONTROL_KEY,
+        )
+    )
+
+
+class OfficialReleaseSourceControlApiTests(unittest.TestCase):
+    def test_get_requires_read_auth_and_returns_versioned_inactive_state(self):
+        source_repository = _SourceRepository()
+        source_repository.version = 4
+        client = _client(source_repository)
+
+        unauthorized = client.get(f"/api/v1/events/{EVENT_ID}/official-release-source")
+        self.assertEqual(unauthorized.status_code, 401)
+
+        response = client.get(
+            f"/api/v1/events/{EVENT_ID}/official-release-source",
+            headers={"X-MarketAI-Key": READ_KEY},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            "event_id": EVENT_ID,
+            "active": False,
+            "version": 4,
+            "source_kind": None,
+            "source_url": None,
+            "source_title": None,
+        })
+
+    def test_put_requires_control_auth_and_sets_canonical_source(self):
+        source_repository = _SourceRepository()
+        client = _client(source_repository)
+        body = {
+            "source_kind": "results_page",
+            "source_url": "https://investor.example.com/results",
+            "source_title": " Results ",
+            "expected_version": 0,
+        }
+
+        unauthorized = client.put(
+            f"/api/v1/events/{EVENT_ID}/official-release-source", json=body
+        )
+        self.assertEqual(unauthorized.status_code, 401)
+        self.assertEqual(source_repository.set_calls, [])
+
+        response = client.put(
+            f"/api/v1/events/{EVENT_ID}/official-release-source",
+            headers={"X-MarketAI-Control-Key": CONTROL_KEY},
+            json=body,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["version"], 1)
+        self.assertTrue(response.json()["active"])
+        saved, expected = source_repository.set_calls[-1]
+        self.assertEqual(expected, 0)
+        self.assertEqual(saved.source_title, "Results")
+
+    def test_put_rejects_invalid_url_before_repository_write(self):
+        source_repository = _SourceRepository()
+        client = _client(source_repository)
+        response = client.put(
+            f"/api/v1/events/{EVENT_ID}/official-release-source",
+            headers={"X-MarketAI-Control-Key": CONTROL_KEY},
+            json={
+                "source_kind": "direct_url",
+                "source_url": "http://investor.example.com/results.pdf",
+                "expected_version": 0,
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(source_repository.set_calls, [])
+
+    def test_put_version_conflict_is_409(self):
+        source_repository = _SourceRepository()
+        source_repository.version = 2
+        client = _client(source_repository)
+        response = client.put(
+            f"/api/v1/events/{EVENT_ID}/official-release-source",
+            headers={"X-MarketAI-Control-Key": CONTROL_KEY},
+            json={
+                "source_kind": "direct_url",
+                "source_url": "https://investor.example.com/results.pdf",
+                "expected_version": 1,
+            },
+        )
+        self.assertEqual(response.status_code, 409)
+
+    def test_delete_clears_to_versioned_tombstone(self):
+        source_repository = _SourceRepository()
+        source_repository.version = 3
+        source_repository.source = OfficialReleaseSource(
+            EVENT_ID,
+            "direct_url",
+            "https://investor.example.com/results.pdf",
+            version=3,
+        )
+        client = _client(source_repository)
+        response = client.delete(
+            f"/api/v1/events/{EVENT_ID}/official-release-source?expected_version=3",
+            headers={"X-MarketAI-Control-Key": CONTROL_KEY},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            "event_id": EVENT_ID,
+            "active": False,
+            "version": 4,
+            "source_kind": None,
+            "source_url": None,
+            "source_title": None,
+        })
+
+    def test_unknown_event_is_404_before_source_repository_access(self):
+        source_repository = _SourceRepository()
+        client = _client(source_repository, _EventRepository(exists=False))
+        response = client.put(
+            f"/api/v1/events/{EVENT_ID}/official-release-source",
+            headers={"X-MarketAI-Control-Key": CONTROL_KEY},
+            json={
+                "source_kind": "results_page",
+                "source_url": "https://investor.example.com/results",
+                "expected_version": 0,
+            },
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(source_repository.set_calls, [])
+
+    def test_repository_failures_are_503_but_not_version_conflicts(self):
+        source_repository = _SourceRepository()
+        source_repository.set_error = RuntimeError("source backend unavailable")
+        client = _client(source_repository)
+        response = client.put(
+            f"/api/v1/events/{EVENT_ID}/official-release-source",
+            headers={"X-MarketAI-Control-Key": CONTROL_KEY},
+            json={
+                "source_kind": "results_page",
+                "source_url": "https://investor.example.com/results",
+                "expected_version": 0,
+            },
+        )
+        self.assertEqual(response.status_code, 503)
+
+
+class _ApiError(Exception):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+class _ErrorRpc:
+    def __init__(self, error):
+        self.error = error
+
+    def execute(self):
+        raise self.error
+
+
+class _ErrorClient:
+    def __init__(self, error):
+        self.error = error
+
+    def rpc(self, name, payload):
+        return _ErrorRpc(self.error)
+
+
+class OfficialReleaseSourceRepositoryErrorTranslationTests(unittest.TestCase):
+    def test_set_translates_sqlstate_version_conflict(self):
+        repository = SupabaseOfficialReleaseSourceRepository(
+            _ErrorClient(_ApiError("40001", "version_conflict: expected 1, current 2"))
+        )
+        source = OfficialReleaseSource(
+            EVENT_ID, "direct_url", "https://investor.example.com/results.pdf"
+        )
+        with self.assertRaises(OfficialReleaseSourceVersionConflict):
+            repository.set(source, expected_version=1)
+
+    def test_set_translates_missing_event(self):
+        repository = SupabaseOfficialReleaseSourceRepository(
+            _ErrorClient(_ApiError("P0002", f"event_not_found: {EVENT_ID}"))
+        )
+        source = OfficialReleaseSource(
+            EVENT_ID, "direct_url", "https://investor.example.com/results.pdf"
+        )
+        with self.assertRaises(OfficialReleaseSourceEventNotFound):
+            repository.set(source, expected_version=0)
+
+    def test_unknown_rpc_error_stays_service_failure(self):
+        repository = SupabaseOfficialReleaseSourceRepository(
+            _ErrorClient(_ApiError("08006", "connection failure"))
+        )
+        source = OfficialReleaseSource(
+            EVENT_ID, "direct_url", "https://investor.example.com/results.pdf"
+        )
+        with self.assertRaisesRegex(RuntimeError, "write failed"):
+            repository.set(source, expected_version=0)
+
+
+if __name__ == "__main__":
+    unittest.main()
+''')
+          PY
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile and diff check
+        run: |
+          python -m py_compile trading_system/api.py trading_system/official_release_source_repository.py tests/test_official_release_source_control_api.py
+          git diff --check
+      - name: Focused tests
+        run: python -m unittest tests.test_official_release_source_repository tests.test_official_release_source_control_api -v
+      - name: Full canonical suite
+        run: python -m unittest discover -s tests -v
+      - name: Commit validated change and remove temporary workflow
+        run: |
+          rm .github/workflows/tmp-official-release-source-control-api.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add trading_system/api.py trading_system/official_release_source_repository.py tests/test_official_release_source_control_api.py .github/workflows/tmp-official-release-source-control-api.yml
+          git commit -m "feat: add official release source control API"
+          git push origin HEAD:feature/official-release-source-control-api
