@@ -4,6 +4,7 @@ import unittest
 MIGRATION = Path("supabase/migrations/20260902104000_official_release_source_approval_audit.sql")
 INTEGRITY_MIGRATION = Path("supabase/migrations/20260902105000_official_release_source_audit_integrity.sql")
 GENERATION_MIGRATION = Path("supabase/migrations/20260902106000_official_release_source_generation_integrity.sql")
+TRIGGER_GATE_MIGRATION = Path("supabase/migrations/20260902107000_official_release_source_trigger_gate.sql")
 SCHEMA_GATE = Path("scripts/verify_supabase_schema.py")
 
 
@@ -14,6 +15,7 @@ class OfficialReleaseSourceApprovalAuditSqlTests(unittest.TestCase):
         cls.schema_gate = SCHEMA_GATE.read_text()
         cls.integrity_sql = INTEGRITY_MIGRATION.read_text()
         cls.generation_sql = GENERATION_MIGRATION.read_text()
+        cls.trigger_gate_sql = TRIGGER_GATE_MIGRATION.read_text()
 
     def test_audit_is_append_only_service_readable(self):
         self.assertIn("create table public.event_official_release_source_audit", self.sql)
@@ -148,14 +150,31 @@ class OfficialReleaseSourceApprovalAuditSqlTests(unittest.TestCase):
         self.assertLess(parent_check, missing_error)
         self.assertLess(missing_error, clear_call)
 
+    def test_v5_schema_gate_verifies_enabled_market_event_delete_trigger(self):
+        self.assertIn("from pg_catalog.pg_trigger trigger_row", self.trigger_gate_sql)
+        self.assertIn("relation_namespace.nspname = 'public'", self.trigger_gate_sql)
+        self.assertIn("relation.relname = 'market_events'", self.trigger_gate_sql)
+        self.assertIn(
+            "trigger_row.tgname = 'tombstone_official_release_source_before_event_delete'",
+            self.trigger_gate_sql,
+        )
+        self.assertIn("not trigger_row.tgisinternal", self.trigger_gate_sql)
+        self.assertIn("trigger_row.tgtype = 11", self.trigger_gate_sql)
+        self.assertIn("trigger_row.tgenabled in ('O', 'A')", self.trigger_gate_sql)
+        self.assertIn(
+            "trigger_function.proname = 'tombstone_official_release_source_before_event_delete'",
+            self.trigger_gate_sql,
+        )
+        self.assertIn("    5;", self.trigger_gate_sql)
+
     def test_schema_gate_has_distinct_audited_contract_version(self):
         self.assertIn("drop function public.verify_official_release_source_schema()", self.sql)
         self.assertIn("official_release_source_schema_version integer", self.sql)
         self.assertIn("event_official_release_source_audit", self.sql)
         self.assertIn("set_event_official_release_source_approved", self.sql)
         self.assertIn("clear_event_official_release_source_approved", self.sql)
-        self.assertIn("REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 4", self.schema_gate)
-        self.assertIn("    4;", self.generation_sql)
+        self.assertIn("REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 5", self.schema_gate)
+        self.assertIn("    5;", self.trigger_gate_sql)
         self.assertIn(
             '"official_release_source_schema_version"',
             self.schema_gate,
