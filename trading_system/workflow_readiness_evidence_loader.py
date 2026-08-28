@@ -23,7 +23,8 @@ class SupabaseWorkflowReadinessEvidenceLoader:
 
     The loader reads only durable facts. It does not infer progress from UI state,
     event source, clock time, or calendar ownership. Release identity follows the
-    canonical release-shell contract introduced for tracked events.
+    canonical release-shell contract introduced for tracked events. Versioned
+    downstream evidence is accepted only for the current expectation version.
     """
 
     def __init__(self, client: Any) -> None:
@@ -34,8 +35,9 @@ class SupabaseWorkflowReadinessEvidenceLoader:
             raise ValueError("event must be a PersistentTrackedEvent")
 
         release_event_id = canonical_release_event_id(event)
+        current_version = self._current_expectation_version(release_event_id)
         latest_run = self._latest_release_run(release_event_id)
-        paper_state = self._paper_state(release_event_id)
+        paper_state = self._paper_state_for_version(release_event_id, current_version)
         release_document_present = self._exists(
             "event_source_documents", "event_id", release_event_id
         )
@@ -50,8 +52,8 @@ class SupabaseWorkflowReadinessEvidenceLoader:
             release_failed=(
                 not release_document_present and _release_requires_action(latest_run)
             ),
-            analysis_present=self._exists(
-                "event_ai_analyses", "event_id", release_event_id
+            analysis_present=self._analysis_exists_for_version(
+                release_event_id, current_version
             ),
             reaction_present=self._exists(
                 "tracked_market_event_reactions",
@@ -73,6 +75,41 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         )
         return bool(response.data or [])
 
+    def _current_expectation_version(self, event_id: str) -> int | None:
+        response = (
+            self.client.table("current_event_expectations")
+            .select("version")
+            .eq("event_id", event_id)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            return None
+        value = rows[0].get("version")
+        if isinstance(value, bool):
+            raise RuntimeError("current expectation version is invalid")
+        try:
+            version = int(value)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("current expectation version is invalid") from exc
+        if version < 1:
+            raise RuntimeError("current expectation version is invalid")
+        return version
+
+    def _analysis_exists_for_version(self, event_id: str, version: int | None) -> bool:
+        if version is None:
+            return False
+        response = (
+            self.client.table("event_ai_analyses")
+            .select("id")
+            .eq("event_id", event_id)
+            .eq("expectation_version", version)
+            .limit(1)
+            .execute()
+        )
+        return bool(response.data or [])
+
     def _latest_release_run(self, event_id: str) -> dict[str, Any] | None:
         response = (
             self.client.table("event_ingestion_runs")
@@ -85,13 +122,27 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         rows = response.data or []
         return rows[0] if rows else None
 
-    def _paper_state(self, event_id: str) -> dict[str, Any] | None:
+    def _paper_state_for_version(
+        self, event_id: str, version: int | None
+    ) -> dict[str, Any] | None:
         response = self.client.rpc(
             "get_event_paper_trade_state",
             {"input_event_id": event_id},
         ).execute()
         rows = response.data or []
-        return rows[0] if rows else None
+        if not rows or version is None:
+            return None
+        row = rows[0]
+        value = row.get("expectation_version")
+        if isinstance(value, bool):
+            raise RuntimeError("persisted paper expectation_version is invalid")
+        try:
+            persisted_version = int(value)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("persisted paper expectation_version is invalid") from exc
+        if persisted_version != version:
+            return None
+        return row
 
 
 def canonical_release_event_id(event: PersistentTrackedEvent) -> str:
