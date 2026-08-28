@@ -11,6 +11,8 @@ from trading_system.tracked_event_repository import PersistentTrackedEvent
 
 
 _RELEASE_ERROR_STATUSES = frozenset({"error"})
+_CANONICAL_RELEASE_BLOCKER_PROVIDER = "canonical_release_worker"
+_ACTION_REQUIRED_PREFIX = "action_required:"
 _ACCEPTED_ORDER_STATUSES = frozenset(
     {"accepted", "etoro_demo_accepted", "pending", "open", "submitted"}
 )
@@ -49,13 +51,15 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         release_document_present = self._exists(
             "event_source_documents", "event_id", release_event_id
         )
+        canonical_blocker = _is_canonical_release_blocker(latest_run)
 
         return WorkflowReadinessEvidence(
             tracked_status=event.status,
             event_id=event.event_id,
             release_document_present=release_document_present,
             release_failed=(
-                not release_document_present and _release_requires_action(latest_run)
+                canonical_blocker
+                or (not release_document_present and _release_requires_action(latest_run))
             ),
             analysis_present=self._analysis_exists_for_version(
                 release_event_id, current_version
@@ -119,7 +123,7 @@ class SupabaseWorkflowReadinessEvidenceLoader:
     def _latest_release_run(self, event_id: str) -> dict[str, Any] | None:
         response = (
             self.client.table("event_ingestion_runs")
-            .select("status,error_message,created_at")
+            .select("provider,status,error_message,created_at")
             .eq("event_id", event_id)
             .order("created_at", desc=True)
             .limit(1)
@@ -159,6 +163,19 @@ def canonical_release_event_id(event: PersistentTrackedEvent) -> str:
     if not event_id:
         raise ValueError("tracked event id must not be blank")
     return f"tracked:{event_id}"
+
+
+def _is_canonical_release_blocker(run: dict[str, Any] | None) -> bool:
+    if run is None:
+        return False
+    provider = str(run.get("provider") or "").strip().lower()
+    status = str(run.get("status") or "").strip().lower()
+    message = str(run.get("error_message") or "").strip().lower()
+    return (
+        provider == _CANONICAL_RELEASE_BLOCKER_PROVIDER
+        and status == "error"
+        and message.startswith(_ACTION_REQUIRED_PREFIX)
+    )
 
 
 def _release_requires_action(run: dict[str, Any] | None) -> bool:
