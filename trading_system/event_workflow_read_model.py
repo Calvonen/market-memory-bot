@@ -53,6 +53,8 @@ def build_event_workflow_read_model(
         raise ValueError("evidence must be WorkflowReadinessEvidence")
     if trading_mode is not None and not isinstance(trading_mode, TradingMode):
         raise ValueError("trading_mode must be a TradingMode or None")
+    if evidence.event_id != event.event_id:
+        raise ValueError("workflow evidence event id does not match event id")
     if evidence.tracked_status is not event.status:
         raise ValueError("workflow evidence tracked status does not match event status")
 
