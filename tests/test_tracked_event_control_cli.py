@@ -16,7 +16,7 @@ class TrackedEventControlCliTests(unittest.TestCase):
     def test_calendar_binding_option_is_not_exposed(self) -> None:
         self.assertNotIn('parser.add_argument("--calendar-event-id"', self.source)
         self.assertIn("Calendar-owned events must be promoted through the", self.source)
-        self.assertIn("calendar_event_id=None", self.source)
+        self.assertNotIn("calendar_event_id=", self.source)
 
 
 if __name__ == "__main__":
