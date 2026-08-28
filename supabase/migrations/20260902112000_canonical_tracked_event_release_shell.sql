@@ -17,12 +17,36 @@ as $$
 declare
   tracked_row public.tracked_market_events%rowtype;
   calendar_row public.calendar_events%rowtype;
+  initial_calendar_event_id uuid;
   existing_market_event public.market_events%rowtype;
   release_event_id text;
   release_event_name text;
   expectation_exists boolean;
   shell_action text := 'noop_existing';
 begin
+  -- Probe the tracked row without taking a row lock so calendar-bound paths can
+  -- acquire locks in the same order as calendar promotion: calendar first,
+  -- tracked event second. This avoids a calendar<->tracked deadlock while the
+  -- second locked read below protects against a binding change between reads.
+  select calendar_event_id into initial_calendar_event_id
+  from public.tracked_market_events
+  where id = input_tracked_event_id;
+
+  if not found then
+    raise exception 'tracked_event_not_found' using errcode = 'P0002';
+  end if;
+
+  if initial_calendar_event_id is not null then
+    select * into calendar_row
+    from public.calendar_events
+    where id = initial_calendar_event_id
+    for update;
+
+    if calendar_row.id is null then
+      raise exception 'tracked_release_calendar_event_not_found' using errcode = 'P0002';
+    end if;
+  end if;
+
   select * into tracked_row
   from public.tracked_market_events
   where id = input_tracked_event_id
@@ -30,6 +54,9 @@ begin
 
   if tracked_row.id is null then
     raise exception 'tracked_event_not_found' using errcode = 'P0002';
+  end if;
+  if tracked_row.calendar_event_id is distinct from initial_calendar_event_id then
+    raise exception 'tracked_release_calendar_binding_changed_during_lock';
   end if;
   if tracked_row.kind <> 'earnings' then
     raise exception 'tracked_event_not_release_shell_eligible';
@@ -39,15 +66,6 @@ begin
   end if;
 
   if tracked_row.calendar_event_id is not null then
-    select * into calendar_row
-    from public.calendar_events
-    where id = tracked_row.calendar_event_id
-    for update;
-
-    if calendar_row.id is null then
-      raise exception 'tracked_release_calendar_event_not_found' using errcode = 'P0002';
-    end if;
-
     -- Calendar is only a producer. Before preserving its legacy release identity,
     -- prove that the calendar row describes this exact canonical tracked event.
     if upper(replace(calendar_row.instrument, ' ', '')) is distinct from tracked_row.instrument
