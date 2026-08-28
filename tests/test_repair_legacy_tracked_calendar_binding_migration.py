@@ -17,6 +17,15 @@ class RepairLegacyTrackedCalendarBindingMigrationTests(unittest.TestCase):
     def test_runs_before_release_shell_backfill(self) -> None:
         self.assertLess(MIGRATION.name, NEXT_MIGRATION.name)
 
+    def test_serializes_all_tracked_event_writes_before_repair_scan(self) -> None:
+        relation_lock = "lock table public.tracked_market_events in share row exclusive mode"
+        candidate_scan = "for candidate in"
+        conflict_scan = "select string_agg("
+        self.assertIn(relation_lock, self.sql)
+        self.assertLess(self.sql.index(relation_lock), self.sql.index(candidate_scan))
+        self.assertLess(self.sql.index(relation_lock), self.sql.index(conflict_scan))
+        self.assertIn("legacy service-role upsert compatibility", self.sql)
+
     def test_repairs_only_unambiguous_terminal_non_calendar_identity(self) -> None:
         self.assertIn("set calendar_event_id = null", self.sql)
         self.assertIn("t.status in ('completed', 'failed', 'cancelled')", self.sql)
