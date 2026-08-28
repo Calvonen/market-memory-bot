@@ -15,8 +15,8 @@ lock table public.tracked_market_events in share row exclusive mode;
 -- Bound calendar identity must remain immutable regardless of whether a caller
 -- uses the RPC surface or the Supabase table API. Candidate rows may still be
 -- refreshed by the provider sync before promotion; once a tracked runtime is
--- bound, changes to identity/date fields must fail closed and be expressed as a
--- new occurrence instead.
+-- bound, changes to identity/date/release-name fields must fail closed and be
+-- expressed through the documented control surface or a new occurrence.
 create or replace function public.guard_bound_calendar_event_identity()
 returns trigger
 language plpgsql
@@ -24,7 +24,8 @@ security invoker
 set search_path = pg_catalog, public
 as $$
 begin
-  if new.instrument is not distinct from old.instrument
+  if new.company_name is not distinct from old.company_name
+     and new.instrument is not distinct from old.instrument
      and new.event_type is not distinct from old.event_type
      and new.source is not distinct from old.source
      and new.occurrence_key is not distinct from old.occurrence_key
@@ -48,7 +49,7 @@ revoke all on function public.guard_bound_calendar_event_identity() from public,
 
 drop trigger if exists guard_bound_calendar_event_identity on public.calendar_events;
 create trigger guard_bound_calendar_event_identity
-before update of instrument, event_type, source, occurrence_key, scheduled_date
+before update of company_name, instrument, event_type, source, occurrence_key, scheduled_date
 on public.calendar_events
 for each row
 execute function public.guard_bound_calendar_event_identity();
