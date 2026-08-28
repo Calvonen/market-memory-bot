@@ -22,8 +22,9 @@ def _aware_datetime(value: str) -> datetime:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Create/update one persistent MarketAI tracked event through the canonical "
-            "Supabase RPC. This controls observation only; it never creates a trade."
+            "Create/update one persistent calendar-less MarketAI tracked event through the "
+            "canonical Supabase RPC. Calendar-owned events must be promoted through the "
+            "calendar control surface. This controls observation only; it never creates a trade."
         )
     )
     parser.add_argument("--instrument", required=True)
@@ -40,7 +41,6 @@ def _parse_args() -> argparse.Namespace:
         choices=[item.value for item in TrackedEventTimeStatus],
     )
     parser.add_argument("--actor", required=True)
-    parser.add_argument("--calendar-event-id", default=None)
     return parser.parse_args()
 
 
@@ -58,7 +58,7 @@ def main() -> int:
         event_at=args.event_at,
         event_time_status=TrackedEventTimeStatus(args.event_time_status),
         actor=args.actor,
-        calendar_event_id=args.calendar_event_id,
+        calendar_event_id=None,
     )
     armed = event.resolved_etoro_instrument_id is not None
     print(
