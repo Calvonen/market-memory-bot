@@ -27,6 +27,32 @@ class CloseLegacyTrackedEventCalendarBindingUpsertMigrationTests(unittest.TestCa
         self.assertLess(self.sql.index(lock_sql), self.sql.index(rename_sql))
         self.assertLess(self.sql.index(lock_sql), self.sql.index("select string_agg("))
 
+    def test_revokes_direct_table_identity_writes_before_runtime_cutover(self) -> None:
+        relation_lock = self.sql.index(
+            "lock table public.tracked_market_events in share row exclusive mode"
+        )
+        revoke_insert = self.sql.index(
+            "revoke insert on table public.tracked_market_events from service_role"
+        )
+        revoke_identity_update = self.sql.index(
+            "revoke update (\n  calendar_event_id,\n  instrument,\n  source,\n  external_key,\n  kind,\n  event_date\n) on table public.tracked_market_events from service_role"
+        )
+        rename = self.sql.index("alter function public.upsert_tracked_market_event(")
+        scan = self.sql.index("select string_agg(")
+        self.assertLess(relation_lock, revoke_insert)
+        self.assertLess(revoke_insert, revoke_identity_update)
+        self.assertLess(revoke_identity_update, rename)
+        self.assertLess(revoke_identity_update, scan)
+        for identity_column in (
+            "calendar_event_id",
+            "instrument",
+            "source",
+            "external_key",
+            "kind",
+            "event_date",
+        ):
+            self.assertIn(identity_column, self.sql[revoke_identity_update:rename])
+
     def test_runtime_writer_forbids_calendar_binding(self) -> None:
         self.assertIn("input_calendar_event_id uuid default null", self.sql)
         self.assertIn("raise exception 'tracked_market_event_calendar_binding_forbidden'", self.sql)
