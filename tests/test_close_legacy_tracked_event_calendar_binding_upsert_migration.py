@@ -78,9 +78,16 @@ class CloseLegacyTrackedEventCalendarBindingUpsertMigrationTests(unittest.TestCa
         self.assertIn("calendar_event_missing", self.sql)
         self.assertIn("instrument_mismatch", self.sql)
         self.assertIn("kind_mismatch", self.sql)
+        self.assertIn("event_date_missing", self.sql)
         self.assertIn("event_date_mismatch", self.sql)
         self.assertIn("source_mismatch", self.sql)
         self.assertIn("external_key_mismatch", self.sql)
+        self.assertIn("where t.calendar_event_id is not null", self.sql)
+        self.assertNotIn(
+            "where t.calendar_event_id is not null\n    and t.event_date is not null",
+            self.sql,
+        )
+        self.assertIn("or t.event_date is null", self.sql)
 
 
 if __name__ == "__main__":
