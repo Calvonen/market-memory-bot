@@ -19,15 +19,41 @@ class CloseLegacyTrackedEventCalendarBindingUpsertMigrationTests(unittest.TestCa
         self.assertLess(CANONICAL_CUTOVER.name, LEGACY_CUTOVER.name)
         self.assertLess(LEGACY_CUTOVER.name, RELEASE_SHELL.name)
 
-    def test_serializes_lower_level_cutover_with_tracked_event_writes(self) -> None:
-        lock_sql = "lock table public.tracked_market_events in share row exclusive mode"
+    def test_serializes_cutover_calendar_first_then_tracked(self) -> None:
+        calendar_lock = "lock table public.calendar_events in exclusive mode"
+        tracked_lock = "lock table public.tracked_market_events in share row exclusive mode"
         rename_sql = "alter function public.upsert_tracked_market_event("
-        self.assertIn(lock_sql, self.sql)
+        self.assertIn(calendar_lock, self.sql)
+        self.assertIn(tracked_lock, self.sql)
         self.assertIn(rename_sql, self.sql)
-        self.assertLess(self.sql.index(lock_sql), self.sql.index(rename_sql))
-        self.assertLess(self.sql.index(lock_sql), self.sql.index("select string_agg("))
+        self.assertLess(self.sql.index(calendar_lock), self.sql.index(tracked_lock))
+        self.assertLess(self.sql.index(tracked_lock), self.sql.index(rename_sql))
+        self.assertLess(self.sql.index(tracked_lock), self.sql.index("select string_agg("))
 
-    def test_revokes_direct_table_identity_writes_before_runtime_cutover(self) -> None:
+    def test_bound_calendar_identity_is_guarded_before_invariant_scan(self) -> None:
+        calendar_lock = self.sql.index("lock table public.calendar_events in exclusive mode")
+        guard = self.sql.index("create or replace function public.guard_bound_calendar_event_identity()")
+        trigger = self.sql.index("create trigger guard_bound_calendar_event_identity")
+        scan = self.sql.index("select string_agg(")
+        self.assertLess(calendar_lock, guard)
+        self.assertLess(guard, trigger)
+        self.assertLess(trigger, scan)
+        self.assertIn("calendar_bound_identity_direct_write_forbidden", self.sql)
+        self.assertIn("where t.calendar_event_id = old.id", self.sql)
+        self.assertIn(
+            "before update of instrument, event_type, source, occurrence_key, scheduled_date",
+            self.sql,
+        )
+        for identity_column in (
+            "instrument",
+            "event_type",
+            "source",
+            "occurrence_key",
+            "scheduled_date",
+        ):
+            self.assertIn(identity_column, self.sql[guard:trigger])
+
+    def test_revokes_direct_tracked_table_identity_writes_before_runtime_cutover(self) -> None:
         relation_lock = self.sql.index(
             "lock table public.tracked_market_events in share row exclusive mode"
         )
@@ -60,10 +86,7 @@ class CloseLegacyTrackedEventCalendarBindingUpsertMigrationTests(unittest.TestCa
 
     def test_calendar_capable_legacy_body_is_owner_only(self) -> None:
         self.assertIn("rename to upsert_tracked_market_event_calendar_compat_v11", self.sql)
-        self.assertIn(
-            "from public, anon, authenticated, service_role",
-            self.sql,
-        )
+        self.assertIn("from public, anon, authenticated, service_role", self.sql)
         self.assertIn("security definer", self.sql)
         self.assertIn("set search_path = pg_catalog, public", self.sql)
 
