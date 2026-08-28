@@ -24,10 +24,10 @@ declare
   expectation_exists boolean;
   shell_action text := 'noop_existing';
 begin
-  -- Probe the tracked row without taking a row lock so calendar-bound paths can
-  -- acquire locks in the same order as calendar promotion: calendar first,
-  -- tracked event second. This avoids a calendar<->tracked deadlock while the
-  -- second locked read below protects against a binding change between reads.
+  -- Probe without locking so calendar-bound work can acquire locks in the same
+  -- order as calendar promotion: calendar first, tracked event second. This RPC
+  -- is called by the release worker as its own transaction boundary, not from a
+  -- tracked-row write trigger.
   select calendar_event_id into initial_calendar_event_id
   from public.tracked_market_events
   where id = input_tracked_event_id;
@@ -165,31 +165,10 @@ $$;
 revoke all on function public.ensure_tracked_event_release_shell(uuid) from public;
 grant execute on function public.ensure_tracked_event_release_shell(uuid) to service_role;
 
-create or replace function public.ensure_tracked_event_release_shell_after_date_write()
-returns trigger
-language plpgsql
-security invoker
-as $$
-begin
-  perform * from public.ensure_tracked_event_release_shell(new.id);
-  return new;
-end;
-$$;
-
-revoke all on function public.ensure_tracked_event_release_shell_after_date_write() from public;
-
-drop trigger if exists tracked_market_events_release_shell_after_date_write
-  on public.tracked_market_events;
-create trigger tracked_market_events_release_shell_after_date_write
-  after insert or update of event_date on public.tracked_market_events
-  for each row
-  when (new.kind = 'earnings' and new.event_date is not null)
-  execute function public.ensure_tracked_event_release_shell_after_date_write();
-
 -- Backfill shells only for canonical tracked earnings that already have an
--- explicit local event_date. The canonical function validates calendar binding
--- directly and therefore remains safe for calendar rows that have advanced past
--- the old candidate/tracked watchlist statuses.
+-- explicit local event_date. Future rows are ensured by the canonical release
+-- worker immediately before release discovery/analysis. Never infer a date from
+-- event_at UTC.
 do $$
 declare
   target record;
@@ -240,7 +219,6 @@ returns table (
   ensure_calendar_release_shell_function_exists boolean,
   calendar_release_shell_version_matches boolean,
   ensure_tracked_event_release_shell_function_exists boolean,
-  tracked_event_release_shell_trigger_exists boolean,
   runtime_schema_version integer
 )
 language sql
@@ -298,16 +276,6 @@ as $$
     to_regprocedure('public.ensure_calendar_release_shell(uuid)') is not null,
     public.calendar_release_shell_version() = 1,
     to_regprocedure('public.ensure_tracked_event_release_shell(uuid)') is not null,
-    exists (
-      select 1
-      from pg_trigger t
-      join pg_class c on c.oid = t.tgrelid
-      join pg_namespace n on n.oid = c.relnamespace
-      where n.nspname = 'public'
-        and c.relname = 'tracked_market_events'
-        and t.tgname = 'tracked_market_events_release_shell_after_date_write'
-        and not t.tgisinternal
-    ),
     public.tracked_event_runtime_schema_version();
 $$;
 
