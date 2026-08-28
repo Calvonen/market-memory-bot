@@ -20,9 +20,17 @@ class CanonicalTrackedEventReleaseShellMigrationTests(unittest.TestCase):
         self.assertNotIn("tracked_row.event_at::date", self.sql)
         self.assertNotIn("date(tracked_row.event_at", self.sql.lower())
 
-    def test_calendar_bound_rows_preserve_existing_release_identity(self) -> None:
+    def test_calendar_bound_rows_preserve_identity_and_validate_binding(self) -> None:
         self.assertIn("if tracked_row.calendar_event_id is not null then", self.sql)
-        self.assertIn("from public.ensure_calendar_release_shell(tracked_row.calendar_event_id)", self.sql)
+        self.assertIn("from public.calendar_events", self.sql)
+        self.assertIn("tracked_release_calendar_binding_identity_conflict", self.sql)
+        self.assertIn("calendar_row.scheduled_date is distinct from tracked_row.event_date", self.sql)
+        self.assertIn("calendar_row.event_type is distinct from tracked_row.kind", self.sql)
+        self.assertIn("release_event_id := 'calendar:' || calendar_row.id::text", self.sql)
+
+    def test_calendar_backfill_does_not_depend_on_watchlist_status(self) -> None:
+        self.assertNotIn("from public.ensure_calendar_release_shell(tracked_row.calendar_event_id)", self.sql)
+        self.assertIn("calendar rows that have advanced past", self.sql)
 
     def test_calendarless_rows_use_tracked_event_identity(self) -> None:
         self.assertIn("release_event_id := 'tracked:' || tracked_row.id::text", self.sql)
@@ -44,6 +52,12 @@ class CanonicalTrackedEventReleaseShellMigrationTests(unittest.TestCase):
         self.assertIn("tracked_release_shell_identity_conflict", self.sql)
         self.assertIn("tracked_event_release_date_required", self.sql)
         self.assertIn("tracked_event_not_release_shell_eligible", self.sql)
+
+    def test_schema_gate_requires_canonical_shell_and_trigger(self) -> None:
+        self.assertIn("ensure_tracked_event_release_shell_function_exists boolean", self.sql)
+        self.assertIn("tracked_event_release_shell_trigger_exists boolean", self.sql)
+        self.assertIn("tracked_market_events_release_shell_after_date_write", self.sql)
+        self.assertIn("select 12;", self.sql)
 
 
 if __name__ == "__main__":
