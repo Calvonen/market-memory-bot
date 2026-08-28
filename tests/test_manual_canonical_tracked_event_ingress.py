@@ -72,6 +72,7 @@ class ManualCanonicalTrackedEventIngressTests(unittest.TestCase):
         self.assertEqual(params["input_source"], "manual")
         self.assertEqual(params["input_event_at"], "2026-08-27T23:15:00+00:00")
         self.assertEqual(params["input_event_date"], "2026-08-28")
+        self.assertEqual(params["input_expected_tracked_instrument_id"], "tracked-hvn")
         self.assertIsNone(params["input_calendar_event_id"])
 
     def test_fails_closed_if_database_binds_other_tracked_instrument(self) -> None:
