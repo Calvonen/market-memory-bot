@@ -67,6 +67,36 @@ class RepairLegacyTrackedCalendarBindingMigrationTests(unittest.TestCase):
         self.assertIn("migration-only lifecycle repair", self.sql)
         self.assertIn("audit row above records the prior state", self.sql)
 
+    def test_repair_audit_table_is_operator_only_and_immutable_over_data_api(self) -> None:
+        self.assertIn(
+            "alter table public.legacy_tracked_calendar_binding_repairs enable row level security",
+            self.sql,
+        )
+        self.assertIn(
+            "revoke all on table public.legacy_tracked_calendar_binding_repairs from public, anon, authenticated",
+            self.sql,
+        )
+        self.assertIn(
+            "grant select on table public.legacy_tracked_calendar_binding_repairs to service_role",
+            self.sql,
+        )
+        self.assertIn(
+            "revoke all on sequence public.legacy_tracked_calendar_binding_repairs_id_seq from public, anon, authenticated, service_role",
+            self.sql,
+        )
+        self.assertNotIn(
+            "grant insert on table public.legacy_tracked_calendar_binding_repairs to service_role",
+            self.sql,
+        )
+        self.assertNotIn(
+            "grant update on table public.legacy_tracked_calendar_binding_repairs to service_role",
+            self.sql,
+        )
+        self.assertNotIn(
+            "grant delete on table public.legacy_tracked_calendar_binding_repairs to service_role",
+            self.sql,
+        )
+
     def test_quarantines_trackable_calendar_row_before_detach(self) -> None:
         self.assertIn("calendar_row.status in ('candidate', 'tracked')", self.sql)
         self.assertIn("set status = 'research'", self.sql)
