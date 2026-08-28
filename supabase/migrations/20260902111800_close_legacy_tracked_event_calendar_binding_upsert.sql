@@ -248,8 +248,9 @@ grant execute on function public.promote_calendar_event_to_tracked_runtime(
 ) to service_role;
 
 -- Revalidate every persisted calendar binding while the write barrier is still
--- held. The next migration may only advance runtime schema v12 from a clean
--- state that cannot be recreated through either canonical or legacy RPCs.
+-- held. Include null-dated legacy bindings: once the compatibility writer is
+-- closed, promotion is the only repair path and a malformed null-dated binding
+-- would otherwise remain permanently stuck behind the identity guard.
 do $$
 declare
   conflict_report text;
@@ -259,23 +260,24 @@ begin
       when c.id is null then 'calendar_event_missing'
       when upper(replace(c.instrument, ' ', '')) is distinct from t.instrument then 'instrument_mismatch'
       when c.event_type is distinct from t.kind then 'kind_mismatch'
-      when c.scheduled_date is distinct from t.event_date then 'event_date_mismatch'
       when c.source is distinct from t.source then 'source_mismatch'
       when t.external_key is distinct from ('calendar:' || c.id::text) then 'external_key_mismatch'
+      when t.event_date is null then 'event_date_missing'
+      when c.scheduled_date is distinct from t.event_date then 'event_date_mismatch'
       else 'unknown_conflict'
     end), ', ' order by t.id)
   into conflict_report
   from public.tracked_market_events t
   left join public.calendar_events c on c.id = t.calendar_event_id
   where t.calendar_event_id is not null
-    and t.event_date is not null
     and (
       c.id is null
       or upper(replace(c.instrument, ' ', '')) is distinct from t.instrument
       or c.event_type is distinct from t.kind
-      or c.scheduled_date is distinct from t.event_date
       or c.source is distinct from t.source
       or t.external_key is distinct from ('calendar:' || c.id::text)
+      or t.event_date is null
+      or c.scheduled_date is distinct from t.event_date
     );
 
   if conflict_report is not null then
