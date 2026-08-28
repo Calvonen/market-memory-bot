@@ -28,6 +28,15 @@ class CanonicalTrackedEventReleaseShellMigrationTests(unittest.TestCase):
         self.assertIn("calendar_row.event_type is distinct from tracked_row.kind", self.sql)
         self.assertIn("release_event_id := 'calendar:' || calendar_row.id::text", self.sql)
 
+    def test_calendar_bound_lock_order_matches_promotion(self) -> None:
+        calendar_lock = self.sql.index("from public.calendar_events")
+        tracked_lock = self.sql.index(
+            "select * into tracked_row\n  from public.tracked_market_events\n"
+            "  where id = input_tracked_event_id\n  for update;"
+        )
+        self.assertLess(calendar_lock, tracked_lock)
+        self.assertIn("tracked_release_calendar_binding_changed_during_lock", self.sql)
+
     def test_calendar_backfill_does_not_depend_on_watchlist_status(self) -> None:
         self.assertNotIn("from public.ensure_calendar_release_shell(tracked_row.calendar_event_id)", self.sql)
         self.assertIn("calendar rows that have advanced past", self.sql)
