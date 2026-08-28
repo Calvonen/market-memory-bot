@@ -48,9 +48,11 @@ class WorkflowStepDefinition:
 class EventWorkflowProfile:
     """Producer-neutral policy describing which stages apply to one event.
 
-    The profile says what MarketAI should attempt for an event. Runtime state is
-    represented separately by ``WorkflowStepStatus`` so partially completed and
-    non-linear workflows can be reported truthfully.
+    The event profile is observation-only unless a canonical trading task exists.
+    Strategy, Risk, and PAPER are appended only for a trading-task-backed profile,
+    so tracking an event never implies that MarketAI should attempt a trade.
+    Runtime state is represented separately by ``WorkflowStepStatus`` so partially
+    completed and non-linear workflows can be reported truthfully.
     """
 
     profile_id: str
@@ -86,30 +88,42 @@ _COMMON_PREFIX = (
     WorkflowStepDefinition(WorkflowStepKey.TRACKING),
     WorkflowStepDefinition(WorkflowStepKey.EVENT_IDENTIFIED),
 )
-_COMMON_SUFFIX = (
+_OBSERVATION_SUFFIX = (
     WorkflowStepDefinition(WorkflowStepKey.ANALYSIS),
     WorkflowStepDefinition(WorkflowStepKey.MARKET_REACTION),
+)
+_TRADING_SUFFIX = (
     WorkflowStepDefinition(WorkflowStepKey.STRATEGY),
     WorkflowStepDefinition(WorkflowStepKey.RISK),
     WorkflowStepDefinition(WorkflowStepKey.PAPER),
 )
 
 EARNINGS_WORKFLOW = EventWorkflowProfile(
-    profile_id="earnings_documented_v1",
+    profile_id="earnings_documented_observation_v1",
     steps=(
         *_COMMON_PREFIX,
         WorkflowStepDefinition(WorkflowStepKey.RELEASE, WorkflowStepMode.REQUIRED),
-        *_COMMON_SUFFIX,
+        *_OBSERVATION_SUFFIX,
     ),
 )
 
+EARNINGS_TRADING_WORKFLOW = EventWorkflowProfile(
+    profile_id="earnings_documented_trading_v1",
+    steps=(*EARNINGS_WORKFLOW.steps, *_TRADING_SUFFIX),
+)
+
 CONTENT_EVENT_WORKFLOW = EventWorkflowProfile(
-    profile_id="content_event_v1",
+    profile_id="content_event_observation_v1",
     steps=(
         *_COMMON_PREFIX,
         WorkflowStepDefinition(WorkflowStepKey.RELEASE, WorkflowStepMode.SKIP),
-        *_COMMON_SUFFIX,
+        *_OBSERVATION_SUFFIX,
     ),
+)
+
+CONTENT_EVENT_TRADING_WORKFLOW = EventWorkflowProfile(
+    profile_id="content_event_trading_v1",
+    steps=(*CONTENT_EVENT_WORKFLOW.steps, *_TRADING_SUFFIX),
 )
 
 
@@ -123,12 +137,20 @@ _DOCUMENTED_RELEASE_KINDS = frozenset(
 )
 
 
-def workflow_profile_for_kind(kind: MarketEventKind) -> EventWorkflowProfile:
+def workflow_profile_for_kind(
+    kind: MarketEventKind,
+    *,
+    has_trading_task: bool = False,
+) -> EventWorkflowProfile:
+    """Select policy from event kind plus explicit canonical trading-task presence."""
     if not isinstance(kind, MarketEventKind):
         raise ValueError("kind must be a MarketEventKind")
+    if not isinstance(has_trading_task, bool):
+        raise ValueError("has_trading_task must be a bool")
+
     if kind in _DOCUMENTED_RELEASE_KINDS:
-        return EARNINGS_WORKFLOW
-    return CONTENT_EVENT_WORKFLOW
+        return EARNINGS_TRADING_WORKFLOW if has_trading_task else EARNINGS_WORKFLOW
+    return CONTENT_EVENT_TRADING_WORKFLOW if has_trading_task else CONTENT_EVENT_WORKFLOW
 
 
 def initial_workflow_state(profile: EventWorkflowProfile) -> tuple[WorkflowStepState, ...]:
