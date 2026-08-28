@@ -8,6 +8,21 @@ begin;
 -- can commit a calendar binding outside the invariant scan below.
 lock table public.tracked_market_events in share row exclusive mode;
 
+-- Close the table API as an alternate identity writer while the same write
+-- barrier is held. Runtime mutations continue through the reviewed RPCs; those
+-- RPCs are SECURITY DEFINER where owner privileges are required. Removing direct
+-- INSERT plus the calendar-binding identity/date columns prevents service-role
+-- clients from bypassing the guarded writers after this cutover.
+revoke insert on table public.tracked_market_events from service_role;
+revoke update (
+  calendar_event_id,
+  instrument,
+  source,
+  external_key,
+  kind,
+  event_date
+) on table public.tracked_market_events from service_role;
+
 alter function public.upsert_tracked_market_event(
   text, text, text, text, text, text, text, timestamptz, text, text, uuid
 ) rename to upsert_tracked_market_event_calendar_compat_v11;
