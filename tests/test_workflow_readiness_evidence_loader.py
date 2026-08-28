@@ -4,6 +4,7 @@ import unittest
 from datetime import UTC, datetime
 
 from trading_system.event_workflow_readiness import WorkflowExecutionOutcome
+from trading_system.models import TradingMode
 from trading_system.tracked_event_repository import (
     PersistentTrackedEvent,
     TrackedEventStatus,
@@ -146,6 +147,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
             },
         )
         evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
+        self.assertEqual(evidence.event_id, "tracked-123")
         self.assertTrue(evidence.release_document_present)
         self.assertFalse(evidence.release_failed)
         self.assertTrue(evidence.analysis_present)
@@ -153,6 +155,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
         self.assertTrue(evidence.strategy_present)
         self.assertTrue(evidence.risk_present)
         self.assertEqual(evidence.execution_outcome, WorkflowExecutionOutcome.FILLED)
+        self.assertIs(evidence.trading_mode, TradingMode.PAPER)
         self.assertEqual(
             client.rpc_calls,
             [("get_event_paper_trade_state", {"input_event_id": release_id})],
@@ -172,6 +175,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
         )
         evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
         self.assertEqual(evidence.execution_outcome, WorkflowExecutionOutcome.ACCEPTED)
+        self.assertIs(evidence.trading_mode, TradingMode.PAPER)
 
     def test_stale_analysis_and_paper_state_do_not_complete_current_workflow(self):
         release_id = "tracked:tracked-123"
@@ -199,6 +203,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
         self.assertFalse(evidence.strategy_present)
         self.assertFalse(evidence.risk_present)
         self.assertEqual(evidence.execution_outcome, WorkflowExecutionOutcome.NOT_STARTED)
+        self.assertIs(evidence.trading_mode, TradingMode.PAPER)
 
     def test_missing_current_expectation_ignores_versioned_downstream_evidence(self):
         release_id = "tracked:tracked-123"
@@ -220,6 +225,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
         self.assertFalse(evidence.strategy_present)
         self.assertFalse(evidence.risk_present)
         self.assertEqual(evidence.execution_outcome, WorkflowExecutionOutcome.NOT_STARTED)
+        self.assertIs(evidence.trading_mode, TradingMode.PAPER)
 
     def test_release_document_completion_survives_downstream_analysis_error(self):
         release_id = "tracked:tracked-123"
@@ -241,6 +247,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
         self.assertTrue(evidence.release_document_present)
         self.assertFalse(evidence.release_failed)
         self.assertFalse(evidence.analysis_present)
+        self.assertIs(evidence.trading_mode, TradingMode.PAPER)
 
     def test_error_without_release_document_requires_action(self):
         release_id = "tracked:tracked-123"
@@ -260,6 +267,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
         evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
         self.assertFalse(evidence.release_document_present)
         self.assertTrue(evidence.release_failed)
+        self.assertIs(evidence.trading_mode, TradingMode.PAPER)
 
     def test_normal_no_release_does_not_require_action_before_overdue_marker(self):
         release_id = "tracked:tracked-123"
@@ -278,6 +286,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
         )
         evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
         self.assertFalse(evidence.release_failed)
+        self.assertIs(evidence.trading_mode, TradingMode.PAPER)
 
     def test_overdue_no_release_requires_action(self):
         release_id = "tracked:tracked-123"
@@ -296,6 +305,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
         )
         evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
         self.assertTrue(evidence.release_failed)
+        self.assertIs(evidence.trading_mode, TradingMode.PAPER)
 
     def test_expired_no_trade_closes_execution_without_inventing_strategy_or_risk(self):
         release_id = "tracked:tracked-123"
@@ -312,6 +322,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
         self.assertFalse(evidence.strategy_present)
         self.assertFalse(evidence.risk_present)
         self.assertEqual(evidence.execution_outcome, WorkflowExecutionOutcome.NO_TRADE)
+        self.assertIs(evidence.trading_mode, TradingMode.PAPER)
 
     def test_unknown_terminal_paper_status_fails_closed(self):
         release_id = "tracked:tracked-123"
