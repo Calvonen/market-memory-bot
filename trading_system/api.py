@@ -27,6 +27,11 @@ from trading_system.event_repository import (
     EventExpectationRepository,
     ExpectationPatch,
 )
+from trading_system.event_workflow_read_model import (
+    EventWorkflowReadModel,
+    build_event_workflow_read_model,
+)
+from trading_system.event_workflow_readiness import WorkflowReadinessEvidence
 from trading_system.models import EventExpectation
 from trading_system.paper_trade_repository import SupabasePaperTradeRepository
 from trading_system.official_release_source_repository import (
@@ -61,6 +66,9 @@ from trading_system.tracked_event_result import (
     TrackedEventLatestReaction,
     latest_tracked_event_reaction,
 )
+from trading_system.workflow_readiness_evidence_loader import (
+    SupabaseWorkflowReadinessEvidenceLoader,
+)
 
 # Calendar range MVP: the mobile UI only ever offers 7/30-day chips and the
 # calendar sync worker never fetches further out than this (see
@@ -81,6 +89,10 @@ class OfficialReleaseSourceRepository(Protocol):
     def clear(
         self, event_id: str, *, expected_version: int, actor: str
     ) -> int: ...
+
+
+class WorkflowReadinessEvidenceLoader(Protocol):
+    def load(self, event: PersistentTrackedEvent) -> WorkflowReadinessEvidence: ...
 
 
 class ExpectationVersionRequest(BaseModel):
@@ -246,6 +258,17 @@ def _tracked_event_latest_reaction_payload(
     }
 
 
+def _tracked_event_workflow_payload(
+    workflow: EventWorkflowReadModel,
+) -> dict[str, Any]:
+    return {
+        "event_id": workflow.event_id,
+        "profile_id": workflow.profile_id,
+        "trading_mode": workflow.trading_mode,
+        "steps": [asdict(step) for step in workflow.steps],
+    }
+
+
 _POSTGRES_UUID_TEXT = re.compile(
     r"(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
@@ -348,6 +371,7 @@ def create_app(
     approval_repository: StrategyDraftApprovalRepository | None = None,
     calendar_repository: CalendarEventRepository | None = None,
     tracked_event_repository: SupabaseTrackedEventRepository | None = None,
+    workflow_evidence_loader: WorkflowReadinessEvidenceLoader | None = None,
     official_release_source_repository: OfficialReleaseSourceRepository | None = None,
     admin_token: str | None = None,
     read_api_key: str | None = None,
@@ -381,6 +405,7 @@ def create_app(
     approval_repo_cache: StrategyDraftApprovalRepository | None = approval_repository
     calendar_repo_cache: CalendarEventRepository | None = calendar_repository
     tracked_event_repo_cache: SupabaseTrackedEventRepository | None = tracked_event_repository
+    workflow_evidence_loader_cache: WorkflowReadinessEvidenceLoader | None = workflow_evidence_loader
     official_release_source_repo_cache: OfficialReleaseSourceRepository | None = (
         official_release_source_repository
     )
@@ -425,6 +450,15 @@ def create_app(
         if tracked_event_repo_cache is None:
             tracked_event_repo_cache = SupabaseTrackedEventRepository.from_env()
         return tracked_event_repo_cache
+
+    def get_workflow_evidence_loader() -> WorkflowReadinessEvidenceLoader:
+        nonlocal workflow_evidence_loader_cache
+        if workflow_evidence_loader_cache is None:
+            repository = get_tracked_event_repository()
+            workflow_evidence_loader_cache = SupabaseWorkflowReadinessEvidenceLoader(
+                repository.client
+            )
+        return workflow_evidence_loader_cache
 
     def get_official_release_source_repository() -> OfficialReleaseSourceRepository:
         nonlocal official_release_source_repo_cache
@@ -541,6 +575,43 @@ def create_app(
                 else None
             ),
         }
+
+    @app.get("/api/v1/tracked-events/{event_id}/workflow")
+    def get_tracked_event_workflow(
+        event_id: str,
+        x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
+    ) -> dict[str, Any]:
+        require_read(x_marketai_key)
+        event_id = _require_valid_tracked_event_id(event_id)
+        try:
+            event = get_tracked_event_repository().get(event_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503, detail="Tracked-event read failed"
+            ) from exc
+        if event is None:
+            raise HTTPException(status_code=404, detail="Tracked event not found")
+
+        try:
+            evidence = get_workflow_evidence_loader().load(event)
+            # Tracking alone never creates a trading task. Until an explicit
+            # canonical task-mode source is wired to this API, project the
+            # observation workflow only; persisted PAPER evidence is ignored by
+            # the read model rather than silently turning tracking into trading.
+            workflow = build_event_workflow_read_model(
+                event,
+                evidence,
+                trading_mode=None,
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503, detail="Workflow readiness read failed"
+            ) from exc
+        return _tracked_event_workflow_payload(workflow)
 
     @app.get("/api/v1/symbols")
     def symbols(q: str = Query(..., max_length=100), limit: int = 8, x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key")) -> list[dict[str, str]]:
