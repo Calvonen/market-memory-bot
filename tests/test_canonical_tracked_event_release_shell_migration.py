@@ -37,9 +37,31 @@ class CanonicalTrackedEventReleaseShellMigrationTests(unittest.TestCase):
         self.assertLess(calendar_lock, tracked_lock)
         self.assertIn("tracked_release_calendar_binding_changed_during_lock", self.sql)
 
-    def test_release_shell_is_not_invoked_from_tracked_row_trigger(self) -> None:
+    def test_legacy_calendar_shell_symbol_is_compared_canonically(self) -> None:
+        self.assertIn(
+            "upper(replace(existing_market_event.instrument, ' ', ''))",
+            self.sql,
+        )
+        self.assertIn(
+            "upper(replace(tracked_row.instrument, ' ', ''))",
+            self.sql,
+        )
+        self.assertNotIn(
+            "if existing_market_event.instrument is distinct from tracked_row.instrument",
+            self.sql,
+        )
+
+    def test_calendarless_date_write_provisions_shell_without_calendar_lock_path(self) -> None:
+        self.assertIn(
+            "create trigger tracked_market_events_calendarless_release_shell_after_date_write",
+            self.sql,
+        )
+        self.assertIn("new.calendar_event_id is null", self.sql)
+        self.assertIn(
+            "perform * from public.ensure_tracked_event_release_shell(new.id)",
+            self.sql,
+        )
         self.assertNotIn("tracked_market_events_release_shell_after_date_write", self.sql)
-        self.assertIn("called by the release worker as its own transaction boundary", self.sql)
 
     def test_calendarless_rows_use_tracked_event_identity(self) -> None:
         self.assertIn("release_event_id := 'tracked:' || tracked_row.id::text", self.sql)
@@ -57,9 +79,13 @@ class CanonicalTrackedEventReleaseShellMigrationTests(unittest.TestCase):
         self.assertIn("tracked_event_release_date_required", self.sql)
         self.assertIn("tracked_event_not_release_shell_eligible", self.sql)
 
-    def test_schema_gate_requires_canonical_shell(self) -> None:
+    def test_schema_gate_requires_canonical_shell_and_calendarless_trigger(self) -> None:
         self.assertIn("ensure_tracked_event_release_shell_function_exists boolean", self.sql)
-        self.assertNotIn("tracked_event_release_shell_trigger_exists boolean", self.sql)
+        self.assertIn("calendarless_release_shell_trigger_exists boolean", self.sql)
+        self.assertIn(
+            "tracked_market_events_calendarless_release_shell_after_date_write",
+            self.sql,
+        )
         self.assertIn("select 12;", self.sql)
 
 
