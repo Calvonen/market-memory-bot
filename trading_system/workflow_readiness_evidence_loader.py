@@ -52,6 +52,7 @@ class SupabaseWorkflowReadinessEvidenceLoader:
 
         return WorkflowReadinessEvidence(
             tracked_status=event.status,
+            event_id=event.event_id,
             release_document_present=release_document_present,
             release_failed=(
                 not release_document_present and _release_requires_action(latest_run)
