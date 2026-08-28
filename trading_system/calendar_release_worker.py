@@ -25,18 +25,22 @@ DEFAULT_LOOKAHEAD_DAYS = 0
 TARGET_PAGE_SIZE = 1000
 US_MARKET_LABELS = ("US", "USA", "NASDAQ", "NYSE", "AMEX")
 DATE_ONLY_OVERDUE_GRACE_HOURS = 24.0
+RELEASE_ELIGIBLE_TRACKED_STATUSES = ("tracked", "monitoring", "completed", "failed")
 
 
 @dataclass(frozen=True)
 class CalendarReleaseTarget:
-    calendar_event_id: str
+    calendar_event_id: str | None
     event_id: str
     ticker: str
     scheduled_date: date
     market: str = ""
+    tracked_event_id: str = ""
 
 
 class SupabaseCalendarReleaseTargetRepository:
+    """Enumerate canonical tracked-event release targets across all producers."""
+
     def __init__(self, client: Any) -> None:
         self.client = client
 
@@ -67,11 +71,11 @@ class SupabaseCalendarReleaseTargetRepository:
 
         while True:
             query = (
-                self.client.table("calendar_events")
-                .select("id,instrument,scheduled_date,market")
-                .eq("status", "tracked")
-                .eq("event_type", "earnings")
-                .lte("scheduled_date", end_date.isoformat())
+                self.client.table("tracked_market_events")
+                .select("id,calendar_event_id,instrument,event_date,market")
+                .eq("kind", "earnings")
+                .in_("status", RELEASE_ELIGIBLE_TRACKED_STATUSES)
+                .lte("event_date", end_date.isoformat())
                 .order("id")
                 .limit(TARGET_PAGE_SIZE)
             )
@@ -82,15 +86,17 @@ class SupabaseCalendarReleaseTargetRepository:
 
             for row in rows:
                 if not isinstance(row, dict):
-                    raise RuntimeError("calendar release target row is not an object")
-                calendar_id = str(row.get("id") or "").strip()
+                    raise RuntimeError("tracked release target row is not an object")
+                tracked_id = str(row.get("id") or "").strip()
+                calendar_id_raw = row.get("calendar_event_id")
+                calendar_id = str(calendar_id_raw).strip() if calendar_id_raw else None
                 ticker = str(row.get("instrument") or "").strip().upper()
                 market = str(row.get("market") or "").strip().upper()
-                scheduled = row.get("scheduled_date")
-                if not calendar_id or not ticker or not market or not scheduled:
-                    row_identity = calendar_id or "<missing-id>"
+                scheduled = row.get("event_date")
+                if not tracked_id or not ticker or not market or not scheduled:
+                    row_identity = tracked_id or "<missing-id>"
                     raise RuntimeError(
-                        f"calendar release target {row_identity} is missing required canonical data"
+                        f"tracked release target {row_identity} is missing required canonical data"
                     )
                 try:
                     parsed_date = (
@@ -100,15 +106,21 @@ class SupabaseCalendarReleaseTargetRepository:
                     )
                 except (TypeError, ValueError) as exc:
                     raise RuntimeError(
-                        f"calendar release target {calendar_id} has invalid scheduled_date"
+                        f"tracked release target {tracked_id} has invalid event_date"
                     ) from exc
+                event_id = (
+                    f"calendar:{calendar_id}"
+                    if calendar_id is not None
+                    else f"tracked:{tracked_id}"
+                )
                 targets.append(
                     CalendarReleaseTarget(
                         calendar_event_id=calendar_id,
-                        event_id=f"calendar:{calendar_id}",
+                        event_id=event_id,
                         ticker=ticker,
                         scheduled_date=parsed_date,
                         market=market,
+                        tracked_event_id=tracked_id,
                     )
                 )
 
@@ -116,10 +128,26 @@ class SupabaseCalendarReleaseTargetRepository:
                 break
             next_cursor = str(rows[-1].get("id") or "").strip()
             if not next_cursor or next_cursor == cursor:
-                raise RuntimeError("calendar release target pagination cursor did not advance")
+                raise RuntimeError("tracked release target pagination cursor did not advance")
             cursor = next_cursor
 
         return tuple(targets)
+
+    def ensure_release_shell(self, target: CalendarReleaseTarget) -> str:
+        tracked_id = target.tracked_event_id.strip()
+        if not tracked_id:
+            raise RuntimeError("tracked release target is missing tracked_event_id")
+        response = self.client.rpc(
+            "ensure_tracked_event_release_shell",
+            {"input_tracked_event_id": tracked_id},
+        ).execute()
+        rows = list(response.data or [])
+        if len(rows) != 1 or not isinstance(rows[0], dict):
+            raise RuntimeError("canonical release-shell RPC returned invalid response")
+        release_event_id = str(rows[0].get("out_release_event_id") or "").strip()
+        if release_event_id != target.event_id:
+            raise RuntimeError("canonical release-shell identity differs from release target")
+        return release_event_id
 
 
 class _PinnedExpectationRepository:
@@ -160,6 +188,10 @@ def run_calendar_release_ingestion_once(
     results: list[CalendarReleaseWorkerResult] = []
     for target in targets.list_targets(start_date=start_date, end_date=end_date):
         try:
+            ensure_shell = getattr(targets, "ensure_release_shell", None)
+            if callable(ensure_shell):
+                ensure_shell(target)
+
             expectation = expectations.get(target.event_id)
             if expectation is None:
                 results.append(
@@ -175,7 +207,7 @@ def run_calendar_release_ingestion_once(
                     CalendarReleaseWorkerResult(
                         target.event_id,
                         "identity_conflict",
-                        "release-shell instrument differs from calendar instrument",
+                        "release-shell instrument differs from tracked-event instrument",
                     )
                 )
                 continue
@@ -184,7 +216,7 @@ def run_calendar_release_ingestion_once(
                     CalendarReleaseWorkerResult(
                         target.event_id,
                         "identity_conflict",
-                        "release-shell date differs from calendar date",
+                        "release-shell date differs from tracked-event date",
                     )
                 )
                 continue
@@ -205,12 +237,6 @@ def run_calendar_release_ingestion_once(
             )
             if approved_source is not None:
                 if approved_source.source_kind == "results_page":
-                    # The approved page defines the discovery origin; the
-                    # provider still selects fail-closed on explicit evidence.
-                    # No release_period is passed: the canonical release target
-                    # carries an event identity and a scheduled date, not a
-                    # fiscal period, and a quarter must never be guessed from a
-                    # date. Exact scheduled-date evidence remains available.
                     provider = ResultsPageOfficialReleaseProvider.for_event(
                         approved_source,
                         scheduled_date=target.scheduled_date,
@@ -240,11 +266,6 @@ def run_calendar_release_ingestion_once(
                 release_repository=releases,
                 analyzer=analyzer,
                 provider=provider,
-                # Calendar release shells contain only a date, not a confirmed
-                # release time. Do not mark a legitimate same-day after-hours
-                # release overdue from the shared midnight+8h default. Until an
-                # exchange-aware release boundary exists, the end of the UTC
-                # calendar date is the earliest defensible generic boundary.
                 overdue_grace_hours=DATE_ONLY_OVERDUE_GRACE_HOURS,
                 clock=clock,
             )

@@ -64,6 +64,26 @@ class CanonicalTrackedEventIngressTests(unittest.TestCase):
         self.assertEqual(params["input_event_time_status"], "estimated")
         self.assertIsNone(params["input_calendar_event_id"])
 
+    def test_rejects_calendar_binding_before_rpc(self) -> None:
+        client = _FakeClient([])
+        ingress = SupabaseCanonicalTrackedEventIngress(client)
+        with self.assertRaisesRegex(ValueError, "use calendar runtime promotion"):
+            ingress.register(
+                company_name="Autodesk",
+                instrument="ADSK",
+                market="USA",
+                source="finnhub",
+                external_key="calendar:22648076-6e43-40fc-ac6e-f57a79ceee31",
+                kind="earnings",
+                title="Autodesk earnings",
+                event_at=datetime(2026, 8, 27, 20, tzinfo=UTC),
+                event_date=date(2026, 8, 27),
+                event_time_status=TrackedEventTimeStatus.ESTIMATED,
+                actor="test",
+                calendar_event_id="22648076-6e43-40fc-ac6e-f57a79ceee31",
+            )
+        self.assertEqual(client.calls, [])
+
     def test_rejects_datetime_as_event_date(self) -> None:
         ingress = SupabaseCanonicalTrackedEventIngress(_FakeClient([]))
         with self.assertRaisesRegex(ValueError, "event_date must be a date"):

@@ -71,7 +71,9 @@ TRACKED_PRESENT_ROW = {
     "calendar_runtime_untrack_guard_version_matches": True,
     "ensure_calendar_release_shell_function_exists": True,
     "calendar_release_shell_version_matches": True,
-    "runtime_schema_version": 11,
+    "ensure_tracked_event_release_shell_function_exists": True,
+    "calendarless_release_shell_trigger_exists": True,
+    "runtime_schema_version": 12,
 }
 
 
@@ -140,12 +142,12 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertIn("deployed: 7", err)
 
     def test_fails_closed_on_old_runtime_schema_version(self) -> None:
-        row = dict(TRACKED_PRESENT_ROW, runtime_schema_version=10)
+        row = dict(TRACKED_PRESENT_ROW, runtime_schema_version=11)
         exit_code, _out, err = self._run_with_client(
             _FakeClient(_responses(tracked_row=row))
         )
         self.assertEqual(exit_code, 1)
-        self.assertIn("tracked-event runtime schema version 11", err)
+        self.assertIn("tracked-event runtime schema version 12", err)
 
     def test_fails_closed_when_event_date_column_is_missing(self) -> None:
         row = dict(
@@ -212,6 +214,28 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         )
         self.assertEqual(exit_code, 1)
         self.assertIn("calendar release-pipeline shell", err)
+
+    def test_fails_closed_when_canonical_release_shell_function_is_missing(self) -> None:
+        row = dict(
+            TRACKED_PRESENT_ROW,
+            ensure_tracked_event_release_shell_function_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_row=row))
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("ensure_tracked_event_release_shell() function", err)
+
+    def test_fails_closed_when_calendarless_release_shell_trigger_is_missing(self) -> None:
+        row = dict(
+            TRACKED_PRESENT_ROW,
+            calendarless_release_shell_trigger_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_row=row))
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("calendar-less tracked-event release-shell trigger", err)
 
     def test_fails_closed_when_existing_required_object_is_missing(self) -> None:
         row = dict(

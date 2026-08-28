@@ -5,6 +5,7 @@ from datetime import date
 from types import SimpleNamespace
 
 from trading_system.calendar_release_worker import (
+    RELEASE_ELIGIBLE_TRACKED_STATUSES,
     TARGET_PAGE_SIZE,
     SupabaseCalendarReleaseTargetRepository,
 )
@@ -51,11 +52,21 @@ class _Query:
         return SimpleNamespace(data=self.rows)
 
 
+class _RpcCall:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def execute(self):
+        return SimpleNamespace(data=self.rows)
+
+
 class _Client:
-    def __init__(self, pages):
+    def __init__(self, pages, *, rpc_rows=None):
         self.pages = list(pages)
         self.queries = []
         self.table_names = []
+        self.rpc_rows = rpc_rows or []
+        self.rpc_calls = []
 
     def table(self, name):
         self.table_names.append(name)
@@ -65,22 +76,28 @@ class _Client:
         self.queries.append(query)
         return query
 
+    def rpc(self, name, params):
+        self.rpc_calls.append((name, params))
+        return _RpcCall(self.rpc_rows)
+
 
 class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
-    def test_requests_tracked_earnings_across_markets_through_end_date_without_lower_bound(self):
+    def test_requests_canonical_earnings_across_markets_without_lower_bound(self):
         client = _Client(
             [[
                 {
-                    "id": "22648076-6e43-40fc-ac6e-f57a79ceee31",
+                    "id": "12648076-6e43-40fc-ac6e-f57a79ceee31",
+                    "calendar_event_id": "22648076-6e43-40fc-ac6e-f57a79ceee31",
                     "instrument": "aapl",
-                    "scheduled_date": "2026-08-23",
+                    "event_date": "2026-08-23",
                     "market": "NASDAQ",
                 },
                 {
                     "id": "32648076-6e43-40fc-ac6e-f57a79ceee31",
-                    "instrument": "nokia",
-                    "scheduled_date": "2026-08-24",
-                    "market": "helsinki",
+                    "calendar_event_id": None,
+                    "instrument": "hvn.asx",
+                    "event_date": "2026-08-24",
+                    "market": "australia",
                 },
             ]]
         )
@@ -91,33 +108,44 @@ class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
             end_date=date(2026, 8, 25),
         )
 
-        self.assertEqual(client.table_names, ["calendar_events"])
+        self.assertEqual(client.table_names, ["tracked_market_events"])
         calls = client.queries[0].calls
-        self.assertIn(("select", "id,instrument,scheduled_date,market"), calls)
-        self.assertIn(("eq", "status", "tracked"), calls)
-        self.assertFalse(any(call[0] == "in" and call[1] == "market" for call in calls))
-        self.assertIn(("eq", "event_type", "earnings"), calls)
-        self.assertNotIn(("gte", "scheduled_date", "2026-08-24"), calls)
-        self.assertIn(("lte", "scheduled_date", "2026-08-25"), calls)
+        self.assertIn(
+            ("select", "id,calendar_event_id,instrument,event_date,market"),
+            calls,
+        )
+        self.assertIn(("eq", "kind", "earnings"), calls)
+        self.assertIn(("in", "status", RELEASE_ELIGIBLE_TRACKED_STATUSES), calls)
+        self.assertNotIn(("gte", "event_date", "2026-08-24"), calls)
+        self.assertIn(("lte", "event_date", "2026-08-25"), calls)
         self.assertIn(("order", "id"), calls)
         self.assertIn(("limit", TARGET_PAGE_SIZE), calls)
         self.assertEqual(len(targets), 2)
         self.assertEqual(targets[0].ticker, "AAPL")
         self.assertEqual(targets[0].market, "NASDAQ")
         self.assertEqual(targets[0].scheduled_date, date(2026, 8, 23))
-        self.assertEqual(targets[1].ticker, "NOKIA")
-        self.assertEqual(targets[1].market, "HELSINKI")
         self.assertEqual(
             targets[0].event_id,
             "calendar:22648076-6e43-40fc-ac6e-f57a79ceee31",
+        )
+        self.assertEqual(targets[1].ticker, "HVN.ASX")
+        self.assertEqual(targets[1].market, "AUSTRALIA")
+        self.assertEqual(
+            targets[1].event_id,
+            "tracked:32648076-6e43-40fc-ac6e-f57a79ceee31",
+        )
+        self.assertEqual(
+            targets[1].tracked_event_id,
+            "32648076-6e43-40fc-ac6e-f57a79ceee31",
         )
 
     def test_paginates_past_postgrest_response_limit_with_id_cursor(self):
         first_page = [
             {
                 "id": f"{index:08d}-0000-0000-0000-000000000000",
+                "calendar_event_id": None,
                 "instrument": "AAA",
-                "scheduled_date": "2026-08-20",
+                "event_date": "2026-08-20",
                 "market": "NASDAQ",
             }
             for index in range(TARGET_PAGE_SIZE)
@@ -126,8 +154,9 @@ class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
         second_page = [
             {
                 "id": second_id,
+                "calendar_event_id": None,
                 "instrument": "NEW",
-                "scheduled_date": "2026-08-25",
+                "event_date": "2026-08-25",
                 "market": "ASX",
             }
         ]
@@ -143,21 +172,17 @@ class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
         self.assertEqual(len(targets), TARGET_PAGE_SIZE + 1)
         self.assertEqual(targets[-1].ticker, "NEW")
         self.assertEqual(targets[-1].market, "ASX")
-        self.assertIn(
-            ("gt", "id", first_page[-1]["id"]),
-            client.queries[1].calls,
-        )
+        self.assertIn(("gt", "id", first_page[-1]["id"]), client.queries[1].calls)
 
     def test_incomplete_target_row_fails_closed(self):
         client = _Client(
-            [[
-                {
-                    "id": "22648076-6e43-40fc-ac6e-f57a79ceee31",
-                    "instrument": "",
-                    "scheduled_date": "2026-08-25",
-                    "market": "NASDAQ",
-                }
-            ]]
+            [[{
+                "id": "22648076-6e43-40fc-ac6e-f57a79ceee31",
+                "calendar_event_id": None,
+                "instrument": "",
+                "event_date": "2026-08-25",
+                "market": "NASDAQ",
+            }]]
         )
         repository = SupabaseCalendarReleaseTargetRepository(client)
 
@@ -172,14 +197,13 @@ class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
 
     def test_missing_market_fails_closed(self):
         client = _Client(
-            [[
-                {
-                    "id": "22648076-6e43-40fc-ac6e-f57a79ceee31",
-                    "instrument": "NOKIA",
-                    "scheduled_date": "2026-08-25",
-                    "market": "",
-                }
-            ]]
+            [[{
+                "id": "22648076-6e43-40fc-ac6e-f57a79ceee31",
+                "calendar_event_id": None,
+                "instrument": "NOKIA",
+                "event_date": "2026-08-25",
+                "market": "",
+            }]]
         )
         repository = SupabaseCalendarReleaseTargetRepository(client)
 
@@ -188,6 +212,60 @@ class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
                 start_date=date(2026, 8, 24),
                 end_date=date(2026, 8, 25),
             )
+
+    def test_ensure_shell_uses_canonical_tracked_event_identity(self):
+        tracked_id = "32648076-6e43-40fc-ac6e-f57a79ceee31"
+        client = _Client(
+            [[]],
+            rpc_rows=[{
+                "out_release_event_id": f"tracked:{tracked_id}",
+                "out_action": "inserted",
+            }],
+        )
+        repository = SupabaseCalendarReleaseTargetRepository(client)
+        target = type(
+            "Target",
+            (),
+            {
+                "tracked_event_id": tracked_id,
+                "event_id": f"tracked:{tracked_id}",
+            },
+        )()
+
+        release_id = repository.ensure_release_shell(target)
+
+        self.assertEqual(release_id, f"tracked:{tracked_id}")
+        self.assertEqual(
+            client.rpc_calls,
+            [
+                (
+                    "ensure_tracked_event_release_shell",
+                    {"input_tracked_event_id": tracked_id},
+                )
+            ],
+        )
+
+    def test_ensure_shell_fails_closed_on_identity_mismatch(self):
+        tracked_id = "32648076-6e43-40fc-ac6e-f57a79ceee31"
+        client = _Client(
+            [[]],
+            rpc_rows=[{
+                "out_release_event_id": "tracked:other",
+                "out_action": "noop_existing",
+            }],
+        )
+        repository = SupabaseCalendarReleaseTargetRepository(client)
+        target = type(
+            "Target",
+            (),
+            {
+                "tracked_event_id": tracked_id,
+                "event_id": f"tracked:{tracked_id}",
+            },
+        )()
+
+        with self.assertRaisesRegex(RuntimeError, "identity differs"):
+            repository.ensure_release_shell(target)
 
 
 if __name__ == "__main__":

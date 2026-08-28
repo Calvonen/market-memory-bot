@@ -3,9 +3,9 @@
 
 The existing strategy-draft and calendar/watchlist checks stay in place. The
 persistent tracked-event worker additionally requires the tracked-event runtime
-migrations through the canonical event-local-date version. Manual official
-release sources have a dedicated verifier RPC so a missing out-of-band migration
-fails before backend/systemd processes are restarted.
+migrations through the canonical tracked-event release-shell version. Manual
+official release sources have a dedicated verifier RPC so a missing out-of-band
+migration fails before backend/systemd processes are restarted.
 """
 
 from __future__ import annotations
@@ -124,23 +124,24 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
         "calendar_release_shell_version_matches",
         "calendar release-pipeline shell implementation version",
     ),
+    (
+        "ensure_tracked_event_release_shell_function_exists",
+        "ensure_tracked_event_release_shell() function",
+    ),
+    (
+        "calendarless_release_shell_trigger_exists",
+        "calendar-less tracked-event release-shell trigger",
+    ),
 )
 
 REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 3
 REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 8
-REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 11
+REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 12
 POSTGRES_IDENTIFIER_MAX_BYTES = 63
 
 
 def _postgres_response_key(key_name: str) -> str:
-    """Return the key PostgreSQL exposes for an unquoted result-column name.
-
-    PostgreSQL identifiers are limited to 63 bytes. SQL function OUT/TABLE
-    column names longer than that are silently truncated when the function is
-    created, and PostgREST consequently serializes the truncated name. All
-    verifier identifiers are ASCII today, but truncate by bytes to match the
-    database rule rather than assuming a character limit.
-    """
+    """Return the key PostgreSQL exposes for an unquoted result-column name."""
     encoded = key_name.encode("utf-8")
     if len(encoded) <= POSTGRES_IDENTIFIER_MAX_BYTES:
         return key_name

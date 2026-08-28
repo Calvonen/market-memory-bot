@@ -18,7 +18,12 @@ class CanonicalTrackedEventWriteResult:
 
 
 class SupabaseCanonicalTrackedEventIngress:
-    """Producer-neutral Python boundary for canonical tracked-event creation."""
+    """Producer-neutral Python boundary for canonical tracked-event creation.
+
+    Calendar-bound registrations deliberately do not use this boundary. They
+    must go through promote_calendar_event_to_tracked_runtime(), which owns the
+    calendar-first lock order and validates the calendar identity atomically.
+    """
 
     def __init__(self, client: Any) -> None:
         self.client = client
@@ -97,6 +102,11 @@ class SupabaseCanonicalTrackedEventIngress:
             raise ValueError("event_time_status must be a TrackedEventTimeStatus")
         if expected_tracked_instrument_id is not None and not expected_tracked_instrument_id.strip():
             raise ValueError("expected_tracked_instrument_id must not be blank")
+        if calendar_event_id is not None:
+            raise ValueError(
+                "calendar_event_id is not accepted by canonical tracked-event ingress; "
+                "use calendar runtime promotion"
+            )
 
         response = self.client.rpc(
             "upsert_canonical_tracked_market_event",
@@ -112,7 +122,7 @@ class SupabaseCanonicalTrackedEventIngress:
                 "input_event_date": event_date.isoformat(),
                 "input_event_time_status": event_time_status.value,
                 "input_actor": actor,
-                "input_calendar_event_id": calendar_event_id,
+                "input_calendar_event_id": None,
                 "input_expected_tracked_instrument_id": expected_tracked_instrument_id,
             },
         ).execute()
