@@ -48,10 +48,13 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         current_version = self._current_expectation_version(release_event_id)
         latest_run = self._latest_release_run(release_event_id)
         paper_state = self._paper_state_for_version(release_event_id, current_version)
-        release_document_present = self._exists(
+        persisted_release_document_present = self._exists(
             "event_source_documents", "event_id", release_event_id
         )
         canonical_blocker = _is_canonical_release_blocker(latest_run)
+        release_document_present = (
+            persisted_release_document_present and not canonical_blocker
+        )
 
         return WorkflowReadinessEvidence(
             tracked_status=event.status,
