@@ -11,7 +11,9 @@ from trading_system.tracked_event_repository import PersistentTrackedEvent
 
 _RELEASE_ERROR_STATUSES = frozenset({"error"})
 _ACCEPTED_ORDER_STATUSES = frozenset({"accepted", "pending", "open", "submitted"})
-_FILLED_ORDER_STATUSES = frozenset({"filled", "executed", "complete", "completed"})
+_FILLED_ORDER_STATUSES = frozenset(
+    {"filled", "filled_simulated", "executed", "complete", "completed"}
+)
 _REJECTED_ORDER_STATUSES = frozenset({"rejected", "cancelled", "canceled"})
 _FAILED_ORDER_STATUSES = frozenset({"failed", "error"})
 
@@ -34,13 +36,20 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         release_event_id = canonical_release_event_id(event)
         latest_run = self._latest_release_run(release_event_id)
         paper_state = self._paper_state(release_event_id)
+        release_document_present = self._exists(
+            "event_source_documents", "event_id", release_event_id
+        )
 
         return WorkflowReadinessEvidence(
             tracked_status=event.status,
-            release_document_present=self._exists(
-                "event_source_documents", "event_id", release_event_id
+            release_document_present=release_document_present,
+            # Once an official source document is durably persisted, the RELEASE
+            # stage is complete even if a later AI/analysis step fails and the
+            # latest ingestion run is recorded as a generic error. Only escalate
+            # release discovery failures while no document exists.
+            release_failed=(
+                not release_document_present and _release_requires_action(latest_run)
             ),
-            release_failed=_release_requires_action(latest_run),
             analysis_present=self._exists(
                 "event_ai_analyses", "event_id", release_event_id
             ),
