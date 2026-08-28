@@ -58,7 +58,6 @@ def main() -> int:
         event_at=args.event_at,
         event_time_status=TrackedEventTimeStatus(args.event_time_status),
         actor=args.actor,
-        calendar_event_id=None,
     )
     armed = event.resolved_etoro_instrument_id is not None
     print(
