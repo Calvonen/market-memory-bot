@@ -153,6 +153,11 @@ def _reaction_status(evidence: WorkflowReadinessEvidence) -> WorkflowStepStatus:
         if evidence.tracked_status is TrackedEventStatus.COMPLETED:
             return WorkflowStepStatus.COMPLETED
         return WorkflowStepStatus.RUNNING
+    # COMPLETED is also terminal. If no reaction row was ever persisted, the
+    # reaction stage cannot advance on a later poll, so fail closed instead of
+    # projecting an impossible perpetual PENDING state.
+    if evidence.tracked_status is TrackedEventStatus.COMPLETED:
+        return WorkflowStepStatus.FAILED
     return WorkflowStepStatus.PENDING
 
 
