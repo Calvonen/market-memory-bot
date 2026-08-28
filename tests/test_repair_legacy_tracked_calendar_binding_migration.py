@@ -89,14 +89,14 @@ class RepairLegacyTrackedCalendarBindingMigrationTests(unittest.TestCase):
             "alter table public.legacy_tracked_calendar_binding_repairs enable row level security",
             self.sql,
         )
-        self.assertIn(
-            "revoke all on table public.legacy_tracked_calendar_binding_repairs from public, anon, authenticated",
-            self.sql,
+        revoke = (
+            "revoke all on table public.legacy_tracked_calendar_binding_repairs "
+            "from public, anon, authenticated, service_role"
         )
-        self.assertIn(
-            "grant select on table public.legacy_tracked_calendar_binding_repairs to service_role",
-            self.sql,
-        )
+        grant = "grant select on table public.legacy_tracked_calendar_binding_repairs to service_role"
+        self.assertIn(revoke, self.sql)
+        self.assertIn(grant, self.sql)
+        self.assertLess(self.sql.index(revoke), self.sql.index(grant))
         self.assertIn(
             "revoke all on sequence public.legacy_tracked_calendar_binding_repairs_id_seq from public, anon, authenticated, service_role",
             self.sql,
