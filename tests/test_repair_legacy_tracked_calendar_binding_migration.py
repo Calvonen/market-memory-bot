@@ -26,6 +26,22 @@ class RepairLegacyTrackedCalendarBindingMigrationTests(unittest.TestCase):
         self.assertIn("c.source is distinct from t.source", self.sql)
         self.assertIn("t.external_key not like 'calendar:%'", self.sql)
 
+    def test_detach_requires_no_dependent_release_or_execution_state(self) -> None:
+        for table_name in (
+            "market_events",
+            "event_expectation_versions",
+            "event_official_release_sources",
+            "event_official_release_source_audit",
+            "event_source_documents",
+            "event_ai_analyses",
+            "event_ingestion_runs",
+            "event_strategy_approvals",
+            "event_paper_trade_event_claims",
+            "event_paper_trade_runs",
+        ):
+            self.assertIn(f"from public.{table_name} s", self.sql)
+        self.assertIn("where s.event_id = ('calendar:' || c.id::text)", self.sql)
+
     def test_remaining_conflicts_abort_with_ids_and_reasons(self) -> None:
         self.assertIn("string_agg(", self.sql)
         self.assertIn("calendar_event_missing", self.sql)
