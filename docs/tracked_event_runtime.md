@@ -11,9 +11,11 @@ This runtime turns an explicitly tracked scheduled event into persistent market-
 
 ## Canonical writer
 
-Trusted agents/tooling create or update a runtime event through the Supabase RPC `upsert_tracked_market_event(...)`.
+Trusted agents/tooling create or update **calendar-less** runtime events through `SupabaseTrackedEventRepository.upsert()`, which uses the guarded Supabase RPC `upsert_tracked_market_event(...)`.
 
-Identity is `(source, external_key)`. Repeating the same request is idempotent. The RPC rejects an attempt to reuse that identity for a different instrument/kind/calendar event. Once monitoring has started or a pre-event reference has been captured, material event timing/identity is locked; an agent must not silently retarget the running event.
+Calendar-owned events are different: they must be created or retried through the calendar promotion boundary `promote_calendar_event_to_tracked_runtime(...)`. The generic repository rejects any non-null `calendar_event_id` before issuing an RPC, and the database RPC independently rejects calendar binding through the generic path. This keeps calendar ownership on one identity-validated promotion route rather than allowing callers to attach arbitrary calendar IDs to tracked events.
+
+Identity for calendar-less events is `(source, external_key)`. Repeating the same request is idempotent. Once monitoring has started or a pre-event reference has been captured, material event timing/identity is locked; an agent must not silently retarget the running event.
 
 All timestamps supplied by clients must be timezone-aware. The repository normalizes persisted event timestamps to UTC.
 

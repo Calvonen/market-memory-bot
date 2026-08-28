@@ -127,6 +127,11 @@ class SupabaseTrackedEventRepository:
         actor: str,
         calendar_event_id: str | None = None,
     ) -> tuple[PersistentTrackedEvent, str]:
+        if calendar_event_id is not None:
+            raise ValueError(
+                "calendar_event_id is not supported by the generic tracked-event repository; "
+                "use calendar promotion"
+            )
         if event_at.tzinfo is None or event_at.utcoffset() is None:
             raise ValueError("event_at must be timezone-aware")
         response = self.client.rpc(
@@ -142,7 +147,7 @@ class SupabaseTrackedEventRepository:
                 "input_event_at": event_at.astimezone(UTC).isoformat(),
                 "input_event_time_status": event_time_status.value,
                 "input_actor": actor,
-                "input_calendar_event_id": calendar_event_id,
+                "input_calendar_event_id": None,
             },
         ).execute()
         rows = response.data or []

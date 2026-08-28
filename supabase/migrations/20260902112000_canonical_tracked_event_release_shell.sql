@@ -200,16 +200,32 @@ create trigger tracked_market_events_calendarless_release_shell_after_date_write
   execute function public.ensure_calendarless_tracked_event_release_shell_after_date_write();
 
 -- Backfill shells only for canonical tracked earnings that already have an
--- explicit local event_date. Never infer a date from event_at UTC.
+-- explicit local event_date. Never infer a date from event_at UTC. Historical
+-- rows can predate the canonical calendar-binding invariant; leave those rows
+-- untouched here rather than letting one legacy identity conflict block the
+-- schema migration. The runtime function above still fails closed if such a row
+-- is explicitly processed later.
 do $$
 declare
   target record;
 begin
   for target in
-    select id
-    from public.tracked_market_events
-    where kind = 'earnings'
-      and event_date is not null
+    select t.id
+    from public.tracked_market_events t
+    left join public.calendar_events c on c.id = t.calendar_event_id
+    where t.kind = 'earnings'
+      and t.event_date is not null
+      and (
+        t.calendar_event_id is null
+        or (
+          c.id is not null
+          and upper(replace(c.instrument, ' ', '')) = t.instrument
+          and c.event_type = t.kind
+          and c.scheduled_date = t.event_date
+          and c.source = t.source
+          and t.external_key = ('calendar:' || c.id::text)
+        )
+      )
   loop
     perform * from public.ensure_tracked_event_release_shell(target.id);
   end loop;
