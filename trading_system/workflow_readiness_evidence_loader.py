@@ -6,6 +6,7 @@ from trading_system.event_workflow_readiness import (
     WorkflowExecutionOutcome,
     WorkflowReadinessEvidence,
 )
+from trading_system.models import TradingMode
 from trading_system.tracked_event_repository import PersistentTrackedEvent
 
 
@@ -27,6 +28,11 @@ class SupabaseWorkflowReadinessEvidenceLoader:
     event source, clock time, or calendar ownership. Release identity follows the
     canonical release-shell contract introduced for tracked events. Versioned
     downstream evidence is accepted only for the current expectation version.
+
+    Strategy/Risk/execution fields come from ``get_event_paper_trade_state`` and
+    are therefore explicitly tagged with PAPER provenance. A LIVE workflow must
+    obtain trading evidence from a LIVE-scoped source instead of reusing this
+    loader's PAPER state.
     """
 
     def __init__(self, client: Any) -> None:
@@ -61,6 +67,7 @@ class SupabaseWorkflowReadinessEvidenceLoader:
             strategy_present=isinstance((paper_state or {}).get("strategy"), dict),
             risk_present=isinstance((paper_state or {}).get("risk"), dict),
             execution_outcome=_execution_outcome_from_paper_state(paper_state),
+            trading_mode=TradingMode.PAPER,
         )
 
     def _exists(self, table: str, field: str, value: str) -> bool:
