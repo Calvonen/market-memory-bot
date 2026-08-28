@@ -128,6 +128,10 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
         "ensure_tracked_event_release_shell_function_exists",
         "ensure_tracked_event_release_shell() function",
     ),
+    (
+        "calendarless_release_shell_trigger_exists",
+        "calendar-less tracked-event release-shell trigger",
+    ),
 )
 
 REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 3
