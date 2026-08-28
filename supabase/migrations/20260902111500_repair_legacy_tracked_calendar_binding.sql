@@ -6,6 +6,12 @@
 -- every migration-only quarantine/detach transition.
 begin;
 
+-- Freeze tracked-event writes for the duration of the repair + final conflict
+-- scan. SHARE ROW EXCLUSIVE conflicts with the ROW EXCLUSIVE lock taken by
+-- INSERT/UPDATE paths (including the legacy service-role upsert compatibility
+-- function), so no new calendar binding can commit outside this scan's view.
+lock table public.tracked_market_events in share row exclusive mode;
+
 create table if not exists public.legacy_tracked_calendar_binding_repairs (
   id bigint generated always as identity primary key,
   calendar_event_id uuid not null,
