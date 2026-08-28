@@ -39,12 +39,16 @@ class _Releases:
         self.analyzed = analyzed
         self.fail_event_id = fail_event_id
         self.analysis_checks = []
+        self.recorded_runs = []
 
     def has_analysis_for_event_version(self, *, event_id, expectation_version):
         self.analysis_checks.append((event_id, expectation_version))
         if event_id == self.fail_event_id:
             raise RuntimeError("analysis repository transient failure")
         return self.analyzed
+
+    def record_run(self, **kwargs):
+        self.recorded_runs.append(kwargs)
 
 
 class CalendarReleaseWorkerTests(unittest.TestCase):
