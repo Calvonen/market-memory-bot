@@ -41,10 +41,11 @@ class CloseLegacyTrackedEventCalendarBindingUpsertMigrationTests(unittest.TestCa
         self.assertIn("calendar_bound_identity_direct_write_forbidden", self.sql)
         self.assertIn("where t.calendar_event_id = old.id", self.sql)
         self.assertIn(
-            "before update of instrument, event_type, source, occurrence_key, scheduled_date",
+            "before update of company_name, instrument, event_type, source, occurrence_key, scheduled_date",
             self.sql,
         )
         for identity_column in (
+            "company_name",
             "instrument",
             "event_type",
             "source",
