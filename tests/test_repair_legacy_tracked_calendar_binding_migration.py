@@ -26,8 +26,27 @@ class RepairLegacyTrackedCalendarBindingMigrationTests(unittest.TestCase):
         self.assertIn("c.source is distinct from t.source", self.sql)
         self.assertIn("t.external_key not like 'calendar:%'", self.sql)
 
-    def test_detach_requires_no_dependent_release_or_execution_state(self) -> None:
-        for table_name in (
+    def test_serializes_with_release_shell_lock_order_and_rechecks_after_locks(self) -> None:
+        calendar_lock = self.sql.index(
+            "from public.calendar_events\n    where id = candidate.calendar_event_id\n    for update;"
+        )
+        tracked_lock = self.sql.index(
+            "from public.tracked_market_events\n    where id = candidate.id\n    for update;"
+        )
+        dependency_check = self.sql.index(
+            "if exists (select 1 from public.market_events where event_id = old_release_event_id)"
+        )
+        detach = self.sql.index(
+            "update public.tracked_market_events\n    set calendar_event_id = null"
+        )
+        self.assertLess(calendar_lock, tracked_lock)
+        self.assertLess(tracked_lock, dependency_check)
+        self.assertLess(dependency_check, detach)
+        self.assertIn("tracked_row.calendar_event_id is distinct from candidate.calendar_event_id", self.sql)
+        self.assertIn("Recheck the complete safe-detach predicate after both locks are held", self.sql)
+
+    def test_preserves_all_dependent_release_and_trading_state(self) -> None:
+        for table in (
             "market_events",
             "event_expectation_versions",
             "event_official_release_sources",
@@ -39,8 +58,7 @@ class RepairLegacyTrackedCalendarBindingMigrationTests(unittest.TestCase):
             "event_paper_trade_event_claims",
             "event_paper_trade_runs",
         ):
-            self.assertIn(f"from public.{table_name} s", self.sql)
-        self.assertIn("where s.event_id = ('calendar:' || c.id::text)", self.sql)
+            self.assertIn(f"from public.{table} where event_id = old_release_event_id", self.sql)
 
     def test_remaining_conflicts_abort_with_ids_and_reasons(self) -> None:
         self.assertIn("string_agg(", self.sql)
