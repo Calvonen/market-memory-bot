@@ -17,14 +17,19 @@ class RepairLegacyTrackedCalendarBindingMigrationTests(unittest.TestCase):
     def test_runs_before_release_shell_backfill(self) -> None:
         self.assertLess(MIGRATION.name, NEXT_MIGRATION.name)
 
-    def test_serializes_all_tracked_event_writes_before_repair_scan(self) -> None:
-        relation_lock = "lock table public.tracked_market_events in share row exclusive mode"
+    def test_serializes_calendar_first_before_tracked_event_repair_barrier(self) -> None:
+        calendar_lock = "lock table public.calendar_events in exclusive mode"
+        tracked_lock = "lock table public.tracked_market_events in share row exclusive mode"
         candidate_scan = "for candidate in"
         conflict_scan = "select string_agg("
-        self.assertIn(relation_lock, self.sql)
-        self.assertLess(self.sql.index(relation_lock), self.sql.index(candidate_scan))
-        self.assertLess(self.sql.index(relation_lock), self.sql.index(conflict_scan))
-        self.assertIn("legacy service-role upsert compatibility", self.sql)
+        self.assertIn(calendar_lock, self.sql)
+        self.assertIn(tracked_lock, self.sql)
+        self.assertLess(self.sql.index(calendar_lock), self.sql.index(tracked_lock))
+        self.assertLess(self.sql.index(tracked_lock), self.sql.index(candidate_scan))
+        self.assertLess(self.sql.index(tracked_lock), self.sql.index(conflict_scan))
+        self.assertIn("calendar -> tracked lock order", self.sql)
+        self.assertIn("promotion that already", self.sql)
+        self.assertIn("must finish its later tracked-event write", self.sql)
 
     def test_repairs_only_unambiguous_terminal_non_calendar_identity(self) -> None:
         self.assertIn("set calendar_event_id = null", self.sql)
