@@ -10,6 +10,12 @@ begin;
 alter table public.tracked_market_events
   add column if not exists event_date date null;
 
+-- 20260902091000 intentionally removed broad table UPDATE from service_role
+-- and granted only the columns that existed at that point. Future columns are
+-- therefore fail-closed by default. event_date is a controlled runtime field
+-- written by the trusted promotion/upsert boundaries, so grant it explicitly.
+grant update (event_date) on table public.tracked_market_events to service_role;
+
 -- Existing calendar-promoted rows have an authoritative local occurrence date
 -- available. Do not invent dates for manual/scanner/news rows from event_at.
 update public.tracked_market_events t
