@@ -1299,9 +1299,13 @@ class _Expectations:
 class _Releases:
     def __init__(self, *, analyzed=False):
         self.analyzed = analyzed
+        self.recorded_runs = []
 
     def has_analysis_for_event_version(self, *, event_id, expectation_version):
         return self.analyzed
+
+    def record_run(self, **kwargs):
+        self.recorded_runs.append(kwargs)
 
 
 class _OfficialSources:
