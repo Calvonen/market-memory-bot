@@ -236,6 +236,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
                 "event_ingestion_runs": [
                     {
                         "event_id": release_id,
+                        "provider": "results_page_official_release",
                         "status": "error",
                         "error_message": "AI analysis failed",
                         "created_at": "2026-08-28T06:05:00+00:00",
@@ -247,6 +248,50 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
         self.assertTrue(evidence.release_document_present)
         self.assertFalse(evidence.release_failed)
         self.assertFalse(evidence.analysis_present)
+        self.assertIs(evidence.trading_mode, TradingMode.PAPER)
+
+    def test_canonical_blocker_overrides_stale_release_document(self):
+        release_id = "tracked:tracked-123"
+        client = _Client(
+            tables={
+                "current_event_expectations": [_current_expectation(release_id)],
+                "event_source_documents": [{"id": "doc-old", "event_id": release_id}],
+                "event_ingestion_runs": [
+                    {
+                        "event_id": release_id,
+                        "provider": "canonical_release_worker",
+                        "status": "error",
+                        "error_message": "action_required: approved official source is missing",
+                        "created_at": "2026-08-28T06:10:00+00:00",
+                    }
+                ],
+            }
+        )
+        evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
+        self.assertTrue(evidence.release_document_present)
+        self.assertTrue(evidence.release_failed)
+        self.assertIs(evidence.trading_mode, TradingMode.PAPER)
+
+    def test_generic_error_does_not_override_existing_release_document(self):
+        release_id = "tracked:tracked-123"
+        client = _Client(
+            tables={
+                "current_event_expectations": [_current_expectation(release_id)],
+                "event_source_documents": [{"id": "doc-1", "event_id": release_id}],
+                "event_ingestion_runs": [
+                    {
+                        "event_id": release_id,
+                        "provider": "results_page_official_release",
+                        "status": "error",
+                        "error_message": "temporary parser failure",
+                        "created_at": "2026-08-28T06:10:00+00:00",
+                    }
+                ],
+            }
+        )
+        evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
+        self.assertTrue(evidence.release_document_present)
+        self.assertFalse(evidence.release_failed)
         self.assertIs(evidence.trading_mode, TradingMode.PAPER)
 
     def test_error_without_release_document_requires_action(self):
