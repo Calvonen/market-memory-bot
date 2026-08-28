@@ -181,7 +181,9 @@ def workflow_profile_for_kind(
         return EARNINGS_WORKFLOW if documented else CONTENT_EVENT_WORKFLOW
     if trading_mode is TradingMode.PAPER:
         return EARNINGS_PAPER_WORKFLOW if documented else CONTENT_EVENT_PAPER_WORKFLOW
-    return EARNINGS_LIVE_WORKFLOW if documented else CONTENT_EVENT_LIVE_WORKFLOW
+    if trading_mode is TradingMode.LIVE:
+        return EARNINGS_LIVE_WORKFLOW if documented else CONTENT_EVENT_LIVE_WORKFLOW
+    raise ValueError(f"unsupported trading_mode: {trading_mode.value}")
 
 
 def initial_workflow_state(profile: EventWorkflowProfile) -> tuple[WorkflowStepState, ...]:
