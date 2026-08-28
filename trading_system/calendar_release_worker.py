@@ -27,6 +27,7 @@ US_MARKET_LABELS = ("US", "USA", "NASDAQ", "NYSE", "AMEX")
 DATE_ONLY_OVERDUE_GRACE_HOURS = 24.0
 RELEASE_ELIGIBLE_TRACKED_STATUSES = ("tracked", "monitoring", "completed", "failed")
 ACTION_REQUIRED_PROVIDER = "canonical_release_worker"
+RELEASE_SHELL_IDENTITY_CONFLICT = "tracked_release_shell_identity_conflict"
 
 
 @dataclass(frozen=True)
@@ -192,6 +193,10 @@ def _persist_action_required(
     )
 
 
+def _is_release_shell_identity_conflict(exc: Exception) -> bool:
+    return RELEASE_SHELL_IDENTITY_CONFLICT in str(exc).lower()
+
+
 def run_calendar_release_ingestion_once(
     *,
     targets: SupabaseCalendarReleaseTargetRepository,
@@ -212,7 +217,25 @@ def run_calendar_release_ingestion_once(
         try:
             ensure_shell = getattr(targets, "ensure_release_shell", None)
             if callable(ensure_shell):
-                ensure_shell(target)
+                try:
+                    ensure_shell(target)
+                except Exception as exc:
+                    if not _is_release_shell_identity_conflict(exc):
+                        raise
+                    message = "canonical release-shell identity conflicts with tracked-event identity"
+                    _persist_action_required(
+                        releases,
+                        event_id=target.event_id,
+                        message=message,
+                    )
+                    results.append(
+                        CalendarReleaseWorkerResult(
+                            target.event_id,
+                            "identity_conflict",
+                            message,
+                        )
+                    )
+                    continue
 
             expectation = expectations.get(target.event_id)
             if expectation is None:
