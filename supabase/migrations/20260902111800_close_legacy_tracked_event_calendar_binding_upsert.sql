@@ -4,15 +4,58 @@
 -- remains available only for calendar-less persistence.
 begin;
 
--- Serialize the cutover with all tracked-event writes so no pre-cutover caller
--- can commit a calendar binding outside the invariant scan below.
+-- Preserve the global calendar -> tracked lock order while draining any
+-- in-flight calendar identity/promotion work before the tracked-event cutover.
+-- The calendar EXCLUSIVE lock blocks direct UPDATE plus SELECT ... FOR UPDATE;
+-- once it is held, no bound calendar identity can change outside the invariant
+-- scan while we acquire the tracked-event write barrier.
+lock table public.calendar_events in exclusive mode;
 lock table public.tracked_market_events in share row exclusive mode;
 
--- Close the table API as an alternate identity writer while the same write
--- barrier is held. Runtime mutations continue through the reviewed RPCs; those
--- RPCs are SECURITY DEFINER where owner privileges are required. Removing direct
--- INSERT plus the calendar-binding identity/date columns prevents service-role
--- clients from bypassing the guarded writers after this cutover.
+-- Bound calendar identity must remain immutable regardless of whether a caller
+-- uses the RPC surface or the Supabase table API. Candidate rows may still be
+-- refreshed by the provider sync before promotion; once a tracked runtime is
+-- bound, changes to identity/date fields must fail closed and be expressed as a
+-- new occurrence instead.
+create or replace function public.guard_bound_calendar_event_identity()
+returns trigger
+language plpgsql
+security invoker
+set search_path = pg_catalog, public
+as $$
+begin
+  if new.instrument is not distinct from old.instrument
+     and new.event_type is not distinct from old.event_type
+     and new.source is not distinct from old.source
+     and new.occurrence_key is not distinct from old.occurrence_key
+     and new.scheduled_date is not distinct from old.scheduled_date then
+    return new;
+  end if;
+
+  if exists (
+    select 1
+    from public.tracked_market_events t
+    where t.calendar_event_id = old.id
+  ) then
+    raise exception 'calendar_bound_identity_direct_write_forbidden';
+  end if;
+
+  return new;
+end;
+$$;
+
+revoke all on function public.guard_bound_calendar_event_identity() from public, anon, authenticated;
+
+drop trigger if exists guard_bound_calendar_event_identity on public.calendar_events;
+create trigger guard_bound_calendar_event_identity
+before update of instrument, event_type, source, occurrence_key, scheduled_date
+on public.calendar_events
+for each row
+execute function public.guard_bound_calendar_event_identity();
+
+-- Close the tracked-event table API as an alternate identity writer while the
+-- same write barrier is held. Runtime mutations continue through reviewed RPCs;
+-- those RPCs are SECURITY DEFINER where owner privileges are required.
 revoke insert on table public.tracked_market_events from service_role;
 revoke update (
   calendar_event_id,
@@ -262,10 +305,10 @@ grant execute on function public.promote_calendar_event_to_tracked_runtime(
   uuid, text, text, text, text, date, timestamptz, text, text
 ) to service_role;
 
--- Revalidate every persisted calendar binding while the write barrier is still
--- held. Include null-dated legacy bindings: once the compatibility writer is
--- closed, promotion is the only repair path and a malformed null-dated binding
--- would otherwise remain permanently stuck behind the identity guard.
+-- Revalidate every persisted calendar binding while both relation barriers are
+-- still held. Include null-dated legacy bindings: once compatibility writers are
+-- closed, promotion is the only repair path and a malformed binding must fail at
+-- migration time with its tracked-event identifier.
 do $$
 declare
   conflict_report text;
