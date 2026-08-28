@@ -10,7 +10,9 @@ from trading_system.tracked_event_repository import PersistentTrackedEvent
 
 
 _RELEASE_ERROR_STATUSES = frozenset({"error"})
-_ACCEPTED_ORDER_STATUSES = frozenset({"accepted", "pending", "open", "submitted"})
+_ACCEPTED_ORDER_STATUSES = frozenset(
+    {"accepted", "etoro_demo_accepted", "pending", "open", "submitted"}
+)
 _FILLED_ORDER_STATUSES = frozenset(
     {"filled", "filled_simulated", "executed", "complete", "completed"}
 )
@@ -45,10 +47,6 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         return WorkflowReadinessEvidence(
             tracked_status=event.status,
             release_document_present=release_document_present,
-            # Once an official source document is durably persisted, the RELEASE
-            # stage is complete even if a later AI/analysis step fails and the
-            # latest ingestion run is recorded as a generic error. Only escalate
-            # release discovery failures while no document exists.
             release_failed=(
                 not release_document_present and _release_requires_action(latest_run)
             ),
@@ -164,9 +162,6 @@ def _release_requires_action(run: dict[str, Any] | None) -> bool:
     if status != "no_release":
         return False
     message = str(run.get("error_message") or "").lower()
-    # no_release is expected before the grace window. Only the durable overdue
-    # audit marker escalates it to action_required; provider no-match text alone
-    # is not enough to claim the release can no longer arrive normally.
     return "release overdue:" in message
 
 
