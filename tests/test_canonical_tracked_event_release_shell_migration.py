@@ -69,10 +69,20 @@ class CanonicalTrackedEventReleaseShellMigrationTests(unittest.TestCase):
         self.assertIn("'tracked:' || tracked_row.source || ':automatic-release-shell'", self.sql)
 
     def test_existing_explicit_dates_are_backfilled_without_utc_derivation(self) -> None:
-        self.assertIn("where kind = 'earnings'", self.sql)
-        self.assertIn("and event_date is not null", self.sql)
+        self.assertIn("where t.kind = 'earnings'", self.sql)
+        self.assertIn("and t.event_date is not null", self.sql)
         self.assertIn("perform * from public.ensure_tracked_event_release_shell(target.id)", self.sql)
         self.assertNotIn("event_at::date", self.sql)
+
+    def test_backfill_skips_legacy_calendar_binding_conflicts(self) -> None:
+        self.assertIn("left join public.calendar_events c on c.id = t.calendar_event_id", self.sql)
+        self.assertIn("t.calendar_event_id is null", self.sql)
+        self.assertIn("c.source = t.source", self.sql)
+        self.assertIn("t.external_key = ('calendar:' || c.id::text)", self.sql)
+        self.assertIn(
+            "runtime function above still fails closed if such a row",
+            self.sql,
+        )
 
     def test_shell_fails_closed_on_identity_conflict(self) -> None:
         self.assertIn("tracked_release_shell_identity_conflict", self.sql)
