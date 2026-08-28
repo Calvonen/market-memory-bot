@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from trading_system.market_event import MarketEventKind
+from trading_system.models import TradingMode
 
 
 class WorkflowStepKey(str, Enum):
@@ -15,6 +16,7 @@ class WorkflowStepKey(str, Enum):
     STRATEGY = "strategy"
     RISK = "risk"
     PAPER = "paper"
+    LIVE = "live"
 
 
 class WorkflowStepStatus(str, Enum):
@@ -48,11 +50,12 @@ class WorkflowStepDefinition:
 class EventWorkflowProfile:
     """Producer-neutral policy describing which stages apply to one event.
 
-    The event profile is observation-only unless a canonical trading task exists.
-    Strategy, Risk, and PAPER are appended only for a trading-task-backed profile,
-    so tracking an event never implies that MarketAI should attempt a trade.
-    Runtime state is represented separately by ``WorkflowStepStatus`` so partially
-    completed and non-linear workflows can be reported truthfully.
+    The event profile is observation-only unless a canonical trading task provides
+    an execution mode. Strategy and Risk are then followed by the task's actual
+    PAPER or LIVE execution stage, so tracking never implies a trade and the
+    workflow never invents an execution mode. Runtime state is represented
+    separately by ``WorkflowStepStatus`` so partially completed and non-linear
+    workflows can be reported truthfully.
     """
 
     profile_id: str
@@ -92,10 +95,9 @@ _OBSERVATION_SUFFIX = (
     WorkflowStepDefinition(WorkflowStepKey.ANALYSIS),
     WorkflowStepDefinition(WorkflowStepKey.MARKET_REACTION),
 )
-_TRADING_SUFFIX = (
+_TRADING_PREFIX = (
     WorkflowStepDefinition(WorkflowStepKey.STRATEGY),
     WorkflowStepDefinition(WorkflowStepKey.RISK),
-    WorkflowStepDefinition(WorkflowStepKey.PAPER),
 )
 
 EARNINGS_WORKFLOW = EventWorkflowProfile(
@@ -107,11 +109,6 @@ EARNINGS_WORKFLOW = EventWorkflowProfile(
     ),
 )
 
-EARNINGS_TRADING_WORKFLOW = EventWorkflowProfile(
-    profile_id="earnings_documented_trading_v1",
-    steps=(*EARNINGS_WORKFLOW.steps, *_TRADING_SUFFIX),
-)
-
 CONTENT_EVENT_WORKFLOW = EventWorkflowProfile(
     profile_id="content_event_observation_v1",
     steps=(
@@ -121,9 +118,40 @@ CONTENT_EVENT_WORKFLOW = EventWorkflowProfile(
     ),
 )
 
-CONTENT_EVENT_TRADING_WORKFLOW = EventWorkflowProfile(
-    profile_id="content_event_trading_v1",
-    steps=(*CONTENT_EVENT_WORKFLOW.steps, *_TRADING_SUFFIX),
+EARNINGS_PAPER_WORKFLOW = EventWorkflowProfile(
+    profile_id="earnings_documented_paper_v1",
+    steps=(
+        *EARNINGS_WORKFLOW.steps,
+        *_TRADING_PREFIX,
+        WorkflowStepDefinition(WorkflowStepKey.PAPER),
+    ),
+)
+
+EARNINGS_LIVE_WORKFLOW = EventWorkflowProfile(
+    profile_id="earnings_documented_live_v1",
+    steps=(
+        *EARNINGS_WORKFLOW.steps,
+        *_TRADING_PREFIX,
+        WorkflowStepDefinition(WorkflowStepKey.LIVE),
+    ),
+)
+
+CONTENT_EVENT_PAPER_WORKFLOW = EventWorkflowProfile(
+    profile_id="content_event_paper_v1",
+    steps=(
+        *CONTENT_EVENT_WORKFLOW.steps,
+        *_TRADING_PREFIX,
+        WorkflowStepDefinition(WorkflowStepKey.PAPER),
+    ),
+)
+
+CONTENT_EVENT_LIVE_WORKFLOW = EventWorkflowProfile(
+    profile_id="content_event_live_v1",
+    steps=(
+        *CONTENT_EVENT_WORKFLOW.steps,
+        *_TRADING_PREFIX,
+        WorkflowStepDefinition(WorkflowStepKey.LIVE),
+    ),
 )
 
 
@@ -140,17 +168,20 @@ _DOCUMENTED_RELEASE_KINDS = frozenset(
 def workflow_profile_for_kind(
     kind: MarketEventKind,
     *,
-    has_trading_task: bool = False,
+    trading_mode: TradingMode | None = None,
 ) -> EventWorkflowProfile:
-    """Select policy from event kind plus explicit canonical trading-task presence."""
+    """Select policy from event kind plus the canonical task execution mode."""
     if not isinstance(kind, MarketEventKind):
         raise ValueError("kind must be a MarketEventKind")
-    if not isinstance(has_trading_task, bool):
-        raise ValueError("has_trading_task must be a bool")
+    if trading_mode is not None and not isinstance(trading_mode, TradingMode):
+        raise ValueError("trading_mode must be a TradingMode or None")
 
-    if kind in _DOCUMENTED_RELEASE_KINDS:
-        return EARNINGS_TRADING_WORKFLOW if has_trading_task else EARNINGS_WORKFLOW
-    return CONTENT_EVENT_TRADING_WORKFLOW if has_trading_task else CONTENT_EVENT_WORKFLOW
+    documented = kind in _DOCUMENTED_RELEASE_KINDS
+    if trading_mode is None:
+        return EARNINGS_WORKFLOW if documented else CONTENT_EVENT_WORKFLOW
+    if trading_mode is TradingMode.PAPER:
+        return EARNINGS_PAPER_WORKFLOW if documented else CONTENT_EVENT_PAPER_WORKFLOW
+    return EARNINGS_LIVE_WORKFLOW if documented else CONTENT_EVENT_LIVE_WORKFLOW
 
 
 def initial_workflow_state(profile: EventWorkflowProfile) -> tuple[WorkflowStepState, ...]:
