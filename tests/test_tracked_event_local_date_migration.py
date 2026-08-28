@@ -37,7 +37,14 @@ class TrackedEventLocalDateMigrationTests(unittest.TestCase):
             '"tracked_market_event_event_date_column_exists",',
             self.schema_gate,
         )
-        self.assertIn("REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 11", self.schema_gate)
+        # This migration introduced runtime schema v11. Later canonical release-shell
+        # migrations legitimately advance the deploy gate, so this regression must
+        # require at least v11 rather than pinning the current global gate to v11.
+        marker = "REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = "
+        line = next(
+            line for line in self.schema_gate.splitlines() if line.startswith(marker)
+        )
+        self.assertGreaterEqual(int(line.removeprefix(marker)), 11)
 
 
 if __name__ == "__main__":
