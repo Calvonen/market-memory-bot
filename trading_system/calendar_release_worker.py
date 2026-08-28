@@ -26,6 +26,7 @@ TARGET_PAGE_SIZE = 1000
 US_MARKET_LABELS = ("US", "USA", "NASDAQ", "NYSE", "AMEX")
 DATE_ONLY_OVERDUE_GRACE_HOURS = 24.0
 RELEASE_ELIGIBLE_TRACKED_STATUSES = ("tracked", "monitoring", "completed", "failed")
+ACTION_REQUIRED_PROVIDER = "canonical_release_worker"
 
 
 @dataclass(frozen=True)
@@ -170,6 +171,27 @@ class CalendarReleaseWorkerResult:
     message: str | None = None
 
 
+def _persist_action_required(
+    releases: SupabaseReleaseRepository,
+    *,
+    event_id: str,
+    message: str,
+) -> None:
+    """Persist a durable blocker so workflow readiness can surface it.
+
+    The readiness loader already treats persisted ingestion errors as
+    ``action_required``. Keep the worker's specific result status for logs and
+    diagnostics, but record the blocker through the same durable ingestion-run
+    channel used by normal release polling instead of leaving it process-local.
+    """
+    releases.record_run(
+        event_id=event_id,
+        provider=ACTION_REQUIRED_PROVIDER,
+        status="error",
+        error_message=f"action_required: {message}"[:500],
+    )
+
+
 def run_calendar_release_ingestion_once(
     *,
     targets: SupabaseCalendarReleaseTargetRepository,
@@ -194,29 +216,47 @@ def run_calendar_release_ingestion_once(
 
             expectation = expectations.get(target.event_id)
             if expectation is None:
+                message = "current_event_expectations row is missing"
+                _persist_action_required(
+                    releases,
+                    event_id=target.event_id,
+                    message=message,
+                )
                 results.append(
                     CalendarReleaseWorkerResult(
                         target.event_id,
                         "missing_release_shell",
-                        "current_event_expectations row is missing",
+                        message,
                     )
                 )
                 continue
             if expectation.instrument.strip().upper() != target.ticker:
+                message = "release-shell instrument differs from tracked-event instrument"
+                _persist_action_required(
+                    releases,
+                    event_id=target.event_id,
+                    message=message,
+                )
                 results.append(
                     CalendarReleaseWorkerResult(
                         target.event_id,
                         "identity_conflict",
-                        "release-shell instrument differs from tracked-event instrument",
+                        message,
                     )
                 )
                 continue
             if expectation.scheduled_date != target.scheduled_date:
+                message = "release-shell date differs from tracked-event date"
+                _persist_action_required(
+                    releases,
+                    event_id=target.event_id,
+                    message=message,
+                )
                 results.append(
                     CalendarReleaseWorkerResult(
                         target.event_id,
                         "identity_conflict",
-                        "release-shell date differs from tracked-event date",
+                        message,
                     )
                 )
                 continue
@@ -246,11 +286,20 @@ def run_calendar_release_ingestion_once(
             else:
                 normalized_market = target.market.strip().upper()
                 if normalized_market not in US_MARKET_LABELS:
+                    message = (
+                        "earnings target outside approved US market labels requires "
+                        "an approved official release source"
+                    )
+                    _persist_action_required(
+                        releases,
+                        event_id=target.event_id,
+                        message=message,
+                    )
                     results.append(
                         CalendarReleaseWorkerResult(
                             target.event_id,
                             "missing_official_source",
-                            "earnings target outside approved US market labels requires an approved official release source",
+                            message,
                         )
                     )
                     continue
