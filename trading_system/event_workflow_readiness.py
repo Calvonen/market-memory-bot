@@ -29,6 +29,15 @@ class WorkflowExecutionOutcome(str, Enum):
     FAILED = "failed"
 
 
+_TERMINAL_EXECUTION_OUTCOMES = frozenset(
+    {
+        WorkflowExecutionOutcome.NO_TRADE,
+        WorkflowExecutionOutcome.REJECTED,
+        WorkflowExecutionOutcome.FAILED,
+    }
+)
+
+
 @dataclass(frozen=True)
 class WorkflowReadinessEvidence:
     """Canonical persisted evidence used to project workflow readiness.
@@ -101,17 +110,9 @@ def project_workflow_readiness(
         elif step.key is WorkflowStepKey.MARKET_REACTION:
             status = _reaction_status(evidence)
         elif step.key is WorkflowStepKey.STRATEGY:
-            status = (
-                WorkflowStepStatus.COMPLETED
-                if evidence.strategy_present
-                else WorkflowStepStatus.PENDING
-            )
+            status = _trading_stage_status(evidence.strategy_present, evidence)
         elif step.key is WorkflowStepKey.RISK:
-            status = (
-                WorkflowStepStatus.COMPLETED
-                if evidence.risk_present
-                else WorkflowStepStatus.PENDING
-            )
+            status = _trading_stage_status(evidence.risk_present, evidence)
         elif step.key in (WorkflowStepKey.PAPER, WorkflowStepKey.LIVE):
             status = _execution_status(evidence.execution_outcome)
         else:  # fail closed if the workflow vocabulary grows without projection logic
@@ -152,6 +153,20 @@ def _reaction_status(evidence: WorkflowReadinessEvidence) -> WorkflowStepStatus:
         if evidence.tracked_status is TrackedEventStatus.COMPLETED:
             return WorkflowStepStatus.COMPLETED
         return WorkflowStepStatus.RUNNING
+    return WorkflowStepStatus.PENDING
+
+
+def _trading_stage_status(
+    present: bool,
+    evidence: WorkflowReadinessEvidence,
+) -> WorkflowStepStatus:
+    if present:
+        return WorkflowStepStatus.COMPLETED
+    # Terminal execution outcomes close the trading workflow. If a strategy or
+    # risk stage was never reached (for example expired_no_trade before the
+    # pipeline ran), it can no longer advance and must not remain PENDING.
+    if evidence.execution_outcome in _TERMINAL_EXECUTION_OUTCOMES:
+        return WorkflowStepStatus.SKIPPED
     return WorkflowStepStatus.PENDING
 
 
