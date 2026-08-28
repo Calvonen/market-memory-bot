@@ -52,10 +52,12 @@ begin
       and c.scheduled_date = t.event_date
       and c.source is distinct from t.source
       -- Only detach identities that are clearly non-calendar. Historical keys
-      -- such as `Calendar:<uuid>` or ` calendar:<uuid> ` are malformed calendar
-      -- identities, not safe evidence of a different producer, so leave them
-      -- bound for the conflict report below to fail closed.
-      and lower(btrim(t.external_key)) not like 'calendar:%'
+      -- with case differences or any leading/trailing whitespace (spaces, tabs,
+      -- newlines, etc.) are malformed calendar identities, not safe evidence of
+      -- a different producer, so leave them bound for the conflict report below.
+      and lower(
+        regexp_replace(t.external_key, '^[[:space:]]+|[[:space:]]+$', '', 'g')
+      ) not like 'calendar:%'
     order by t.id
   loop
     -- Match the runtime release-shell lock protocol: calendar first, then tracked.
@@ -88,7 +90,9 @@ begin
        or calendar_row.event_type is distinct from tracked_row.kind
        or calendar_row.scheduled_date is distinct from tracked_row.event_date
        or calendar_row.source is not distinct from tracked_row.source
-       or lower(btrim(tracked_row.external_key)) like 'calendar:%' then
+       or lower(
+         regexp_replace(tracked_row.external_key, '^[[:space:]]+|[[:space:]]+$', '', 'g')
+       ) like 'calendar:%' then
       continue;
     end if;
 
