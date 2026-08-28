@@ -12,6 +12,7 @@ class MarketEventSource(str, Enum):
     RELEASE = "release"
     MANUAL = "manual"
     NEWS = "news"
+    SCANNER = "scanner"
 
 
 class MarketEventKind(str, Enum):
@@ -27,7 +28,7 @@ class MarketEventKind(str, Enum):
 
 @dataclass(frozen=True)
 class MarketEvent:
-    """Generic event identity shared by calendar, release, manual and news producers.
+    """Generic event identity shared by calendar, release, manual, news and scanner producers.
 
     This contract is intentionally independent of event expectations, broker
     resolution, market data, strategy, risk and trading. Producers only describe
