@@ -45,6 +45,31 @@ class CloseLegacyTrackedEventCalendarBindingUpsertMigrationTests(unittest.TestCa
         self.assertIn("input_actor,\n    null\n  );", self.sql)
         self.assertIn("grant execute on function public.upsert_tracked_market_event(", self.sql)
 
+    def test_calendar_promotion_uses_private_calendar_capable_helper(self) -> None:
+        promotion = self.sql.index(
+            "create or replace function public.promote_calendar_event_to_tracked_runtime("
+        )
+        private_call = self.sql.index(
+            "from public.upsert_tracked_market_event_calendar_compat_v11(",
+            promotion,
+        )
+        release_shell = self.sql.index(
+            "perform * from public.ensure_calendar_release_shell(calendar_row.id);",
+            promotion,
+        )
+        self.assertLess(promotion, private_call)
+        self.assertLess(private_call, self.sql.index("select string_agg("))
+        self.assertIn("security definer", self.sql[promotion:private_call])
+        self.assertIn("set search_path = pg_catalog, public", self.sql[promotion:private_call])
+        self.assertIn("calendar_event_changed_before_promotion", self.sql[promotion:private_call])
+        self.assertIn("calendar_runtime_binding_identity_conflict", self.sql[promotion:private_call])
+        self.assertIn("'calendar:' || calendar_row.id::text", self.sql[promotion:private_call + 500])
+        self.assertLess(release_shell, self.sql.index("commit;"))
+        self.assertNotIn(
+            "from public.upsert_tracked_market_event(\n    calendar_row.company_name",
+            self.sql[promotion:],
+        )
+
     def test_revalidates_binding_invariant_before_commit(self) -> None:
         scan = self.sql.index("select string_agg(")
         commit = self.sql.rindex("commit;")
