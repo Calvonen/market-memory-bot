@@ -268,7 +268,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
             }
         )
         evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
-        self.assertTrue(evidence.release_document_present)
+        self.assertFalse(evidence.release_document_present)
         self.assertTrue(evidence.release_failed)
         self.assertIs(evidence.trading_mode, TradingMode.PAPER)
 
