@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from trading_system.market_event import MarketEvent, MarketEventKind, MarketEventSource
+from trading_system.market_event_ingress import register_market_event
 from trading_system.registered_market_event_monitor import RegisteredMarketEventMonitor
 from trading_system.tracked_instrument_etoro import TrackedEtoroInstrument
 
@@ -24,19 +25,16 @@ def register_release_market_event(
     represent earnings, guidance, trading updates, dividends, acquisitions, or
     other existing ``MarketEventKind`` values.
 
-    Validation and event-id reuse rules remain delegated to ``MarketEvent`` and
-    ``RegisteredMarketEventMonitor``. This ingress does not fetch or discover
+    Validation and event-id reuse rules remain delegated to the producer-neutral
+    ``register_market_event`` boundary. This ingress does not fetch or discover
     releases, persist data, observe reactions, resolve brokers, or trade.
     """
-    event = MarketEvent(
+    return register_market_event(
+        monitor,
+        tracked,
         event_id=event_id,
-        tracked_instrument_id=tracked.tracked_instrument_id,
-        instrument=tracked.instrument,
-        market=tracked.market,
         event_at=event_at,
         source=MarketEventSource.RELEASE,
         kind=kind,
         title=title,
     )
-    monitor.register(event, tracked)
-    return event
