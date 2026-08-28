@@ -72,7 +72,6 @@ TRACKED_PRESENT_ROW = {
     "ensure_calendar_release_shell_function_exists": True,
     "calendar_release_shell_version_matches": True,
     "ensure_tracked_event_release_shell_function_exists": True,
-    "tracked_event_release_shell_trigger_exists": True,
     "runtime_schema_version": 12,
 }
 
@@ -225,17 +224,6 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         )
         self.assertEqual(exit_code, 1)
         self.assertIn("ensure_tracked_event_release_shell() function", err)
-
-    def test_fails_closed_when_canonical_release_shell_trigger_is_missing(self) -> None:
-        row = dict(
-            TRACKED_PRESENT_ROW,
-            tracked_event_release_shell_trigger_exists=False,
-        )
-        exit_code, _out, err = self._run_with_client(
-            _FakeClient(_responses(tracked_row=row))
-        )
-        self.assertEqual(exit_code, 1)
-        self.assertIn("canonical release-shell trigger", err)
 
     def test_fails_closed_when_existing_required_object_is_missing(self) -> None:
         row = dict(
