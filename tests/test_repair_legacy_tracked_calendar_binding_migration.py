@@ -36,6 +36,9 @@ class RepairLegacyTrackedCalendarBindingMigrationTests(unittest.TestCase):
         dependency_check = self.sql.index(
             "if exists (select 1 from public.market_events where event_id = old_release_event_id)"
         )
+        audit_insert = self.sql.index(
+            "insert into public.legacy_tracked_calendar_binding_repairs"
+        )
         quarantine = self.sql.index(
             "update public.calendar_events\n      set status = 'research'"
         )
@@ -44,17 +47,31 @@ class RepairLegacyTrackedCalendarBindingMigrationTests(unittest.TestCase):
         )
         self.assertLess(calendar_lock, tracked_lock)
         self.assertLess(tracked_lock, dependency_check)
-        self.assertLess(dependency_check, quarantine)
+        self.assertLess(dependency_check, audit_insert)
+        self.assertLess(audit_insert, quarantine)
         self.assertLess(quarantine, detach)
         self.assertIn("tracked_row.calendar_event_id is distinct from candidate.calendar_event_id", self.sql)
         self.assertIn("Recheck the complete safe-detach predicate after both locks are held", self.sql)
+
+    def test_quarantine_is_audited_before_detach(self) -> None:
+        self.assertIn("create table if not exists public.legacy_tracked_calendar_binding_repairs", self.sql)
+        self.assertIn("calendar_event_id uuid not null", self.sql)
+        self.assertIn("tracked_event_id uuid not null", self.sql)
+        self.assertIn("prior_calendar_status text not null", self.sql)
+        self.assertIn("prior_calendar_source text not null", self.sql)
+        self.assertIn("tracked_source text not null", self.sql)
+        self.assertIn("tracked_external_key text not null", self.sql)
+        self.assertIn("repair_action text not null", self.sql)
+        self.assertIn("repair_reason text not null", self.sql)
+        self.assertIn("'quarantine_and_detach'", self.sql)
+        self.assertIn("migration-only lifecycle repair", self.sql)
+        self.assertIn("audit row above records the prior state", self.sql)
 
     def test_quarantines_trackable_calendar_row_before_detach(self) -> None:
         self.assertIn("calendar_row.status in ('candidate', 'tracked')", self.sql)
         self.assertIn("set status = 'research'", self.sql)
         self.assertIn("status = calendar_row.status", self.sql)
         self.assertIn("detached calendar row must not remain trackable", self.sql)
-        self.assertIn("legacy quarantine", self.sql)
 
     def test_preserves_all_dependent_release_and_trading_state(self) -> None:
         for table in (
