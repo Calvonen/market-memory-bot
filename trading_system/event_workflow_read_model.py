@@ -9,6 +9,7 @@ from trading_system.event_workflow import (
     workflow_profile_for_kind,
 )
 from trading_system.event_workflow_readiness import (
+    WorkflowExecutionOutcome,
     WorkflowReadinessEvidence,
     project_workflow_readiness,
 )
@@ -82,7 +83,7 @@ def _require_compatible_trading_evidence(
         has_trading_progress = (
             evidence.strategy_present
             or evidence.risk_present
-            or evidence.execution_outcome.value != "not_started"
+            or evidence.execution_outcome is not WorkflowExecutionOutcome.NOT_STARTED
         )
         if has_trading_progress:
             raise ValueError("trading workflow evidence mode is required")
