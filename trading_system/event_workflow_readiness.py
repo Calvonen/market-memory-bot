@@ -10,6 +10,7 @@ from trading_system.event_workflow import (
     WorkflowStepState,
     WorkflowStepStatus,
 )
+from trading_system.models import TradingMode
 from trading_system.tracked_event_repository import TrackedEventStatus
 
 
@@ -45,6 +46,10 @@ class WorkflowReadinessEvidence:
     This object is intentionally producer-neutral. Callers populate it from the
     tracked-event, release, reaction, and trading-task persistence layers. The
     projector never invents progress that is not present in durable state.
+
+    ``trading_mode`` records provenance for Strategy/Risk/execution evidence. It
+    is independent from the workflow profile selected by the caller, so PAPER
+    persistence can never be mistaken for LIVE broker evidence.
     """
 
     tracked_status: TrackedEventStatus
@@ -55,6 +60,7 @@ class WorkflowReadinessEvidence:
     strategy_present: bool = False
     risk_present: bool = False
     execution_outcome: WorkflowExecutionOutcome = WorkflowExecutionOutcome.NOT_STARTED
+    trading_mode: TradingMode | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.tracked_status, TrackedEventStatus):
@@ -71,6 +77,8 @@ class WorkflowReadinessEvidence:
                 raise ValueError(f"{field_name} must be a bool")
         if not isinstance(self.execution_outcome, WorkflowExecutionOutcome):
             raise ValueError("execution_outcome must be a WorkflowExecutionOutcome")
+        if self.trading_mode is not None and not isinstance(self.trading_mode, TradingMode):
+            raise ValueError("trading_mode must be a TradingMode or None")
         if self.release_document_present and self.release_failed:
             raise ValueError("release cannot be both present and failed")
 
