@@ -79,6 +79,18 @@ begin
       continue;
     end if;
 
+    -- A detached calendar row must not remain trackable. Otherwise an idempotent
+    -- retry would see no bound runtime and promote the same occurrence again.
+    -- `research` is an existing non-trackable, sync-locked lifecycle state and
+    -- serves here as an explicit legacy quarantine requiring human review.
+    if calendar_row.status in ('candidate', 'tracked') then
+      update public.calendar_events
+      set status = 'research',
+          updated_at = now()
+      where id = calendar_row.id
+        and status = calendar_row.status;
+    end if;
+
     update public.tracked_market_events
     set calendar_event_id = null,
         updated_by = 'migration:repair-legacy-tracked-calendar-binding',
