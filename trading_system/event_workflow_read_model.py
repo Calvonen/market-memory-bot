@@ -9,6 +9,7 @@ from trading_system.event_workflow import (
     workflow_profile_for_kind,
 )
 from trading_system.event_workflow_readiness import (
+    WorkflowExecutionOutcome,
     WorkflowReadinessEvidence,
     project_workflow_readiness,
 )
@@ -58,6 +59,7 @@ def build_event_workflow_read_model(
     except ValueError as exc:
         raise ValueError(f"unsupported tracked event kind: {event.kind}") from exc
 
+    _require_compatible_trading_evidence(trading_mode, evidence)
     profile = workflow_profile_for_kind(kind, trading_mode=trading_mode)
     states = project_workflow_readiness(profile, evidence)
     return EventWorkflowReadModel(
@@ -66,6 +68,29 @@ def build_event_workflow_read_model(
         trading_mode=trading_mode.value if trading_mode is not None else None,
         steps=_join_steps(profile, states),
     )
+
+
+def _require_compatible_trading_evidence(
+    trading_mode: TradingMode | None,
+    evidence: WorkflowReadinessEvidence,
+) -> None:
+    """Fail closed when PAPER-backed evidence is applied to a LIVE workflow.
+
+    The durable evidence loader currently obtains Strategy/Risk/execution state
+    from ``get_event_paper_trade_state``. Until a LIVE-scoped evidence source is
+    introduced, a LIVE projection may therefore expose the workflow shape but
+    must not consume any persisted trading progress from this evidence object.
+    """
+    if trading_mode is not TradingMode.LIVE:
+        return
+
+    has_trading_progress = (
+        evidence.strategy_present
+        or evidence.risk_present
+        or evidence.execution_outcome is not WorkflowExecutionOutcome.NOT_STARTED
+    )
+    if has_trading_progress:
+        raise ValueError("LIVE workflow cannot consume PAPER trading evidence")
 
 
 def _join_steps(
