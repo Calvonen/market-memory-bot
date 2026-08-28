@@ -158,6 +158,21 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
             [("get_event_paper_trade_state", {"input_event_id": release_id})],
         )
 
+    def test_etoro_demo_accepted_order_projects_execution_running(self):
+        release_id = "tracked:tracked-123"
+        client = _Client(
+            tables={"current_event_expectations": [_current_expectation(release_id)]},
+            paper_state={
+                "status": "paper_executed",
+                "expectation_version": 2,
+                "strategy": {"decision_id": "s1"},
+                "risk": {"status": "approved"},
+                "paper_order": {"status": "ETORO_DEMO_ACCEPTED"},
+            },
+        )
+        evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
+        self.assertEqual(evidence.execution_outcome, WorkflowExecutionOutcome.ACCEPTED)
+
     def test_stale_analysis_and_paper_state_do_not_complete_current_workflow(self):
         release_id = "tracked:tracked-123"
         client = _Client(
