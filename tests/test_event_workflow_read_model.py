@@ -99,6 +99,39 @@ class EventWorkflowReadModelTests(unittest.TestCase):
         self.assertEqual(model.steps[-1].key, "live")
         self.assertEqual(model.steps[-1].status, "pending")
 
+    def test_live_task_rejects_paper_trading_progress(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "LIVE workflow cannot consume PAPER trading evidence",
+        ):
+            build_event_workflow_read_model(
+                _event(status=TrackedEventStatus.COMPLETED),
+                WorkflowReadinessEvidence(
+                    tracked_status=TrackedEventStatus.COMPLETED,
+                    release_document_present=True,
+                    analysis_present=True,
+                    reaction_present=True,
+                    strategy_present=True,
+                    risk_present=True,
+                    execution_outcome=WorkflowExecutionOutcome.FILLED,
+                ),
+                trading_mode=TradingMode.LIVE,
+            )
+
+    def test_live_task_rejects_paper_execution_without_strategy_or_risk(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "LIVE workflow cannot consume PAPER trading evidence",
+        ):
+            build_event_workflow_read_model(
+                _event(),
+                WorkflowReadinessEvidence(
+                    tracked_status=TrackedEventStatus.MONITORING,
+                    execution_outcome=WorkflowExecutionOutcome.ACCEPTED,
+                ),
+                trading_mode=TradingMode.LIVE,
+            )
+
     def test_unknown_persisted_kind_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "unsupported tracked event kind"):
             build_event_workflow_read_model(
