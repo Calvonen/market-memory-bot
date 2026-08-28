@@ -89,6 +89,15 @@ class EventWorkflowReadinessTests(unittest.TestCase):
         self.assertEqual(by_key[WorkflowStepKey.ANALYSIS], WorkflowStepStatus.COMPLETED)
         self.assertEqual(by_key[WorkflowStepKey.MARKET_REACTION], WorkflowStepStatus.COMPLETED)
 
+    def test_completed_tracking_without_reaction_fails_closed(self) -> None:
+        states = project_workflow_readiness(
+            EARNINGS_WORKFLOW,
+            WorkflowReadinessEvidence(tracked_status=TrackedEventStatus.COMPLETED),
+        )
+        by_key = self._by_key(states)
+        self.assertEqual(by_key[WorkflowStepKey.TRACKING], WorkflowStepStatus.COMPLETED)
+        self.assertEqual(by_key[WorkflowStepKey.MARKET_REACTION], WorkflowStepStatus.FAILED)
+
     def test_paper_trading_stages_follow_only_persisted_evidence(self) -> None:
         states = project_workflow_readiness(
             EARNINGS_PAPER_WORKFLOW,
