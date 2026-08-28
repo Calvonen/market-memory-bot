@@ -47,12 +47,14 @@ class WorkflowReadinessEvidence:
     tracked-event, release, reaction, and trading-task persistence layers. The
     projector never invents progress that is not present in durable state.
 
+    ``event_id`` binds a loaded evidence snapshot to its canonical tracked event.
     ``trading_mode`` records provenance for Strategy/Risk/execution evidence. It
     is independent from the workflow profile selected by the caller, so PAPER
     persistence can never be mistaken for LIVE broker evidence.
     """
 
     tracked_status: TrackedEventStatus
+    event_id: str | None = None
     release_document_present: bool = False
     release_failed: bool = False
     analysis_present: bool = False
@@ -65,6 +67,9 @@ class WorkflowReadinessEvidence:
     def __post_init__(self) -> None:
         if not isinstance(self.tracked_status, TrackedEventStatus):
             raise ValueError("tracked_status must be a TrackedEventStatus")
+        if self.event_id is not None:
+            if not isinstance(self.event_id, str) or not self.event_id.strip():
+                raise ValueError("event_id must be a nonblank string or None")
         for field_name in (
             "release_document_present",
             "release_failed",
@@ -123,7 +128,7 @@ def project_workflow_readiness(
             status = _trading_stage_status(evidence.risk_present, evidence)
         elif step.key in (WorkflowStepKey.PAPER, WorkflowStepKey.LIVE):
             status = _execution_status(evidence.execution_outcome)
-        else:  # fail closed if the workflow vocabulary grows without projection logic
+        else:
             raise ValueError(f"unsupported workflow step: {step.key.value}")
 
         states.append(WorkflowStepState(key=step.key, status=status))
@@ -151,8 +156,6 @@ def _release_status(evidence: WorkflowReadinessEvidence) -> WorkflowStepStatus:
 
 
 def _reaction_status(evidence: WorkflowReadinessEvidence) -> WorkflowStepStatus:
-    # Terminal tracked states win over partial reaction presence: the worker will
-    # not resume a failed/cancelled runtime, so it must never remain RUNNING.
     if evidence.tracked_status is TrackedEventStatus.FAILED:
         return WorkflowStepStatus.FAILED
     if evidence.tracked_status is TrackedEventStatus.CANCELLED:
@@ -161,9 +164,6 @@ def _reaction_status(evidence: WorkflowReadinessEvidence) -> WorkflowStepStatus:
         if evidence.tracked_status is TrackedEventStatus.COMPLETED:
             return WorkflowStepStatus.COMPLETED
         return WorkflowStepStatus.RUNNING
-    # COMPLETED is also terminal. If no reaction row was ever persisted, the
-    # reaction stage cannot advance on a later poll, so fail closed instead of
-    # projecting an impossible perpetual PENDING state.
     if evidence.tracked_status is TrackedEventStatus.COMPLETED:
         return WorkflowStepStatus.FAILED
     return WorkflowStepStatus.PENDING
@@ -175,9 +175,6 @@ def _trading_stage_status(
 ) -> WorkflowStepStatus:
     if present:
         return WorkflowStepStatus.COMPLETED
-    # Terminal execution outcomes close the trading workflow. If a strategy or
-    # risk stage was never reached (for example expired_no_trade before the
-    # pipeline ran), it can no longer advance and must not remain PENDING.
     if evidence.execution_outcome in _TERMINAL_EXECUTION_OUTCOMES:
         return WorkflowStepStatus.SKIPPED
     return WorkflowStepStatus.PENDING
