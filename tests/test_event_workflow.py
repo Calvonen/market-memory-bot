@@ -3,9 +3,11 @@ from __future__ import annotations
 import unittest
 
 from trading_system.event_workflow import (
-    CONTENT_EVENT_TRADING_WORKFLOW,
+    CONTENT_EVENT_LIVE_WORKFLOW,
+    CONTENT_EVENT_PAPER_WORKFLOW,
     CONTENT_EVENT_WORKFLOW,
-    EARNINGS_TRADING_WORKFLOW,
+    EARNINGS_LIVE_WORKFLOW,
+    EARNINGS_PAPER_WORKFLOW,
     EARNINGS_WORKFLOW,
     EventWorkflowProfile,
     WorkflowStepDefinition,
@@ -16,6 +18,7 @@ from trading_system.event_workflow import (
     workflow_profile_for_kind,
 )
 from trading_system.market_event import MarketEventKind
+from trading_system.models import TradingMode
 
 
 class EventWorkflowProfileTests(unittest.TestCase):
@@ -30,13 +33,14 @@ class EventWorkflowProfileTests(unittest.TestCase):
         self.assertNotIn(WorkflowStepKey.STRATEGY, keys)
         self.assertNotIn(WorkflowStepKey.RISK, keys)
         self.assertNotIn(WorkflowStepKey.PAPER, keys)
+        self.assertNotIn(WorkflowStepKey.LIVE, keys)
 
-    def test_explicit_trading_task_adds_strategy_risk_and_paper(self) -> None:
+    def test_paper_trading_task_adds_paper_execution_stage(self) -> None:
         profile = workflow_profile_for_kind(
             MarketEventKind.EARNINGS,
-            has_trading_task=True,
+            trading_mode=TradingMode.PAPER,
         )
-        self.assertIs(profile, EARNINGS_TRADING_WORKFLOW)
+        self.assertIs(profile, EARNINGS_PAPER_WORKFLOW)
         self.assertEqual(
             tuple(step.key for step in profile.steps[-3:]),
             (
@@ -45,6 +49,23 @@ class EventWorkflowProfileTests(unittest.TestCase):
                 WorkflowStepKey.PAPER,
             ),
         )
+        self.assertNotIn(WorkflowStepKey.LIVE, tuple(step.key for step in profile.steps))
+
+    def test_live_trading_task_adds_live_execution_stage(self) -> None:
+        profile = workflow_profile_for_kind(
+            MarketEventKind.EARNINGS,
+            trading_mode=TradingMode.LIVE,
+        )
+        self.assertIs(profile, EARNINGS_LIVE_WORKFLOW)
+        self.assertEqual(
+            tuple(step.key for step in profile.steps[-3:]),
+            (
+                WorkflowStepKey.STRATEGY,
+                WorkflowStepKey.RISK,
+                WorkflowStepKey.LIVE,
+            ),
+        )
+        self.assertNotIn(WorkflowStepKey.PAPER, tuple(step.key for step in profile.steps))
 
     def test_news_keeps_observation_path_but_skips_release_stage(self) -> None:
         profile = workflow_profile_for_kind(MarketEventKind.NEWS)
@@ -61,12 +82,12 @@ class EventWorkflowProfileTests(unittest.TestCase):
             ),
         )
 
-    def test_news_trading_task_uses_content_trading_profile(self) -> None:
+    def test_news_paper_task_uses_content_paper_profile(self) -> None:
         profile = workflow_profile_for_kind(
             MarketEventKind.NEWS,
-            has_trading_task=True,
+            trading_mode=TradingMode.PAPER,
         )
-        self.assertIs(profile, CONTENT_EVENT_TRADING_WORKFLOW)
+        self.assertIs(profile, CONTENT_EVENT_PAPER_WORKFLOW)
         self.assertEqual(profile.mode_for(WorkflowStepKey.RELEASE), WorkflowStepMode.SKIP)
         self.assertEqual(
             tuple(step.key for step in profile.steps[-3:]),
@@ -76,6 +97,15 @@ class EventWorkflowProfileTests(unittest.TestCase):
                 WorkflowStepKey.PAPER,
             ),
         )
+
+    def test_news_live_task_uses_content_live_profile(self) -> None:
+        profile = workflow_profile_for_kind(
+            MarketEventKind.NEWS,
+            trading_mode=TradingMode.LIVE,
+        )
+        self.assertIs(profile, CONTENT_EVENT_LIVE_WORKFLOW)
+        self.assertEqual(profile.mode_for(WorkflowStepKey.RELEASE), WorkflowStepMode.SKIP)
+        self.assertEqual(profile.steps[-1].key, WorkflowStepKey.LIVE)
 
     def test_non_document_release_kinds_do_not_inherit_earnings_requirement(self) -> None:
         for kind in (
@@ -109,6 +139,7 @@ class EventWorkflowProfileTests(unittest.TestCase):
         self.assertNotIn(WorkflowStepKey.STRATEGY, by_key)
         self.assertNotIn(WorkflowStepKey.RISK, by_key)
         self.assertNotIn(WorkflowStepKey.PAPER, by_key)
+        self.assertNotIn(WorkflowStepKey.LIVE, by_key)
 
     def test_runtime_status_contract_supports_partial_and_action_required_states(self) -> None:
         self.assertEqual(
@@ -137,11 +168,11 @@ class EventWorkflowProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "MarketEventKind"):
             workflow_profile_for_kind("earnings")  # type: ignore[arg-type]
 
-    def test_profile_rejects_non_boolean_trading_task_flag(self) -> None:
-        with self.assertRaisesRegex(ValueError, "has_trading_task"):
+    def test_profile_rejects_invalid_trading_mode(self) -> None:
+        with self.assertRaisesRegex(ValueError, "trading_mode"):
             workflow_profile_for_kind(
                 MarketEventKind.EARNINGS,
-                has_trading_task=1,  # type: ignore[arg-type]
+                trading_mode="PAPER",  # type: ignore[arg-type]
             )
 
 
