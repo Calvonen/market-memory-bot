@@ -127,6 +127,34 @@ class EventWorkflowReadinessTests(unittest.TestCase):
                 )
                 self.assertEqual(self._by_key(states)[WorkflowStepKey.PAPER], status)
 
+    def test_terminal_no_trade_skips_unrun_strategy_and_risk(self) -> None:
+        states = project_workflow_readiness(
+            EARNINGS_PAPER_WORKFLOW,
+            WorkflowReadinessEvidence(
+                tracked_status=TrackedEventStatus.COMPLETED,
+                execution_outcome=WorkflowExecutionOutcome.NO_TRADE,
+            ),
+        )
+        by_key = self._by_key(states)
+        self.assertEqual(by_key[WorkflowStepKey.STRATEGY], WorkflowStepStatus.SKIPPED)
+        self.assertEqual(by_key[WorkflowStepKey.RISK], WorkflowStepStatus.SKIPPED)
+        self.assertEqual(by_key[WorkflowStepKey.PAPER], WorkflowStepStatus.SKIPPED)
+
+    def test_terminal_execution_preserves_completed_upstream_trading_stages(self) -> None:
+        states = project_workflow_readiness(
+            EARNINGS_PAPER_WORKFLOW,
+            WorkflowReadinessEvidence(
+                tracked_status=TrackedEventStatus.COMPLETED,
+                strategy_present=True,
+                risk_present=False,
+                execution_outcome=WorkflowExecutionOutcome.REJECTED,
+            ),
+        )
+        by_key = self._by_key(states)
+        self.assertEqual(by_key[WorkflowStepKey.STRATEGY], WorkflowStepStatus.COMPLETED)
+        self.assertEqual(by_key[WorkflowStepKey.RISK], WorkflowStepStatus.SKIPPED)
+        self.assertEqual(by_key[WorkflowStepKey.PAPER], WorkflowStepStatus.SKIPPED)
+
     def test_failed_tracking_does_not_erase_completed_release_or_analysis(self) -> None:
         states = project_workflow_readiness(
             EARNINGS_WORKFLOW,
