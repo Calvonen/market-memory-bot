@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from trading_system.market_event import MarketEvent, MarketEventKind, MarketEventSource
+from trading_system.market_event_ingress import register_market_event
 from trading_system.registered_market_event_monitor import RegisteredMarketEventMonitor
 from trading_system.tracked_instrument_etoro import TrackedEtoroInstrument
 
@@ -21,20 +22,17 @@ def register_manual_market_event(
     Instrument identity is taken only from the already-resolved tracked instrument;
     callers do not provide duplicate symbol/market fields that could drift from the
     live stream identity. Validation and event-id reuse rules remain delegated to
-    ``MarketEvent`` and ``RegisteredMarketEventMonitor``.
+    the producer-neutral ``register_market_event`` boundary.
 
     This ingress does not discover events, persist data, resolve brokers, fetch
     market data, or make trading decisions.
     """
-    event = MarketEvent(
+    return register_market_event(
+        monitor,
+        tracked,
         event_id=event_id,
-        tracked_instrument_id=tracked.tracked_instrument_id,
-        instrument=tracked.instrument,
-        market=tracked.market,
         event_at=event_at,
         source=MarketEventSource.MANUAL,
         kind=kind,
         title=title,
     )
-    monitor.register(event, tracked)
-    return event
