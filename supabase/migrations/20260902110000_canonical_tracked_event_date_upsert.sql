@@ -89,11 +89,13 @@ begin
   end if;
 
   if saved_row.event_date is null then
-    -- event_date is event identity. Only fill a missing value before monitoring
-    -- has begun or a reference has been captured. Exact retries remain safe.
+    -- event_date is event identity. Only fill a missing value before any
+    -- session-specific pre-event context, monitoring state or reference has
+    -- been persisted. Exact retries with an existing matching date remain safe.
     if saved_row.status <> 'tracked'
        or saved_row.reference_price is not null
-       or saved_row.started_at is not null then
+       or saved_row.started_at is not null
+       or saved_row.pre_event_market_context is not null then
       raise exception 'tracked_market_event_date_locked';
     end if;
 
