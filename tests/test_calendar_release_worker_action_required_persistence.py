@@ -16,18 +16,31 @@ EVENT_ID = "calendar:22648076-6e43-40fc-ac6e-f57a79ceee31"
 
 
 class _Targets:
-    def __init__(self, target: CalendarReleaseTarget) -> None:
+    def __init__(
+        self,
+        target: CalendarReleaseTarget,
+        *,
+        ensure_error: Exception | None = None,
+    ) -> None:
         self.target = target
+        self.ensure_error = ensure_error
 
     def list_targets(self, *, start_date, end_date):
         return (self.target,)
+
+    def ensure_release_shell(self, target):
+        if self.ensure_error is not None:
+            raise self.ensure_error
+        return target.event_id
 
 
 class _Expectations:
     def __init__(self, expectation: EventExpectation | None) -> None:
         self.expectation = expectation
+        self.calls = []
 
     def get(self, event_id: str):
+        self.calls.append(event_id)
         return self.expectation if event_id == EVENT_ID else None
 
 
@@ -61,6 +74,57 @@ class CalendarReleaseWorkerActionRequiredPersistenceTests(unittest.TestCase):
         releases = MagicMock()
         releases.has_analysis_for_event_version.return_value = False
         return releases
+
+    def test_shell_rpc_identity_conflict_is_persisted_before_expectation_lookup(self):
+        releases = self._releases()
+        expectations = _Expectations(_expectation())
+        targets = _Targets(
+            _target(),
+            ensure_error=RuntimeError(
+                "tracked_release_shell_identity_conflict: instrument mismatch"
+            ),
+        )
+
+        results = run_calendar_release_ingestion_once(
+            targets=targets,
+            expectations=expectations,
+            releases=releases,
+            analyzer=MagicMock(),
+            clock=_clock,
+        )
+
+        self.assertEqual(results[0].status, "identity_conflict")
+        self.assertEqual(expectations.calls, [])
+        releases.record_run.assert_called_once_with(
+            event_id=EVENT_ID,
+            provider=ACTION_REQUIRED_PROVIDER,
+            status="error",
+            error_message=(
+                "action_required: canonical release-shell identity conflicts with "
+                "tracked-event identity"
+            ),
+        )
+
+    def test_unrelated_shell_rpc_failure_remains_retryable_error(self):
+        releases = self._releases()
+        expectations = _Expectations(_expectation())
+        targets = _Targets(
+            _target(),
+            ensure_error=RuntimeError("temporary Supabase timeout"),
+        )
+
+        results = run_calendar_release_ingestion_once(
+            targets=targets,
+            expectations=expectations,
+            releases=releases,
+            analyzer=MagicMock(),
+            clock=_clock,
+        )
+
+        self.assertEqual(results[0].status, "error")
+        self.assertIn("temporary Supabase timeout", results[0].message or "")
+        self.assertEqual(expectations.calls, [])
+        releases.record_run.assert_not_called()
 
     def test_missing_release_shell_is_persisted_as_action_required_error(self):
         releases = self._releases()
