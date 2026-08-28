@@ -1,10 +1,27 @@
 -- Repair one legacy class of producer-identity drift before the canonical
 -- release-shell backfill runs. Historical tracked events could retain a
 -- calendar_event_id even when their canonical source/external_key already
--- belonged to a non-calendar producer. Repair only unambiguous terminal rows
--- and serialize the identity change with the same calendar -> tracked lock order
--- used by ensure_tracked_event_release_shell().
+-- belonged to a non-calendar producer. Repair only unambiguous terminal rows,
+-- serialize with the runtime lock order, and retain a durable audit link for
+-- every migration-only quarantine/detach transition.
 begin;
+
+create table if not exists public.legacy_tracked_calendar_binding_repairs (
+  id bigint generated always as identity primary key,
+  calendar_event_id uuid not null,
+  tracked_event_id uuid not null,
+  prior_calendar_status text not null,
+  prior_calendar_source text not null,
+  tracked_source text not null,
+  tracked_external_key text not null,
+  repair_action text not null check (repair_action = 'quarantine_and_detach'),
+  repair_reason text not null,
+  repaired_at timestamptz not null default now(),
+  unique (calendar_event_id, tracked_event_id, repair_action)
+);
+
+comment on table public.legacy_tracked_calendar_binding_repairs is
+  'Audit trail for migration-only repairs that quarantine a stale calendar producer binding before detaching it from the canonical tracked event.';
 
 do $$
 declare
@@ -79,10 +96,34 @@ begin
       continue;
     end if;
 
+    -- This is an exceptional migration-only lifecycle repair, not a normal
+    -- calendar control-surface transition. Preserve the original visible state,
+    -- producer identity and tracked-event link durably before changing either row.
+    insert into public.legacy_tracked_calendar_binding_repairs (
+      calendar_event_id,
+      tracked_event_id,
+      prior_calendar_status,
+      prior_calendar_source,
+      tracked_source,
+      tracked_external_key,
+      repair_action,
+      repair_reason
+    ) values (
+      calendar_row.id,
+      tracked_row.id,
+      calendar_row.status,
+      calendar_row.source,
+      tracked_row.source,
+      tracked_row.external_key,
+      'quarantine_and_detach',
+      'legacy calendar binding conflicts with canonical non-calendar producer identity'
+    )
+    on conflict (calendar_event_id, tracked_event_id, repair_action) do nothing;
+
     -- A detached calendar row must not remain trackable. Otherwise an idempotent
     -- retry would see no bound runtime and promote the same occurrence again.
-    -- `research` is an existing non-trackable, sync-locked lifecycle state and
-    -- serves here as an explicit legacy quarantine requiring human review.
+    -- `research` is an existing non-trackable, sync-locked lifecycle state; the
+    -- audit row above records the prior state and durable detached-runtime link.
     if calendar_row.status in ('candidate', 'tracked') then
       update public.calendar_events
       set status = 'research',
