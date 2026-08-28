@@ -24,11 +24,22 @@ class RepairLegacyTrackedCalendarBindingMigrationTests(unittest.TestCase):
         self.assertIn("c.event_type = t.kind", self.sql)
         self.assertIn("c.scheduled_date = t.event_date", self.sql)
         self.assertIn("c.source is distinct from t.source", self.sql)
-        self.assertIn("lower(btrim(t.external_key)) not like 'calendar:%'", self.sql)
+        self.assertIn(
+            "regexp_replace(t.external_key, '^[[:space:]]+|[[:space:]]+$', '', 'g')",
+            self.sql,
+        )
 
     def test_malformed_calendar_keys_are_not_detached(self) -> None:
-        self.assertIn("lower(btrim(t.external_key)) not like 'calendar:%'", self.sql)
-        self.assertIn("lower(btrim(tracked_row.external_key)) like 'calendar:%'", self.sql)
+        self.assertIn(
+            "regexp_replace(t.external_key, '^[[:space:]]+|[[:space:]]+$', '', 'g')",
+            self.sql,
+        )
+        self.assertIn(
+            "regexp_replace(tracked_row.external_key, '^[[:space:]]+|[[:space:]]+$', '', 'g')",
+            self.sql,
+        )
+        self.assertIn("spaces, tabs", self.sql)
+        self.assertIn("newlines", self.sql)
         self.assertIn("malformed calendar", self.sql)
         self.assertIn("external_key_mismatch", self.sql)
 
