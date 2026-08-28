@@ -24,7 +24,13 @@ class RepairLegacyTrackedCalendarBindingMigrationTests(unittest.TestCase):
         self.assertIn("c.event_type = t.kind", self.sql)
         self.assertIn("c.scheduled_date = t.event_date", self.sql)
         self.assertIn("c.source is distinct from t.source", self.sql)
-        self.assertIn("t.external_key not like 'calendar:%'", self.sql)
+        self.assertIn("lower(btrim(t.external_key)) not like 'calendar:%'", self.sql)
+
+    def test_malformed_calendar_keys_are_not_detached(self) -> None:
+        self.assertIn("lower(btrim(t.external_key)) not like 'calendar:%'", self.sql)
+        self.assertIn("lower(btrim(tracked_row.external_key)) like 'calendar:%'", self.sql)
+        self.assertIn("malformed calendar", self.sql)
+        self.assertIn("external_key_mismatch", self.sql)
 
     def test_serializes_with_release_shell_lock_order_and_rechecks_after_locks(self) -> None:
         calendar_lock = self.sql.index(
