@@ -1,9 +1,10 @@
 -- Repair one legacy class of producer-identity drift before the canonical
 -- release-shell backfill runs. Historical tracked events could retain a
 -- calendar_event_id even when their canonical source/external_key already
--- belonged to a non-calendar producer. Detach only unambiguous terminal rows;
--- any remaining mismatch aborts with an actionable report instead of being
--- silently skipped by the following v12 backfill.
+-- belonged to a non-calendar producer. Detach only unambiguous terminal rows
+-- that have no release-pipeline state under the legacy calendar identity; any
+-- remaining mismatch aborts with an actionable report instead of being silently
+-- skipped by the following v12 backfill.
 begin;
 
 do $$
@@ -26,7 +27,51 @@ begin
     and c.scheduled_date = t.event_date
     -- The canonical producer identity is already non-calendar and must win.
     and c.source is distinct from t.source
-    and t.external_key not like 'calendar:%';
+    and t.external_key not like 'calendar:%'
+    -- Never change canonical release identity after any dependent release,
+    -- analysis, approval or execution state has been persisted. Such rows stay
+    -- bound to the legacy identity and are reported by the conflict gate below
+    -- for an explicit state-preserving repair.
+    and not exists (
+      select 1 from public.market_events s
+      where s.event_id = ('calendar:' || c.id::text)
+    )
+    and not exists (
+      select 1 from public.event_expectation_versions s
+      where s.event_id = ('calendar:' || c.id::text)
+    )
+    and not exists (
+      select 1 from public.event_official_release_sources s
+      where s.event_id = ('calendar:' || c.id::text)
+    )
+    and not exists (
+      select 1 from public.event_official_release_source_audit s
+      where s.event_id = ('calendar:' || c.id::text)
+    )
+    and not exists (
+      select 1 from public.event_source_documents s
+      where s.event_id = ('calendar:' || c.id::text)
+    )
+    and not exists (
+      select 1 from public.event_ai_analyses s
+      where s.event_id = ('calendar:' || c.id::text)
+    )
+    and not exists (
+      select 1 from public.event_ingestion_runs s
+      where s.event_id = ('calendar:' || c.id::text)
+    )
+    and not exists (
+      select 1 from public.event_strategy_approvals s
+      where s.event_id = ('calendar:' || c.id::text)
+    )
+    and not exists (
+      select 1 from public.event_paper_trade_event_claims s
+      where s.event_id = ('calendar:' || c.id::text)
+    )
+    and not exists (
+      select 1 from public.event_paper_trade_runs s
+      where s.event_id = ('calendar:' || c.id::text)
+    );
 
   select string_agg(
     format(
