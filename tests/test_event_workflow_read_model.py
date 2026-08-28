@@ -34,11 +34,19 @@ def _event(*, kind: str = "earnings", status=TrackedEventStatus.MONITORING):
     )
 
 
+def _evidence(*, tracked_status: TrackedEventStatus, event_id: str = "tracked-123", **kwargs):
+    return WorkflowReadinessEvidence(
+        tracked_status=tracked_status,
+        event_id=event_id,
+        **kwargs,
+    )
+
+
 class EventWorkflowReadModelTests(unittest.TestCase):
     def test_observation_only_earnings_does_not_invent_trading_steps(self):
         model = build_event_workflow_read_model(
             _event(),
-            WorkflowReadinessEvidence(
+            _evidence(
                 tracked_status=TrackedEventStatus.MONITORING,
                 reaction_present=True,
             ),
@@ -60,7 +68,7 @@ class EventWorkflowReadModelTests(unittest.TestCase):
     def test_content_event_reports_release_as_skipped(self):
         model = build_event_workflow_read_model(
             _event(kind="news", status=TrackedEventStatus.TRACKED),
-            WorkflowReadinessEvidence(tracked_status=TrackedEventStatus.TRACKED),
+            _evidence(tracked_status=TrackedEventStatus.TRACKED),
         )
 
         release = next(step for step in model.steps if step.key == "release")
@@ -70,7 +78,7 @@ class EventWorkflowReadModelTests(unittest.TestCase):
     def test_explicit_paper_task_adds_strategy_risk_and_paper(self):
         model = build_event_workflow_read_model(
             _event(status=TrackedEventStatus.COMPLETED),
-            WorkflowReadinessEvidence(
+            _evidence(
                 tracked_status=TrackedEventStatus.COMPLETED,
                 release_document_present=True,
                 analysis_present=True,
@@ -92,7 +100,7 @@ class EventWorkflowReadModelTests(unittest.TestCase):
     def test_explicit_live_task_is_preserved_without_enabling_it(self):
         model = build_event_workflow_read_model(
             _event(status=TrackedEventStatus.TRACKED),
-            WorkflowReadinessEvidence(tracked_status=TrackedEventStatus.TRACKED),
+            _evidence(tracked_status=TrackedEventStatus.TRACKED),
             trading_mode=TradingMode.LIVE,
         )
 
@@ -107,7 +115,7 @@ class EventWorkflowReadModelTests(unittest.TestCase):
         ):
             build_event_workflow_read_model(
                 _event(status=TrackedEventStatus.COMPLETED),
-                WorkflowReadinessEvidence(
+                _evidence(
                     tracked_status=TrackedEventStatus.COMPLETED,
                     release_document_present=True,
                     analysis_present=True,
@@ -127,7 +135,7 @@ class EventWorkflowReadModelTests(unittest.TestCase):
         ):
             build_event_workflow_read_model(
                 _event(status=TrackedEventStatus.TRACKED),
-                WorkflowReadinessEvidence(
+                _evidence(
                     tracked_status=TrackedEventStatus.TRACKED,
                     trading_mode=TradingMode.PAPER,
                 ),
@@ -138,7 +146,7 @@ class EventWorkflowReadModelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "trading workflow evidence mode is required"):
             build_event_workflow_read_model(
                 _event(),
-                WorkflowReadinessEvidence(
+                _evidence(
                     tracked_status=TrackedEventStatus.MONITORING,
                     execution_outcome=WorkflowExecutionOutcome.ACCEPTED,
                 ),
@@ -152,21 +160,44 @@ class EventWorkflowReadModelTests(unittest.TestCase):
         ):
             build_event_workflow_read_model(
                 _event(status=TrackedEventStatus.CANCELLED),
-                WorkflowReadinessEvidence(tracked_status=TrackedEventStatus.MONITORING),
+                _evidence(tracked_status=TrackedEventStatus.MONITORING),
+            )
+
+    def test_mismatched_event_identity_fails_closed(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "workflow evidence event id does not match event id",
+        ):
+            build_event_workflow_read_model(
+                _event(status=TrackedEventStatus.TRACKED),
+                _evidence(
+                    tracked_status=TrackedEventStatus.TRACKED,
+                    event_id="tracked-other",
+                ),
+            )
+
+    def test_missing_event_identity_fails_closed(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "workflow evidence event id does not match event id",
+        ):
+            build_event_workflow_read_model(
+                _event(status=TrackedEventStatus.TRACKED),
+                WorkflowReadinessEvidence(tracked_status=TrackedEventStatus.TRACKED),
             )
 
     def test_unknown_persisted_kind_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "unsupported tracked event kind"):
             build_event_workflow_read_model(
                 _event(kind="future_kind", status=TrackedEventStatus.TRACKED),
-                WorkflowReadinessEvidence(tracked_status=TrackedEventStatus.TRACKED),
+                _evidence(tracked_status=TrackedEventStatus.TRACKED),
             )
 
     def test_invalid_trading_mode_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "trading_mode must be"):
             build_event_workflow_read_model(
                 _event(status=TrackedEventStatus.TRACKED),
-                WorkflowReadinessEvidence(tracked_status=TrackedEventStatus.TRACKED),
+                _evidence(tracked_status=TrackedEventStatus.TRACKED),
                 trading_mode="PAPER",  # type: ignore[arg-type]
             )
 
@@ -174,6 +205,7 @@ class EventWorkflowReadModelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "trading_mode must be"):
             WorkflowReadinessEvidence(
                 tracked_status=TrackedEventStatus.TRACKED,
+                event_id="tracked-123",
                 trading_mode="PAPER",  # type: ignore[arg-type]
             )
 
