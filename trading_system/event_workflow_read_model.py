@@ -9,7 +9,6 @@ from trading_system.event_workflow import (
     workflow_profile_for_kind,
 )
 from trading_system.event_workflow_readiness import (
-    WorkflowExecutionOutcome,
     WorkflowReadinessEvidence,
     project_workflow_readiness,
 )
@@ -74,23 +73,26 @@ def _require_compatible_trading_evidence(
     trading_mode: TradingMode | None,
     evidence: WorkflowReadinessEvidence,
 ) -> None:
-    """Fail closed when PAPER-backed evidence is applied to a LIVE workflow.
-
-    The durable evidence loader currently obtains Strategy/Risk/execution state
-    from ``get_event_paper_trade_state``. Until a LIVE-scoped evidence source is
-    introduced, a LIVE projection may therefore expose the workflow shape but
-    must not consume any persisted trading progress from this evidence object.
-    """
-    if trading_mode is not TradingMode.LIVE:
+    """Require trading evidence provenance to match the selected task mode."""
+    if trading_mode is None:
         return
 
-    has_trading_progress = (
-        evidence.strategy_present
-        or evidence.risk_present
-        or evidence.execution_outcome is not WorkflowExecutionOutcome.NOT_STARTED
-    )
-    if has_trading_progress:
-        raise ValueError("LIVE workflow cannot consume PAPER trading evidence")
+    evidence_mode = evidence.trading_mode
+    if evidence_mode is None:
+        has_trading_progress = (
+            evidence.strategy_present
+            or evidence.risk_present
+            or evidence.execution_outcome.value != "not_started"
+        )
+        if has_trading_progress:
+            raise ValueError("trading workflow evidence mode is required")
+        return
+
+    if evidence_mode is not trading_mode:
+        raise ValueError(
+            f"{trading_mode.value} workflow cannot consume "
+            f"{evidence_mode.value} trading evidence"
+        )
 
 
 def _join_steps(
