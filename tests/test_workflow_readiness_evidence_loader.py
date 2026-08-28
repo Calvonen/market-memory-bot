@@ -98,6 +98,10 @@ def _event(*, calendar_event_id=None, status=TrackedEventStatus.MONITORING):
     )
 
 
+def _current_expectation(release_id: str, version: int = 2):
+    return {"event_id": release_id, "version": version}
+
+
 class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
     def test_release_identity_is_calendar_bound_when_calendar_id_exists(self):
         self.assertEqual(
@@ -112,8 +116,15 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
         release_id = "tracked:tracked-123"
         client = _Client(
             tables={
+                "current_event_expectations": [_current_expectation(release_id)],
                 "event_source_documents": [{"id": "doc-1", "event_id": release_id}],
-                "event_ai_analyses": [{"id": "analysis-1", "event_id": release_id}],
+                "event_ai_analyses": [
+                    {
+                        "id": "analysis-1",
+                        "event_id": release_id,
+                        "expectation_version": 2,
+                    }
+                ],
                 "tracked_market_event_reactions": [
                     {"id": "reaction-1", "tracked_market_event_id": "tracked-123"}
                 ],
@@ -128,6 +139,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
             },
             paper_state={
                 "status": "paper_executed",
+                "expectation_version": 2,
                 "strategy": {"decision_id": "s1"},
                 "risk": {"status": "approved"},
                 "paper_order": {"status": "FILLED_SIMULATED"},
@@ -146,10 +158,59 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
             [("get_event_paper_trade_state", {"input_event_id": release_id})],
         )
 
+    def test_stale_analysis_and_paper_state_do_not_complete_current_workflow(self):
+        release_id = "tracked:tracked-123"
+        client = _Client(
+            tables={
+                "current_event_expectations": [_current_expectation(release_id, version=3)],
+                "event_ai_analyses": [
+                    {
+                        "id": "analysis-old",
+                        "event_id": release_id,
+                        "expectation_version": 2,
+                    }
+                ],
+            },
+            paper_state={
+                "status": "paper_executed",
+                "expectation_version": 2,
+                "strategy": {"decision_id": "old"},
+                "risk": {"status": "approved"},
+                "paper_order": {"status": "FILLED_SIMULATED"},
+            },
+        )
+        evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
+        self.assertFalse(evidence.analysis_present)
+        self.assertFalse(evidence.strategy_present)
+        self.assertFalse(evidence.risk_present)
+        self.assertEqual(evidence.execution_outcome, WorkflowExecutionOutcome.NOT_STARTED)
+
+    def test_missing_current_expectation_ignores_versioned_downstream_evidence(self):
+        release_id = "tracked:tracked-123"
+        client = _Client(
+            tables={
+                "event_ai_analyses": [
+                    {"id": "analysis-old", "event_id": release_id, "expectation_version": 1}
+                ]
+            },
+            paper_state={
+                "status": "expired_no_trade",
+                "expectation_version": 1,
+                "strategy": None,
+                "risk": None,
+            },
+        )
+        evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
+        self.assertFalse(evidence.analysis_present)
+        self.assertFalse(evidence.strategy_present)
+        self.assertFalse(evidence.risk_present)
+        self.assertEqual(evidence.execution_outcome, WorkflowExecutionOutcome.NOT_STARTED)
+
     def test_release_document_completion_survives_downstream_analysis_error(self):
         release_id = "tracked:tracked-123"
         client = _Client(
             tables={
+                "current_event_expectations": [_current_expectation(release_id)],
                 "event_source_documents": [{"id": "doc-1", "event_id": release_id}],
                 "event_ingestion_runs": [
                     {
@@ -170,6 +231,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
         release_id = "tracked:tracked-123"
         client = _Client(
             tables={
+                "current_event_expectations": [_current_expectation(release_id)],
                 "event_ingestion_runs": [
                     {
                         "event_id": release_id,
@@ -177,7 +239,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
                         "error_message": "provider failed before document persistence",
                         "created_at": "2026-08-28T06:05:00+00:00",
                     }
-                ]
+                ],
             }
         )
         evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
@@ -188,6 +250,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
         release_id = "tracked:tracked-123"
         client = _Client(
             tables={
+                "current_event_expectations": [_current_expectation(release_id)],
                 "event_ingestion_runs": [
                     {
                         "event_id": release_id,
@@ -195,7 +258,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
                         "error_message": "results_page selection no_match",
                         "created_at": "2026-08-28T06:00:00+00:00",
                     }
-                ]
+                ],
             }
         )
         evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
@@ -205,6 +268,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
         release_id = "tracked:tracked-123"
         client = _Client(
             tables={
+                "current_event_expectations": [_current_expectation(release_id)],
                 "event_ingestion_runs": [
                     {
                         "event_id": release_id,
@@ -212,21 +276,34 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
                         "error_message": "release overdue: scheduled_date=2026-08-28 still no_release",
                         "created_at": "2026-08-29T06:00:00+00:00",
                     }
-                ]
+                ],
             }
         )
         evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
         self.assertTrue(evidence.release_failed)
 
     def test_expired_no_trade_closes_execution_without_inventing_strategy_or_risk(self):
-        client = _Client(paper_state={"status": "expired_no_trade", "strategy": None, "risk": None})
+        release_id = "tracked:tracked-123"
+        client = _Client(
+            tables={"current_event_expectations": [_current_expectation(release_id)]},
+            paper_state={
+                "status": "expired_no_trade",
+                "expectation_version": 2,
+                "strategy": None,
+                "risk": None,
+            },
+        )
         evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
         self.assertFalse(evidence.strategy_present)
         self.assertFalse(evidence.risk_present)
         self.assertEqual(evidence.execution_outcome, WorkflowExecutionOutcome.NO_TRADE)
 
     def test_unknown_terminal_paper_status_fails_closed(self):
-        client = _Client(paper_state={"status": "mystery_terminal"})
+        release_id = "tracked:tracked-123"
+        client = _Client(
+            tables={"current_event_expectations": [_current_expectation(release_id)]},
+            paper_state={"status": "mystery_terminal", "expectation_version": 2},
+        )
         with self.assertRaisesRegex(RuntimeError, "unsupported persisted paper status"):
             SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
 
