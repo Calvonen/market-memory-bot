@@ -147,6 +147,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
             },
         )
         evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
+        self.assertEqual(evidence.event_id, "tracked-123")
         self.assertTrue(evidence.release_document_present)
         self.assertFalse(evidence.release_failed)
         self.assertTrue(evidence.analysis_present)
