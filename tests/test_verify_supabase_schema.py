@@ -55,6 +55,7 @@ OFFICIAL_SOURCE_PRESENT_ROW = {
 TRACKED_PRESENT_ROW = {
     "tracked_market_events_table_exists": True,
     "tracked_market_event_reactions_table_exists": True,
+    "tracked_market_event_event_date_column_exists": True,
     "upsert_tracked_market_event_function_exists": True,
     "arm_tracked_market_event_resolution_function_exists": True,
     "capture_tracked_market_event_reference_function_exists": True,
@@ -70,7 +71,7 @@ TRACKED_PRESENT_ROW = {
     "calendar_runtime_untrack_guard_version_matches": True,
     "ensure_calendar_release_shell_function_exists": True,
     "calendar_release_shell_version_matches": True,
-    "runtime_schema_version": 10,
+    "runtime_schema_version": 11,
 }
 
 
@@ -139,12 +140,23 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertIn("deployed: 7", err)
 
     def test_fails_closed_on_old_runtime_schema_version(self) -> None:
-        row = dict(TRACKED_PRESENT_ROW, runtime_schema_version=9)
+        row = dict(TRACKED_PRESENT_ROW, runtime_schema_version=10)
         exit_code, _out, err = self._run_with_client(
             _FakeClient(_responses(tracked_row=row))
         )
         self.assertEqual(exit_code, 1)
-        self.assertIn("tracked-event runtime schema version 10", err)
+        self.assertIn("tracked-event runtime schema version 11", err)
+
+    def test_fails_closed_when_event_date_column_is_missing(self) -> None:
+        row = dict(
+            TRACKED_PRESENT_ROW,
+            tracked_market_event_event_date_column_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_row=row))
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("tracked_market_events.event_date date column", err)
 
     def test_fails_closed_when_stale_context_fail_rpc_is_missing(self) -> None:
         row = dict(

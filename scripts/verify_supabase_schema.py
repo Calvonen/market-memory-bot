@@ -3,7 +3,7 @@
 
 The existing strategy-draft and calendar/watchlist checks stay in place. The
 persistent tracked-event worker additionally requires the tracked-event runtime
-migrations through the calendar release-pipeline shell version. Manual official
+migrations through the canonical event-local-date version. Manual official
 release sources have a dedicated verifier RPC so a missing out-of-band migration
 fails before backend/systemd processes are restarted.
 """
@@ -59,6 +59,10 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
     (
         "tracked_market_event_reactions_table_exists",
         "tracked_market_event_reactions table",
+    ),
+    (
+        "tracked_market_event_event_date_column_exists",
+        "tracked_market_events.event_date date column",
     ),
     (
         "upsert_tracked_market_event_function_exists",
@@ -124,7 +128,7 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
 
 REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 3
 REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 8
-REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 10
+REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 11
 POSTGRES_IDENTIFIER_MAX_BYTES = 63
 
 
