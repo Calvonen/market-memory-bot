@@ -23,6 +23,15 @@ create table if not exists public.legacy_tracked_calendar_binding_repairs (
 comment on table public.legacy_tracked_calendar_binding_repairs is
   'Audit trail for migration-only repairs that quarantine a stale calendar producer binding before detaching it from the canonical tracked event.';
 
+-- This table is an operator-only immutable audit surface. Keep it out of the
+-- public Data API even on projects whose public schema still has broad default
+-- privileges. The migration itself runs as the database owner; runtime service
+-- code only needs read access for diagnostics.
+alter table public.legacy_tracked_calendar_binding_repairs enable row level security;
+revoke all on table public.legacy_tracked_calendar_binding_repairs from public, anon, authenticated;
+grant select on table public.legacy_tracked_calendar_binding_repairs to service_role;
+revoke all on sequence public.legacy_tracked_calendar_binding_repairs_id_seq from public, anon, authenticated, service_role;
+
 do $$
 declare
   candidate record;
