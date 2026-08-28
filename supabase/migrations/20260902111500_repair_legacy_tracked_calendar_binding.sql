@@ -1,78 +1,94 @@
 -- Repair one legacy class of producer-identity drift before the canonical
 -- release-shell backfill runs. Historical tracked events could retain a
 -- calendar_event_id even when their canonical source/external_key already
--- belonged to a non-calendar producer. Detach only unambiguous terminal rows
--- that have no release-pipeline state under the legacy calendar identity; any
--- remaining mismatch aborts with an actionable report instead of being silently
--- skipped by the following v12 backfill.
+-- belonged to a non-calendar producer. Repair only unambiguous terminal rows
+-- and serialize the identity change with the same calendar -> tracked lock order
+-- used by ensure_tracked_event_release_shell().
 begin;
 
 do $$
 declare
+  candidate record;
+  calendar_row public.calendar_events%rowtype;
+  tracked_row public.tracked_market_events%rowtype;
+  old_release_event_id text;
   conflict_report text;
 begin
-  update public.tracked_market_events t
-  set calendar_event_id = null,
-      updated_by = 'migration:repair-legacy-tracked-calendar-binding',
-      updated_at = now()
-  from public.calendar_events c
-  where t.calendar_event_id = c.id
-    and t.kind = 'earnings'
-    and t.event_date is not null
-    and t.status in ('completed', 'failed', 'cancelled')
-    -- The calendar row still describes the same occurrence, so detaching the
-    -- stale ownership link does not change instrument, kind or local date.
-    and upper(replace(c.instrument, ' ', '')) = t.instrument
-    and c.event_type = t.kind
-    and c.scheduled_date = t.event_date
-    -- The canonical producer identity is already non-calendar and must win.
-    and c.source is distinct from t.source
-    and t.external_key not like 'calendar:%'
-    -- Never change canonical release identity after any dependent release,
-    -- analysis, approval or execution state has been persisted. Such rows stay
-    -- bound to the legacy identity and are reported by the conflict gate below
-    -- for an explicit state-preserving repair.
-    and not exists (
-      select 1 from public.market_events s
-      where s.event_id = ('calendar:' || c.id::text)
-    )
-    and not exists (
-      select 1 from public.event_expectation_versions s
-      where s.event_id = ('calendar:' || c.id::text)
-    )
-    and not exists (
-      select 1 from public.event_official_release_sources s
-      where s.event_id = ('calendar:' || c.id::text)
-    )
-    and not exists (
-      select 1 from public.event_official_release_source_audit s
-      where s.event_id = ('calendar:' || c.id::text)
-    )
-    and not exists (
-      select 1 from public.event_source_documents s
-      where s.event_id = ('calendar:' || c.id::text)
-    )
-    and not exists (
-      select 1 from public.event_ai_analyses s
-      where s.event_id = ('calendar:' || c.id::text)
-    )
-    and not exists (
-      select 1 from public.event_ingestion_runs s
-      where s.event_id = ('calendar:' || c.id::text)
-    )
-    and not exists (
-      select 1 from public.event_strategy_approvals s
-      where s.event_id = ('calendar:' || c.id::text)
-    )
-    and not exists (
-      select 1 from public.event_paper_trade_event_claims s
-      where s.event_id = ('calendar:' || c.id::text)
-    )
-    and not exists (
-      select 1 from public.event_paper_trade_runs s
-      where s.event_id = ('calendar:' || c.id::text)
-    );
+  for candidate in
+    select t.id, t.calendar_event_id
+    from public.tracked_market_events t
+    join public.calendar_events c on c.id = t.calendar_event_id
+    where t.kind = 'earnings'
+      and t.event_date is not null
+      and t.status in ('completed', 'failed', 'cancelled')
+      and upper(replace(c.instrument, ' ', '')) = t.instrument
+      and c.event_type = t.kind
+      and c.scheduled_date = t.event_date
+      and c.source is distinct from t.source
+      and t.external_key not like 'calendar:%'
+    order by t.id
+  loop
+    -- Match the runtime release-shell lock protocol: calendar first, then tracked.
+    -- If a worker is already creating release state, this waits for it to commit;
+    -- the dependency checks below then run in fresh READ COMMITTED statements.
+    select * into calendar_row
+    from public.calendar_events
+    where id = candidate.calendar_event_id
+    for update;
 
+    if calendar_row.id is null then
+      continue;
+    end if;
+
+    select * into tracked_row
+    from public.tracked_market_events
+    where id = candidate.id
+    for update;
+
+    if tracked_row.id is null
+       or tracked_row.calendar_event_id is distinct from candidate.calendar_event_id then
+      continue;
+    end if;
+
+    -- Recheck the complete safe-detach predicate after both locks are held.
+    if tracked_row.kind <> 'earnings'
+       or tracked_row.event_date is null
+       or tracked_row.status not in ('completed', 'failed', 'cancelled')
+       or upper(replace(calendar_row.instrument, ' ', '')) is distinct from tracked_row.instrument
+       or calendar_row.event_type is distinct from tracked_row.kind
+       or calendar_row.scheduled_date is distinct from tracked_row.event_date
+       or calendar_row.source is not distinct from tracked_row.source
+       or tracked_row.external_key like 'calendar:%' then
+      continue;
+    end if;
+
+    old_release_event_id := 'calendar:' || calendar_row.id::text;
+
+    -- Do not change release identity when any state already exists under the old
+    -- calendar identity. These checks intentionally happen after the row locks.
+    if exists (select 1 from public.market_events where event_id = old_release_event_id)
+       or exists (select 1 from public.event_expectation_versions where event_id = old_release_event_id)
+       or exists (select 1 from public.event_official_release_sources where event_id = old_release_event_id)
+       or exists (select 1 from public.event_official_release_source_audit where event_id = old_release_event_id)
+       or exists (select 1 from public.event_source_documents where event_id = old_release_event_id)
+       or exists (select 1 from public.event_ai_analyses where event_id = old_release_event_id)
+       or exists (select 1 from public.event_ingestion_runs where event_id = old_release_event_id)
+       or exists (select 1 from public.event_strategy_approvals where event_id = old_release_event_id)
+       or exists (select 1 from public.event_paper_trade_event_claims where event_id = old_release_event_id)
+       or exists (select 1 from public.event_paper_trade_runs where event_id = old_release_event_id) then
+      continue;
+    end if;
+
+    update public.tracked_market_events
+    set calendar_event_id = null,
+        updated_by = 'migration:repair-legacy-tracked-calendar-binding',
+        updated_at = now()
+    where id = tracked_row.id
+      and calendar_event_id = calendar_row.id;
+  end loop;
+
+  -- Any mismatch that remains after the serialized repair is actionable and must
+  -- abort instead of being silently skipped by the v12 backfill.
   select string_agg(
     format(
       '%s[%s]',
