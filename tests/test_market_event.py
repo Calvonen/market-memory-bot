@@ -29,7 +29,7 @@ class MarketEventTests(unittest.TestCase):
     def test_supports_all_current_event_producers(self) -> None:
         self.assertEqual(
             {source.value for source in MarketEventSource},
-            {"calendar", "release", "manual", "news"},
+            {"calendar", "release", "manual", "news", "scanner"},
         )
 
     def test_event_kinds_are_generic_not_earnings_only(self) -> None:
