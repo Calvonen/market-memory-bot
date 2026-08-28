@@ -6,10 +6,14 @@
 -- every migration-only quarantine/detach transition.
 begin;
 
--- Freeze tracked-event writes for the duration of the repair + final conflict
--- scan. SHARE ROW EXCLUSIVE conflicts with the ROW EXCLUSIVE lock taken by
--- INSERT/UPDATE paths (including the legacy service-role upsert compatibility
--- function), so no new calendar binding can commit outside this scan's view.
+-- Drain and block calendar-first promotion/release-shell paths before freezing
+-- tracked-event writes. EXCLUSIVE conflicts with the ROW SHARE table lock taken
+-- by SELECT ... FOR UPDATE on calendar_events, so any promotion that already
+-- owns a calendar row must finish its later tracked-event write before this lock
+-- can be granted. Once granted, new calendar-first promotions cannot enter.
+-- Only then take the tracked-event write barrier, preserving the global
+-- calendar -> tracked lock order and avoiding a live-deploy deadlock.
+lock table public.calendar_events in exclusive mode;
 lock table public.tracked_market_events in share row exclusive mode;
 
 create table if not exists public.legacy_tracked_calendar_binding_repairs (
@@ -68,8 +72,8 @@ begin
     order by t.id
   loop
     -- Match the runtime release-shell lock protocol: calendar first, then tracked.
-    -- If a worker is already creating release state, this waits for it to commit;
-    -- the dependency checks below then run in fresh READ COMMITTED statements.
+    -- The relation-level calendar lock above has already drained concurrent
+    -- calendar-first writers; these row locks retain the same local ordering.
     select * into calendar_row
     from public.calendar_events
     where id = candidate.calendar_event_id
