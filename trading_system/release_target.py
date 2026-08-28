@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 
 from trading_system.market_event import MarketEventKind, MarketEventSource
+from trading_system.tracked_event_repository import TrackedEventTimeStatus
 from trading_system.tracked_instruments import _normalise_symbol
 
 
@@ -22,6 +23,7 @@ class ReleaseTarget:
     market: str
     event_at: datetime
     event_date: date
+    event_time_status: TrackedEventTimeStatus
     source: MarketEventSource
     kind: MarketEventKind
     title: str = ""
@@ -43,8 +45,10 @@ class ReleaseTarget:
             raise ValueError("market must not be blank")
         if self.event_at.tzinfo is None or self.event_at.utcoffset() is None:
             raise ValueError("event_at must be timezone-aware")
-        if not isinstance(self.event_date, date):
+        if isinstance(self.event_date, datetime) or not isinstance(self.event_date, date):
             raise ValueError("event_date must be a date")
+        if not isinstance(self.event_time_status, TrackedEventTimeStatus):
+            raise ValueError("event_time_status must be a TrackedEventTimeStatus")
         if not isinstance(self.source, MarketEventSource):
             raise ValueError("source must be a MarketEventSource")
         if not isinstance(self.kind, MarketEventKind):
