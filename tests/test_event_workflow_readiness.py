@@ -10,6 +10,7 @@ from trading_system.event_workflow import (
     WorkflowStepStatus,
 )
 from trading_system.event_workflow_readiness import (
+    WorkflowExecutionOutcome,
     WorkflowReadinessEvidence,
     project_workflow_readiness,
 )
@@ -98,13 +99,33 @@ class EventWorkflowReadinessTests(unittest.TestCase):
                 reaction_present=True,
                 strategy_present=True,
                 risk_present=False,
-                execution_present=False,
             ),
         )
         by_key = self._by_key(states)
         self.assertEqual(by_key[WorkflowStepKey.STRATEGY], WorkflowStepStatus.COMPLETED)
         self.assertEqual(by_key[WorkflowStepKey.RISK], WorkflowStepStatus.PENDING)
         self.assertEqual(by_key[WorkflowStepKey.PAPER], WorkflowStepStatus.PENDING)
+
+    def test_execution_outcomes_distinguish_accepted_filled_and_terminal_no_trade(self) -> None:
+        expected = {
+            WorkflowExecutionOutcome.ACCEPTED: WorkflowStepStatus.RUNNING,
+            WorkflowExecutionOutcome.FILLED: WorkflowStepStatus.COMPLETED,
+            WorkflowExecutionOutcome.NO_TRADE: WorkflowStepStatus.SKIPPED,
+            WorkflowExecutionOutcome.REJECTED: WorkflowStepStatus.SKIPPED,
+            WorkflowExecutionOutcome.FAILED: WorkflowStepStatus.FAILED,
+        }
+        for outcome, status in expected.items():
+            with self.subTest(outcome=outcome):
+                states = project_workflow_readiness(
+                    EARNINGS_PAPER_WORKFLOW,
+                    WorkflowReadinessEvidence(
+                        tracked_status=TrackedEventStatus.COMPLETED,
+                        strategy_present=True,
+                        risk_present=True,
+                        execution_outcome=outcome,
+                    ),
+                )
+                self.assertEqual(self._by_key(states)[WorkflowStepKey.PAPER], status)
 
     def test_failed_tracking_does_not_erase_completed_release_or_analysis(self) -> None:
         states = project_workflow_readiness(
@@ -121,10 +142,26 @@ class EventWorkflowReadinessTests(unittest.TestCase):
         self.assertEqual(by_key[WorkflowStepKey.ANALYSIS], WorkflowStepStatus.COMPLETED)
         self.assertEqual(by_key[WorkflowStepKey.MARKET_REACTION], WorkflowStepStatus.FAILED)
 
-    def test_cancelled_tracking_skips_unfinished_tracking_and_reaction(self) -> None:
+    def test_failed_tracking_overrides_partial_reaction_presence(self) -> None:
         states = project_workflow_readiness(
             EARNINGS_WORKFLOW,
-            WorkflowReadinessEvidence(tracked_status=TrackedEventStatus.CANCELLED),
+            WorkflowReadinessEvidence(
+                tracked_status=TrackedEventStatus.FAILED,
+                reaction_present=True,
+            ),
+        )
+        self.assertEqual(
+            self._by_key(states)[WorkflowStepKey.MARKET_REACTION],
+            WorkflowStepStatus.FAILED,
+        )
+
+    def test_cancelled_tracking_skips_partial_reaction_presence(self) -> None:
+        states = project_workflow_readiness(
+            EARNINGS_WORKFLOW,
+            WorkflowReadinessEvidence(
+                tracked_status=TrackedEventStatus.CANCELLED,
+                reaction_present=True,
+            ),
         )
         by_key = self._by_key(states)
         self.assertEqual(by_key[WorkflowStepKey.TRACKING], WorkflowStepStatus.SKIPPED)
@@ -143,6 +180,13 @@ class EventWorkflowReadinessTests(unittest.TestCase):
             WorkflowReadinessEvidence(
                 tracked_status=TrackedEventStatus.MONITORING,
                 analysis_present=1,  # type: ignore[arg-type]
+            )
+
+    def test_evidence_rejects_non_execution_outcome(self) -> None:
+        with self.assertRaisesRegex(ValueError, "execution_outcome"):
+            WorkflowReadinessEvidence(
+                tracked_status=TrackedEventStatus.MONITORING,
+                execution_outcome="filled",  # type: ignore[arg-type]
             )
 
 
