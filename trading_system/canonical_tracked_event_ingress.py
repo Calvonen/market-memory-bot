@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from trading_system.tracked_event_repository import TrackedEventTimeStatus
+from trading_system.tracked_instrument_etoro import TrackedEtoroInstrument
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,42 @@ class SupabaseCanonicalTrackedEventIngress:
                 "MARKETAI_SUPABASE_URL and MARKETAI_SUPABASE_SECRET_KEY are required"
             )
         return cls(create_client(url, key))
+
+    def register_for_tracked_instrument(
+        self,
+        tracked: TrackedEtoroInstrument,
+        *,
+        company_name: str,
+        source: str,
+        external_key: str,
+        kind: str,
+        title: str,
+        event_at: datetime,
+        event_date: date,
+        event_time_status: TrackedEventTimeStatus,
+        actor: str,
+        calendar_event_id: str | None = None,
+    ) -> CanonicalTrackedEventWriteResult:
+        """Persist producer metadata against one already-resolved instrument identity."""
+        result = self.register(
+            company_name=company_name,
+            instrument=tracked.instrument,
+            market=tracked.market,
+            source=source,
+            external_key=external_key,
+            kind=kind,
+            title=title,
+            event_at=event_at,
+            event_date=event_date,
+            event_time_status=event_time_status,
+            actor=actor,
+            calendar_event_id=calendar_event_id,
+        )
+        if result.tracked_instrument_id != tracked.tracked_instrument_id:
+            raise RuntimeError(
+                "canonical tracked event resolved to a different tracked instrument"
+            )
+        return result
 
     def register(
         self,
