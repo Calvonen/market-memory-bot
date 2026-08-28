@@ -64,6 +64,7 @@ class SupabaseCanonicalTrackedEventIngress:
             event_time_status=event_time_status,
             actor=actor,
             calendar_event_id=calendar_event_id,
+            expected_tracked_instrument_id=tracked.tracked_instrument_id,
         )
         if result.tracked_instrument_id != tracked.tracked_instrument_id:
             raise RuntimeError(
@@ -86,6 +87,7 @@ class SupabaseCanonicalTrackedEventIngress:
         event_time_status: TrackedEventTimeStatus,
         actor: str,
         calendar_event_id: str | None = None,
+        expected_tracked_instrument_id: str | None = None,
     ) -> CanonicalTrackedEventWriteResult:
         if event_at.tzinfo is None or event_at.utcoffset() is None:
             raise ValueError("event_at must be timezone-aware")
@@ -93,6 +95,8 @@ class SupabaseCanonicalTrackedEventIngress:
             raise ValueError("event_date must be a date")
         if not isinstance(event_time_status, TrackedEventTimeStatus):
             raise ValueError("event_time_status must be a TrackedEventTimeStatus")
+        if expected_tracked_instrument_id is not None and not expected_tracked_instrument_id.strip():
+            raise ValueError("expected_tracked_instrument_id must not be blank")
 
         response = self.client.rpc(
             "upsert_canonical_tracked_market_event",
@@ -109,6 +113,7 @@ class SupabaseCanonicalTrackedEventIngress:
                 "input_event_time_status": event_time_status.value,
                 "input_actor": actor,
                 "input_calendar_event_id": calendar_event_id,
+                "input_expected_tracked_instrument_id": expected_tracked_instrument_id,
             },
         ).execute()
         rows = response.data or []
@@ -120,9 +125,18 @@ class SupabaseCanonicalTrackedEventIngress:
         if persisted_date != event_date:
             raise RuntimeError("canonical tracked event returned a different event_date")
 
+        persisted_tracked_instrument_id = str(row["out_tracked_instrument_id"])
+        if (
+            expected_tracked_instrument_id is not None
+            and persisted_tracked_instrument_id != expected_tracked_instrument_id
+        ):
+            raise RuntimeError(
+                "canonical tracked event returned a different tracked instrument"
+            )
+
         return CanonicalTrackedEventWriteResult(
             event_id=str(row["out_id"]),
-            tracked_instrument_id=str(row["out_tracked_instrument_id"]),
+            tracked_instrument_id=persisted_tracked_instrument_id,
             event_date=persisted_date,
             action=str(row["out_action"]),
         )
