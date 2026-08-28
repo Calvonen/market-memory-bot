@@ -130,7 +130,7 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
                 "status": "paper_executed",
                 "strategy": {"decision_id": "s1"},
                 "risk": {"status": "approved"},
-                "paper_order": {"status": "filled"},
+                "paper_order": {"status": "FILLED_SIMULATED"},
             },
         )
         evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
@@ -145,6 +145,44 @@ class WorkflowReadinessEvidenceLoaderTests(unittest.TestCase):
             client.rpc_calls,
             [("get_event_paper_trade_state", {"input_event_id": release_id})],
         )
+
+    def test_release_document_completion_survives_downstream_analysis_error(self):
+        release_id = "tracked:tracked-123"
+        client = _Client(
+            tables={
+                "event_source_documents": [{"id": "doc-1", "event_id": release_id}],
+                "event_ingestion_runs": [
+                    {
+                        "event_id": release_id,
+                        "status": "error",
+                        "error_message": "AI analysis failed",
+                        "created_at": "2026-08-28T06:05:00+00:00",
+                    }
+                ],
+            }
+        )
+        evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
+        self.assertTrue(evidence.release_document_present)
+        self.assertFalse(evidence.release_failed)
+        self.assertFalse(evidence.analysis_present)
+
+    def test_error_without_release_document_requires_action(self):
+        release_id = "tracked:tracked-123"
+        client = _Client(
+            tables={
+                "event_ingestion_runs": [
+                    {
+                        "event_id": release_id,
+                        "status": "error",
+                        "error_message": "provider failed before document persistence",
+                        "created_at": "2026-08-28T06:05:00+00:00",
+                    }
+                ]
+            }
+        )
+        evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(_event())
+        self.assertFalse(evidence.release_document_present)
+        self.assertTrue(evidence.release_failed)
 
     def test_normal_no_release_does_not_require_action_before_overdue_marker(self):
         release_id = "tracked:tracked-123"
