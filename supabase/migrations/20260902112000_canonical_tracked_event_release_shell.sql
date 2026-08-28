@@ -25,9 +25,9 @@ declare
   shell_action text := 'noop_existing';
 begin
   -- Probe without locking so calendar-bound work can acquire locks in the same
-  -- order as calendar promotion: calendar first, tracked event second. This RPC
-  -- is called by the release worker as its own transaction boundary, not from a
-  -- tracked-row write trigger.
+  -- order as calendar promotion: calendar first, tracked event second. The
+  -- calendar-less trigger below is safe while the outer canonical write already
+  -- owns the tracked row because this branch never waits on calendar_events.
   select calendar_event_id into initial_calendar_event_id
   from public.tracked_market_events
   where id = input_tracked_event_id;
@@ -104,7 +104,11 @@ begin
     );
     shell_action := 'inserted_market_event';
   else
-    if existing_market_event.instrument is distinct from tracked_row.instrument
+    -- Legacy calendar shells stored calendar_events.instrument verbatim while
+    -- tracked events normalize the symbol. Compare canonical symbol forms so
+    -- harmless historical casing/spacing cannot make this migration fail.
+    if upper(replace(existing_market_event.instrument, ' ', ''))
+         is distinct from upper(replace(tracked_row.instrument, ' ', ''))
        or existing_market_event.event_name is distinct from release_event_name
        or existing_market_event.scheduled_date is distinct from tracked_row.event_date then
       raise exception 'tracked_release_shell_identity_conflict';
@@ -165,10 +169,38 @@ $$;
 revoke all on function public.ensure_tracked_event_release_shell(uuid) from public;
 grant execute on function public.ensure_tracked_event_release_shell(uuid) to service_role;
 
+-- Calendar promotion already creates its release shell in its calendar->tracked
+-- transaction. Calendar-less producers have no such owner, so provision their
+-- shell as soon as canonical event_date is persisted. The predicate guarantees
+-- this trigger never acquires calendar_events while an outer tracked-row write
+-- holds the tracked row, avoiding the lock inversion that a generic trigger had.
+create or replace function public.ensure_calendarless_tracked_event_release_shell_after_date_write()
+returns trigger
+language plpgsql
+security invoker
+as $$
+begin
+  perform * from public.ensure_tracked_event_release_shell(new.id);
+  return new;
+end;
+$$;
+
+revoke all on function public.ensure_calendarless_tracked_event_release_shell_after_date_write() from public;
+
+drop trigger if exists tracked_market_events_calendarless_release_shell_after_date_write
+  on public.tracked_market_events;
+create trigger tracked_market_events_calendarless_release_shell_after_date_write
+  after insert or update of event_date on public.tracked_market_events
+  for each row
+  when (
+    new.kind = 'earnings'
+    and new.event_date is not null
+    and new.calendar_event_id is null
+  )
+  execute function public.ensure_calendarless_tracked_event_release_shell_after_date_write();
+
 -- Backfill shells only for canonical tracked earnings that already have an
--- explicit local event_date. Future rows are ensured by the canonical release
--- worker immediately before release discovery/analysis. Never infer a date from
--- event_at UTC.
+-- explicit local event_date. Never infer a date from event_at UTC.
 do $$
 declare
   target record;
@@ -219,6 +251,7 @@ returns table (
   ensure_calendar_release_shell_function_exists boolean,
   calendar_release_shell_version_matches boolean,
   ensure_tracked_event_release_shell_function_exists boolean,
+  calendarless_release_shell_trigger_exists boolean,
   runtime_schema_version integer
 )
 language sql
@@ -276,6 +309,16 @@ as $$
     to_regprocedure('public.ensure_calendar_release_shell(uuid)') is not null,
     public.calendar_release_shell_version() = 1,
     to_regprocedure('public.ensure_tracked_event_release_shell(uuid)') is not null,
+    exists (
+      select 1
+      from pg_trigger t
+      join pg_class c on c.oid = t.tgrelid
+      join pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = 'public'
+        and c.relname = 'tracked_market_events'
+        and t.tgname = 'tracked_market_events_calendarless_release_shell_after_date_write'
+        and not t.tgisinternal
+    ),
     public.tracked_event_runtime_schema_version();
 $$;
 
