@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 from trading_system.event_workflow import (
     EventWorkflowProfile,
@@ -12,12 +13,28 @@ from trading_system.event_workflow import (
 from trading_system.tracked_event_repository import TrackedEventStatus
 
 
+class WorkflowExecutionOutcome(str, Enum):
+    """Normalized durable outcome for the execution stage.
+
+    Repository adapters translate broker/paper persistence into this vocabulary;
+    the readiness projector therefore never treats mere order presence as proof
+    that execution completed.
+    """
+
+    NOT_STARTED = "not_started"
+    ACCEPTED = "accepted"
+    FILLED = "filled"
+    NO_TRADE = "no_trade"
+    REJECTED = "rejected"
+    FAILED = "failed"
+
+
 @dataclass(frozen=True)
 class WorkflowReadinessEvidence:
     """Canonical persisted evidence used to project workflow readiness.
 
-    This object is intentionally producer-neutral.  Callers populate it from the
-    tracked-event, release, reaction, and trading-task persistence layers.  The
+    This object is intentionally producer-neutral. Callers populate it from the
+    tracked-event, release, reaction, and trading-task persistence layers. The
     projector never invents progress that is not present in durable state.
     """
 
@@ -28,7 +45,7 @@ class WorkflowReadinessEvidence:
     reaction_present: bool = False
     strategy_present: bool = False
     risk_present: bool = False
-    execution_present: bool = False
+    execution_outcome: WorkflowExecutionOutcome = WorkflowExecutionOutcome.NOT_STARTED
 
     def __post_init__(self) -> None:
         if not isinstance(self.tracked_status, TrackedEventStatus):
@@ -40,10 +57,11 @@ class WorkflowReadinessEvidence:
             "reaction_present",
             "strategy_present",
             "risk_present",
-            "execution_present",
         ):
             if not isinstance(getattr(self, field_name), bool):
                 raise ValueError(f"{field_name} must be a bool")
+        if not isinstance(self.execution_outcome, WorkflowExecutionOutcome):
+            raise ValueError("execution_outcome must be a WorkflowExecutionOutcome")
         if self.release_document_present and self.release_failed:
             raise ValueError("release cannot be both present and failed")
 
@@ -55,7 +73,7 @@ def project_workflow_readiness(
     """Project canonical workflow state from durable evidence.
 
     The projection is intentionally non-linear: release/analysis/reaction can be
-    complete independently when persisted evidence proves that they are.  A
+    complete independently when persisted evidence proves that they are. A
     failed tracked-event runtime fails only the still-unfinished tracking and
     reaction stages; already completed evidence remains completed.
     """
@@ -95,11 +113,7 @@ def project_workflow_readiness(
                 else WorkflowStepStatus.PENDING
             )
         elif step.key in (WorkflowStepKey.PAPER, WorkflowStepKey.LIVE):
-            status = (
-                WorkflowStepStatus.COMPLETED
-                if evidence.execution_present
-                else WorkflowStepStatus.PENDING
-            )
+            status = _execution_status(evidence.execution_outcome)
         else:  # fail closed if the workflow vocabulary grows without projection logic
             raise ValueError(f"unsupported workflow step: {step.key.value}")
 
@@ -128,12 +142,28 @@ def _release_status(evidence: WorkflowReadinessEvidence) -> WorkflowStepStatus:
 
 
 def _reaction_status(evidence: WorkflowReadinessEvidence) -> WorkflowStepStatus:
-    if evidence.reaction_present:
-        if evidence.tracked_status is TrackedEventStatus.COMPLETED:
-            return WorkflowStepStatus.COMPLETED
-        return WorkflowStepStatus.RUNNING
+    # Terminal tracked states win over partial reaction presence: the worker will
+    # not resume a failed/cancelled runtime, so it must never remain RUNNING.
     if evidence.tracked_status is TrackedEventStatus.FAILED:
         return WorkflowStepStatus.FAILED
     if evidence.tracked_status is TrackedEventStatus.CANCELLED:
         return WorkflowStepStatus.SKIPPED
+    if evidence.reaction_present:
+        if evidence.tracked_status is TrackedEventStatus.COMPLETED:
+            return WorkflowStepStatus.COMPLETED
+        return WorkflowStepStatus.RUNNING
     return WorkflowStepStatus.PENDING
+
+
+def _execution_status(outcome: WorkflowExecutionOutcome) -> WorkflowStepStatus:
+    if outcome is WorkflowExecutionOutcome.NOT_STARTED:
+        return WorkflowStepStatus.PENDING
+    if outcome is WorkflowExecutionOutcome.ACCEPTED:
+        return WorkflowStepStatus.RUNNING
+    if outcome is WorkflowExecutionOutcome.FILLED:
+        return WorkflowStepStatus.COMPLETED
+    if outcome in (WorkflowExecutionOutcome.NO_TRADE, WorkflowExecutionOutcome.REJECTED):
+        return WorkflowStepStatus.SKIPPED
+    if outcome is WorkflowExecutionOutcome.FAILED:
+        return WorkflowStepStatus.FAILED
+    raise ValueError(f"unsupported execution outcome: {outcome.value}")
