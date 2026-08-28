@@ -78,6 +78,7 @@ class EventWorkflowReadModelTests(unittest.TestCase):
                 strategy_present=True,
                 risk_present=True,
                 execution_outcome=WorkflowExecutionOutcome.FILLED,
+                trading_mode=TradingMode.PAPER,
             ),
             trading_mode=TradingMode.PAPER,
         )
@@ -99,7 +100,7 @@ class EventWorkflowReadModelTests(unittest.TestCase):
         self.assertEqual(model.steps[-1].key, "live")
         self.assertEqual(model.steps[-1].status, "pending")
 
-    def test_live_task_rejects_paper_trading_progress(self):
+    def test_live_task_rejects_paper_trading_evidence(self):
         with self.assertRaisesRegex(
             ValueError,
             "LIVE workflow cannot consume PAPER trading evidence",
@@ -114,11 +115,12 @@ class EventWorkflowReadModelTests(unittest.TestCase):
                     strategy_present=True,
                     risk_present=True,
                     execution_outcome=WorkflowExecutionOutcome.FILLED,
+                    trading_mode=TradingMode.PAPER,
                 ),
                 trading_mode=TradingMode.LIVE,
             )
 
-    def test_live_task_rejects_paper_execution_without_strategy_or_risk(self):
+    def test_live_task_rejects_even_empty_paper_scoped_evidence(self):
         with self.assertRaisesRegex(
             ValueError,
             "LIVE workflow cannot consume PAPER trading evidence",
@@ -126,10 +128,21 @@ class EventWorkflowReadModelTests(unittest.TestCase):
             build_event_workflow_read_model(
                 _event(),
                 WorkflowReadinessEvidence(
+                    tracked_status=TrackedEventStatus.TRACKED,
+                    trading_mode=TradingMode.PAPER,
+                ),
+                trading_mode=TradingMode.LIVE,
+            )
+
+    def test_trading_progress_without_provenance_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "trading workflow evidence mode is required"):
+            build_event_workflow_read_model(
+                _event(),
+                WorkflowReadinessEvidence(
                     tracked_status=TrackedEventStatus.MONITORING,
                     execution_outcome=WorkflowExecutionOutcome.ACCEPTED,
                 ),
-                trading_mode=TradingMode.LIVE,
+                trading_mode=TradingMode.PAPER,
             )
 
     def test_unknown_persisted_kind_fails_closed(self):
@@ -144,6 +157,13 @@ class EventWorkflowReadModelTests(unittest.TestCase):
             build_event_workflow_read_model(
                 _event(),
                 WorkflowReadinessEvidence(tracked_status=TrackedEventStatus.TRACKED),
+                trading_mode="PAPER",  # type: ignore[arg-type]
+            )
+
+    def test_invalid_evidence_trading_mode_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "trading_mode must be"):
+            WorkflowReadinessEvidence(
+                tracked_status=TrackedEventStatus.TRACKED,
                 trading_mode="PAPER",  # type: ignore[arg-type]
             )
 
