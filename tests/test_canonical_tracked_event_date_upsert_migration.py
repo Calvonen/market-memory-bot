@@ -30,6 +30,16 @@ class CanonicalTrackedEventDateUpsertMigrationTests(unittest.TestCase):
         self.assertIn("saved_row.status <> 'tracked'", self.sql)
         self.assertIn("saved_row.reference_price is not null", self.sql)
         self.assertIn("saved_row.started_at is not null", self.sql)
+        self.assertIn("saved_row.pre_event_market_context is not null", self.sql)
+
+    def test_pre_event_context_locks_missing_event_date(self) -> None:
+        lock_block = (
+            "if saved_row.status <> 'tracked'\n"
+            "       or saved_row.reference_price is not null\n"
+            "       or saved_row.started_at is not null\n"
+            "       or saved_row.pre_event_market_context is not null then"
+        )
+        self.assertIn(lock_block, self.sql)
 
     def test_exact_retry_preserves_existing_date(self) -> None:
         conflict = "saved_row.event_date is not null\n     and saved_row.event_date is distinct from input_event_date"
