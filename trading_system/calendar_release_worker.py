@@ -150,12 +150,15 @@ class SupabaseCalendarReleaseTargetRepository:
         if not tracked_id:
             raise RuntimeError("tracked release target is missing tracked_event_id")
         response = self.client.rpc(
-            "ensure_tracked_event_release_shell",
+            "ensure_tracked_event_release_shell_with_blocker",
             {"input_tracked_event_id": tracked_id},
         ).execute()
         rows = list(response.data or [])
         if len(rows) != 1 or not isinstance(rows[0], dict):
             raise RuntimeError("canonical release-shell RPC returned invalid response")
+        blocker_code = str(rows[0].get("out_blocker_code") or "").strip()
+        if blocker_code:
+            raise RuntimeError(blocker_code)
         release_event_id = str(rows[0].get("out_release_event_id") or "").strip()
         if release_event_id != target.event_id:
             raise RuntimeError("canonical release-shell identity differs from release target")
@@ -206,6 +209,10 @@ def _persist_action_required(
 def _is_release_shell_identity_conflict(exc: Exception) -> bool:
     message = str(exc).lower()
     return any(marker in message for marker in RELEASE_SHELL_IDENTITY_CONFLICTS)
+
+
+def _is_calendar_binding_identity_conflict(exc: Exception) -> bool:
+    return "tracked_release_calendar_binding_identity_conflict" in str(exc).lower()
 
 
 def _canonical_blocker_message(run: dict[str, Any] | None) -> str | None:
@@ -290,11 +297,12 @@ def run_calendar_release_ingestion_once(
                     if not _is_release_shell_identity_conflict(exc):
                         raise
                     message = "canonical release-shell identity conflicts with tracked-event identity"
-                    _persist_action_required(
-                        releases,
-                        event_id=target.event_id,
-                        message=message,
-                    )
+                    if not _is_calendar_binding_identity_conflict(exc):
+                        _persist_action_required(
+                            releases,
+                            event_id=target.event_id,
+                            message=message,
+                        )
                     results.append(
                         CalendarReleaseWorkerResult(
                             target.event_id,
