@@ -51,7 +51,12 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         persisted_release_document_present = self._exists(
             "event_source_documents", "event_id", release_event_id
         )
-        canonical_blocker = _is_canonical_release_blocker(latest_run)
+        analysis_present = self._analysis_exists_for_version(
+            release_event_id, current_version
+        )
+        canonical_blocker = (
+            _is_canonical_release_blocker(latest_run) and not analysis_present
+        )
         release_document_present = (
             persisted_release_document_present and not canonical_blocker
         )
@@ -64,9 +69,7 @@ class SupabaseWorkflowReadinessEvidenceLoader:
                 canonical_blocker
                 or (not release_document_present and _release_requires_action(latest_run))
             ),
-            analysis_present=self._analysis_exists_for_version(
-                release_event_id, current_version
-            ),
+            analysis_present=analysis_present,
             reaction_present=self._exists(
                 "tracked_market_event_reactions",
                 "tracked_market_event_id",
