@@ -57,6 +57,8 @@ class WorkflowReadinessEvidence:
     event_id: str | None = None
     release_document_present: bool = False
     release_failed: bool = False
+    release_action_code: str | None = None
+    release_action_reason: str | None = None
     analysis_present: bool = False
     reaction_present: bool = False
     strategy_present: bool = False
@@ -80,6 +82,14 @@ class WorkflowReadinessEvidence:
         ):
             if not isinstance(getattr(self, field_name), bool):
                 raise ValueError(f"{field_name} must be a bool")
+        for field_name in ("release_action_code", "release_action_reason"):
+            value = getattr(self, field_name)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"{field_name} must be a nonblank string or None")
+        if (self.release_action_code is None) != (self.release_action_reason is None):
+            raise ValueError("release action code and reason must be provided together")
+        if self.release_action_code is not None and not self.release_failed:
+            raise ValueError("release action metadata requires release_failed")
         if not isinstance(self.execution_outcome, WorkflowExecutionOutcome):
             raise ValueError("execution_outcome must be a WorkflowExecutionOutcome")
         if self.trading_mode is not None and not isinstance(self.trading_mode, TradingMode):
