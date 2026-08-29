@@ -59,6 +59,16 @@ export type TrackedEventWorkflowResponse = {
   steps: TrackedEventWorkflowStep[];
 };
 
+export type TrackedEventReleaseSource = {
+  event_id: string;
+  release_event_id: string;
+  active: boolean;
+  version: number;
+  source_kind: 'direct_url' | 'results_page' | null;
+  source_url: string | null;
+  source_title: string | null;
+};
+
 export type TrackedMarketEvent = {
   event_id: string;
   tracked_instrument_id: string;
@@ -111,5 +121,11 @@ export function getTrackedEventLatestReaction(
 export function getTrackedEventWorkflow(eventId: string): Promise<TrackedEventWorkflowResponse> {
   return apiGet<TrackedEventWorkflowResponse>(
     `/api/v1/tracked-events/${encodeURIComponent(eventId)}/workflow`,
+  );
+}
+
+export function getTrackedEventReleaseSource(eventId: string): Promise<TrackedEventReleaseSource> {
+  return apiGet<TrackedEventReleaseSource>(
+    `/api/v1/tracked-events/${encodeURIComponent(eventId)}/release-source`,
   );
 }
