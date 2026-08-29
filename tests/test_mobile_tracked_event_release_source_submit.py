@@ -34,6 +34,14 @@ class MobileTrackedEventReleaseSourceSubmitTests(unittest.TestCase):
         self.assertIn("expected_version: releaseSource.version", screen_source)
         self.assertIn("setReleaseSource(saved)", screen_source)
 
+    def test_failed_submit_resets_edits_to_refreshed_canonical_source(self) -> None:
+        screen_source = SCREEN_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("setReleaseSource(currentSource)", screen_source)
+        self.assertIn("setSourceUrl(currentSource.source_url ?? '')", screen_source)
+        self.assertIn("setSourceTitle(currentSource.source_title ?? '')", screen_source)
+        self.assertIn("setError(writeError)", screen_source)
+
     def test_submit_records_explicit_approver_in_actor_header(self) -> None:
         service_source = SERVICE_PATH.read_text(encoding="utf-8")
         screen_source = SCREEN_PATH.read_text(encoding="utf-8")

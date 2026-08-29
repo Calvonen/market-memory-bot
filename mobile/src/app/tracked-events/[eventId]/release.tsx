@@ -120,6 +120,8 @@ export default function TrackedEventReleaseHandoffScreen() {
           const currentSource = await getTrackedEventReleaseSource(submittedEventId);
           if (mountedRef.current && eventIdRef.current === submittedEventId) {
             setReleaseSource(currentSource);
+            setSourceUrl(currentSource.source_url ?? '');
+            setSourceTitle(currentSource.source_title ?? '');
             setError(writeError);
           }
         } catch {
