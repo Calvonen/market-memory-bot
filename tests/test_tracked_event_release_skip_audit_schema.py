@@ -33,6 +33,10 @@ def test_skip_audit_atomically_revalidates_complete_existing_binding() -> None:
         "existing_market_event.scheduled_date is distinct from tracked_row.event_date"
         in sql
     )
+    assert "select e.version into locked_expectation_version" in sql
+    assert "order by e.version desc" in sql
+    assert "limit 1" in sql
+    assert "if locked_expectation_version is null then" in sql
     assert "tracked_release_expectation_missing" in sql
 
 
