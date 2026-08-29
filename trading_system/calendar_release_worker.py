@@ -27,7 +27,12 @@ US_MARKET_LABELS = ("US", "USA", "NASDAQ", "NYSE", "AMEX")
 DATE_ONLY_OVERDUE_GRACE_HOURS = 24.0
 RELEASE_ELIGIBLE_TRACKED_STATUSES = ("tracked", "monitoring", "completed", "failed")
 ACTION_REQUIRED_PROVIDER = "canonical_release_worker"
-RELEASE_SHELL_IDENTITY_CONFLICT = "tracked_release_shell_identity_conflict"
+RELEASE_SHELL_IDENTITY_CONFLICTS = frozenset(
+    {
+        "tracked_release_shell_identity_conflict",
+        "tracked_release_calendar_binding_identity_conflict",
+    }
+)
 ACTION_REQUIRED_PREFIX = "action_required:"
 
 
@@ -195,7 +200,8 @@ def _persist_action_required(
 
 
 def _is_release_shell_identity_conflict(exc: Exception) -> bool:
-    return RELEASE_SHELL_IDENTITY_CONFLICT in str(exc).lower()
+    message = str(exc).lower()
+    return any(marker in message for marker in RELEASE_SHELL_IDENTITY_CONFLICTS)
 
 
 def _is_release_shell_blocker(run: dict[str, Any] | None) -> bool:
