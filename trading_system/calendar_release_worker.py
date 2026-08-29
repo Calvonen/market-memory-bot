@@ -34,6 +34,10 @@ RELEASE_SHELL_IDENTITY_CONFLICTS = frozenset(
     }
 )
 ACTION_REQUIRED_PREFIX = "action_required:"
+MISSING_OFFICIAL_SOURCE_BLOCKER = (
+    "earnings target outside approved us market labels requires "
+    "an approved official release source"
+)
 
 
 @dataclass(frozen=True)
@@ -204,15 +208,22 @@ def _is_release_shell_identity_conflict(exc: Exception) -> bool:
     return any(marker in message for marker in RELEASE_SHELL_IDENTITY_CONFLICTS)
 
 
-def _is_release_shell_blocker(run: dict[str, Any] | None) -> bool:
+def _canonical_blocker_message(run: dict[str, Any] | None) -> str | None:
     if not isinstance(run, dict):
-        return False
+        return None
     provider = str(run.get("provider") or "").strip().lower()
     status = str(run.get("status") or "").strip().lower()
     message = str(run.get("error_message") or "").strip().lower()
     if provider != ACTION_REQUIRED_PROVIDER or status != "error":
-        return False
+        return None
     if not message.startswith(ACTION_REQUIRED_PREFIX):
+        return None
+    return message
+
+
+def _is_release_shell_blocker(run: dict[str, Any] | None) -> bool:
+    message = _canonical_blocker_message(run)
+    if message is None:
         return False
     return any(
         marker in message
@@ -225,16 +236,25 @@ def _is_release_shell_blocker(run: dict[str, Any] | None) -> bool:
     )
 
 
-def _persist_release_shell_validation_if_needed(
+def _is_missing_official_source_blocker(run: dict[str, Any] | None) -> bool:
+    message = _canonical_blocker_message(run)
+    return message is not None and MISSING_OFFICIAL_SOURCE_BLOCKER in message
+
+
+def _persist_canonical_validation_if_needed(
     releases: SupabaseReleaseRepository,
     *,
     event_id: str,
+    current_version_analyzed: bool,
 ) -> None:
     latest_run = getattr(releases, "latest_run", None)
     if not callable(latest_run):
         return
     run = latest_run(event_id=event_id)
-    if not _is_release_shell_blocker(run):
+    should_clear = _is_release_shell_blocker(run) or (
+        current_version_analyzed and _is_missing_official_source_blocker(run)
+    )
+    if not should_clear:
         return
     releases.record_run(
         event_id=event_id,
@@ -331,15 +351,17 @@ def run_calendar_release_ingestion_once(
                 )
                 continue
 
-            _persist_release_shell_validation_if_needed(
-                releases,
-                event_id=target.event_id,
-            )
-
-            if releases.has_analysis_for_event_version(
+            current_version_analyzed = releases.has_analysis_for_event_version(
                 event_id=target.event_id,
                 expectation_version=expectation.version,
-            ):
+            )
+            _persist_canonical_validation_if_needed(
+                releases,
+                event_id=target.event_id,
+                current_version_analyzed=current_version_analyzed,
+            )
+
+            if current_version_analyzed:
                 results.append(
                     CalendarReleaseWorkerResult(target.event_id, "already_analyzed")
                 )
