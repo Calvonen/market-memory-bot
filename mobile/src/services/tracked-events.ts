@@ -140,10 +140,11 @@ export function getTrackedEventReleaseSource(eventId: string): Promise<TrackedEv
 export function putTrackedEventReleaseSource(
   eventId: string,
   input: PutTrackedEventReleaseSourceInput,
+  actor: string,
 ): Promise<TrackedEventReleaseSource> {
   return apiPut<TrackedEventReleaseSource>(
     `/api/v1/tracked-events/${encodeURIComponent(eventId)}/release-source`,
     input,
-    { 'X-MarketAI-Actor': 'marketai-mobile' },
+    { 'X-MarketAI-Actor': actor },
   );
 }
