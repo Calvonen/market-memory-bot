@@ -44,7 +44,11 @@ class MobileCanonicalWorkflowRenderingTests(unittest.TestCase):
         self.assertNotIn("reaction_anchor_at", workflow_source)
         self.assertNotIn("reference_price", workflow_source)
         self.assertNotIn("last_error", workflow_source)
-        self.assertNotIn("paper", workflow_source.lower().split("const WORKFLOW_STEP_LABELS", 1)[0])
+        normalized_workflow_source = workflow_source.lower()
+        self.assertNotIn(
+            "paper",
+            normalized_workflow_source.split("const workflow_step_labels", 1)[0],
+        )
 
     def test_workflow_fetch_is_independent_from_reaction_fetch(self) -> None:
         details_start = self.component_source.index("export function TrackedEventDetails(")
