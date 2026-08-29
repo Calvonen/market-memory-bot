@@ -68,6 +68,9 @@ from trading_system.tracked_event_release_source_api import (
 from trading_system.tracked_event_release_ingestion_api import (
     build_tracked_event_release_ingestion_router,
 )
+from trading_system.tracked_event_release_skip_api import (
+    build_tracked_event_release_skip_router,
+)
 from trading_system.ai_event_analyzer import build_default_event_analyzer
 from trading_system.release_repository import SupabaseReleaseRepository
 from trading_system.tracked_event_result import (
@@ -423,6 +426,7 @@ def create_app(
     event_analyzer_cache = event_analyzer
     release_shell_repo_cache = None
     release_ingestion_audit_repo_cache = None
+    release_skip_audit_repo_cache = None
     configured_admin_token = admin_token or os.environ.get("MARKETAI_ADMIN_API_KEY")
     configured_read_api_key = read_api_key or os.environ.get("MARKETAI_READ_API_KEY")
     # Backend-only control-auth for the strategy-draft approval endpoint. This
@@ -520,6 +524,18 @@ def create_app(
             )
         return release_ingestion_audit_repo_cache
 
+    def get_release_skip_audit_repository():
+        nonlocal release_skip_audit_repo_cache
+        if release_skip_audit_repo_cache is None:
+            from trading_system.tracked_event_release_skip import (
+                SupabaseTrackedEventReleaseSkipAuditRepository,
+            )
+
+            release_skip_audit_repo_cache = SupabaseTrackedEventReleaseSkipAuditRepository(
+                get_tracked_event_repository().client
+            )
+        return release_skip_audit_repo_cache
+
     def require_event_exists(event_id: str) -> None:
         try:
             event = get_repository().get(event_id)
@@ -571,6 +587,15 @@ def create_app(
             get_release_shell_repository=get_release_shell_repository,
             get_ingestion_audit_repository=get_release_ingestion_audit_repository,
             get_event_analyzer=get_event_analyzer,
+        )
+    )
+
+    app.include_router(
+        build_tracked_event_release_skip_router(
+            require_control=require_control,
+            get_tracked_event_repository=get_tracked_event_repository,
+            get_release_shell_repository=get_release_shell_repository,
+            get_release_skip_audit_repository=get_release_skip_audit_repository,
         )
     )
 
