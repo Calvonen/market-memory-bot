@@ -54,9 +54,7 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         analysis_present = self._analysis_exists_for_version(
             release_event_id, current_version
         )
-        canonical_blocker = (
-            _is_canonical_release_blocker(latest_run) and not analysis_present
-        )
+        canonical_blocker = _is_canonical_release_blocker(latest_run)
         release_document_present = (
             persisted_release_document_present and not canonical_blocker
         )
