@@ -103,6 +103,19 @@ class _PinnedExpectationRepository:
         return self.expectation if event_id == self.expectation.event_id else None
 
 
+class _LazyEventAnalyzer:
+    """Resolve the configured analyzer only if the monitor needs an AI call."""
+
+    def __init__(self, factory: Callable[[], EventAnalyzer]) -> None:
+        self._factory = factory
+        self._analyzer: EventAnalyzer | None = None
+
+    def analyze(self, expectation, document):
+        if self._analyzer is None:
+            self._analyzer = self._factory()
+        return self._analyzer.analyze(expectation, document)
+
+
 def ingest_tracked_event_release_once(
     event: PersistentTrackedEvent,
     *,
@@ -152,21 +165,35 @@ def ingest_tracked_event_release_once(
             message="Current expectation version is already analyzed",
         )
 
-    if source.source_kind == "direct_url":
-        provider = ManualOfficialReleaseProvider(source)
-    elif source.source_kind == "results_page":
-        provider = ResultsPageOfficialReleaseProvider.for_event(
-            source, scheduled_date=expectation.scheduled_date
-        )
-    else:
-        raise ReleaseIngestionNotReady("Approved official release source kind is invalid")
+    try:
+        if source.source_kind == "direct_url":
+            provider = ManualOfficialReleaseProvider(source)
+        elif source.source_kind == "results_page":
+            provider = ResultsPageOfficialReleaseProvider.for_event(
+                source, scheduled_date=expectation.scheduled_date
+            )
+        else:
+            raise ReleaseIngestionNotReady(
+                "Approved official release source kind is invalid"
+            )
 
-    ingestion = EventReleaseMonitor(
-        expectation_repository=_PinnedExpectationRepository(expectation),
-        release_repository=release_repository,
-        analyzer=analyzer_factory(),
-        provider=provider,
-    ).run_once(release_event_id)
+        ingestion = EventReleaseMonitor(
+            expectation_repository=_PinnedExpectationRepository(expectation),
+            release_repository=release_repository,
+            analyzer=_LazyEventAnalyzer(analyzer_factory),
+            provider=provider,
+        ).run_once(release_event_id)
+    except Exception as exc:
+        try:
+            ingestion_audit_repository.record_attempt(
+                tracked_event_id=event.event_id,
+                release_event_id=release_event_id,
+                actor=actor,
+                status="error",
+            )
+        except Exception as audit_exc:
+            exc.add_note(f"Failed to persist ingestion error audit: {audit_exc}")
+        raise
     ingestion_audit_repository.record_attempt(
         tracked_event_id=event.event_id,
         release_event_id=release_event_id,

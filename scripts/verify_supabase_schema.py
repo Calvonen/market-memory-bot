@@ -57,6 +57,14 @@ REQUIRED_OFFICIAL_RELEASE_SOURCE_CHECKS: tuple[tuple[str, str], ...] = (
 REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
     ("tracked_market_events_table_exists", "tracked_market_events table"),
     (
+        "tracked_event_release_ingestion_audit_table_exists",
+        "tracked_event_release_ingestion_audit table",
+    ),
+    (
+        "record_tracked_event_release_ingestion_attempt_function_exists",
+        "record_tracked_event_release_ingestion_attempt(uuid,text,text,text) function",
+    ),
+    (
         "tracked_market_event_reactions_table_exists",
         "tracked_market_event_reactions table",
     ),
@@ -144,7 +152,7 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
 
 REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 3
 REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 8
-REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 13
+REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 14
 POSTGRES_IDENTIFIER_MAX_BYTES = 63
 
 

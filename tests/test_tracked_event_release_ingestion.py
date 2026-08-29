@@ -59,6 +59,17 @@ class _AnalyzedReleaseRepository:
         return True
 
 
+class _FreshReleaseRepository:
+    def __init__(self):
+        self.runs = []
+
+    def has_analysis_for_event_version(self, **kwargs):
+        return False
+
+    def record_run(self, **kwargs):
+        self.runs.append(kwargs)
+
+
 class _ShellRepository:
     def __init__(self, release_id=RELEASE_ID):
         self.release_id = release_id
@@ -140,3 +151,92 @@ def test_calendar_binding_conflict_fails_before_expectation_read() -> None:
             analyzer_factory=lambda: object(),
             actor="operator",
         )
+
+
+def test_no_release_does_not_construct_analyzer(monkeypatch) -> None:
+    source = OfficialReleaseSource(
+        event_id=RELEASE_ID,
+        source_kind="direct_url",
+        source_url="https://example.com/results.pdf",
+        version=1,
+    )
+
+    class _NoReleaseProvider:
+        name = "approved-manual"
+
+        def __init__(self, source):
+            self.source = source
+
+        def discover(self, event_id):
+            return None
+
+    monkeypatch.setattr(
+        "trading_system.tracked_event_release_ingestion.ManualOfficialReleaseProvider",
+        _NoReleaseProvider,
+    )
+    releases = _FreshReleaseRepository()
+    audit = _AuditRepository()
+
+    result = ingest_tracked_event_release_once(
+        _event(),
+        expectation_repository=_ExpectationRepository(),
+        official_release_source_repository=_SourceRepository(source),
+        release_repository=releases,
+        release_shell_repository=_ShellRepository(),
+        ingestion_audit_repository=audit,
+        analyzer_factory=lambda: pytest.fail("analyzer must not be built"),
+        actor="operator",
+    )
+
+    assert result.status == "no_release"
+    assert releases.runs[0]["status"] == "no_release"
+    assert audit.calls[0]["status"] == "no_release"
+
+
+def test_discovery_failure_is_audited_once_and_original_error_propagates(
+    monkeypatch,
+) -> None:
+    source = OfficialReleaseSource(
+        event_id=RELEASE_ID,
+        source_kind="direct_url",
+        source_url="https://example.com/results.pdf",
+        version=1,
+    )
+    failure = RuntimeError("discovery failed")
+
+    class _FailingProvider:
+        name = "approved-manual"
+
+        def __init__(self, source):
+            self.source = source
+
+        def discover(self, event_id):
+            raise failure
+
+    monkeypatch.setattr(
+        "trading_system.tracked_event_release_ingestion.ManualOfficialReleaseProvider",
+        _FailingProvider,
+    )
+    releases = _FreshReleaseRepository()
+    audit = _AuditRepository()
+
+    with pytest.raises(RuntimeError) as raised:
+        ingest_tracked_event_release_once(
+            _event(),
+            expectation_repository=_ExpectationRepository(),
+            official_release_source_repository=_SourceRepository(source),
+            release_repository=releases,
+            release_shell_repository=_ShellRepository(),
+            ingestion_audit_repository=audit,
+            analyzer_factory=lambda: pytest.fail("analyzer must not be built"),
+            actor="canonical-operator",
+        )
+
+    assert raised.value is failure
+    assert releases.runs[0]["status"] == "error"
+    assert audit.calls == [{
+        "tracked_event_id": EVENT_ID,
+        "release_event_id": RELEASE_ID,
+        "actor": "canonical-operator",
+        "status": "error",
+    }]
