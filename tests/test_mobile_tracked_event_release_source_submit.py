@@ -27,6 +27,17 @@ class MobileTrackedEventReleaseSourceSubmitTests(unittest.TestCase):
         self.assertIn("source_kind: 'direct_url'", screen_source)
         self.assertIn("setReleaseSource(saved)", screen_source)
 
+    def test_submit_records_explicit_approver_in_actor_header(self) -> None:
+        service_source = SERVICE_PATH.read_text(encoding="utf-8")
+        screen_source = SCREEN_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("actor: string", service_source)
+        self.assertIn("'X-MarketAI-Actor': actor", service_source)
+        self.assertNotIn("'X-MarketAI-Actor': 'marketai-mobile'", service_source)
+        self.assertIn("const [approver, setApprover]", screen_source)
+        self.assertIn("placeholder=\"Hyväksyjän tunniste\"", screen_source)
+        self.assertIn("normalizedApprover", screen_source)
+
     def test_submit_does_not_start_ingestion_or_create_trading_task(self) -> None:
         source = SCREEN_PATH.read_text(encoding="utf-8") + SERVICE_PATH.read_text(encoding="utf-8")
 
