@@ -32,6 +32,7 @@ declare
   tracked_row public.tracked_market_events%rowtype;
   calendar_row public.calendar_events%rowtype;
   existing_market_event public.market_events%rowtype;
+  locked_expectation_version integer;
   expected_release_event_id text;
   expected_release_event_name text;
 begin
@@ -120,11 +121,16 @@ begin
     raise exception 'tracked_release_shell_identity_conflict';
   end if;
 
-  if not exists (
-    select 1
-    from public.event_expectation_versions e
-    where e.event_id = expected_release_event_id
-  ) then
+  -- The expectation row is part of the canonical shell contract. Lock one
+  -- existing version so it cannot be deleted between validation and audit insert.
+  select e.version into locked_expectation_version
+  from public.event_expectation_versions e
+  where e.event_id = expected_release_event_id
+  order by e.version desc
+  limit 1
+  for share;
+
+  if locked_expectation_version is null then
     raise exception 'tracked_release_expectation_missing';
   end if;
 
