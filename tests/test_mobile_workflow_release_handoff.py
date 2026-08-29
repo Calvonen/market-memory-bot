@@ -18,13 +18,16 @@ class MobileWorkflowReleaseHandoffTests(unittest.TestCase):
         self.assertIn("params: { eventId }", source)
         self.assertNotIn("pathname: '/events/[eventId]'", source)
 
-    def test_handoff_screen_is_read_only_and_tracked_event_scoped(self):
+    def test_handoff_screen_is_tracked_event_scoped_and_release_source_only(self):
         source = HANDOFF.read_text(encoding="utf-8")
         self.assertIn("useLocalSearchParams<{ eventId: string }>()", source)
-        self.assertIn("read-only", source)
+        self.assertIn("putTrackedEventReleaseSource", source)
         self.assertNotIn("apiPost", source)
         self.assertNotIn("apiPatch", source)
         self.assertNotIn("apiDelete", source)
+        self.assertNotIn("/ingest", source)
+        self.assertNotIn("/retry", source)
+        self.assertNotIn("trading-task", source)
 
 
 if __name__ == "__main__":
