@@ -5,7 +5,10 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import {
   getTrackedEventLatestReaction,
   getTrackedEvents,
+  getTrackedEventWorkflow,
   TrackedEventLatestReaction,
+  TrackedEventWorkflowResponse,
+  TrackedEventWorkflowStep,
   TrackedMarketEvent,
 } from '@/services/tracked-events';
 
@@ -26,6 +29,11 @@ type Props = {
 type LatestReactionState =
   | { status: 'loading' }
   | { status: 'ready'; reaction: TrackedEventLatestReaction | null }
+  | { status: 'error' };
+
+type WorkflowState =
+  | { status: 'loading' }
+  | { status: 'ready'; workflow: TrackedEventWorkflowResponse }
   | { status: 'error' };
 
 export function TrackedEventsSection({
@@ -138,10 +146,14 @@ export function TrackedEventDetails({
   const [latestReactionState, setLatestReactionState] = useState<LatestReactionState>({
     status: 'loading',
   });
+  const [workflowState, setWorkflowState] = useState<WorkflowState>({ status: 'loading' });
 
   useFocusEffect(
     useCallback(() => {
       let active = true;
+      setLatestReactionState({ status: 'loading' });
+      setWorkflowState({ status: 'loading' });
+
       void getTrackedEventLatestReaction(event.event_id)
         .then((response) => {
           if (!active) return;
@@ -155,6 +167,21 @@ export function TrackedEventDetails({
           if (!active) return;
           setLatestReactionState({ status: 'error' });
         });
+
+      void getTrackedEventWorkflow(event.event_id)
+        .then((workflow) => {
+          if (!active) return;
+          if (workflow.event_id !== event.event_id) {
+            setWorkflowState({ status: 'error' });
+            return;
+          }
+          setWorkflowState({ status: 'ready', workflow });
+        })
+        .catch(() => {
+          if (!active) return;
+          setWorkflowState({ status: 'error' });
+        });
+
       return () => {
         active = false;
       };
@@ -171,6 +198,8 @@ export function TrackedEventDetails({
         {presentation.detail ? <Text style={styles.detailText}>{presentation.detail}</Text> : null}
       </View>
 
+      <TrackedEventWorkflow state={workflowState} />
+
       <View style={styles.configBlock}>
         <Text style={styles.configTitle}>Seuranta-asetukset</Text>
         <Text style={styles.configText}>{configText}</Text>
@@ -179,6 +208,74 @@ export function TrackedEventDetails({
       <TrackedEventResult state={latestReactionState} />
     </>
   );
+}
+
+function TrackedEventWorkflow({ state }: { state: WorkflowState }) {
+  if (state.status === 'loading') {
+    return (
+      <View style={styles.workflowBlock}>
+        <Text style={styles.configTitle}>Workflow</Text>
+        <Text style={styles.configText}>Haetaan workflow-tilaa…</Text>
+      </View>
+    );
+  }
+  if (state.status === 'error') {
+    return (
+      <View style={styles.workflowBlock}>
+        <Text style={styles.configTitle}>Workflow</Text>
+        <Text style={styles.configText}>Workflow-tilaa ei juuri nyt saatu haettua.</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.workflowBlock}>
+      <Text style={styles.configTitle}>Workflow</Text>
+      {state.workflow.steps.map((step) => (
+        <View key={step.key} style={styles.workflowRow}>
+          <Text style={styles.workflowStep}>{workflowStepLabel(step.key)}</Text>
+          <Text
+            style={[
+              styles.workflowStatus,
+              step.status === 'action_required' ? styles.workflowActionRequired : null,
+              step.status === 'failed' ? styles.workflowFailed : null,
+            ]}
+          >
+            {workflowStatusLabel(step)}
+          </Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+const WORKFLOW_STEP_LABELS: Record<string, string> = {
+  tracking: 'Seuranta',
+  event_identified: 'Tapahtuma tunnistettu',
+  release: 'Julkaisu',
+  analysis: 'Analyysi',
+  market_reaction: 'Markkinareaktio',
+  strategy: 'Strategia',
+  risk: 'Riski',
+  paper: 'Paperikauppa',
+  live: 'Live-kauppa',
+};
+
+const WORKFLOW_STATUS_LABELS: Record<TrackedEventWorkflowStep['status'], string> = {
+  pending: 'Odottaa',
+  running: 'Käynnissä',
+  completed: 'Valmis',
+  skipped: 'Ohitettu',
+  failed: 'Epäonnistui',
+  action_required: 'Toimia tarvitaan',
+};
+
+function workflowStepLabel(key: string): string {
+  return WORKFLOW_STEP_LABELS[key] ?? key.replaceAll('_', ' ');
+}
+
+function workflowStatusLabel(step: TrackedEventWorkflowStep): string {
+  return WORKFLOW_STATUS_LABELS[step.status];
 }
 
 function TrackedEventResult({ state }: { state: LatestReactionState }) {
@@ -359,6 +456,35 @@ const styles = StyleSheet.create({
     color: '#8994a6',
     fontSize: 12,
     marginTop: 4,
+  },
+  workflowBlock: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#202734',
+  },
+  workflowRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginTop: 5,
+  },
+  workflowStep: {
+    color: '#b8c1ce',
+    fontSize: 12,
+    flex: 1,
+  },
+  workflowStatus: {
+    color: '#8994a6',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  workflowActionRequired: {
+    color: '#d7ad5f',
+  },
+  workflowFailed: {
+    color: '#e17878',
   },
   configBlock: {
     marginTop: 10,
