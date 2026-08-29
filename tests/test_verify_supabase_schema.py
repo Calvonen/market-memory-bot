@@ -93,6 +93,7 @@ def _responses(
 
 
 def _as_postgres_rpc_row(row):
+    """Mirror PostgreSQL's 63-byte output-column identifier truncation."""
     return {_postgres_response_key(key): value for key, value in row.items()}
 
 
@@ -151,68 +152,123 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertIn("tracked-event runtime schema version 13", err)
 
     def test_fails_closed_when_event_date_column_is_missing(self) -> None:
-        row = dict(TRACKED_PRESENT_ROW, tracked_market_event_event_date_column_exists=False)
-        exit_code, _out, err = self._run_with_client(_FakeClient(_responses(tracked_row=row)))
+        row = dict(
+            TRACKED_PRESENT_ROW,
+            tracked_market_event_event_date_column_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_row=row))
+        )
         self.assertEqual(exit_code, 1)
         self.assertIn("tracked_market_events.event_date date column", err)
 
     def test_fails_closed_when_stale_context_fail_rpc_is_missing(self) -> None:
-        row = dict(TRACKED_PRESENT_ROW, fail_tracked_market_event_stale_context_if_current_function_exists=False)
-        exit_code, _out, err = self._run_with_client(_FakeClient(_responses(tracked_row=row)))
+        row = dict(
+            TRACKED_PRESENT_ROW,
+            fail_tracked_market_event_stale_context_if_current_function_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_row=row))
+        )
         self.assertEqual(exit_code, 1)
         self.assertIn("fail_tracked_market_event_stale_context_if_current() function", err)
 
     def test_fails_closed_when_calendar_promotion_rpc_is_missing(self) -> None:
-        row = dict(TRACKED_PRESENT_ROW, promote_calendar_event_to_tracked_runtime_function_exists=False)
-        exit_code, _out, err = self._run_with_client(_FakeClient(_responses(tracked_row=row)))
+        row = dict(
+            TRACKED_PRESENT_ROW,
+            promote_calendar_event_to_tracked_runtime_function_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_row=row))
+        )
         self.assertEqual(exit_code, 1)
         self.assertIn("promote_calendar_event_to_tracked_runtime() function", err)
 
     def test_fails_closed_when_runtime_untrack_guard_is_missing(self) -> None:
-        row = dict(TRACKED_PRESENT_ROW, calendar_runtime_untrack_guard_version_matches=False)
-        exit_code, _out, err = self._run_with_client(_FakeClient(_responses(tracked_row=row)))
+        row = dict(
+            TRACKED_PRESENT_ROW,
+            calendar_runtime_untrack_guard_version_matches=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_row=row))
+        )
         self.assertEqual(exit_code, 1)
         self.assertIn("calendar runtime-bound untrack guard", err)
 
     def test_fails_closed_when_release_shell_function_is_missing(self) -> None:
-        row = dict(TRACKED_PRESENT_ROW, ensure_calendar_release_shell_function_exists=False)
-        exit_code, _out, err = self._run_with_client(_FakeClient(_responses(tracked_row=row)))
+        row = dict(
+            TRACKED_PRESENT_ROW,
+            ensure_calendar_release_shell_function_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_row=row))
+        )
         self.assertEqual(exit_code, 1)
         self.assertIn("ensure_calendar_release_shell() function", err)
 
     def test_fails_closed_when_release_shell_version_is_missing(self) -> None:
-        row = dict(TRACKED_PRESENT_ROW, calendar_release_shell_version_matches=False)
-        exit_code, _out, err = self._run_with_client(_FakeClient(_responses(tracked_row=row)))
+        row = dict(
+            TRACKED_PRESENT_ROW,
+            calendar_release_shell_version_matches=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_row=row))
+        )
         self.assertEqual(exit_code, 1)
         self.assertIn("calendar release-pipeline shell", err)
 
     def test_fails_closed_when_canonical_release_shell_function_is_missing(self) -> None:
-        row = dict(TRACKED_PRESENT_ROW, ensure_tracked_event_release_shell_function_exists=False)
-        exit_code, _out, err = self._run_with_client(_FakeClient(_responses(tracked_row=row)))
+        row = dict(
+            TRACKED_PRESENT_ROW,
+            ensure_tracked_event_release_shell_function_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_row=row))
+        )
         self.assertEqual(exit_code, 1)
         self.assertIn("ensure_tracked_event_release_shell() function", err)
 
     def test_fails_closed_when_workflow_blocker_table_is_missing(self) -> None:
-        row = dict(TRACKED_PRESENT_ROW, tracked_event_workflow_blockers_table_exists=False)
-        exit_code, _out, err = self._run_with_client(_FakeClient(_responses(tracked_row=row)))
+        row = dict(
+            TRACKED_PRESENT_ROW,
+            tracked_event_workflow_blockers_table_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_row=row))
+        )
         self.assertEqual(exit_code, 1)
         self.assertIn("tracked_event_workflow_blockers table", err)
 
     def test_fails_closed_when_blocker_wrapper_rpc_is_missing(self) -> None:
-        row = dict(TRACKED_PRESENT_ROW, ensure_tracked_event_release_shell_with_blocker_function_exists=False)
-        exit_code, _out, err = self._run_with_client(_FakeClient(_responses(tracked_row=row)))
+        row = dict(
+            TRACKED_PRESENT_ROW,
+            ensure_tracked_event_release_shell_with_blocker_function_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_row=row))
+        )
         self.assertEqual(exit_code, 1)
         self.assertIn("ensure_tracked_event_release_shell_with_blocker() function", err)
 
     def test_fails_closed_when_calendarless_release_shell_trigger_is_missing(self) -> None:
-        row = dict(TRACKED_PRESENT_ROW, calendarless_release_shell_trigger_exists=False)
-        exit_code, _out, err = self._run_with_client(_FakeClient(_responses(tracked_row=row)))
+        row = dict(
+            TRACKED_PRESENT_ROW,
+            calendarless_release_shell_trigger_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_row=row))
+        )
         self.assertEqual(exit_code, 1)
         self.assertIn("calendar-less tracked-event release-shell trigger", err)
 
     def test_fails_closed_when_existing_required_object_is_missing(self) -> None:
-        row = dict(TRACKED_PRESENT_ROW, capture_tracked_market_event_reference_function_exists=False)
-        exit_code, _out, err = self._run_with_client(_FakeClient(_responses(tracked_row=row)))
+        row = dict(
+            TRACKED_PRESENT_ROW,
+            capture_tracked_market_event_reference_function_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_row=row))
+        )
         self.assertEqual(exit_code, 1)
         self.assertIn("capture_tracked_market_event_reference() function", err)
 
@@ -222,18 +278,26 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(err, "")
         self.assertIn("passed", out.lower())
-        self.assertEqual(fake_client.calls, [
-            ("verify_strategy_draft_schema", {}),
-            ("verify_official_release_source_schema", {}),
-            ("verify_tracked_event_runtime_schema", {}),
-        ])
+        self.assertEqual(
+            fake_client.calls,
+            [
+                ("verify_strategy_draft_schema", {}),
+                ("verify_official_release_source_schema", {}),
+                ("verify_tracked_event_runtime_schema", {}),
+            ],
+        )
 
     def test_passes_with_real_postgres_truncated_rpc_column_names(self) -> None:
         truncated_row = _as_postgres_rpc_row(TRACKED_PRESENT_ROW)
         long_keys = [key for key, _label in REQUIRED_TRACKED_EVENT_CHECKS if len(key.encode()) > 63]
+
         self.assertTrue(long_keys)
         self.assertTrue(all(key not in truncated_row for key in long_keys))
-        exit_code, out, err = self._run_with_client(_FakeClient(_responses(tracked_row=truncated_row)))
+
+        exit_code, out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_row=truncated_row))
+        )
+
         self.assertEqual(exit_code, 0)
         self.assertEqual(err, "")
         self.assertIn("passed", out.lower())
@@ -242,7 +306,11 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         row = _as_postgres_rpc_row(TRACKED_PRESENT_ROW)
         key = "fail_tracked_market_event_stale_context_if_current_function_exists"
         row[_postgres_response_key(key)] = False
-        exit_code, _out, err = self._run_with_client(_FakeClient(_responses(tracked_row=row)))
+
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_row=row))
+        )
+
         self.assertEqual(exit_code, 1)
         self.assertIn("fail_tracked_market_event_stale_context_if_current() function", err)
 
