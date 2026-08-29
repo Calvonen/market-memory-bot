@@ -33,6 +33,29 @@ export type TrackedEventLatestReactionResponse = {
   latest_reaction: TrackedEventLatestReaction | null;
 };
 
+export type TrackedEventWorkflowStepStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'skipped'
+  | 'failed'
+  | 'action_required';
+
+export type TrackedEventWorkflowStepMode = 'required' | 'optional' | 'skip';
+
+export type TrackedEventWorkflowStep = {
+  key: string;
+  mode: TrackedEventWorkflowStepMode;
+  status: TrackedEventWorkflowStepStatus;
+};
+
+export type TrackedEventWorkflowResponse = {
+  event_id: string;
+  profile_id: string;
+  trading_mode: 'PAPER' | 'LIVE' | null;
+  steps: TrackedEventWorkflowStep[];
+};
+
 export type TrackedMarketEvent = {
   event_id: string;
   tracked_instrument_id: string;
@@ -79,5 +102,11 @@ export function getTrackedEventLatestReaction(
 ): Promise<TrackedEventLatestReactionResponse> {
   return apiGet<TrackedEventLatestReactionResponse>(
     `/api/v1/tracked-events/${encodeURIComponent(eventId)}/latest-reaction`,
+  );
+}
+
+export function getTrackedEventWorkflow(eventId: string): Promise<TrackedEventWorkflowResponse> {
+  return apiGet<TrackedEventWorkflowResponse>(
+    `/api/v1/tracked-events/${encodeURIComponent(eventId)}/workflow`,
   );
 }
