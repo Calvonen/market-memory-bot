@@ -1,3 +1,5 @@
+begin;
+
 create table if not exists public.tracked_event_workflow_blockers (
     tracked_market_event_id uuid not null references public.tracked_market_events(id) on delete cascade,
     step_key text not null,
@@ -209,3 +211,5 @@ $$;
 
 revoke all on function public.verify_tracked_event_runtime_schema from public;
 grant execute on function public.verify_tracked_event_runtime_schema to service_role;
+
+commit;
