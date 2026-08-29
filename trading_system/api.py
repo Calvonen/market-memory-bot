@@ -421,6 +421,8 @@ def create_app(
     )
     release_repo_cache = release_repository
     event_analyzer_cache = event_analyzer
+    release_shell_repo_cache = None
+    release_ingestion_audit_repo_cache = None
     configured_admin_token = admin_token or os.environ.get("MARKETAI_ADMIN_API_KEY")
     configured_read_api_key = read_api_key or os.environ.get("MARKETAI_READ_API_KEY")
     # Backend-only control-auth for the strategy-draft approval endpoint. This
@@ -492,6 +494,32 @@ def create_app(
             event_analyzer_cache = build_default_event_analyzer()
         return event_analyzer_cache
 
+    def get_release_shell_repository():
+        nonlocal release_shell_repo_cache
+        if release_shell_repo_cache is None:
+            from trading_system.tracked_event_release_ingestion import (
+                SupabaseTrackedEventReleaseShellRepository,
+            )
+
+            release_shell_repo_cache = SupabaseTrackedEventReleaseShellRepository(
+                get_tracked_event_repository().client
+            )
+        return release_shell_repo_cache
+
+    def get_release_ingestion_audit_repository():
+        nonlocal release_ingestion_audit_repo_cache
+        if release_ingestion_audit_repo_cache is None:
+            from trading_system.tracked_event_release_ingestion import (
+                SupabaseTrackedEventReleaseIngestionAuditRepository,
+            )
+
+            release_ingestion_audit_repo_cache = (
+                SupabaseTrackedEventReleaseIngestionAuditRepository(
+                    get_tracked_event_repository().client
+                )
+            )
+        return release_ingestion_audit_repo_cache
+
     def require_event_exists(event_id: str) -> None:
         try:
             event = get_repository().get(event_id)
@@ -540,6 +568,8 @@ def create_app(
             get_expectation_repository=get_repository,
             get_official_release_source_repository=get_official_release_source_repository,
             get_release_repository=get_release_repository,
+            get_release_shell_repository=get_release_shell_repository,
+            get_ingestion_audit_repository=get_release_ingestion_audit_repository,
             get_event_analyzer=get_event_analyzer,
         )
     )

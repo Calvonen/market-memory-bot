@@ -59,6 +59,24 @@ class _AnalyzedReleaseRepository:
         return True
 
 
+class _ShellRepository:
+    def __init__(self, release_id=RELEASE_ID):
+        self.release_id = release_id
+        self.calls = []
+
+    def ensure_release_shell(self, event):
+        self.calls.append(event.event_id)
+        return self.release_id
+
+
+class _AuditRepository:
+    def __init__(self):
+        self.calls = []
+
+    def record_attempt(self, **kwargs):
+        self.calls.append(kwargs)
+
+
 def test_already_analyzed_returns_before_provider_construction(monkeypatch) -> None:
     source = OfficialReleaseSource(
         event_id=RELEASE_ID,
@@ -71,16 +89,28 @@ def test_already_analyzed_returns_before_provider_construction(monkeypatch) -> N
         lambda source: pytest.fail("provider must not be built"),
     )
 
+    audit = _AuditRepository()
+    shell = _ShellRepository()
     result = ingest_tracked_event_release_once(
         _event(),
         expectation_repository=_ExpectationRepository(),
         official_release_source_repository=_SourceRepository(source),
         release_repository=_AnalyzedReleaseRepository(),
-        analyzer=object(),
+        release_shell_repository=shell,
+        ingestion_audit_repository=audit,
+        analyzer_factory=lambda: pytest.fail("analyzer must not be built"),
+        actor="operator@example.com",
     )
 
     assert result.status == "already_analyzed"
     assert result.release_event_id == RELEASE_ID
+    assert shell.calls == [EVENT_ID]
+    assert audit.calls == [{
+        "tracked_event_id": EVENT_ID,
+        "release_event_id": RELEASE_ID,
+        "actor": "operator@example.com",
+        "status": "already_analyzed",
+    }]
 
 
 def test_missing_approved_source_fails_closed_even_when_already_analyzed() -> None:
@@ -90,5 +120,23 @@ def test_missing_approved_source_fails_closed_even_when_already_analyzed() -> No
             expectation_repository=_ExpectationRepository(),
             official_release_source_repository=_SourceRepository(None),
             release_repository=_AnalyzedReleaseRepository(),
-            analyzer=object(),
+            release_shell_repository=_ShellRepository(),
+            ingestion_audit_repository=_AuditRepository(),
+            analyzer_factory=lambda: object(),
+            actor="operator",
+        )
+
+
+def test_calendar_binding_conflict_fails_before_expectation_read() -> None:
+    event = replace(_event(), calendar_event_id="calendar-occurrence")
+    with pytest.raises(ReleaseIngestionNotReady, match="identity does not match"):
+        ingest_tracked_event_release_once(
+            event,
+            expectation_repository=pytest.fail,
+            official_release_source_repository=pytest.fail,
+            release_repository=_AnalyzedReleaseRepository(),
+            release_shell_repository=_ShellRepository("calendar:different-occurrence"),
+            ingestion_audit_repository=_AuditRepository(),
+            analyzer_factory=lambda: object(),
+            actor="operator",
         )

@@ -17,7 +17,8 @@ _UUID = re.compile(r"(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-
 def build_tracked_event_release_ingestion_router(
     *, require_control: Callable[[str | None], None], get_tracked_event_repository,
     get_expectation_repository, get_official_release_source_repository,
-    get_release_repository, get_event_analyzer,
+    get_release_repository, get_release_shell_repository,
+    get_ingestion_audit_repository, get_event_analyzer,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -42,7 +43,10 @@ def build_tracked_event_release_ingestion_router(
                 expectation_repository=get_expectation_repository(),
                 official_release_source_repository=get_official_release_source_repository(),
                 release_repository=get_release_repository(),
-                analyzer=get_event_analyzer(),
+                release_shell_repository=get_release_shell_repository(),
+                ingestion_audit_repository=get_ingestion_audit_repository(),
+                analyzer_factory=get_event_analyzer,
+                actor=actor,
             )
             return asdict(result)
         except HTTPException:

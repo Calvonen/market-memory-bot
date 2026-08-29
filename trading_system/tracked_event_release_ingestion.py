@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Callable, Protocol
 
 from trading_system.ai_event_analyzer import EventAnalyzer
 from trading_system.manual_release_ingestion import ManualOfficialReleaseProvider
@@ -31,6 +31,59 @@ class ReleaseRepository(Protocol):
     ) -> bool: ...
 
 
+class ReleaseShellRepository(Protocol):
+    def ensure_release_shell(self, event: PersistentTrackedEvent) -> str: ...
+
+
+class IngestionAuditRepository(Protocol):
+    def record_attempt(
+        self, *, tracked_event_id: str, release_event_id: str, actor: str, status: str
+    ) -> None: ...
+
+
+class SupabaseTrackedEventReleaseShellRepository:
+    """Invoke the canonical database identity/binding validator."""
+
+    def __init__(self, client) -> None:
+        self.client = client
+
+    def ensure_release_shell(self, event: PersistentTrackedEvent) -> str:
+        response = self.client.rpc(
+            "ensure_tracked_event_release_shell_with_blocker",
+            {"input_tracked_event_id": event.event_id},
+        ).execute()
+        rows = list(response.data or [])
+        if len(rows) != 1 or not isinstance(rows[0], dict):
+            raise RuntimeError("Canonical release-shell RPC returned invalid response")
+        blocker = str(rows[0].get("out_blocker_code") or "").strip()
+        if blocker:
+            raise ReleaseIngestionNotReady(blocker)
+        release_event_id = str(rows[0].get("out_release_event_id") or "").strip()
+        if not release_event_id:
+            raise RuntimeError("Canonical release-shell RPC omitted release identity")
+        return release_event_id
+
+
+class SupabaseTrackedEventReleaseIngestionAuditRepository:
+    """Durably attribute explicit operator ingestion attempts."""
+
+    def __init__(self, client) -> None:
+        self.client = client
+
+    def record_attempt(
+        self, *, tracked_event_id: str, release_event_id: str, actor: str, status: str
+    ) -> None:
+        self.client.rpc(
+            "record_tracked_event_release_ingestion_attempt",
+            {
+                "input_tracked_event_id": tracked_event_id,
+                "input_release_event_id": release_event_id,
+                "input_actor": actor,
+                "input_status": status,
+            },
+        ).execute()
+
+
 @dataclass(frozen=True)
 class TrackedEventReleaseIngestionResult:
     event_id: str
@@ -56,10 +109,18 @@ def ingest_tracked_event_release_once(
     expectation_repository: ExpectationRepository,
     official_release_source_repository: OfficialSourceRepository,
     release_repository: ReleaseRepository,
-    analyzer: EventAnalyzer,
+    release_shell_repository: ReleaseShellRepository,
+    ingestion_audit_repository: IngestionAuditRepository,
+    analyzer_factory: Callable[[], EventAnalyzer],
+    actor: str,
 ) -> TrackedEventReleaseIngestionResult:
     """Run one explicit attempt through the existing canonical ingestion engine."""
     release_event_id = canonical_release_event_id(event)
+    validated_release_event_id = release_shell_repository.ensure_release_shell(event)
+    if validated_release_event_id != release_event_id:
+        raise ReleaseIngestionNotReady(
+            "Canonical release-shell identity does not match tracked event"
+        )
     expectation = expectation_repository.get(release_event_id)
     if expectation is None:
         raise ReleaseIngestionNotReady("Canonical release expectation is missing")
@@ -78,6 +139,12 @@ def ingest_tracked_event_release_once(
     if release_repository.has_analysis_for_event_version(
         event_id=release_event_id, expectation_version=expectation.version
     ):
+        ingestion_audit_repository.record_attempt(
+            tracked_event_id=event.event_id,
+            release_event_id=release_event_id,
+            actor=actor,
+            status="already_analyzed",
+        )
         return TrackedEventReleaseIngestionResult(
             event_id=event.event_id,
             release_event_id=release_event_id,
@@ -97,9 +164,15 @@ def ingest_tracked_event_release_once(
     ingestion = EventReleaseMonitor(
         expectation_repository=_PinnedExpectationRepository(expectation),
         release_repository=release_repository,
-        analyzer=analyzer,
+        analyzer=analyzer_factory(),
         provider=provider,
     ).run_once(release_event_id)
+    ingestion_audit_repository.record_attempt(
+        tracked_event_id=event.event_id,
+        release_event_id=release_event_id,
+        actor=actor,
+        status=ingestion.status,
+    )
     return TrackedEventReleaseIngestionResult(
         event_id=event.event_id,
         release_event_id=release_event_id,
