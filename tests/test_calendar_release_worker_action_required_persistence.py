@@ -73,6 +73,7 @@ class CalendarReleaseWorkerActionRequiredPersistenceTests(unittest.TestCase):
     def _releases(self) -> MagicMock:
         releases = MagicMock()
         releases.has_analysis_for_event_version.return_value = False
+        releases.latest_run.return_value = None
         return releases
 
     def test_shell_rpc_identity_conflict_is_persisted_before_expectation_lookup(self):
@@ -170,6 +171,34 @@ class CalendarReleaseWorkerActionRequiredPersistenceTests(unittest.TestCase):
             ),
         )
         provider.assert_not_called()
+
+    def test_repaired_release_shell_supersedes_prior_identity_blocker_once(self):
+        releases = self._releases()
+        releases.has_analysis_for_event_version.return_value = True
+        releases.latest_run.return_value = {
+            "provider": ACTION_REQUIRED_PROVIDER,
+            "status": "error",
+            "error_message": (
+                "action_required: canonical release-shell identity conflicts with "
+                "tracked-event identity"
+            ),
+        }
+
+        results = run_calendar_release_ingestion_once(
+            targets=_Targets(_target()),
+            expectations=_Expectations(_expectation()),
+            releases=releases,
+            analyzer=MagicMock(),
+            clock=_clock,
+        )
+
+        self.assertEqual(results[0].status, "already_analyzed")
+        releases.record_run.assert_called_once_with(
+            event_id=EVENT_ID,
+            provider=ACTION_REQUIRED_PROVIDER,
+            status="validated",
+            error_message=None,
+        )
 
     def test_missing_non_us_official_source_is_persisted_for_workflow_readiness(self):
         releases = self._releases()
