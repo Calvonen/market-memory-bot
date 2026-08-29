@@ -54,6 +54,8 @@ export default function TrackedEventReleaseHandoffScreen() {
         const source = await getTrackedEventReleaseSource(eventId);
         if (!cancelled) {
           setReleaseSource(source);
+          setSourceUrl(source.source_url ?? '');
+          setSourceTitle(source.source_title ?? '');
           setError(null);
         }
       } catch (loadError) {
@@ -95,7 +97,9 @@ export default function TrackedEventReleaseHandoffScreen() {
       const saved = await putTrackedEventReleaseSource(
         submittedEventId,
         {
-          source_kind: 'direct_url',
+          source_kind: releaseSource.active && releaseSource.source_kind
+            ? releaseSource.source_kind
+            : 'direct_url',
           source_url: normalizedUrl,
           ...(sourceTitle.trim() ? { source_title: sourceTitle.trim() } : {}),
           expected_version: releaseSource.version,

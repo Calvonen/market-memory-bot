@@ -20,11 +20,18 @@ class MobileTrackedEventReleaseSourceSubmitTests(unittest.TestCase):
         self.assertNotIn("X-Admin-Token", service_source)
         self.assertNotIn("EXPO_PUBLIC_MARKETAI_ADMIN", service_source)
 
-    def test_submit_uses_loaded_canonical_version_and_direct_url(self) -> None:
+    def test_submit_preserves_loaded_results_page_kind_title_and_version(self) -> None:
         screen_source = SCREEN_PATH.read_text(encoding="utf-8")
+        service_source = SERVICE_PATH.read_text(encoding="utf-8")
 
+        self.assertIn("source_kind: 'direct_url' | 'results_page'", service_source)
+        self.assertIn("setSourceUrl(source.source_url ?? '')", screen_source)
+        self.assertIn("setSourceTitle(source.source_title ?? '')", screen_source)
+        self.assertIn("releaseSource.active && releaseSource.source_kind", screen_source)
+        self.assertIn("? releaseSource.source_kind", screen_source)
+        self.assertIn(": 'direct_url'", screen_source)
+        self.assertIn("sourceTitle.trim()", screen_source)
         self.assertIn("expected_version: releaseSource.version", screen_source)
-        self.assertIn("source_kind: 'direct_url'", screen_source)
         self.assertIn("setReleaseSource(saved)", screen_source)
 
     def test_submit_records_explicit_approver_in_actor_header(self) -> None:
