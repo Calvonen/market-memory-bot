@@ -25,14 +25,29 @@ def _braced_block(source: str, signature: str) -> str:
     raise AssertionError(f"Unterminated block for {signature}")
 
 
-def _tracked_event_service_calls(source: str) -> set[str]:
-    imported = {
-        "getTrackedEventReleaseSource",
-        "getTrackedEventWorkflow",
-        "ingestTrackedEventRelease",
-        "putTrackedEventReleaseSource",
-    }
-    called = set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", source))
+def _tracked_event_value_imports(source: str) -> set[str]:
+    match = re.search(
+        r"import\s*\{(?P<body>.*?)\}\s*from\s*['\"]@/services/tracked-events['\"];",
+        source,
+        flags=re.DOTALL,
+    )
+    if match is None:
+        raise AssertionError("tracked-events service import not found")
+
+    names: set[str] = set()
+    for raw_item in match.group("body").split(","):
+        item = raw_item.strip()
+        if not item or item.startswith("type "):
+            continue
+        imported_name = item.split(" as ", 1)[0].strip()
+        if imported_name:
+            names.add(imported_name)
+    return names
+
+
+def _tracked_event_service_calls(screen_source: str, function_source: str) -> set[str]:
+    imported = _tracked_event_value_imports(screen_source)
+    called = set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", function_source))
     return called & imported
 
 
@@ -86,7 +101,7 @@ class MobileTrackedEventReleaseIngestionTests(unittest.TestCase):
         process_release = _braced_block(screen, "async function processRelease() {")
 
         self.assertEqual(
-            _tracked_event_service_calls(process_release),
+            _tracked_event_service_calls(screen, process_release),
             {
                 "ingestTrackedEventRelease",
                 "getTrackedEventReleaseSource",
