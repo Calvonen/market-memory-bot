@@ -77,7 +77,9 @@ TRACKED_PRESENT_ROW = {
     "tracked_event_workflow_blockers_table_exists": True,
     "ensure_tracked_event_release_shell_with_blocker_function_exists": True,
     "calendarless_release_shell_trigger_exists": True,
-    "runtime_schema_version": 14,
+    "tracked_event_release_skip_audit_table_exists": True,
+    "record_tracked_event_release_skip_function_exists": True,
+    "runtime_schema_version": 15,
 }
 
 
@@ -151,7 +153,7 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
             _FakeClient(_responses(tracked_row=row))
         )
         self.assertEqual(exit_code, 1)
-        self.assertIn("tracked-event runtime schema version 14", err)
+        self.assertIn("tracked-event runtime schema version 15", err)
 
     def test_fails_closed_when_ingestion_audit_table_is_missing(self) -> None:
         row = dict(

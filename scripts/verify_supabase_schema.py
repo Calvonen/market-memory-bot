@@ -148,11 +148,19 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
         "calendarless_release_shell_trigger_exists",
         "calendar-less tracked-event release-shell trigger",
     ),
+    (
+        "tracked_event_release_skip_audit_table_exists",
+        "tracked-event release skip audit table",
+    ),
+    (
+        "record_tracked_event_release_skip_function_exists",
+        "record_tracked_event_release_skip() function",
+    ),
 )
 
 REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 3
 REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 8
-REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 14
+REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 15
 POSTGRES_IDENTIFIER_MAX_BYTES = 63
 
 
