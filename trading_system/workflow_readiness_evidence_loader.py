@@ -142,14 +142,15 @@ class SupabaseWorkflowReadinessEvidenceLoader:
     def _tracked_release_blocker(self, tracked_event_id: str) -> bool:
         response = (
             self.client.table("tracked_event_workflow_blockers")
-            .select("blocker_code")
+            .select("blocker_code,resolved_at,updated_at")
             .eq("tracked_market_event_id", tracked_event_id)
             .eq("step_key", "release")
-            .is_("resolved_at", "null")
+            .order("updated_at", desc=True)
             .limit(1)
             .execute()
         )
-        return bool(response.data or [])
+        rows = response.data or []
+        return bool(rows and rows[0].get("resolved_at") is None)
 
     def _paper_state_for_version(
         self, event_id: str, version: int | None
