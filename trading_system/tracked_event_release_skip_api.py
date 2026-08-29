@@ -27,7 +27,13 @@ def build_tracked_event_release_skip_router(
     require_control: Callable[[str | None], None],
     get_tracked_event_repository,
     get_release_skip_audit_repository,
+    get_release_shell_repository=None,
 ) -> APIRouter:
+    # get_release_shell_repository remains an accepted wiring argument for
+    # create_app compatibility, but is deliberately never called here. The
+    # shell "ensure" repository is mutating; skip is audit-only and delegates
+    # atomic read-only binding validation to record_tracked_event_release_skip.
+    del get_release_shell_repository
     router = APIRouter()
 
     @router.post("/api/v1/tracked-events/{event_id}/release-skip")
