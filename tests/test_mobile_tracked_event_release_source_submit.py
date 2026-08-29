@@ -42,6 +42,16 @@ class MobileTrackedEventReleaseSourceSubmitTests(unittest.TestCase):
         self.assertIn("setSourceTitle(currentSource.source_title ?? '')", screen_source)
         self.assertIn("setError(writeError)", screen_source)
 
+    def test_submit_clears_stale_success_before_validation_returns(self) -> None:
+        screen_source = SCREEN_PATH.read_text(encoding="utf-8")
+        submit_start = screen_source.index("async function submitReleaseSource()")
+        clear_success = screen_source.index("setSubmitMessage(null);", submit_start)
+        url_validation = screen_source.index("if (!normalizedUrl.startsWith('https://'))", submit_start)
+        approver_validation = screen_source.index("if (!normalizedApprover)", submit_start)
+
+        self.assertLess(clear_success, url_validation)
+        self.assertLess(clear_success, approver_validation)
+
     def test_submit_records_explicit_approver_in_actor_header(self) -> None:
         service_source = SERVICE_PATH.read_text(encoding="utf-8")
         screen_source = SCREEN_PATH.read_text(encoding="utf-8")
