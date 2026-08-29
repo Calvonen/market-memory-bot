@@ -24,7 +24,7 @@ class MobileTrackedEventReleaseSourceReadTests(unittest.TestCase):
         self.assertIn("releaseSource.active", source)
         self.assertIn("releaseSource.source_url", source)
         self.assertNotIn("apiPost", source)
-        self.assertNotIn("apiPut", source)
+        self.assertIn("putTrackedEventReleaseSource", source)
         self.assertNotIn("apiDelete", source)
         self.assertNotIn("EXPO_PUBLIC_MARKETAI_CONTROL_API_KEY", source)
 

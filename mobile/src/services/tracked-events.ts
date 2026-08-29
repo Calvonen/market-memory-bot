@@ -1,4 +1,4 @@
-import { apiGet } from '@/services/api';
+import { apiGet, apiPut } from '@/services/api';
 
 export type TrackedEventMonitoringStageSnapshot = {
   start_after_minutes: number;
@@ -69,6 +69,13 @@ export type TrackedEventReleaseSource = {
   source_title: string | null;
 };
 
+export type PutTrackedEventReleaseSourceInput = {
+  source_kind: 'direct_url' | 'results_page';
+  source_url: string;
+  source_title?: string;
+  expected_version: number;
+};
+
 export type TrackedMarketEvent = {
   event_id: string;
   tracked_instrument_id: string;
@@ -127,5 +134,16 @@ export function getTrackedEventWorkflow(eventId: string): Promise<TrackedEventWo
 export function getTrackedEventReleaseSource(eventId: string): Promise<TrackedEventReleaseSource> {
   return apiGet<TrackedEventReleaseSource>(
     `/api/v1/tracked-events/${encodeURIComponent(eventId)}/release-source`,
+  );
+}
+
+export function putTrackedEventReleaseSource(
+  eventId: string,
+  input: PutTrackedEventReleaseSourceInput,
+): Promise<TrackedEventReleaseSource> {
+  return apiPut<TrackedEventReleaseSource>(
+    `/api/v1/tracked-events/${encodeURIComponent(eventId)}/release-source`,
+    input,
+    { 'X-MarketAI-Actor': 'marketai-mobile' },
   );
 }

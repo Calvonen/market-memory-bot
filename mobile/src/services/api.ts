@@ -36,6 +36,23 @@ async function apiPost<T>(path: string, body: unknown, authHeader: Record<string
   return parseJsonResponse<T>(response);
 }
 
+export async function apiPut<T>(
+  path: string,
+  body: unknown,
+  headers: Record<string, string> = {},
+): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-MarketAI-Control-Key': CONTROL_API_KEY,
+      ...headers,
+    },
+    body: JSON.stringify(body),
+  });
+  return parseJsonResponse<T>(response);
+}
+
 export type SymbolSuggestion = { ticker: string; name: string; exchange: string };
 
 export type MarketMemoryResult = {
