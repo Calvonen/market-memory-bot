@@ -28,7 +28,12 @@ set search_path = public, pg_temp
 as $$
 declare
   audit_id bigint;
+  initial_calendar_event_id uuid;
+  tracked_row public.tracked_market_events%rowtype;
+  calendar_row public.calendar_events%rowtype;
+  existing_market_event public.market_events%rowtype;
   expected_release_event_id text;
+  expected_release_event_name text;
 begin
   if input_actor is null or input_actor <> btrim(input_actor)
      or length(input_actor) < 1 or length(input_actor) > 200 then
@@ -42,27 +47,91 @@ begin
     raise exception 'invalid release skip reason';
   end if;
 
-  select case
-    when calendar_event_id is not null then 'calendar:' || calendar_event_id::text
-    else 'tracked:' || id::text
-  end into expected_release_event_id
+  -- Preserve the canonical calendar-first lock order without provisioning or
+  -- repairing any release state. This endpoint is audit-only apart from its
+  -- append-only audit insert.
+  select calendar_event_id into initial_calendar_event_id
   from public.tracked_market_events
   where id = input_tracked_event_id;
 
-  if expected_release_event_id is null then
-    raise exception 'tracked event not found';
+  if not found then
+    raise exception 'tracked_event_not_found' using errcode = 'P0002';
   end if;
-  if input_release_event_id <> expected_release_event_id
-     or not exists (
-       select 1 from public.market_events where event_id = expected_release_event_id
-     ) then
-    raise exception 'tracked release shell identity conflict';
+
+  if initial_calendar_event_id is not null then
+    select * into calendar_row
+    from public.calendar_events
+    where id = initial_calendar_event_id
+    for share;
+
+    if calendar_row.id is null then
+      raise exception 'tracked_release_calendar_event_not_found';
+    end if;
+  end if;
+
+  select * into tracked_row
+  from public.tracked_market_events
+  where id = input_tracked_event_id
+  for share;
+
+  if tracked_row.id is null then
+    raise exception 'tracked_event_not_found' using errcode = 'P0002';
+  end if;
+  if tracked_row.calendar_event_id is distinct from initial_calendar_event_id then
+    raise exception 'tracked_release_calendar_binding_changed_during_lock';
+  end if;
+  if tracked_row.kind <> 'earnings' then
+    raise exception 'tracked_event_not_release_shell_eligible';
+  end if;
+  if tracked_row.event_date is null then
+    raise exception 'tracked_event_release_date_required';
+  end if;
+
+  if tracked_row.calendar_event_id is not null then
+    if upper(replace(calendar_row.instrument, ' ', '')) is distinct from tracked_row.instrument
+       or calendar_row.event_type is distinct from tracked_row.kind
+       or calendar_row.scheduled_date is distinct from tracked_row.event_date
+       or calendar_row.source is distinct from tracked_row.source
+       or tracked_row.external_key is distinct from ('calendar:' || calendar_row.id::text) then
+      raise exception 'tracked_release_calendar_binding_identity_conflict';
+    end if;
+
+    expected_release_event_id := 'calendar:' || calendar_row.id::text;
+    expected_release_event_name := calendar_row.company_name || ' ' || calendar_row.event_type;
+  else
+    expected_release_event_id := 'tracked:' || tracked_row.id::text;
+    expected_release_event_name := tracked_row.instrument || ' ' || tracked_row.kind;
+  end if;
+
+  if input_release_event_id <> expected_release_event_id then
+    raise exception 'tracked_release_shell_identity_conflict';
+  end if;
+
+  select * into existing_market_event
+  from public.market_events
+  where event_id = expected_release_event_id
+  for share;
+
+  if existing_market_event.event_id is null
+     or upper(replace(existing_market_event.instrument, ' ', ''))
+          is distinct from upper(replace(tracked_row.instrument, ' ', ''))
+     or existing_market_event.event_name is distinct from expected_release_event_name
+     or existing_market_event.scheduled_date is distinct from tracked_row.event_date then
+    raise exception 'tracked_release_shell_identity_conflict';
+  end if;
+
+  if not exists (
+    select 1
+    from public.event_expectation_versions e
+    where e.event_id = expected_release_event_id
+  ) then
+    raise exception 'tracked_release_expectation_missing';
   end if;
 
   insert into public.tracked_event_release_skip_audit (
     tracked_event_id, release_event_id, actor, reason
   ) values (
-    input_tracked_event_id, input_release_event_id, input_actor, input_reason
+    input_tracked_event_id, expected_release_event_id, input_actor, input_reason
   ) returning id into audit_id;
   return audit_id;
 end;
