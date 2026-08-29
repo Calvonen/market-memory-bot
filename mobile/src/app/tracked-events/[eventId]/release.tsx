@@ -16,6 +16,9 @@ export default function TrackedEventReleaseHandoffScreen() {
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
+    setReleaseSource(null);
+    setError(null);
 
     async function loadReleaseSource() {
       if (!eventId) {
