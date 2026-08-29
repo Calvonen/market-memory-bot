@@ -13,6 +13,10 @@ class ReleaseSkipConflict(RuntimeError):
     """The existing canonical release binding is missing or conflicts with the tracked event."""
 
 
+class ReleaseSkipNotFound(RuntimeError):
+    """The tracked event disappeared before the atomic skip audit could lock it."""
+
+
 class ReleaseSkipAuditRepository(Protocol):
     def record_skip(
         self, *, tracked_event_id: str, release_event_id: str, actor: str, reason: str
@@ -46,6 +50,8 @@ class SupabaseTrackedEventReleaseSkipAuditRepository:
             ).execute()
         except Exception as exc:
             message = str(exc)
+            if "tracked_event_not_found" in message or "P0002" in message:
+                raise ReleaseSkipNotFound(message) from exc
             if any(marker in message for marker in self._CONFLICT_MARKERS):
                 raise ReleaseSkipConflict(message) from exc
             raise
@@ -75,9 +81,6 @@ def skip_tracked_event_release(
             f"reason must be nonblank and at most {MAX_RELEASE_SKIP_REASON_LENGTH} characters"
         )
 
-    # Computing the canonical id is read-only. The audit RPC recomputes and
-    # validates the complete current database binding under locks before insert,
-    # eliminating both workflow mutations and the validation/audit TOCTOU gap.
     release_event_id = canonical_release_event_id(event)
     audit_repository.record_skip(
         tracked_event_id=event.event_id,
