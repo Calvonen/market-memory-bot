@@ -65,6 +65,11 @@ from trading_system.tracked_event_repository import (
 from trading_system.tracked_event_release_source_api import (
     build_tracked_event_release_source_router,
 )
+from trading_system.tracked_event_release_ingestion_api import (
+    build_tracked_event_release_ingestion_router,
+)
+from trading_system.ai_event_analyzer import build_default_event_analyzer
+from trading_system.release_repository import SupabaseReleaseRepository
 from trading_system.tracked_event_result import (
     TrackedEventLatestReaction,
     latest_tracked_event_reaction,
@@ -376,6 +381,8 @@ def create_app(
     tracked_event_repository: SupabaseTrackedEventRepository | None = None,
     workflow_evidence_loader: WorkflowReadinessEvidenceLoader | None = None,
     official_release_source_repository: OfficialReleaseSourceRepository | None = None,
+    release_repository=None,
+    event_analyzer=None,
     admin_token: str | None = None,
     read_api_key: str | None = None,
     control_api_key: str | None = None,
@@ -412,6 +419,8 @@ def create_app(
     official_release_source_repo_cache: OfficialReleaseSourceRepository | None = (
         official_release_source_repository
     )
+    release_repo_cache = release_repository
+    event_analyzer_cache = event_analyzer
     configured_admin_token = admin_token or os.environ.get("MARKETAI_ADMIN_API_KEY")
     configured_read_api_key = read_api_key or os.environ.get("MARKETAI_READ_API_KEY")
     # Backend-only control-auth for the strategy-draft approval endpoint. This
@@ -471,6 +480,18 @@ def create_app(
             )
         return official_release_source_repo_cache
 
+    def get_release_repository():
+        nonlocal release_repo_cache
+        if release_repo_cache is None:
+            release_repo_cache = SupabaseReleaseRepository.from_env()
+        return release_repo_cache
+
+    def get_event_analyzer():
+        nonlocal event_analyzer_cache
+        if event_analyzer_cache is None:
+            event_analyzer_cache = build_default_event_analyzer()
+        return event_analyzer_cache
+
     def require_event_exists(event_id: str) -> None:
         try:
             event = get_repository().get(event_id)
@@ -510,6 +531,16 @@ def create_app(
             require_control=require_control,
             get_tracked_event_repository=get_tracked_event_repository,
             get_official_release_source_repository=get_official_release_source_repository,
+        )
+    )
+    app.include_router(
+        build_tracked_event_release_ingestion_router(
+            require_control=require_control,
+            get_tracked_event_repository=get_tracked_event_repository,
+            get_expectation_repository=get_repository,
+            get_official_release_source_repository=get_official_release_source_repository,
+            get_release_repository=get_release_repository,
+            get_event_analyzer=get_event_analyzer,
         )
     )
 
