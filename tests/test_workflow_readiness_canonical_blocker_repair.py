@@ -67,16 +67,7 @@ class _RpcQuery:
 
 
 class _Client:
-    def __init__(self, *, analysis_version: int | None):
-        analysis_rows = []
-        if analysis_version is not None:
-            analysis_rows.append(
-                {
-                    "id": "analysis-1",
-                    "event_id": RELEASE_ID,
-                    "expectation_version": analysis_version,
-                }
-            )
+    def __init__(self, *, latest_status: str = "error"):
         self.tables = {
             "current_event_expectations": [
                 {"event_id": RELEASE_ID, "version": 2}
@@ -84,7 +75,13 @@ class _Client:
             "event_source_documents": [
                 {"id": "doc-1", "event_id": RELEASE_ID}
             ],
-            "event_ai_analyses": analysis_rows,
+            "event_ai_analyses": [
+                {
+                    "id": "analysis-1",
+                    "event_id": RELEASE_ID,
+                    "expectation_version": 2,
+                }
+            ],
             "event_ingestion_runs": [
                 {
                     "event_id": RELEASE_ID,
@@ -92,7 +89,20 @@ class _Client:
                     "status": "error",
                     "error_message": "action_required: release-shell identity mismatch",
                     "created_at": "2026-08-28T06:10:00+00:00",
-                }
+                },
+                *(
+                    [
+                        {
+                            "event_id": RELEASE_ID,
+                            "provider": "canonical_release_worker",
+                            "status": "validated",
+                            "error_message": None,
+                            "created_at": "2026-08-28T06:11:00+00:00",
+                        }
+                    ]
+                    if latest_status == "validated"
+                    else []
+                ),
             ],
             "tracked_market_event_reactions": [],
         }
@@ -125,23 +135,21 @@ def _event() -> PersistentTrackedEvent:
 
 
 class CanonicalBlockerRepairTests(unittest.TestCase):
-    def test_current_version_analysis_supersedes_stale_canonical_blocker(self):
+    def test_fresh_identity_blocker_remains_active_despite_current_analysis(self):
+        evidence = SupabaseWorkflowReadinessEvidenceLoader(_Client()).load(_event())
+
+        self.assertTrue(evidence.analysis_present)
+        self.assertFalse(evidence.release_document_present)
+        self.assertTrue(evidence.release_failed)
+
+    def test_later_validation_run_supersedes_repaired_identity_blocker(self):
         evidence = SupabaseWorkflowReadinessEvidenceLoader(
-            _Client(analysis_version=2)
+            _Client(latest_status="validated")
         ).load(_event())
 
         self.assertTrue(evidence.analysis_present)
         self.assertTrue(evidence.release_document_present)
         self.assertFalse(evidence.release_failed)
-
-    def test_stale_analysis_does_not_supersede_current_canonical_blocker(self):
-        evidence = SupabaseWorkflowReadinessEvidenceLoader(
-            _Client(analysis_version=1)
-        ).load(_event())
-
-        self.assertFalse(evidence.analysis_present)
-        self.assertFalse(evidence.release_document_present)
-        self.assertTrue(evidence.release_failed)
 
 
 if __name__ == "__main__":
