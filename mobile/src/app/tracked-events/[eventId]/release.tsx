@@ -16,6 +16,7 @@ export default function TrackedEventReleaseHandoffScreen() {
   const [error, setError] = useState<string | null>(null);
   const [sourceUrl, setSourceUrl] = useState('');
   const [sourceTitle, setSourceTitle] = useState('');
+  const [approver, setApprover] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitMessage, setSubmitMessage] = useState<string | null>(null);
   const eventIdRef = useRef(eventId);
@@ -38,6 +39,7 @@ export default function TrackedEventReleaseHandoffScreen() {
     setError(null);
     setSourceUrl('');
     setSourceTitle('');
+    setApprover('');
     setSubmitting(false);
     setSubmitMessage(null);
 
@@ -78,18 +80,28 @@ export default function TrackedEventReleaseHandoffScreen() {
       return;
     }
 
+    const normalizedApprover = approver.trim();
+    if (!normalizedApprover) {
+      setError('Syötä hyväksyjän tunniste.');
+      return;
+    }
+
     const submittedEventId = eventId;
     setSubmitting(true);
     setError(null);
     setSubmitMessage(null);
 
     try {
-      const saved = await putTrackedEventReleaseSource(submittedEventId, {
-        source_kind: 'direct_url',
-        source_url: normalizedUrl,
-        ...(sourceTitle.trim() ? { source_title: sourceTitle.trim() } : {}),
-        expected_version: releaseSource.version,
-      });
+      const saved = await putTrackedEventReleaseSource(
+        submittedEventId,
+        {
+          source_kind: 'direct_url',
+          source_url: normalizedUrl,
+          ...(sourceTitle.trim() ? { source_title: sourceTitle.trim() } : {}),
+          expected_version: releaseSource.version,
+        },
+        normalizedApprover,
+      );
       if (mountedRef.current && eventIdRef.current === submittedEventId) {
         setReleaseSource(saved);
         setSubmitMessage('Julkaisulähde tallennettu.');
@@ -175,12 +187,21 @@ export default function TrackedEventReleaseHandoffScreen() {
           style={styles.input}
           value={sourceTitle}
         />
+        <TextInput
+          autoCapitalize="none"
+          autoCorrect={false}
+          onChangeText={setApprover}
+          placeholder="Hyväksyjän tunniste"
+          placeholderTextColor="#677386"
+          style={styles.input}
+          value={approver}
+        />
         <Pressable
-          disabled={!releaseSource || !sourceUrl.trim() || submitting}
+          disabled={!releaseSource || !sourceUrl.trim() || !approver.trim() || submitting}
           onPress={() => void submitReleaseSource()}
           style={({ pressed }) => [
             styles.button,
-            (!releaseSource || !sourceUrl.trim() || submitting) && styles.buttonDisabled,
+            (!releaseSource || !sourceUrl.trim() || !approver.trim() || submitting) && styles.buttonDisabled,
             pressed && styles.buttonPressed,
           ]}>
           <Text style={styles.buttonText}>{submitting ? 'Tallennetaan…' : 'Tallenna lähde'}</Text>
