@@ -11,6 +11,8 @@ from trading_system.tracked_event_repository import PersistentTrackedEvent
 
 
 _RELEASE_ERROR_STATUSES = frozenset({"error"})
+_CANONICAL_RELEASE_BLOCKER_PROVIDER = "canonical_release_worker"
+_ACTION_REQUIRED_PREFIX = "action_required:"
 _ACCEPTED_ORDER_STATUSES = frozenset(
     {"accepted", "etoro_demo_accepted", "pending", "open", "submitted"}
 )
@@ -45,9 +47,19 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         release_event_id = canonical_release_event_id(event)
         current_version = self._current_expectation_version(release_event_id)
         latest_run = self._latest_release_run(release_event_id)
+        tracked_release_blocker = self._tracked_release_blocker(event.event_id)
         paper_state = self._paper_state_for_version(release_event_id, current_version)
-        release_document_present = self._exists(
+        persisted_release_document_present = self._exists(
             "event_source_documents", "event_id", release_event_id
+        )
+        analysis_present = self._analysis_exists_for_version(
+            release_event_id, current_version
+        )
+        canonical_blocker = (
+            _is_canonical_release_blocker(latest_run) or tracked_release_blocker
+        )
+        release_document_present = (
+            persisted_release_document_present and not canonical_blocker
         )
 
         return WorkflowReadinessEvidence(
@@ -55,11 +67,10 @@ class SupabaseWorkflowReadinessEvidenceLoader:
             event_id=event.event_id,
             release_document_present=release_document_present,
             release_failed=(
-                not release_document_present and _release_requires_action(latest_run)
+                canonical_blocker
+                or (not release_document_present and _release_requires_action(latest_run))
             ),
-            analysis_present=self._analysis_exists_for_version(
-                release_event_id, current_version
-            ),
+            analysis_present=analysis_present,
             reaction_present=self._exists(
                 "tracked_market_event_reactions",
                 "tracked_market_event_id",
@@ -119,7 +130,7 @@ class SupabaseWorkflowReadinessEvidenceLoader:
     def _latest_release_run(self, event_id: str) -> dict[str, Any] | None:
         response = (
             self.client.table("event_ingestion_runs")
-            .select("status,error_message,created_at")
+            .select("provider,status,error_message,created_at")
             .eq("event_id", event_id)
             .order("created_at", desc=True)
             .limit(1)
@@ -127,6 +138,19 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         )
         rows = response.data or []
         return rows[0] if rows else None
+
+    def _tracked_release_blocker(self, tracked_event_id: str) -> bool:
+        response = (
+            self.client.table("tracked_event_workflow_blockers")
+            .select("blocker_code,resolved_at,updated_at")
+            .eq("tracked_market_event_id", tracked_event_id)
+            .eq("step_key", "release")
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        return bool(rows and rows[0].get("resolved_at") is None)
 
     def _paper_state_for_version(
         self, event_id: str, version: int | None
@@ -159,6 +183,19 @@ def canonical_release_event_id(event: PersistentTrackedEvent) -> str:
     if not event_id:
         raise ValueError("tracked event id must not be blank")
     return f"tracked:{event_id}"
+
+
+def _is_canonical_release_blocker(run: dict[str, Any] | None) -> bool:
+    if run is None:
+        return False
+    provider = str(run.get("provider") or "").strip().lower()
+    status = str(run.get("status") or "").strip().lower()
+    message = str(run.get("error_message") or "").strip().lower()
+    return (
+        provider == _CANONICAL_RELEASE_BLOCKER_PROVIDER
+        and status == "error"
+        and message.startswith(_ACTION_REQUIRED_PREFIX)
+    )
 
 
 def _release_requires_action(run: dict[str, Any] | None) -> bool:

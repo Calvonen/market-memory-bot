@@ -219,7 +219,7 @@ class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
             [[]],
             rpc_rows=[{
                 "out_release_event_id": f"tracked:{tracked_id}",
-                "out_action": "inserted",
+                "out_blocker_code": None,
             }],
         )
         repository = SupabaseCalendarReleaseTargetRepository(client)
@@ -239,7 +239,7 @@ class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
             client.rpc_calls,
             [
                 (
-                    "ensure_tracked_event_release_shell",
+                    "ensure_tracked_event_release_shell_with_blocker",
                     {"input_tracked_event_id": tracked_id},
                 )
             ],
@@ -251,7 +251,7 @@ class CalendarReleaseTargetRepositoryTests(unittest.TestCase):
             [[]],
             rpc_rows=[{
                 "out_release_event_id": "tracked:other",
-                "out_action": "noop_existing",
+                "out_blocker_code": None,
             }],
         )
         repository = SupabaseCalendarReleaseTargetRepository(client)

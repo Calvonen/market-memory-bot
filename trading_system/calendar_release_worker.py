@@ -26,6 +26,18 @@ TARGET_PAGE_SIZE = 1000
 US_MARKET_LABELS = ("US", "USA", "NASDAQ", "NYSE", "AMEX")
 DATE_ONLY_OVERDUE_GRACE_HOURS = 24.0
 RELEASE_ELIGIBLE_TRACKED_STATUSES = ("tracked", "monitoring", "completed", "failed")
+ACTION_REQUIRED_PROVIDER = "canonical_release_worker"
+RELEASE_SHELL_IDENTITY_CONFLICTS = frozenset(
+    {
+        "tracked_release_shell_identity_conflict",
+        "tracked_release_calendar_binding_identity_conflict",
+    }
+)
+ACTION_REQUIRED_PREFIX = "action_required:"
+MISSING_OFFICIAL_SOURCE_BLOCKER = (
+    "earnings target outside approved us market labels requires "
+    "an approved official release source"
+)
 
 
 @dataclass(frozen=True)
@@ -138,12 +150,15 @@ class SupabaseCalendarReleaseTargetRepository:
         if not tracked_id:
             raise RuntimeError("tracked release target is missing tracked_event_id")
         response = self.client.rpc(
-            "ensure_tracked_event_release_shell",
+            "ensure_tracked_event_release_shell_with_blocker",
             {"input_tracked_event_id": tracked_id},
         ).execute()
         rows = list(response.data or [])
         if len(rows) != 1 or not isinstance(rows[0], dict):
             raise RuntimeError("canonical release-shell RPC returned invalid response")
+        blocker_code = str(rows[0].get("out_blocker_code") or "").strip()
+        if blocker_code:
+            raise RuntimeError(blocker_code)
         release_event_id = str(rows[0].get("out_release_event_id") or "").strip()
         if release_event_id != target.event_id:
             raise RuntimeError("canonical release-shell identity differs from release target")
@@ -170,6 +185,92 @@ class CalendarReleaseWorkerResult:
     message: str | None = None
 
 
+def _persist_action_required(
+    releases: SupabaseReleaseRepository,
+    *,
+    event_id: str,
+    message: str,
+) -> None:
+    """Persist a durable blocker so workflow readiness can surface it.
+
+    The readiness loader already treats persisted ingestion errors as
+    ``action_required``. Keep the worker's specific result status for logs and
+    diagnostics, but record the blocker through the same durable ingestion-run
+    channel used by normal release polling instead of leaving it process-local.
+    """
+    releases.record_run(
+        event_id=event_id,
+        provider=ACTION_REQUIRED_PROVIDER,
+        status="error",
+        error_message=f"{ACTION_REQUIRED_PREFIX} {message}"[:500],
+    )
+
+
+def _is_release_shell_identity_conflict(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in RELEASE_SHELL_IDENTITY_CONFLICTS)
+
+
+def _is_calendar_binding_identity_conflict(exc: Exception) -> bool:
+    return "tracked_release_calendar_binding_identity_conflict" in str(exc).lower()
+
+
+def _canonical_blocker_message(run: dict[str, Any] | None) -> str | None:
+    if not isinstance(run, dict):
+        return None
+    provider = str(run.get("provider") or "").strip().lower()
+    status = str(run.get("status") or "").strip().lower()
+    message = str(run.get("error_message") or "").strip().lower()
+    if provider != ACTION_REQUIRED_PROVIDER or status != "error":
+        return None
+    if not message.startswith(ACTION_REQUIRED_PREFIX):
+        return None
+    return message
+
+
+def _is_release_shell_blocker(run: dict[str, Any] | None) -> bool:
+    message = _canonical_blocker_message(run)
+    if message is None:
+        return False
+    return any(
+        marker in message
+        for marker in (
+            "canonical release-shell identity conflicts",
+            "current_event_expectations row is missing",
+            "release-shell instrument differs",
+            "release-shell date differs",
+        )
+    )
+
+
+def _is_missing_official_source_blocker(run: dict[str, Any] | None) -> bool:
+    message = _canonical_blocker_message(run)
+    return message is not None and MISSING_OFFICIAL_SOURCE_BLOCKER in message
+
+
+def _persist_canonical_validation_if_needed(
+    releases: SupabaseReleaseRepository,
+    *,
+    event_id: str,
+    current_version_analyzed: bool,
+) -> None:
+    latest_run = getattr(releases, "latest_run", None)
+    if not callable(latest_run):
+        return
+    run = latest_run(event_id=event_id)
+    should_clear = _is_release_shell_blocker(run) or (
+        current_version_analyzed and _is_missing_official_source_blocker(run)
+    )
+    if not should_clear:
+        return
+    releases.record_run(
+        event_id=event_id,
+        provider=ACTION_REQUIRED_PROVIDER,
+        status="validated",
+        error_message=None,
+    )
+
+
 def run_calendar_release_ingestion_once(
     *,
     targets: SupabaseCalendarReleaseTargetRepository,
@@ -190,41 +291,85 @@ def run_calendar_release_ingestion_once(
         try:
             ensure_shell = getattr(targets, "ensure_release_shell", None)
             if callable(ensure_shell):
-                ensure_shell(target)
+                try:
+                    ensure_shell(target)
+                except Exception as exc:
+                    if not _is_release_shell_identity_conflict(exc):
+                        raise
+                    message = "canonical release-shell identity conflicts with tracked-event identity"
+                    if not _is_calendar_binding_identity_conflict(exc):
+                        _persist_action_required(
+                            releases,
+                            event_id=target.event_id,
+                            message=message,
+                        )
+                    results.append(
+                        CalendarReleaseWorkerResult(
+                            target.event_id,
+                            "identity_conflict",
+                            message,
+                        )
+                    )
+                    continue
 
             expectation = expectations.get(target.event_id)
             if expectation is None:
+                message = "current_event_expectations row is missing"
+                _persist_action_required(
+                    releases,
+                    event_id=target.event_id,
+                    message=message,
+                )
                 results.append(
                     CalendarReleaseWorkerResult(
                         target.event_id,
                         "missing_release_shell",
-                        "current_event_expectations row is missing",
+                        message,
                     )
                 )
                 continue
             if expectation.instrument.strip().upper() != target.ticker:
+                message = "release-shell instrument differs from tracked-event instrument"
+                _persist_action_required(
+                    releases,
+                    event_id=target.event_id,
+                    message=message,
+                )
                 results.append(
                     CalendarReleaseWorkerResult(
                         target.event_id,
                         "identity_conflict",
-                        "release-shell instrument differs from tracked-event instrument",
+                        message,
                     )
                 )
                 continue
             if expectation.scheduled_date != target.scheduled_date:
+                message = "release-shell date differs from tracked-event date"
+                _persist_action_required(
+                    releases,
+                    event_id=target.event_id,
+                    message=message,
+                )
                 results.append(
                     CalendarReleaseWorkerResult(
                         target.event_id,
                         "identity_conflict",
-                        "release-shell date differs from tracked-event date",
+                        message,
                     )
                 )
                 continue
 
-            if releases.has_analysis_for_event_version(
+            current_version_analyzed = releases.has_analysis_for_event_version(
                 event_id=target.event_id,
                 expectation_version=expectation.version,
-            ):
+            )
+            _persist_canonical_validation_if_needed(
+                releases,
+                event_id=target.event_id,
+                current_version_analyzed=current_version_analyzed,
+            )
+
+            if current_version_analyzed:
                 results.append(
                     CalendarReleaseWorkerResult(target.event_id, "already_analyzed")
                 )
@@ -246,11 +391,20 @@ def run_calendar_release_ingestion_once(
             else:
                 normalized_market = target.market.strip().upper()
                 if normalized_market not in US_MARKET_LABELS:
+                    message = (
+                        "earnings target outside approved US market labels requires "
+                        "an approved official release source"
+                    )
+                    _persist_action_required(
+                        releases,
+                        event_id=target.event_id,
+                        message=message,
+                    )
                     results.append(
                         CalendarReleaseWorkerResult(
                             target.event_id,
                             "missing_official_source",
-                            "earnings target outside approved US market labels requires an approved official release source",
+                            message,
                         )
                     )
                     continue

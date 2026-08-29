@@ -129,6 +129,14 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
         "ensure_tracked_event_release_shell() function",
     ),
     (
+        "tracked_event_workflow_blockers_table_exists",
+        "tracked_event_workflow_blockers table",
+    ),
+    (
+        "ensure_tracked_event_release_shell_with_blocker_function_exists",
+        "ensure_tracked_event_release_shell_with_blocker() function",
+    ),
+    (
         "calendarless_release_shell_trigger_exists",
         "calendar-less tracked-event release-shell trigger",
     ),
@@ -136,7 +144,7 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
 
 REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 3
 REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 8
-REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 12
+REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 13
 POSTGRES_IDENTIFIER_MAX_BYTES = 63
 
 
