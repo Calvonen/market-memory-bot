@@ -44,8 +44,10 @@ def _event() -> PersistentTrackedEvent:
 class _TrackedRepo:
     def __init__(self, event: PersistentTrackedEvent | None) -> None:
         self.event = event
+        self.requested_event_ids: list[str] = []
 
     def get(self, event_id: str) -> PersistentTrackedEvent | None:
+        self.requested_event_ids.append(event_id)
         return self.event if event_id == EVENT_ID else None
 
 
@@ -64,7 +66,7 @@ def _client(
     event: PersistentTrackedEvent | None,
     state: OfficialReleaseSourceState,
     read_key: str = "read-key",
-) -> tuple[TestClient, _SourceRepo]:
+) -> tuple[TestClient, _TrackedRepo, _SourceRepo]:
     tracked_repo = _TrackedRepo(event)
     source_repo = _SourceRepo(state)
 
@@ -80,7 +82,7 @@ def _client(
             get_official_release_source_repository=lambda: source_repo,
         )
     )
-    return TestClient(app), source_repo
+    return TestClient(app), tracked_repo, source_repo
 
 
 class TrackedEventReleaseSourceApiTests(unittest.TestCase):
@@ -93,7 +95,7 @@ class TrackedEventReleaseSourceApiTests(unittest.TestCase):
             source_title="Q2 results",
             version=2,
         )
-        client, source_repo = _client(
+        client, tracked_repo, source_repo = _client(
             event=event,
             state=OfficialReleaseSourceState(source=source, version=2),
         )
@@ -104,13 +106,14 @@ class TrackedEventReleaseSourceApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(tracked_repo.requested_event_ids, [EVENT_ID])
         self.assertEqual(source_repo.requested_event_id, f"tracked:{EVENT_ID}")
         self.assertEqual(response.json()["event_id"], EVENT_ID)
         self.assertEqual(response.json()["release_event_id"], f"tracked:{EVENT_ID}")
         self.assertEqual(response.json()["source_url"], "https://example.com/results.pdf")
 
     def test_requires_read_auth(self) -> None:
-        client, _ = _client(
+        client, _, _ = _client(
             event=_event(),
             state=OfficialReleaseSourceState(source=None, version=0),
         )
@@ -119,8 +122,23 @@ class TrackedEventReleaseSourceApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
 
+    def test_malformed_tracked_event_id_is_400_without_repository_access(self) -> None:
+        client, tracked_repo, source_repo = _client(
+            event=_event(),
+            state=OfficialReleaseSourceState(source=None, version=0),
+        )
+
+        response = client.get(
+            "/api/v1/tracked-events/not-a-uuid/release-source",
+            headers={"X-MarketAI-Key": "read-key"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(tracked_repo.requested_event_ids, [])
+        self.assertIsNone(source_repo.requested_event_id)
+
     def test_missing_tracked_event_is_404(self) -> None:
-        client, _ = _client(
+        client, _, _ = _client(
             event=None,
             state=OfficialReleaseSourceState(source=None, version=0),
         )
@@ -139,7 +157,7 @@ class TrackedEventReleaseSourceApiTests(unittest.TestCase):
             source_url="https://example.com/investors",
             version=1,
         )
-        client, _ = _client(
+        client, _, _ = _client(
             event=_event(),
             state=OfficialReleaseSourceState(source=source, version=1),
         )
