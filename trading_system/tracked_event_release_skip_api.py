@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from trading_system.tracked_event_release_skip import (
     MAX_RELEASE_SKIP_REASON_LENGTH,
     ReleaseSkipConflict,
+    ReleaseSkipNotFound,
     skip_tracked_event_release,
 )
 
@@ -74,6 +75,8 @@ def build_tracked_event_release_skip_router(
             )
         except HTTPException:
             raise
+        except ReleaseSkipNotFound as exc:
+            raise HTTPException(status_code=404, detail="Tracked event not found") from exc
         except ReleaseSkipConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
