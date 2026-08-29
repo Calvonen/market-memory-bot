@@ -23,13 +23,11 @@ class MobileWorkflowActionReasonRenderingTests(unittest.TestCase):
     def test_action_reason_is_visually_bounded(self) -> None:
         self.assertIn("numberOfLines={3}", self.source)
 
-    def test_renderer_does_not_map_action_code_or_add_navigation(self) -> None:
+    def test_renderer_does_not_map_action_code(self) -> None:
         workflow_source = self.source.split("function TrackedEventWorkflow", 1)[1].split(
             "const WORKFLOW_STEP_LABELS", 1
         )[0]
         self.assertNotIn("action_code", workflow_source)
-        self.assertNotIn("router.", workflow_source)
-        self.assertNotIn("onPress", workflow_source)
 
 
 if __name__ == "__main__":

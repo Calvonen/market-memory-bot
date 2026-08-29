@@ -1,4 +1,4 @@
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
@@ -198,7 +198,7 @@ export function TrackedEventDetails({
         {presentation.detail ? <Text style={styles.detailText}>{presentation.detail}</Text> : null}
       </View>
 
-      <TrackedEventWorkflow state={workflowState} />
+      <TrackedEventWorkflow state={workflowState} eventId={event.event_id} />
 
       <View style={styles.configBlock}>
         <Text style={styles.configTitle}>Seuranta-asetukset</Text>
@@ -210,7 +210,9 @@ export function TrackedEventDetails({
   );
 }
 
-function TrackedEventWorkflow({ state }: { state: WorkflowState }) {
+function TrackedEventWorkflow({ state, eventId }: { state: WorkflowState; eventId: string }) {
+  const router = useRouter();
+
   if (state.status === 'loading') {
     return (
       <View style={styles.workflowBlock}>
@@ -249,6 +251,19 @@ function TrackedEventWorkflow({ state }: { state: WorkflowState }) {
             <Text style={styles.configText} numberOfLines={3}>
               {step.action_reason}
             </Text>
+          ) : null}
+          {step.status === 'action_required' && step.action_target === 'release' ? (
+            <Pressable
+              style={styles.workflowActionButton}
+              onPress={() =>
+                router.push({
+                  pathname: '/tracked-events/[eventId]/release',
+                  params: { eventId },
+                })
+              }
+            >
+              <Text style={styles.workflowActionButtonText}>Tarkista julkaisu</Text>
+            </Pressable>
           ) : null}
         </View>
       ))}
@@ -492,6 +507,21 @@ const styles = StyleSheet.create({
   },
   workflowFailed: {
     color: '#e17878',
+  },
+  workflowActionButton: {
+    alignSelf: 'flex-start',
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#4c4028',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    backgroundColor: '#221e16',
+  },
+  workflowActionButtonText: {
+    color: '#d7ad5f',
+    fontSize: 12,
+    fontWeight: '800',
   },
   configBlock: {
     marginTop: 10,
