@@ -28,6 +28,7 @@ DATE_ONLY_OVERDUE_GRACE_HOURS = 24.0
 RELEASE_ELIGIBLE_TRACKED_STATUSES = ("tracked", "monitoring", "completed", "failed")
 ACTION_REQUIRED_PROVIDER = "canonical_release_worker"
 RELEASE_SHELL_IDENTITY_CONFLICT = "tracked_release_shell_identity_conflict"
+ACTION_REQUIRED_PREFIX = "action_required:"
 
 
 @dataclass(frozen=True)
@@ -189,12 +190,52 @@ def _persist_action_required(
         event_id=event_id,
         provider=ACTION_REQUIRED_PROVIDER,
         status="error",
-        error_message=f"action_required: {message}"[:500],
+        error_message=f"{ACTION_REQUIRED_PREFIX} {message}"[:500],
     )
 
 
 def _is_release_shell_identity_conflict(exc: Exception) -> bool:
     return RELEASE_SHELL_IDENTITY_CONFLICT in str(exc).lower()
+
+
+def _is_release_shell_blocker(run: dict[str, Any] | None) -> bool:
+    if not isinstance(run, dict):
+        return False
+    provider = str(run.get("provider") or "").strip().lower()
+    status = str(run.get("status") or "").strip().lower()
+    message = str(run.get("error_message") or "").strip().lower()
+    if provider != ACTION_REQUIRED_PROVIDER or status != "error":
+        return False
+    if not message.startswith(ACTION_REQUIRED_PREFIX):
+        return False
+    return any(
+        marker in message
+        for marker in (
+            "canonical release-shell identity conflicts",
+            "current_event_expectations row is missing",
+            "release-shell instrument differs",
+            "release-shell date differs",
+        )
+    )
+
+
+def _persist_release_shell_validation_if_needed(
+    releases: SupabaseReleaseRepository,
+    *,
+    event_id: str,
+) -> None:
+    latest_run = getattr(releases, "latest_run", None)
+    if not callable(latest_run):
+        return
+    run = latest_run(event_id=event_id)
+    if not _is_release_shell_blocker(run):
+        return
+    releases.record_run(
+        event_id=event_id,
+        provider=ACTION_REQUIRED_PROVIDER,
+        status="validated",
+        error_message=None,
+    )
 
 
 def run_calendar_release_ingestion_once(
@@ -283,6 +324,11 @@ def run_calendar_release_ingestion_once(
                     )
                 )
                 continue
+
+            _persist_release_shell_validation_if_needed(
+                releases,
+                event_id=target.event_id,
+            )
 
             if releases.has_analysis_for_event_version(
                 event_id=target.event_id,
