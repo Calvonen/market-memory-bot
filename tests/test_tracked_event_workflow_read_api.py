@@ -70,6 +70,8 @@ def _evidence(
     *,
     release_document_present: bool = True,
     release_failed: bool = False,
+    release_action_code: str | None = None,
+    release_action_reason: str | None = None,
     analysis_present: bool = True,
     reaction_present: bool = True,
 ) -> WorkflowReadinessEvidence:
@@ -78,6 +80,8 @@ def _evidence(
         tracked_status=TrackedEventStatus.MONITORING,
         release_document_present=release_document_present,
         release_failed=release_failed,
+        release_action_code=release_action_code,
+        release_action_reason=release_action_reason,
         analysis_present=analysis_present,
         reaction_present=reaction_present,
         strategy_present=True,
@@ -151,30 +155,40 @@ class TrackedEventWorkflowReadApiTests(unittest.TestCase):
                         "mode": "required",
                         "status": "running",
                         "action_target": None,
+                        "action_code": None,
+                        "action_reason": None,
                     },
                     {
                         "key": "event_identified",
                         "mode": "required",
                         "status": "completed",
                         "action_target": None,
+                        "action_code": None,
+                        "action_reason": None,
                     },
                     {
                         "key": "release",
                         "mode": "required",
                         "status": "completed",
                         "action_target": None,
+                        "action_code": None,
+                        "action_reason": None,
                     },
                     {
                         "key": "analysis",
                         "mode": "required",
                         "status": "completed",
                         "action_target": None,
+                        "action_code": None,
+                        "action_reason": None,
                     },
                     {
                         "key": "market_reaction",
                         "mode": "required",
                         "status": "running",
                         "action_target": None,
+                        "action_code": None,
+                        "action_reason": None,
                     },
                 ],
             },
@@ -224,6 +238,8 @@ class TrackedEventWorkflowReadApiTests(unittest.TestCase):
                 "mode": "skip",
                 "status": "skipped",
                 "action_target": None,
+                "action_code": None,
+                "action_reason": None,
             },
         )
 
@@ -233,6 +249,8 @@ class TrackedEventWorkflowReadApiTests(unittest.TestCase):
             _evidence(
                 release_document_present=False,
                 release_failed=True,
+                release_action_code="release_overdue",
+                release_action_reason="release overdue: no matching report found",
                 analysis_present=False,
             )
         )
@@ -247,6 +265,11 @@ class TrackedEventWorkflowReadApiTests(unittest.TestCase):
         release = next(step for step in response.json()["steps"] if step["key"] == "release")
         self.assertEqual(release["status"], "action_required")
         self.assertEqual(release["action_target"], "release")
+        self.assertEqual(release["action_code"], "release_overdue")
+        self.assertEqual(
+            release["action_reason"],
+            "release overdue: no matching report found",
+        )
 
     def test_missing_event_is_404_without_evidence_read(self):
         repository = _TrackedEventRepository(None)
