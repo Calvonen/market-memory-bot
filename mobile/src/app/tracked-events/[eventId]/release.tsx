@@ -36,6 +36,8 @@ export default function TrackedEventReleaseHandoffScreen() {
     setLoading(true);
     setReleaseSource(null);
     setError(null);
+    setSourceUrl('');
+    setSourceTitle('');
     setSubmitting(false);
     setSubmitMessage(null);
 
