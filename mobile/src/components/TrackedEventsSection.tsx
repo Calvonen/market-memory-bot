@@ -232,17 +232,24 @@ function TrackedEventWorkflow({ state }: { state: WorkflowState }) {
     <View style={styles.workflowBlock}>
       <Text style={styles.configTitle}>Workflow</Text>
       {state.workflow.steps.map((step) => (
-        <View key={step.key} style={styles.workflowRow}>
-          <Text style={styles.workflowStep}>{workflowStepLabel(step.key)}</Text>
-          <Text
-            style={[
-              styles.workflowStatus,
-              step.status === 'action_required' ? styles.workflowActionRequired : null,
-              step.status === 'failed' ? styles.workflowFailed : null,
-            ]}
-          >
-            {workflowStatusLabel(step)}
-          </Text>
+        <View key={step.key}>
+          <View style={styles.workflowRow}>
+            <Text style={styles.workflowStep}>{workflowStepLabel(step.key)}</Text>
+            <Text
+              style={[
+                styles.workflowStatus,
+                step.status === 'action_required' ? styles.workflowActionRequired : null,
+                step.status === 'failed' ? styles.workflowFailed : null,
+              ]}
+            >
+              {workflowStatusLabel(step)}
+            </Text>
+          </View>
+          {step.status === 'action_required' && step.action_reason ? (
+            <Text style={styles.configText} numberOfLines={3}>
+              {step.action_reason}
+            </Text>
+          ) : null}
         </View>
       ))}
     </View>
