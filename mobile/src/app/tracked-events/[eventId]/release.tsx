@@ -76,6 +76,8 @@ export default function TrackedEventReleaseHandoffScreen() {
   async function submitReleaseSource() {
     if (!eventId || !releaseSource || submitting) return;
 
+    setSubmitMessage(null);
+
     const normalizedUrl = sourceUrl.trim();
     if (!normalizedUrl.startsWith('https://')) {
       setError('Syötä HTTPS-osoite.');
@@ -91,7 +93,6 @@ export default function TrackedEventReleaseHandoffScreen() {
     const submittedEventId = eventId;
     setSubmitting(true);
     setError(null);
-    setSubmitMessage(null);
 
     try {
       const saved = await putTrackedEventReleaseSource(
