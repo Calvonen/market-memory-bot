@@ -54,6 +54,8 @@ OFFICIAL_SOURCE_PRESENT_ROW = {
 
 TRACKED_PRESENT_ROW = {
     "tracked_market_events_table_exists": True,
+    "tracked_event_release_ingestion_audit_table_exists": True,
+    "record_tracked_event_release_ingestion_attempt_function_exists": True,
     "tracked_market_event_reactions_table_exists": True,
     "tracked_market_event_event_date_column_exists": True,
     "upsert_tracked_market_event_function_exists": True,
@@ -75,7 +77,7 @@ TRACKED_PRESENT_ROW = {
     "tracked_event_workflow_blockers_table_exists": True,
     "ensure_tracked_event_release_shell_with_blocker_function_exists": True,
     "calendarless_release_shell_trigger_exists": True,
-    "runtime_schema_version": 13,
+    "runtime_schema_version": 14,
 }
 
 
@@ -144,12 +146,34 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertIn("deployed: 7", err)
 
     def test_fails_closed_on_old_runtime_schema_version(self) -> None:
-        row = dict(TRACKED_PRESENT_ROW, runtime_schema_version=12)
+        row = dict(TRACKED_PRESENT_ROW, runtime_schema_version=13)
         exit_code, _out, err = self._run_with_client(
             _FakeClient(_responses(tracked_row=row))
         )
         self.assertEqual(exit_code, 1)
-        self.assertIn("tracked-event runtime schema version 13", err)
+        self.assertIn("tracked-event runtime schema version 14", err)
+
+    def test_fails_closed_when_ingestion_audit_table_is_missing(self) -> None:
+        row = dict(
+            TRACKED_PRESENT_ROW,
+            tracked_event_release_ingestion_audit_table_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_row=row))
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("tracked_event_release_ingestion_audit table", err)
+
+    def test_fails_closed_when_ingestion_audit_rpc_is_missing(self) -> None:
+        row = dict(
+            TRACKED_PRESENT_ROW,
+            record_tracked_event_release_ingestion_attempt_function_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_row=row))
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("record_tracked_event_release_ingestion_attempt", err)
 
     def test_fails_closed_when_event_date_column_is_missing(self) -> None:
         row = dict(
