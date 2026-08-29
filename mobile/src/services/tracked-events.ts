@@ -47,6 +47,9 @@ export type TrackedEventWorkflowStep = {
   key: string;
   mode: TrackedEventWorkflowStepMode;
   status: TrackedEventWorkflowStepStatus;
+  action_target: string | null;
+  action_code: string | null;
+  action_reason: string | null;
 };
 
 export type TrackedEventWorkflowResponse = {
