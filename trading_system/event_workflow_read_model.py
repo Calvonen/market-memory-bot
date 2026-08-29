@@ -26,6 +26,8 @@ class WorkflowReadStep:
     mode: str
     status: str
     action_target: str | None
+    action_code: str | None
+    action_reason: str | None
 
 
 @dataclass(frozen=True)
@@ -73,7 +75,7 @@ def build_event_workflow_read_model(
         event_id=event.event_id,
         profile_id=profile.profile_id,
         trading_mode=trading_mode.value if trading_mode is not None else None,
-        steps=_join_steps(profile, states),
+        steps=_join_steps(profile, states, evidence),
     )
 
 
@@ -106,6 +108,7 @@ def _require_compatible_trading_evidence(
 def _join_steps(
     profile: EventWorkflowProfile,
     states: tuple[WorkflowStepState, ...],
+    evidence: WorkflowReadinessEvidence,
 ) -> tuple[WorkflowReadStep, ...]:
     if len(profile.steps) != len(states):
         raise RuntimeError("workflow profile and readiness projection differ in length")
@@ -113,12 +116,16 @@ def _join_steps(
     result: list[WorkflowReadStep] = []
     for definition, state in zip(profile.steps, states, strict=True):
         _require_same_step(definition, state)
+        action_target = _action_target(definition, state)
+        action_code, action_reason = _action_metadata(definition, state, evidence)
         result.append(
             WorkflowReadStep(
                 key=definition.key.value,
                 mode=definition.mode.value,
                 status=state.status.value,
-                action_target=_action_target(definition, state),
+                action_target=action_target,
+                action_code=action_code,
+                action_reason=action_reason,
             )
         )
     return tuple(result)
@@ -136,6 +143,19 @@ def _action_target(
     ):
         return "release"
     return None
+
+
+def _action_metadata(
+    definition: WorkflowStepDefinition,
+    state: WorkflowStepState,
+    evidence: WorkflowReadinessEvidence,
+) -> tuple[str | None, str | None]:
+    if (
+        definition.key is WorkflowStepKey.RELEASE
+        and state.status is WorkflowStepStatus.ACTION_REQUIRED
+    ):
+        return evidence.release_action_code, evidence.release_action_reason
+    return None, None
 
 
 def _require_same_step(

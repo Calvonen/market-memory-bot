@@ -47,7 +47,7 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         release_event_id = canonical_release_event_id(event)
         current_version = self._current_expectation_version(release_event_id)
         latest_run = self._latest_release_run(release_event_id)
-        tracked_release_blocker = self._tracked_release_blocker(event.event_id)
+        tracked_release_blocker = self._tracked_release_blocker_metadata(event.event_id)
         paper_state = self._paper_state_for_version(release_event_id, current_version)
         persisted_release_document_present = self._exists(
             "event_source_documents", "event_id", release_event_id
@@ -56,20 +56,25 @@ class SupabaseWorkflowReadinessEvidenceLoader:
             release_event_id, current_version
         )
         canonical_blocker = (
-            _is_canonical_release_blocker(latest_run) or tracked_release_blocker
+            _is_canonical_release_blocker(latest_run)
+            or tracked_release_blocker is not None
         )
         release_document_present = (
             persisted_release_document_present and not canonical_blocker
+        )
+        release_action_code, release_action_reason = _release_action_metadata(
+            latest_run,
+            tracked_release_blocker,
+            release_document_present=release_document_present,
         )
 
         return WorkflowReadinessEvidence(
             tracked_status=event.status,
             event_id=event.event_id,
             release_document_present=release_document_present,
-            release_failed=(
-                canonical_blocker
-                or (not release_document_present and _release_requires_action(latest_run))
-            ),
+            release_failed=release_action_code is not None,
+            release_action_code=release_action_code,
+            release_action_reason=release_action_reason,
             analysis_present=analysis_present,
             reaction_present=self._exists(
                 "tracked_market_event_reactions",
@@ -140,9 +145,14 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         return rows[0] if rows else None
 
     def _tracked_release_blocker(self, tracked_event_id: str) -> bool:
+        return self._tracked_release_blocker_metadata(tracked_event_id) is not None
+
+    def _tracked_release_blocker_metadata(
+        self, tracked_event_id: str
+    ) -> dict[str, Any] | None:
         response = (
             self.client.table("tracked_event_workflow_blockers")
-            .select("blocker_code,resolved_at,updated_at")
+            .select("blocker_code,message,resolved_at,updated_at")
             .eq("tracked_market_event_id", tracked_event_id)
             .eq("step_key", "release")
             .order("updated_at", desc=True)
@@ -150,7 +160,9 @@ class SupabaseWorkflowReadinessEvidenceLoader:
             .execute()
         )
         rows = response.data or []
-        return bool(rows and rows[0].get("resolved_at") is None)
+        if not rows or rows[0].get("resolved_at") is not None:
+            return None
+        return rows[0]
 
     def _paper_state_for_version(
         self, event_id: str, version: int | None
@@ -198,16 +210,36 @@ def _is_canonical_release_blocker(run: dict[str, Any] | None) -> bool:
     )
 
 
-def _release_requires_action(run: dict[str, Any] | None) -> bool:
-    if run is None:
-        return False
+def _release_action_metadata(
+    run: dict[str, Any] | None,
+    tracked_blocker: dict[str, Any] | None,
+    *,
+    release_document_present: bool,
+) -> tuple[str | None, str | None]:
+    if tracked_blocker is not None:
+        code = str(tracked_blocker.get("blocker_code") or "").strip()
+        reason = str(tracked_blocker.get("message") or "").strip()
+        if not code or not reason:
+            raise RuntimeError("tracked release blocker metadata is invalid")
+        return code, reason
+
+    if _is_canonical_release_blocker(run):
+        message = str((run or {}).get("error_message") or "").strip()
+        reason = message[len(_ACTION_REQUIRED_PREFIX) :].strip()
+        if not reason:
+            raise RuntimeError("canonical release blocker reason is missing")
+        return "release_action_required", reason
+
+    if release_document_present or run is None:
+        return None, None
+
     status = str(run.get("status") or "").strip().lower()
+    message = str(run.get("error_message") or "").strip()
     if status in _RELEASE_ERROR_STATUSES:
-        return True
-    if status != "no_release":
-        return False
-    message = str(run.get("error_message") or "").lower()
-    return "release overdue:" in message
+        return "release_ingestion_error", message or "release ingestion failed"
+    if status == "no_release" and "release overdue:" in message.lower():
+        return "release_overdue", message
+    return None, None
 
 
 def _execution_outcome_from_paper_state(
