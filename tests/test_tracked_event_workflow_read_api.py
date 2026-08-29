@@ -146,11 +146,36 @@ class TrackedEventWorkflowReadApiTests(unittest.TestCase):
                 "profile_id": "earnings_documented_observation_v1",
                 "trading_mode": None,
                 "steps": [
-                    {"key": "tracking", "mode": "required", "status": "running"},
-                    {"key": "event_identified", "mode": "required", "status": "completed"},
-                    {"key": "release", "mode": "required", "status": "completed"},
-                    {"key": "analysis", "mode": "required", "status": "completed"},
-                    {"key": "market_reaction", "mode": "required", "status": "running"},
+                    {
+                        "key": "tracking",
+                        "mode": "required",
+                        "status": "running",
+                        "action_target": None,
+                    },
+                    {
+                        "key": "event_identified",
+                        "mode": "required",
+                        "status": "completed",
+                        "action_target": None,
+                    },
+                    {
+                        "key": "release",
+                        "mode": "required",
+                        "status": "completed",
+                        "action_target": None,
+                    },
+                    {
+                        "key": "analysis",
+                        "mode": "required",
+                        "status": "completed",
+                        "action_target": None,
+                    },
+                    {
+                        "key": "market_reaction",
+                        "mode": "required",
+                        "status": "running",
+                        "action_target": None,
+                    },
                 ],
             },
         )
@@ -192,7 +217,15 @@ class TrackedEventWorkflowReadApiTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["profile_id"], "content_event_observation_v1")
         release = next(step for step in payload["steps"] if step["key"] == "release")
-        self.assertEqual(release, {"key": "release", "mode": "skip", "status": "skipped"})
+        self.assertEqual(
+            release,
+            {
+                "key": "release",
+                "mode": "skip",
+                "status": "skipped",
+                "action_target": None,
+            },
+        )
 
     def test_release_failure_is_action_required(self):
         repository = _TrackedEventRepository(_event())
@@ -213,6 +246,7 @@ class TrackedEventWorkflowReadApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         release = next(step for step in response.json()["steps"] if step["key"] == "release")
         self.assertEqual(release["status"], "action_required")
+        self.assertEqual(release["action_target"], "release")
 
     def test_missing_event_is_404_without_evidence_read(self):
         repository = _TrackedEventRepository(None)

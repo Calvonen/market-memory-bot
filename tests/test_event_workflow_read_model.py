@@ -64,6 +64,27 @@ class EventWorkflowReadModelTests(unittest.TestCase):
                 ("market_reaction", "required", "running"),
             ],
         )
+        self.assertTrue(all(step.action_target is None for step in model.steps))
+
+    def test_release_action_required_targets_canonical_release_domain(self):
+        model = build_event_workflow_read_model(
+            _event(),
+            _evidence(
+                tracked_status=TrackedEventStatus.MONITORING,
+                release_failed=True,
+            ),
+        )
+
+        release = next(step for step in model.steps if step.key == "release")
+        self.assertEqual(release.status, "action_required")
+        self.assertEqual(release.action_target, "release")
+        self.assertTrue(
+            all(
+                step.action_target is None
+                for step in model.steps
+                if step.key != "release"
+            )
+        )
 
     def test_content_event_reports_release_as_skipped(self):
         model = build_event_workflow_read_model(
@@ -74,6 +95,7 @@ class EventWorkflowReadModelTests(unittest.TestCase):
         release = next(step for step in model.steps if step.key == "release")
         self.assertEqual(model.profile_id, "content_event_observation_v1")
         self.assertEqual((release.mode, release.status), ("skip", "skipped"))
+        self.assertIsNone(release.action_target)
 
     def test_explicit_paper_task_adds_strategy_risk_and_paper(self):
         model = build_event_workflow_read_model(
