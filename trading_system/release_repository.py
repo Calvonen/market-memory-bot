@@ -104,6 +104,18 @@ class SupabaseReleaseRepository:
         )
         return bool(response.data or [])
 
+    def latest_run(self, *, event_id: str) -> dict[str, Any] | None:
+        response = (
+            self.client.table("event_ingestion_runs")
+            .select("provider,status,error_message,created_at")
+            .eq("event_id", event_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        return rows[0] if rows else None
+
     def save_analysis(
         self,
         *,
