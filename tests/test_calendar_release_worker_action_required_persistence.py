@@ -230,6 +230,60 @@ class CalendarReleaseWorkerActionRequiredPersistenceTests(unittest.TestCase):
             error_message=None,
         )
 
+    def test_repaired_missing_source_blocker_is_cleared_when_analysis_exists(self):
+        releases = self._releases()
+        releases.has_analysis_for_event_version.return_value = True
+        releases.latest_run.return_value = {
+            "provider": ACTION_REQUIRED_PROVIDER,
+            "status": "error",
+            "error_message": (
+                "action_required: earnings target outside approved US market labels "
+                "requires an approved official release source"
+            ),
+        }
+
+        results = run_calendar_release_ingestion_once(
+            targets=_Targets(_target(ticker="HVN.ASX", market="SYDNEY")),
+            expectations=_Expectations(_expectation(ticker="HVN.ASX")),
+            releases=releases,
+            analyzer=MagicMock(),
+            clock=_clock,
+        )
+
+        self.assertEqual(results[0].status, "already_analyzed")
+        releases.record_run.assert_called_once_with(
+            event_id=EVENT_ID,
+            provider=ACTION_REQUIRED_PROVIDER,
+            status="validated",
+            error_message=None,
+        )
+
+    def test_missing_source_blocker_is_not_cleared_without_current_analysis(self):
+        releases = self._releases()
+        releases.latest_run.return_value = {
+            "provider": ACTION_REQUIRED_PROVIDER,
+            "status": "error",
+            "error_message": (
+                "action_required: earnings target outside approved US market labels "
+                "requires an approved official release source"
+            ),
+        }
+        official_sources = MagicMock()
+        official_sources.get.return_value = None
+
+        results = run_calendar_release_ingestion_once(
+            targets=_Targets(_target(ticker="HVN.ASX", market="SYDNEY")),
+            expectations=_Expectations(_expectation(ticker="HVN.ASX")),
+            releases=releases,
+            analyzer=MagicMock(),
+            official_sources=official_sources,
+            clock=_clock,
+        )
+
+        self.assertEqual(results[0].status, "missing_official_source")
+        self.assertEqual(releases.record_run.call_count, 1)
+        self.assertEqual(releases.record_run.call_args.kwargs["status"], "error")
+
     def test_missing_non_us_official_source_is_persisted_for_workflow_readiness(self):
         releases = self._releases()
         official_sources = MagicMock()
