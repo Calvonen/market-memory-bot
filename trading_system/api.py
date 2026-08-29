@@ -62,6 +62,9 @@ from trading_system.tracked_event_repository import (
     PersistentTrackedEvent,
     SupabaseTrackedEventRepository,
 )
+from trading_system.tracked_event_release_source_api import (
+    build_tracked_event_release_source_router,
+)
 from trading_system.tracked_event_result import (
     TrackedEventLatestReaction,
     latest_tracked_event_reaction,
@@ -500,6 +503,14 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Strategy approval is disabled until MARKETAI_CONTROL_API_KEY is configured")
         if not x_marketai_control_key or not secrets.compare_digest(x_marketai_control_key, configured_control_api_key):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing control API key")
+
+    app.include_router(
+        build_tracked_event_release_source_router(
+            require_read=require_read,
+            get_tracked_event_repository=get_tracked_event_repository,
+            get_official_release_source_repository=get_official_release_source_repository,
+        )
+    )
 
     @app.get("/health")
     def health() -> dict[str, str]:
