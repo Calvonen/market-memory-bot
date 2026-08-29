@@ -96,7 +96,19 @@ export default function TrackedEventReleaseHandoffScreen() {
       }
     } catch (submitError) {
       if (mountedRef.current && eventIdRef.current === submittedEventId) {
-        setError(submitError instanceof Error ? submitError.message : 'Julkaisulähteen tallennus epäonnistui.');
+        const writeError =
+          submitError instanceof Error ? submitError.message : 'Julkaisulähteen tallennus epäonnistui.';
+        setError(writeError);
+
+        try {
+          const currentSource = await getTrackedEventReleaseSource(submittedEventId);
+          if (mountedRef.current && eventIdRef.current === submittedEventId) {
+            setReleaseSource(currentSource);
+            setError(writeError);
+          }
+        } catch {
+          // Keep the original write error visible if refreshing canonical state also fails.
+        }
       }
     } finally {
       if (mountedRef.current && eventIdRef.current === submittedEventId) setSubmitting(false);
