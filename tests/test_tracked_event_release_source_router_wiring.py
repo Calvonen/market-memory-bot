@@ -21,6 +21,7 @@ class TrackedEventReleaseSourceRouterWiringTests(unittest.TestCase):
             "app.include_router(\n"
             "        build_tracked_event_release_source_router(\n"
             "            require_read=require_read,\n"
+            "            require_control=require_control,\n"
             "            get_tracked_event_repository=get_tracked_event_repository,\n"
             "            get_official_release_source_repository=get_official_release_source_repository,\n"
             "        )\n"

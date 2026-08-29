@@ -507,6 +507,7 @@ def create_app(
     app.include_router(
         build_tracked_event_release_source_router(
             require_read=require_read,
+            require_control=require_control,
             get_tracked_event_repository=get_tracked_event_repository,
             get_official_release_source_repository=get_official_release_source_repository,
         )
