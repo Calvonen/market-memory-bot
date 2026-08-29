@@ -1,10 +1,11 @@
 import { useLocalSearchParams } from 'expo-router';
-import { useEffect, useState } from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { BackButton } from '@/components/back-button';
 import {
   getTrackedEventReleaseSource,
+  putTrackedEventReleaseSource,
   type TrackedEventReleaseSource,
 } from '@/services/tracked-events';
 
@@ -13,12 +14,34 @@ export default function TrackedEventReleaseHandoffScreen() {
   const [releaseSource, setReleaseSource] = useState<TrackedEventReleaseSource | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [sourceUrl, setSourceUrl] = useState('');
+  const [sourceTitle, setSourceTitle] = useState('');
+  const [approver, setApprover] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [submitMessage, setSubmitMessage] = useState<string | null>(null);
+  const eventIdRef = useRef(eventId);
+  const mountedRef = useRef(true);
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+  }, []);
+
+  useEffect(() => {
+    eventIdRef.current = eventId;
+  }, [eventId]);
 
   useEffect(() => {
     let cancelled = false;
+    // Reset stale state immediately when the route switches to another event.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
     setReleaseSource(null);
     setError(null);
+    setSourceUrl('');
+    setSourceTitle('');
+    setApprover('');
+    setSubmitting(false);
+    setSubmitMessage(null);
 
     async function loadReleaseSource() {
       if (!eventId) {
@@ -31,6 +54,8 @@ export default function TrackedEventReleaseHandoffScreen() {
         const source = await getTrackedEventReleaseSource(eventId);
         if (!cancelled) {
           setReleaseSource(source);
+          setSourceUrl(source.source_url ?? '');
+          setSourceTitle(source.source_title ?? '');
           setError(null);
         }
       } catch (loadError) {
@@ -47,6 +72,67 @@ export default function TrackedEventReleaseHandoffScreen() {
       cancelled = true;
     };
   }, [eventId]);
+
+  async function submitReleaseSource() {
+    if (!eventId || !releaseSource || submitting) return;
+
+    setSubmitMessage(null);
+
+    const normalizedUrl = sourceUrl.trim();
+    if (!normalizedUrl.startsWith('https://')) {
+      setError('Syötä HTTPS-osoite.');
+      return;
+    }
+
+    const normalizedApprover = approver.trim();
+    if (!normalizedApprover) {
+      setError('Syötä hyväksyjän tunniste.');
+      return;
+    }
+
+    const submittedEventId = eventId;
+    setSubmitting(true);
+    setError(null);
+
+    try {
+      const saved = await putTrackedEventReleaseSource(
+        submittedEventId,
+        {
+          source_kind: releaseSource.active && releaseSource.source_kind
+            ? releaseSource.source_kind
+            : 'direct_url',
+          source_url: normalizedUrl,
+          ...(sourceTitle.trim() ? { source_title: sourceTitle.trim() } : {}),
+          expected_version: releaseSource.version,
+        },
+        normalizedApprover,
+      );
+      if (mountedRef.current && eventIdRef.current === submittedEventId) {
+        setReleaseSource(saved);
+        setSubmitMessage('Julkaisulähde tallennettu.');
+      }
+    } catch (submitError) {
+      if (mountedRef.current && eventIdRef.current === submittedEventId) {
+        const writeError =
+          submitError instanceof Error ? submitError.message : 'Julkaisulähteen tallennus epäonnistui.';
+        setError(writeError);
+
+        try {
+          const currentSource = await getTrackedEventReleaseSource(submittedEventId);
+          if (mountedRef.current && eventIdRef.current === submittedEventId) {
+            setReleaseSource(currentSource);
+            setSourceUrl(currentSource.source_url ?? '');
+            setSourceTitle(currentSource.source_title ?? '');
+            setError(writeError);
+          }
+        } catch {
+          // Keep the original write error visible if refreshing canonical state also fails.
+        }
+      }
+    } finally {
+      if (mountedRef.current && eventIdRef.current === submittedEventId) setSubmitting(false);
+    }
+  }
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
@@ -89,9 +175,49 @@ export default function TrackedEventReleaseHandoffScreen() {
         ) : null}
       </View>
 
+      <View style={styles.card}>
+        <Text style={styles.label}>Muuta julkaisulähdettä</Text>
+        <TextInput
+          autoCapitalize="none"
+          autoCorrect={false}
+          keyboardType="url"
+          onChangeText={setSourceUrl}
+          placeholder="https://…"
+          placeholderTextColor="#677386"
+          style={styles.input}
+          value={sourceUrl}
+        />
+        <TextInput
+          onChangeText={setSourceTitle}
+          placeholder="Otsikko (valinnainen)"
+          placeholderTextColor="#677386"
+          style={styles.input}
+          value={sourceTitle}
+        />
+        <TextInput
+          autoCapitalize="none"
+          autoCorrect={false}
+          onChangeText={setApprover}
+          placeholder="Hyväksyjän tunniste"
+          placeholderTextColor="#677386"
+          style={styles.input}
+          value={approver}
+        />
+        <Pressable
+          disabled={!releaseSource || !sourceUrl.trim() || !approver.trim() || submitting}
+          onPress={() => void submitReleaseSource()}
+          style={({ pressed }) => [
+            styles.button,
+            (!releaseSource || !sourceUrl.trim() || !approver.trim() || submitting) && styles.buttonDisabled,
+            pressed && styles.buttonPressed,
+          ]}>
+          <Text style={styles.buttonText}>{submitting ? 'Tallennetaan…' : 'Tallenna lähde'}</Text>
+        </Pressable>
+        {submitMessage ? <Text style={styles.success}>{submitMessage}</Text> : null}
+      </View>
+
       <Text style={styles.note}>
-        Näkymä on edelleen read-only: se ei käynnistä ingestionia, muuta workflow-tilaa eikä luo
-        trading taskia.
+        Lähteen tallentaminen ei käynnistä käsittelyä, muuta workflow-tilaa eikä luo kaupankäyntitehtävää.
       </Text>
     </ScrollView>
   );
@@ -164,6 +290,40 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 19,
     marginTop: 8,
+  },
+  input: {
+    backgroundColor: '#0d1118',
+    borderColor: '#2a3342',
+    borderRadius: 8,
+    borderWidth: 1,
+    color: '#f4f7fb',
+    fontSize: 13,
+    marginTop: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  button: {
+    alignItems: 'center',
+    backgroundColor: '#2d6cdf',
+    borderRadius: 8,
+    marginTop: 12,
+    padding: 11,
+  },
+  buttonDisabled: {
+    opacity: 0.45,
+  },
+  buttonPressed: {
+    opacity: 0.8,
+  },
+  buttonText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  success: {
+    color: '#80d5a6',
+    fontSize: 13,
+    marginTop: 10,
   },
   note: {
     color: '#8994a6',
