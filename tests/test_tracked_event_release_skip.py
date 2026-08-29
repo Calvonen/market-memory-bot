@@ -35,11 +35,6 @@ def _event() -> PersistentTrackedEvent:
     )
 
 
-class _Shell:
-    def ensure_release_shell(self, event):
-        return RELEASE_ID
-
-
 class _Audit:
     def __init__(self):
         self.calls = []
@@ -57,7 +52,6 @@ def test_service_records_only_canonical_identity_and_operator_audit() -> None:
     audit = _Audit()
     result = skip_tracked_event_release(
         _event(),
-        release_shell_repository=_Shell(),
         audit_repository=audit,
         actor="operator@example.com",
         reason="Release is not relevant to this tracked event",
@@ -81,8 +75,10 @@ def _client() -> TestClient:
         build_tracked_event_release_skip_router(
             require_control=lambda key: None,
             get_tracked_event_repository=lambda: _Events(),
-            get_release_shell_repository=lambda: _Shell(),
             get_release_skip_audit_repository=lambda: _Audit(),
+            get_release_shell_repository=lambda: (_ for _ in ()).throw(
+                AssertionError("mutating shell validator must not be called")
+            ),
         )
     )
     return TestClient(app)
