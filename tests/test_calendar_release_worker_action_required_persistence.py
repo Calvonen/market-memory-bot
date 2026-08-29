@@ -106,7 +106,7 @@ class CalendarReleaseWorkerActionRequiredPersistenceTests(unittest.TestCase):
             ),
         )
 
-    def test_calendar_binding_identity_conflict_is_persisted_before_expectation_lookup(self):
+    def test_calendar_binding_identity_conflict_uses_pre_shell_persistence(self):
         releases = self._releases()
         expectations = _Expectations(_expectation())
         targets = _Targets(
@@ -126,15 +126,7 @@ class CalendarReleaseWorkerActionRequiredPersistenceTests(unittest.TestCase):
 
         self.assertEqual(results[0].status, "identity_conflict")
         self.assertEqual(expectations.calls, [])
-        releases.record_run.assert_called_once_with(
-            event_id=EVENT_ID,
-            provider=ACTION_REQUIRED_PROVIDER,
-            status="error",
-            error_message=(
-                "action_required: canonical release-shell identity conflicts with "
-                "tracked-event identity"
-            ),
-        )
+        releases.record_run.assert_not_called()
 
     def test_unrelated_shell_rpc_failure_remains_retryable_error(self):
         releases = self._releases()
