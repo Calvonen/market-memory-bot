@@ -7,9 +7,9 @@ from typing import Callable
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
-from trading_system.tracked_event_release_ingestion import ReleaseIngestionNotReady
 from trading_system.tracked_event_release_skip import (
     MAX_RELEASE_SKIP_REASON_LENGTH,
+    ReleaseSkipConflict,
     skip_tracked_event_release,
 )
 
@@ -26,7 +26,6 @@ def build_tracked_event_release_skip_router(
     *,
     require_control: Callable[[str | None], None],
     get_tracked_event_repository,
-    get_release_shell_repository,
     get_release_skip_audit_repository,
 ) -> APIRouter:
     router = APIRouter()
@@ -62,7 +61,6 @@ def build_tracked_event_release_skip_router(
             return asdict(
                 skip_tracked_event_release(
                     event,
-                    release_shell_repository=get_release_shell_repository(),
                     audit_repository=get_release_skip_audit_repository(),
                     actor=actor,
                     reason=reason,
@@ -70,7 +68,7 @@ def build_tracked_event_release_skip_router(
             )
         except HTTPException:
             raise
-        except ReleaseIngestionNotReady as exc:
+        except ReleaseSkipConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
