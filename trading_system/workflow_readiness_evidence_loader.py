@@ -47,7 +47,7 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         release_event_id = canonical_release_event_id(event)
         current_version = self._current_expectation_version(release_event_id)
         latest_run = self._latest_release_run(release_event_id)
-        tracked_release_blocker = self._tracked_release_blocker(event.event_id)
+        tracked_release_blocker = self._tracked_release_blocker_metadata(event.event_id)
         paper_state = self._paper_state_for_version(release_event_id, current_version)
         persisted_release_document_present = self._exists(
             "event_source_documents", "event_id", release_event_id
@@ -144,7 +144,12 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         rows = response.data or []
         return rows[0] if rows else None
 
-    def _tracked_release_blocker(self, tracked_event_id: str) -> dict[str, Any] | None:
+    def _tracked_release_blocker(self, tracked_event_id: str) -> bool:
+        return self._tracked_release_blocker_metadata(tracked_event_id) is not None
+
+    def _tracked_release_blocker_metadata(
+        self, tracked_event_id: str
+    ) -> dict[str, Any] | None:
         response = (
             self.client.table("tracked_event_workflow_blockers")
             .select("blocker_code,message,resolved_at,updated_at")
@@ -235,18 +240,6 @@ def _release_action_metadata(
     if status == "no_release" and "release overdue:" in message.lower():
         return "release_overdue", message
     return None, None
-
-
-def _release_requires_action(run: dict[str, Any] | None) -> bool:
-    if run is None:
-        return False
-    status = str(run.get("status") or "").strip().lower()
-    if status in _RELEASE_ERROR_STATUSES:
-        return True
-    if status != "no_release":
-        return False
-    message = str(run.get("error_message") or "").lower()
-    return "release overdue:" in message
 
 
 def _execution_outcome_from_paper_state(
