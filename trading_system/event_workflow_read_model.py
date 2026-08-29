@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from trading_system.event_workflow import (
     EventWorkflowProfile,
     WorkflowStepDefinition,
+    WorkflowStepKey,
     WorkflowStepState,
+    WorkflowStepStatus,
     workflow_profile_for_kind,
 )
 from trading_system.event_workflow_readiness import (
@@ -23,6 +25,7 @@ class WorkflowReadStep:
     key: str
     mode: str
     status: str
+    action_target: str | None
 
 
 @dataclass(frozen=True)
@@ -115,9 +118,24 @@ def _join_steps(
                 key=definition.key.value,
                 mode=definition.mode.value,
                 status=state.status.value,
+                action_target=_action_target(definition, state),
             )
         )
     return tuple(result)
+
+
+def _action_target(
+    definition: WorkflowStepDefinition,
+    state: WorkflowStepState,
+) -> str | None:
+    # The read model identifies the canonical domain target only. It does not
+    # choose a UI route, write endpoint, retry policy, or remediation method.
+    if (
+        definition.key is WorkflowStepKey.RELEASE
+        and state.status is WorkflowStepStatus.ACTION_REQUIRED
+    ):
+        return "release"
+    return None
 
 
 def _require_same_step(
