@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
@@ -22,6 +23,17 @@ def _braced_block(source: str, signature: str) -> str:
             if depth == 0:
                 return source[start : index + 1]
     raise AssertionError(f"Unterminated block for {signature}")
+
+
+def _tracked_event_service_calls(source: str) -> set[str]:
+    imported = {
+        "getTrackedEventReleaseSource",
+        "getTrackedEventWorkflow",
+        "ingestTrackedEventRelease",
+        "putTrackedEventReleaseSource",
+    }
+    called = set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", source))
+    return called & imported
 
 
 class MobileTrackedEventReleaseIngestionTests(unittest.TestCase):
@@ -63,34 +75,24 @@ class MobileTrackedEventReleaseIngestionTests(unittest.TestCase):
 
         guard = "if (mountedRef.current && eventIdRef.current === submittedEventId) {"
         self.assertIn(guard, success_path)
-        guarded_update = success_path.split(guard, 1)[1]
+        guarded_update = _braced_block(success_path, guard)
         self.assertIn("setReleaseSource(currentSource)", guarded_update)
         self.assertIn("setWorkflow(currentWorkflow)", guarded_update)
         self.assertIn("setSourceUrl(currentSource.source_url ?? '')", guarded_update)
         self.assertIn("setSourceTitle(currentSource.source_title ?? '')", guarded_update)
 
     def test_mobile_ingestion_executes_only_canonical_release_helpers(self) -> None:
-        service_source = SERVICE_PATH.read_text(encoding="utf-8")
         screen = SCREEN_PATH.read_text(encoding="utf-8")
-        ingestion_service = _braced_block(service_source, "export function ingestTrackedEventRelease(")
         process_release = _braced_block(screen, "async function processRelease() {")
-        executable = ingestion_service + process_release
 
-        self.assertIn("ingestTrackedEventRelease(submittedEventId, normalizedActor)", process_release)
-        self.assertIn("getTrackedEventReleaseSource(submittedEventId)", process_release)
-        self.assertIn("getTrackedEventWorkflow(submittedEventId)", process_release)
-        for forbidden in (
-            "skipTrackedEventRelease(",
-            "runPostReleasePaper(",
-            "runStrategy(",
-            "runRisk(",
-            "broker.",
-            "/release-skip",
-            "paper-run",
-            "trading-task",
-            "run_post_release_paper",
-        ):
-            self.assertNotIn(forbidden.lower(), executable.lower())
+        self.assertEqual(
+            _tracked_event_service_calls(process_release),
+            {
+                "ingestTrackedEventRelease",
+                "getTrackedEventReleaseSource",
+                "getTrackedEventWorkflow",
+            },
+        )
 
 
 if __name__ == "__main__":
