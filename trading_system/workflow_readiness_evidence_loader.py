@@ -47,6 +47,7 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         release_event_id = canonical_release_event_id(event)
         current_version = self._current_expectation_version(release_event_id)
         latest_run = self._latest_release_run(release_event_id)
+        tracked_release_blocker = self._tracked_release_blocker(event.event_id)
         paper_state = self._paper_state_for_version(release_event_id, current_version)
         persisted_release_document_present = self._exists(
             "event_source_documents", "event_id", release_event_id
@@ -54,7 +55,9 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         analysis_present = self._analysis_exists_for_version(
             release_event_id, current_version
         )
-        canonical_blocker = _is_canonical_release_blocker(latest_run)
+        canonical_blocker = (
+            _is_canonical_release_blocker(latest_run) or tracked_release_blocker
+        )
         release_document_present = (
             persisted_release_document_present and not canonical_blocker
         )
@@ -135,6 +138,18 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         )
         rows = response.data or []
         return rows[0] if rows else None
+
+    def _tracked_release_blocker(self, tracked_event_id: str) -> bool:
+        response = (
+            self.client.table("tracked_event_workflow_blockers")
+            .select("blocker_code")
+            .eq("tracked_market_event_id", tracked_event_id)
+            .eq("step_key", "release")
+            .is_("resolved_at", "null")
+            .limit(1)
+            .execute()
+        )
+        return bool(response.data or [])
 
     def _paper_state_for_version(
         self, event_id: str, version: int | None
