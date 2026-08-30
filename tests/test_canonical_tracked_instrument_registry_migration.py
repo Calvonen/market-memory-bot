@@ -36,47 +36,31 @@ class CanonicalTrackedInstrumentRegistryMigrationTests(unittest.TestCase):
         self.assertIn("tracked_instruments.sources || excluded.sources[1]", upsert_body)
         self.assertIn("active = true", upsert_body)
 
-        forbidden_writes = (
-            "insert into public.tracked_market_events",
-            "update public.tracked_market_events",
-            "insert into public.market_events",
-            "update public.market_events",
-            "insert into public.event_expectations",
-            "update public.event_expectations",
-            "insert into public.event_expectation_versions",
-            "update public.event_expectation_versions",
-            "insert into public.event_strategy_approvals",
-            "update public.event_strategy_approvals",
-            "insert into public.event_paper_trade_runs",
-            "update public.event_paper_trade_runs",
-            "insert into public.trading_tasks",
-            "update public.trading_tasks",
-            "upsert_tracked_market_event(",
-            "promote_calendar_event_to_tracked_runtime(",
-            "ensure_calendar_release_shell(",
-            "ensure_tracked_event_release_shell(",
-            "ensure_tracked_event_release_shell_with_blocker(",
-            "arm_tracked_market_event_resolution(",
-            "capture_tracked_market_event_reference(",
-            "capture_tracked_market_event_reaction_anchor(",
-            "capture_tracked_market_event_config_snapshot(",
-            "capture_tracked_market_event_pre_event_context(",
-            "capture_tracked_market_event_pre_event_context_if_current(",
-            "capture_tracked_market_event_pre_event_context_validated(",
-            "validate_tracked_market_event_pre_event_context_if_current(",
-            "fail_tracked_market_event_pre_event_deadline_if_current(",
-            "fail_tracked_market_event_stale_context_if_current(",
-            "insert_next_expectation_version(",
-            "approve_strategy_draft(",
-            "claim_event_paper_run(",
-            "save_event_paper_trade_result(",
-            "create_trading_task(",
+        # The canonical instrument upsert may mutate only its own registry table.
+        # Removing that exact object reference must leave no access to any other
+        # public table, function, or RPC surface. This is intentionally broader
+        # than a name-by-name denylist so new tracked-event/paper/trading mutators
+        # cannot silently enter this producer-neutral boundary later.
+        downstream_surface = upsert_body.replace("public.tracked_instruments", "")
+        self.assertNotIn("public.", downstream_surface)
+
+        for forbidden_sql in (
+            "delete from ",
+            "truncate ",
+            "perform ",
+            "call ",
+            "execute ",
+        ):
+            self.assertNotIn(forbidden_sql, upsert_body)
+
+        for forbidden_domain in (
             "strategy",
             "risk",
             "broker",
-        )
-        for forbidden_write in forbidden_writes:
-            self.assertNotIn(forbidden_write, upsert_body)
+            "trading_task",
+            "paper_trade",
+        ):
+            self.assertNotIn(forbidden_domain, upsert_body)
 
     def test_registry_mutations_are_rpc_only_and_source_values_are_bounded(self) -> None:
         self.assertIn("alter table public.tracked_instruments enable row level security", self.lower_sql)
