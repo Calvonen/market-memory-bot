@@ -12,6 +12,7 @@ from trading_system.etoro_instrument_resolver import (
     EtoroInstrumentResolver,
     InstrumentResolutionRequest,
 )
+from trading_system.market_reaction import DEFAULT_FLAT_THRESHOLD_PCT
 from trading_system.models import ComponentAssessment, EventExpectation, PortfolioState
 from trading_system.pipeline import PaperTradingPipeline
 from trading_system.post_release_paper import PostReleasePaperResult, run_post_release_paper
@@ -22,7 +23,6 @@ from trading_system.tracked_event_repository import (
 
 
 _CANONICAL_REFERENCE_KIND = "etoro_last_execution_pre_event_snapshot"
-_CANONICAL_FLAT_THRESHOLD_PCT = Decimal("0.25")
 
 
 @dataclass(frozen=True)
@@ -52,11 +52,22 @@ def _normalise_text(value: str) -> str:
     return " ".join(value.strip().upper().split())
 
 
+def _is_aware(value: datetime) -> bool:
+    return value.tzinfo is not None and value.utcoffset() is not None
+
+
 def _validate_broker_identity(
     event: PersistentTrackedEvent,
     resolver: EtoroInstrumentResolver,
 ) -> None:
     """Re-resolve eToro identity and prove the persisted reference belongs to it."""
+    if event.resolution_armed_at is None or not event.resolution_armed_by:
+        raise ValueError("persisted reference eToro identity is not armed")
+    if not _is_aware(event.resolution_armed_at):
+        raise ValueError("persisted eToro resolution timestamp must be timezone-aware")
+    if event.resolution_armed_at.astimezone(UTC) > event.event_at.astimezone(UTC):
+        raise ValueError("persisted eToro identity was armed after event time")
+
     resolved = resolver.resolve(
         InstrumentResolutionRequest(
             instrument=event.instrument,
@@ -83,9 +94,9 @@ def _validate_broker_identity(
 
 
 def _canonical_direction(return_pct: Decimal) -> str:
-    if return_pct > _CANONICAL_FLAT_THRESHOLD_PCT:
+    if return_pct > DEFAULT_FLAT_THRESHOLD_PCT:
         return "positive"
-    if return_pct < -_CANONICAL_FLAT_THRESHOLD_PCT:
+    if return_pct < -DEFAULT_FLAT_THRESHOLD_PCT:
         return "negative"
     return "flat"
 
@@ -105,6 +116,8 @@ def build_tracked_event_price_confirmation(
     """
     if event.kind.strip().lower() != "earnings":
         raise ValueError("tracked event is not an earnings event")
+    if not _is_aware(event.event_at):
+        raise ValueError("tracked event time must be timezone-aware")
 
     release_event_id = canonical_release_event_id(event)
     if expectation.event_id != release_event_id:
@@ -116,18 +129,13 @@ def build_tracked_event_price_confirmation(
     reference = event.reference_price
     if anchor is None or reference is None:
         return None
-    if event.event_at.tzinfo is None or event.event_at.utcoffset() is None:
-        raise ValueError("tracked event time must be timezone-aware")
-    if anchor.tzinfo is None or anchor.utcoffset() is None:
+    if not _is_aware(anchor):
         raise ValueError("tracked reaction anchor must be timezone-aware")
     if reference <= 0 or not reference.is_finite():
         raise ValueError("tracked event reference price is invalid")
     if event.reference_captured_at is None:
         raise ValueError("tracked event reference capture timestamp is missing")
-    if (
-        event.reference_captured_at.tzinfo is None
-        or event.reference_captured_at.utcoffset() is None
-    ):
+    if not _is_aware(event.reference_captured_at):
         raise ValueError("tracked event reference capture timestamp must be timezone-aware")
     if event.reference_captured_at.astimezone(UTC) > event.event_at.astimezone(UTC):
         raise ValueError("tracked event reference was captured after event time")
@@ -136,22 +144,22 @@ def build_tracked_event_price_confirmation(
 
     _validate_broker_identity(event, resolver)
 
-    candidates = [
-        reaction
-        for reaction in reactions
-        if reaction.tracked_market_event_id == event.event_id
-        and reaction.interval_minutes == 1
-        and reaction.candle_start.astimezone(UTC) == anchor.astimezone(UTC)
-    ]
+    candidates: list[TrackedEventReactionRecord] = []
+    for reaction in reactions:
+        if reaction.tracked_market_event_id != event.event_id or reaction.interval_minutes != 1:
+            continue
+        if not _is_aware(reaction.candle_start):
+            raise ValueError("tracked reaction candle_start must be timezone-aware")
+        if reaction.candle_start.astimezone(UTC) == anchor.astimezone(UTC):
+            candidates.append(reaction)
+
     if not candidates:
         return None
     if len(candidates) != 1:
         raise ValueError("tracked event has ambiguous anchored 1m reactions")
 
     reaction = candidates[0]
-    if reaction.candle_start.tzinfo is None or reaction.candle_start.utcoffset() is None:
-        raise ValueError("tracked reaction candle_start must be timezone-aware")
-    if reaction.observed_at.tzinfo is None or reaction.observed_at.utcoffset() is None:
+    if not _is_aware(reaction.observed_at):
         raise ValueError("tracked reaction observed_at must be timezone-aware")
     if reaction.candle_start.astimezone(UTC) < event.event_at.astimezone(UTC):
         raise ValueError("tracked reaction precedes event time")
