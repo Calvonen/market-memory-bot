@@ -10,6 +10,7 @@ import {
 } from '@/services/tracking-profiles';
 
 const PROFILE_ACTOR = 'mobile-tracking-profile';
+const DEFAULT_PROFILE_TYPE: TrackingProfileType = 'trend';
 const PROFILE_TYPES: { type: TrackingProfileType; label: string }[] = [
   { type: 'earnings', label: 'Tulosjulkaisut' },
   { type: 'trend', label: 'Trendi' },
@@ -22,7 +23,7 @@ type Props = {
 
 export function TrackingProfileEditor({ trackedInstrumentId }: Props) {
   const [profiles, setProfiles] = useState<TrackedInstrumentProfile[]>([]);
-  const [selectedType, setSelectedType] = useState<TrackingProfileType>('trend');
+  const [selectedType, setSelectedType] = useState<TrackingProfileType>(DEFAULT_PROFILE_TYPE);
   const [specs, setSpecs] = useState('');
   const [enabled, setEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -33,12 +34,15 @@ export function TrackingProfileEditor({ trackedInstrumentId }: Props) {
     let active = true;
     setLoading(true);
     setError('');
+    setSelectedType(DEFAULT_PROFILE_TYPE);
 
     void getTrackingProfiles(trackedInstrumentId)
       .then((loaded) => {
         if (!active) return;
         setProfiles(loaded);
-        const current = loaded.find((profile) => profile.profile_type === selectedType);
+        const current = loaded.find(
+          (profile) => profile.profile_type === DEFAULT_PROFILE_TYPE,
+        );
         setSpecs(current?.specs ?? '');
         setEnabled(current?.enabled ?? false);
       })
@@ -117,9 +121,12 @@ export function TrackingProfileEditor({ trackedInstrumentId }: Props) {
 
       <Pressable
         accessibilityRole="button"
+        disabled={saving}
         onPress={() => setEnabled((current) => !current)}
         style={shared.button}>
-        <Text style={shared.buttonText}>{enabled ? 'Profiili käytössä' : 'Ota profiili käyttöön'}</Text>
+        <Text style={shared.buttonText}>
+          {enabled ? 'Poista profiili käytöstä' : 'Ota profiili käyttöön'}
+        </Text>
       </Pressable>
 
       <TextInput
@@ -130,6 +137,7 @@ export function TrackingProfileEditor({ trackedInstrumentId }: Props) {
         placeholder="Mitä tästä yhtiöstä halutaan seurata?"
         style={[
           shared.card,
+          shared.text,
           {
             minHeight: 88,
             textAlignVertical: 'top',
