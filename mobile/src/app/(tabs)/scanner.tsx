@@ -3,7 +3,11 @@ import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 
 import { ScreenShell, shared } from '@/components/screen-shell';
 import { apiGet, ScannerResult } from '@/services/api';
-import { trackInstrument } from '@/services/tracked-instruments';
+import {
+  getTrackedInstruments,
+  TrackedInstrument,
+  trackInstrument,
+} from '@/services/tracked-instruments';
 
 const COUNTRIES = [
   { label: 'Suomi', value: 'Finland' },
@@ -16,25 +20,34 @@ const SCOPES = ['Top', 'Full'] as const;
 const SCOPE_LIMITS: Record<(typeof SCOPES)[number], number> = { Top: 10, Full: 25 };
 const TRACKING_ACTOR = 'mobile-scanner';
 
-type TrackingStatus = 'saving' | 'saved' | 'error';
+type TrackingStatus = 'saving' | 'error';
+
+function matchesTrackedInstrument(
+  item: TrackedInstrument,
+  ticker: string,
+  country: string,
+): boolean {
+  return (
+    item.active &&
+    item.instrument.trim().toUpperCase() === ticker.trim().toUpperCase() &&
+    item.market.trim().toLowerCase() === country.trim().toLowerCase()
+  );
+}
 
 export default function ScannerScreen() {
   const [country, setCountry] = useState('Finland');
   const [scope, setScope] = useState<(typeof SCOPES)[number]>('Top');
   const [data, setData] = useState<ScannerResult | null>(null);
+  const [trackedInstruments, setTrackedInstruments] = useState<TrackedInstrument[]>([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [trackingStatus, setTrackingStatus] = useState<Record<string, TrackingStatus>>({});
   const latestRequestId = useRef(0);
+  const trackedMutationVersion = useRef(0);
 
   const market = `${country} ${scope}`;
   const limit = SCOPE_LIMITS[scope];
 
-  // Invalidate any in-flight scanner request and drop the previous
-  // market's data synchronously, right when the selection changes - before
-  // the debounced loadScanner effect below even runs. A late response for
-  // the old market can then never update state again, and the old results
-  // can never render under the new "Valittu" label.
   function invalidateScan() {
     latestRequestId.current += 1;
     setData(null);
@@ -44,8 +57,25 @@ export default function ScannerScreen() {
 
   const loadScanner = useCallback(async () => {
     const requestId = ++latestRequestId.current;
+    const trackedVersionAtStart = trackedMutationVersion.current;
     setLoading(true);
     setError('');
+
+    // Persisted tracking annotations are useful but must not make the scanner
+    // unavailable if their read fails. They also must not overwrite a newer
+    // successful tracking mutation that completes while this read is in flight.
+    void getTrackedInstruments()
+      .then((canonicalTrackedInstruments) => {
+        if (
+          requestId === latestRequestId.current &&
+          trackedVersionAtStart === trackedMutationVersion.current
+        ) {
+          setTrackedInstruments(canonicalTrackedInstruments);
+        }
+      })
+      .catch(() => {
+        // Keep the last known canonical annotations; scanner results remain usable.
+      });
 
     try {
       const result = await apiGet<ScannerResult>(
@@ -67,10 +97,12 @@ export default function ScannerScreen() {
 
   async function addScannerResultToTracking(row: ScannerResult['results'][number]) {
     const trackingKey = `${country}:${row.ticker}`;
+    // Invalidate any persisted-state read that started before this mutation.
+    trackedMutationVersion.current += 1;
     setTrackingStatus((current) => ({ ...current, [trackingKey]: 'saving' }));
 
     try {
-      await trackInstrument(
+      const saved = await trackInstrument(
         {
           instrument: row.ticker,
           company_name: '',
@@ -79,7 +111,18 @@ export default function ScannerScreen() {
         },
         TRACKING_ACTOR,
       );
-      setTrackingStatus((current) => ({ ...current, [trackingKey]: 'saved' }));
+      // Also invalidate reads that started while the POST was in flight; they
+      // may have captured the pre-save canonical collection.
+      trackedMutationVersion.current += 1;
+      setTrackedInstruments((current) => [
+        ...current.filter((item) => item.id !== saved.id),
+        saved,
+      ]);
+      setTrackingStatus((current) => {
+        const next = { ...current };
+        delete next[trackingKey];
+        return next;
+      });
     } catch {
       setTrackingStatus((current) => ({ ...current, [trackingKey]: 'error' }));
     }
@@ -104,10 +147,6 @@ export default function ScannerScreen() {
             key={item.value}
             accessibilityRole="button"
             onPress={() => {
-              // Re-tapping the already-selected country must be a no-op:
-              // market/limit would not change, so the debounced load
-              // effect below would never re-run and clear a loading state
-              // set here - the spinner would be stuck on forever.
               if (item.value === country) return;
               invalidateScan();
               setCountry(item.value);
@@ -129,8 +168,6 @@ export default function ScannerScreen() {
             key={item}
             accessibilityRole="button"
             onPress={() => {
-              // Same guard for scope: re-tapping the already-selected
-              // scope must not touch loading/data/requestId either.
               if (item === scope) return;
               invalidateScan();
               setScope(item);
@@ -164,6 +201,9 @@ export default function ScannerScreen() {
         !error &&
         data?.results.map((row) => {
           const status = trackingStatus[`${country}:${row.ticker}`];
+          const isTracked = trackedInstruments.some((item) =>
+            matchesTrackedInstrument(item, row.ticker, country),
+          );
           return (
             <View key={row.ticker} style={shared.card}>
               <Text style={shared.heading}>
@@ -174,13 +214,13 @@ export default function ScannerScreen() {
               </Text>
               <Pressable
                 accessibilityRole="button"
-                disabled={status === 'saving' || status === 'saved'}
+                disabled={status === 'saving' || isTracked}
                 onPress={() => void addScannerResultToTracking(row)}
                 style={shared.button}>
                 <Text style={shared.buttonText}>
                   {status === 'saving'
                     ? 'Lisätään…'
-                    : status === 'saved'
+                    : isTracked
                       ? 'Seurannassa'
                       : status === 'error'
                         ? 'Yritä uudelleen'
