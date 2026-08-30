@@ -17,11 +17,35 @@ class MobileTrackedInstrumentStateTests(unittest.TestCase):
         self.assertIn("export function getTrackedInstruments(", self.service)
         self.assertIn("get<TrackedInstrument[]>('/api/v1/tracked-instruments')", self.service)
 
-    def test_scanner_loads_persisted_tracking_state_with_scan_results(self) -> None:
+    def test_scanner_loads_persisted_tracking_state_independently_from_scan_results(self) -> None:
         self.assertIn("getTrackedInstruments", self.scanner)
-        self.assertIn("const [result, canonicalTrackedInstruments] = await Promise.all([", self.scanner)
+        self.assertNotIn("Promise.all", self.scanner)
+        self.assertIn("void getTrackedInstruments()", self.scanner)
+        self.assertIn("apiGet<ScannerResult>(", self.scanner)
         self.assertIn("setTrackedInstruments(canonicalTrackedInstruments)", self.scanner)
         self.assertIn("matchesTrackedInstrument(item, row.ticker, country)", self.scanner)
+
+    def test_tracked_state_read_failure_does_not_fail_scanner_load(self) -> None:
+        tracked_read_start = self.scanner.index("void getTrackedInstruments()")
+        scanner_try_start = self.scanner.index("    try {", tracked_read_start)
+        tracked_read_block = self.scanner[tracked_read_start:scanner_try_start]
+        self.assertIn(".catch(() => {", tracked_read_block)
+        self.assertNotIn("setError(", tracked_read_block)
+
+    def test_stale_tracked_reads_cannot_replace_newer_mutation_state(self) -> None:
+        self.assertIn("const trackedMutationVersion = useRef(0);", self.scanner)
+        self.assertIn("const trackedVersionAtStart = trackedMutationVersion.current;", self.scanner)
+        self.assertIn(
+            "trackedVersionAtStart === trackedMutationVersion.current",
+            self.scanner,
+        )
+        action_start = self.scanner.index("async function addScannerResultToTracking(")
+        action_end = self.scanner.index("\n  useEffect(() => {", action_start)
+        action = self.scanner[action_start:action_end]
+        self.assertGreaterEqual(action.count("trackedMutationVersion.current += 1;"), 2)
+        success_increment = action.index("trackedMutationVersion.current += 1;", action.index("const saved = await trackInstrument("))
+        saved_state_update = action.index("setTrackedInstruments((current) => [")
+        self.assertLess(success_increment, saved_state_update)
 
     def test_scanner_does_not_use_session_saved_state_as_canonical_state(self) -> None:
         self.assertNotIn("type TrackingStatus = 'saving' | 'saved' | 'error'", self.scanner)
