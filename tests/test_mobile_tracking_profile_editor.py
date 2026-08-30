@@ -33,7 +33,8 @@ class MobileTrackingProfileEditorTests(unittest.TestCase):
 
     def test_editor_reads_and_writes_by_canonical_tracked_instrument_id(self) -> None:
         self.assertIn("getTrackingProfiles(trackedInstrumentId)", self.editor)
-        self.assertIn("trackedInstrumentId,\n        selectedType,", self.editor)
+        self.assertIn("const saveInstrumentId = trackedInstrumentId;", self.editor)
+        self.assertIn("saveInstrumentId,\n        saveProfileType,", self.editor)
         self.assertIn("const PROFILE_ACTOR = 'mobile-tracking-profile';", self.editor)
 
     def test_scanner_opens_editor_only_for_persisted_tracked_row(self) -> None:
@@ -48,6 +49,28 @@ class MobileTrackingProfileEditorTests(unittest.TestCase):
         self.assertIn("onChangeText={setSpecs}", self.editor)
         self.assertIn("{ specs, enabled }", self.editor)
         self.assertIn("Tallenna profiili", self.editor)
+
+    def test_editor_fails_closed_until_canonical_state_loads(self) -> None:
+        self.assertIn("const canonicalStateReady = loadedInstrumentId === trackedInstrumentId;", self.editor)
+        self.assertIn("if (!canonicalStateReady || saving) return;", self.editor)
+        self.assertIn("disabled={saving || !canonicalStateReady}", self.editor)
+        self.assertIn("editable={!saving && canonicalStateReady}", self.editor)
+        self.assertIn("setLoadedInstrumentId(trackedInstrumentId);", self.editor)
+
+    def test_editor_locks_profile_selection_while_save_is_in_flight(self) -> None:
+        self.assertIn("if (saving || !canonicalStateReady) return;", self.editor)
+        self.assertIn("const saveProfileType = selectedType;", self.editor)
+        self.assertIn("selectedTypeRef.current === saveProfileType", self.editor)
+
+    def test_editor_ignores_save_completion_after_unmount_or_instrument_change(self) -> None:
+        self.assertIn("const mountedRef = useRef(true);", self.editor)
+        self.assertIn("mountedRef.current = false;", self.editor)
+        guard = "!mountedRef.current || activeInstrumentIdRef.current !== saveInstrumentId"
+        self.assertGreaterEqual(self.editor.count(guard), 2)
+        self.assertIn(
+            "mountedRef.current && activeInstrumentIdRef.current === saveInstrumentId",
+            self.editor,
+        )
 
     def test_profile_ui_does_not_create_events_or_trading_state(self) -> None:
         source = (self.scanner + self.editor).lower()
