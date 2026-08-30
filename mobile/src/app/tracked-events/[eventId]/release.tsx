@@ -8,6 +8,7 @@ import {
   getTrackedEventWorkflow,
   ingestTrackedEventRelease,
   putTrackedEventReleaseSource,
+  skipTrackedEventRelease,
   type TrackedEventReleaseSource,
   type TrackedEventWorkflowResponse,
 } from '@/services/tracked-events';
@@ -21,19 +22,22 @@ export default function TrackedEventReleaseHandoffScreen() {
   const [sourceUrl, setSourceUrl] = useState('');
   const [sourceTitle, setSourceTitle] = useState('');
   const [actor, setActor] = useState('');
+  const [skipReason, setSkipReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [processing, setProcessing] = useState(false);
+  const [skipping, setSkipping] = useState(false);
   const [submitMessage, setSubmitMessage] = useState<string | null>(null);
   const [processMessage, setProcessMessage] = useState<string | null>(null);
+  const [skipMessage, setSkipMessage] = useState<string | null>(null);
   const eventIdRef = useRef(eventId);
   const mountedRef = useRef(true);
 
   const releaseStep = workflow?.steps.find((step) => step.key === 'release') ?? null;
-  const canProcessRelease = Boolean(
-    releaseSource?.active
-      && releaseStep?.status === 'action_required'
-      && releaseStep.action_target === 'release',
+  const releaseActionRequired = Boolean(
+    releaseStep?.status === 'action_required' && releaseStep.action_target === 'release',
   );
+  const canProcessRelease = Boolean(releaseSource?.active && releaseActionRequired);
+  const canSkipRelease = releaseActionRequired;
 
   useEffect(() => () => {
     mountedRef.current = false;
@@ -54,10 +58,13 @@ export default function TrackedEventReleaseHandoffScreen() {
     setSourceUrl('');
     setSourceTitle('');
     setActor('');
+    setSkipReason('');
     setSubmitting(false);
     setProcessing(false);
+    setSkipping(false);
     setSubmitMessage(null);
     setProcessMessage(null);
+    setSkipMessage(null);
 
     async function loadReleaseState() {
       if (!eventId) {
@@ -94,10 +101,11 @@ export default function TrackedEventReleaseHandoffScreen() {
   }, [eventId]);
 
   async function submitReleaseSource() {
-    if (!eventId || !releaseSource || submitting || processing) return;
+    if (!eventId || !releaseSource || submitting || processing || skipping) return;
 
     setSubmitMessage(null);
     setProcessMessage(null);
+    setSkipMessage(null);
 
     const normalizedUrl = sourceUrl.trim();
     if (!normalizedUrl.startsWith('https://')) {
@@ -156,7 +164,7 @@ export default function TrackedEventReleaseHandoffScreen() {
   }
 
   async function processRelease() {
-    if (!eventId || !canProcessRelease || processing || submitting) return;
+    if (!eventId || !canProcessRelease || processing || submitting || skipping) return;
 
     const normalizedActor = actor.trim();
     if (!normalizedActor) {
@@ -169,6 +177,7 @@ export default function TrackedEventReleaseHandoffScreen() {
     setError(null);
     setSubmitMessage(null);
     setProcessMessage(null);
+    setSkipMessage(null);
 
     try {
       const result = await ingestTrackedEventRelease(submittedEventId, normalizedActor);
@@ -210,6 +219,70 @@ export default function TrackedEventReleaseHandoffScreen() {
       }
     } finally {
       if (mountedRef.current && eventIdRef.current === submittedEventId) setProcessing(false);
+    }
+  }
+
+  async function skipRelease() {
+    if (!eventId || !canSkipRelease || skipping || processing || submitting) return;
+
+    const normalizedActor = actor.trim();
+    if (!normalizedActor) {
+      setError('Syötä toimijan tunniste ennen julkaisun ohittamista.');
+      return;
+    }
+    const normalizedReason = skipReason.trim();
+    if (!normalizedReason) {
+      setError('Kirjoita syy julkaisun ohittamiselle.');
+      return;
+    }
+
+    const submittedEventId = eventId;
+    setSkipping(true);
+    setError(null);
+    setSubmitMessage(null);
+    setProcessMessage(null);
+    setSkipMessage(null);
+
+    try {
+      const result = await skipTrackedEventRelease(
+        submittedEventId,
+        normalizedActor,
+        normalizedReason,
+      );
+      const [currentSource, currentWorkflow] = await Promise.all([
+        getTrackedEventReleaseSource(submittedEventId),
+        getTrackedEventWorkflow(submittedEventId),
+      ]);
+      if (mountedRef.current && eventIdRef.current === submittedEventId) {
+        setReleaseSource(currentSource);
+        setWorkflow(currentWorkflow);
+        setSourceUrl(currentSource.source_url ?? '');
+        setSourceTitle(currentSource.source_title ?? '');
+        setSkipReason('');
+        setSkipMessage(`Julkaisu ohitettu: ${result.status}`);
+      }
+    } catch (skipError) {
+      if (mountedRef.current && eventIdRef.current === submittedEventId) {
+        const writeError = skipError instanceof Error ? skipError.message : 'Julkaisun ohitus epäonnistui.';
+        setError(writeError);
+        try {
+          const [currentSource, currentWorkflow] = await Promise.all([
+            getTrackedEventReleaseSource(submittedEventId),
+            getTrackedEventWorkflow(submittedEventId),
+          ]);
+          if (mountedRef.current && eventIdRef.current === submittedEventId) {
+            setReleaseSource(currentSource);
+            setWorkflow(currentWorkflow);
+            setSourceUrl(currentSource.source_url ?? '');
+            setSourceTitle(currentSource.source_title ?? '');
+            setError(writeError);
+          }
+        } catch {
+          // Keep the original skip error visible if canonical refresh also fails.
+        }
+      }
+    } finally {
+      if (mountedRef.current && eventIdRef.current === submittedEventId) setSkipping(false);
     }
   }
 
@@ -277,17 +350,17 @@ export default function TrackedEventReleaseHandoffScreen() {
           autoCapitalize="none"
           autoCorrect={false}
           onChangeText={setActor}
-          placeholder="Toimijan tunniste (tallennus / käsittely)"
+          placeholder="Toimijan tunniste (tallennus / käsittely / ohitus)"
           placeholderTextColor="#677386"
           style={styles.input}
           value={actor}
         />
         <Pressable
-          disabled={!releaseSource || !sourceUrl.trim() || !actor.trim() || submitting || processing}
+          disabled={!releaseSource || !sourceUrl.trim() || !actor.trim() || submitting || processing || skipping}
           onPress={() => void submitReleaseSource()}
           style={({ pressed }) => [
             styles.button,
-            (!releaseSource || !sourceUrl.trim() || !actor.trim() || submitting || processing) && styles.buttonDisabled,
+            (!releaseSource || !sourceUrl.trim() || !actor.trim() || submitting || processing || skipping) && styles.buttonDisabled,
             pressed && styles.buttonPressed,
           ]}>
           <Text style={styles.buttonText}>{submitting ? 'Tallennetaan…' : 'Tallenna lähde'}</Text>
@@ -302,26 +375,54 @@ export default function TrackedEventReleaseHandoffScreen() {
         </Text>
         {releaseStep?.action_reason ? <Text style={styles.value}>{releaseStep.action_reason}</Text> : null}
         <Pressable
-          disabled={!canProcessRelease || !actor.trim() || processing || submitting}
+          disabled={!canProcessRelease || !actor.trim() || processing || submitting || skipping}
           onPress={() => void processRelease()}
           style={({ pressed }) => [
             styles.button,
-            (!canProcessRelease || !actor.trim() || processing || submitting) && styles.buttonDisabled,
+            (!canProcessRelease || !actor.trim() || processing || submitting || skipping) && styles.buttonDisabled,
             pressed && styles.buttonPressed,
           ]}>
           <Text style={styles.buttonText}>{processing ? 'Käsitellään…' : 'Käsittele julkaisu'}</Text>
         </Pressable>
         {!releaseSource?.active ? (
-          <Text style={styles.meta}>Lisää ensin aktiivinen hyväksytty julkaisulähde.</Text>
+          <Text style={styles.meta}>Lisää ensin aktiivinen hyväksytty julkaisulähde käsittelyä varten.</Text>
         ) : null}
         {releaseSource?.active && !canProcessRelease ? (
           <Text style={styles.meta}>Canonical workflow ei tällä hetkellä pyydä julkaisun käsittelyä.</Text>
         ) : null}
         {processMessage ? <Text style={styles.success}>{processMessage}</Text> : null}
+
+        <Text style={styles.subLabel}>Ohita julkaisu</Text>
+        <Text style={styles.meta}>
+          Ohitus on auditoitu päätös. Sitä voi käyttää vain, kun canonical workflow pyytää release-toimenpidettä.
+        </Text>
+        <TextInput
+          multiline
+          onChangeText={setSkipReason}
+          placeholder="Ohituksen syy"
+          placeholderTextColor="#677386"
+          style={[styles.input, styles.reasonInput]}
+          value={skipReason}
+        />
+        <Pressable
+          disabled={!canSkipRelease || !actor.trim() || !skipReason.trim() || skipping || processing || submitting}
+          onPress={() => void skipRelease()}
+          style={({ pressed }) => [
+            styles.button,
+            styles.skipButton,
+            (!canSkipRelease || !actor.trim() || !skipReason.trim() || skipping || processing || submitting) && styles.buttonDisabled,
+            pressed && styles.buttonPressed,
+          ]}>
+          <Text style={styles.buttonText}>{skipping ? 'Ohitetaan…' : 'Ohita julkaisu'}</Text>
+        </Pressable>
+        {!canSkipRelease ? (
+          <Text style={styles.meta}>Canonical workflow ei tällä hetkellä salli julkaisun ohitusta.</Text>
+        ) : null}
+        {skipMessage ? <Text style={styles.success}>{skipMessage}</Text> : null}
       </View>
 
       <Text style={styles.note}>
-        Käsittely tekee vain yhden explicit ingestion -yrityksen canonical backend -polun kautta. Se ei luo kaupankäyntitehtävää eikä käynnistä Strategy/Risk/Broker-polkuja.
+        Käsittely tekee vain yhden explicit ingestion -yrityksen ja ohitus vain yhden auditoidun skip-kirjauksen canonical backend -polun kautta. Kumpikaan ei luo kaupankäyntitehtävää eikä käynnistä Strategy/Risk/Broker-polkuja.
       </Text>
     </ScrollView>
   );
@@ -367,6 +468,13 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     textTransform: 'uppercase',
   },
+  subLabel: {
+    color: '#d8dee8',
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: 22,
+    textTransform: 'uppercase',
+  },
   value: {
     color: '#d8dee8',
     fontSize: 13,
@@ -406,12 +514,19 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
   },
+  reasonInput: {
+    minHeight: 76,
+    textAlignVertical: 'top',
+  },
   button: {
     alignItems: 'center',
     backgroundColor: '#2d6cdf',
     borderRadius: 8,
     marginTop: 12,
     padding: 11,
+  },
+  skipButton: {
+    backgroundColor: '#623f52',
   },
   buttonDisabled: {
     opacity: 0.45,
