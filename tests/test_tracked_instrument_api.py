@@ -151,6 +151,7 @@ class TrackedInstrumentApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 401)
         self.assertEqual(registry.read_calls, 0)
+        self.assertEqual(registry.calls, [])
 
     def test_post_uses_control_auth_actor_and_canonical_registry_only(self) -> None:
         registry = _Registry()
