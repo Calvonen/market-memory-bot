@@ -45,7 +45,7 @@ class PostReleaseTrackedReactionOverrideTests(unittest.TestCase):
             evidence_quotes=[],
         )
         long = ComponentAssessment("technical", Direction.LONG, 10, 20, ())
-        memory = ComponentAssessment("market_memory", Direction.LONG, 10, 20, ())
+        memory = ComponentAssessment("market_memory", Direction.LONG, 10, 10, ())
 
         result = run_post_release_paper(
             expectation=expectation,
