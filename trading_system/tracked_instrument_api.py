@@ -23,8 +23,25 @@ def build_tracked_instrument_router(
     *,
     require_control: Callable[[str | None], None],
     get_tracked_instrument_registry,
+    require_read: Callable[[str | None], None] | None = None,
 ) -> APIRouter:
     router = APIRouter()
+
+    if require_read is not None:
+
+        @router.get("/api/v1/tracked-instruments")
+        def list_tracked_instruments(
+            x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
+        ) -> list[dict]:
+            require_read(x_marketai_key)
+            try:
+                return [asdict(record) for record in get_tracked_instrument_registry().list_active()]
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503, detail="Tracked instrument read failed"
+                ) from exc
 
     @router.post("/api/v1/tracked-instruments")
     def track_instrument(
