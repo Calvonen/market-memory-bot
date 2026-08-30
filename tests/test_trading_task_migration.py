@@ -37,7 +37,7 @@ class TradingTaskMigrationTests(unittest.TestCase):
 
     def test_writes_are_service_role_rpc_only(self) -> None:
         self.assertIn(
-            "revoke all on table public.trading_tasks from public, anon, authenticated",
+            "revoke all on table public.trading_tasks from public, anon, authenticated, service_role",
             self.sql,
         )
         self.assertIn("grant select on table public.trading_tasks to service_role", self.sql)
