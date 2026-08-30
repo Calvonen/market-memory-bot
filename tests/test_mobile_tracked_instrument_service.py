@@ -16,7 +16,9 @@ def _find_post_invocations(source: str) -> list[str]:
         before = source[start - 1] if start > 0 else ""
         after_index = start + len("post")
         after = source[after_index] if after_index < len(source) else ""
-        if (before.isalnum() or before in "_$.") or (after.isalnum() or after in "_$"):
+        if (before.isalnum() or (before and before in "_$.")) or (
+            after.isalnum() or after in "_$"
+        ):
             index = after_index
             continue
 
