@@ -1,4 +1,4 @@
-import { apiControlPost } from '@/services/api';
+import { apiControlPost, apiGet } from '@/services/api';
 
 export type TrackedInstrumentSource = 'scanner' | 'calendar' | 'manual';
 
@@ -20,11 +20,18 @@ export type TrackInstrumentInput = {
   source: TrackedInstrumentSource;
 };
 
+type TrackedInstrumentGet = <T>(path: string) => Promise<T>;
 type TrackedInstrumentPost = <T>(
   path: string,
   body: unknown,
   headers?: Record<string, string>,
 ) => Promise<T>;
+
+export function getTrackedInstruments(
+  get: TrackedInstrumentGet = apiGet,
+): Promise<TrackedInstrument[]> {
+  return get<TrackedInstrument[]>('/api/v1/tracked-instruments');
+}
 
 export function trackInstrument(
   input: TrackInstrumentInput,
