@@ -47,21 +47,22 @@ class MobileTrackedEventReleaseSourceSubmitTests(unittest.TestCase):
         submit_start = screen_source.index("async function submitReleaseSource()")
         clear_success = screen_source.index("setSubmitMessage(null);", submit_start)
         url_validation = screen_source.index("if (!normalizedUrl.startsWith('https://'))", submit_start)
-        approver_validation = screen_source.index("if (!normalizedApprover)", submit_start)
+        actor_validation = screen_source.index("if (!normalizedActor)", submit_start)
 
         self.assertLess(clear_success, url_validation)
-        self.assertLess(clear_success, approver_validation)
+        self.assertLess(clear_success, actor_validation)
 
-    def test_submit_records_explicit_approver_in_actor_header(self) -> None:
+    def test_submit_records_explicit_actor_in_actor_header(self) -> None:
         service_source = SERVICE_PATH.read_text(encoding="utf-8")
         screen_source = SCREEN_PATH.read_text(encoding="utf-8")
 
         self.assertIn("actor: string", service_source)
         self.assertIn("'X-MarketAI-Actor': actor", service_source)
         self.assertNotIn("'X-MarketAI-Actor': 'marketai-mobile'", service_source)
-        self.assertIn("const [approver, setApprover]", screen_source)
-        self.assertIn("placeholder=\"Hyväksyjän tunniste\"", screen_source)
-        self.assertIn("normalizedApprover", screen_source)
+        self.assertIn("const [actor, setActor]", screen_source)
+        self.assertIn("placeholder=\"Toimijan tunniste\"", screen_source)
+        self.assertIn("const normalizedActor = actor.trim();", screen_source)
+        self.assertIn("normalizedActor,", screen_source)
 
     def test_submit_does_not_start_ingestion_or_create_trading_task(self) -> None:
         source = SCREEN_PATH.read_text(encoding="utf-8") + SERVICE_PATH.read_text(encoding="utf-8")
