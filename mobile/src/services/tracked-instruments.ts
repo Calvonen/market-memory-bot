@@ -20,9 +20,16 @@ export type TrackInstrumentInput = {
   source: TrackedInstrumentSource;
 };
 
+type TrackedInstrumentPost = <T>(
+  path: string,
+  body: unknown,
+  headers?: Record<string, string>,
+) => Promise<T>;
+
 export function trackInstrument(
   input: TrackInstrumentInput,
   actor: string,
+  post: TrackedInstrumentPost = apiControlPost,
 ): Promise<TrackedInstrument> {
   const normalizedActor = actor.trim();
   if (!normalizedActor || normalizedActor.length > 200) {
@@ -36,7 +43,7 @@ export function trackInstrument(
     return Promise.reject(new Error('Instrument must be nonblank'));
   }
 
-  return apiControlPost<TrackedInstrument>(
+  return post<TrackedInstrument>(
     '/api/v1/tracked-instruments',
     {
       instrument: normalizedInstrument,
