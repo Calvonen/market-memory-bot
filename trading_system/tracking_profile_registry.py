@@ -62,6 +62,20 @@ class SupabaseTrackedInstrumentProfileRegistry:
         if not instrument_id:
             raise ValueError("tracked_instrument_id is required")
 
+        identity_response = (
+            self.client.table("tracked_instruments")
+            .select("id")
+            .eq("id", instrument_id)
+            .execute()
+        )
+        identity_data = identity_response.data
+        if not isinstance(identity_data, list) or any(
+            not isinstance(row, dict) for row in identity_data
+        ):
+            raise RuntimeError("tracked_instruments identity read returned invalid data")
+        if not identity_data:
+            raise TrackedInstrumentProfileInstrumentNotFound(instrument_id)
+
         response = (
             self.client.table("tracked_instrument_profiles")
             .select("*")
