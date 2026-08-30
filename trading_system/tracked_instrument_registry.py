@@ -17,12 +17,21 @@ class TrackedInstrumentRecord:
     updated_by: str
 
 
-class SupabaseTrackedInstrumentRegistry:
-    """Canonical persistence boundary for instrument tracking only.
+def _record_from_row(row: dict[str, Any]) -> TrackedInstrumentRecord:
+    return TrackedInstrumentRecord(
+        id=str(row["id"]),
+        instrument=str(row["instrument"]),
+        market=str(row.get("market") or ""),
+        company_name=str(row.get("company_name") or ""),
+        sources=tuple(str(item) for item in (row.get("sources") or ())),
+        active=bool(row["active"]),
+        created_by=str(row.get("created_by") or ""),
+        updated_by=str(row.get("updated_by") or ""),
+    )
 
-    This repository deliberately calls only upsert_tracked_instrument(...).
-    It never creates a tracked market event or any downstream trading state.
-    """
+
+class SupabaseTrackedInstrumentRegistry:
+    """Canonical persistence boundary for instrument tracking only."""
 
     def __init__(self, client: Any) -> None:
         self.client = client
@@ -38,6 +47,20 @@ class SupabaseTrackedInstrumentRegistry:
                 "MARKETAI_SUPABASE_URL and MARKETAI_SUPABASE_SECRET_KEY are required"
             )
         return cls(create_client(url, key))
+
+    def list_active(self) -> list[TrackedInstrumentRecord]:
+        response = (
+            self.client.table("tracked_instruments")
+            .select("*")
+            .eq("active", True)
+            .order("instrument")
+            .order("market")
+            .execute()
+        )
+        data = response.data
+        if not isinstance(data, list) or any(not isinstance(row, dict) for row in data):
+            raise RuntimeError("tracked_instruments read returned invalid data")
+        return [_record_from_row(row) for row in data]
 
     def upsert(
         self,
@@ -62,13 +85,4 @@ class SupabaseTrackedInstrumentRegistry:
         row = data[0] if isinstance(data, list) and data else data
         if not isinstance(row, dict):
             raise RuntimeError("upsert_tracked_instrument returned no row")
-        return TrackedInstrumentRecord(
-            id=str(row["id"]),
-            instrument=str(row["instrument"]),
-            market=str(row.get("market") or ""),
-            company_name=str(row.get("company_name") or ""),
-            sources=tuple(str(item) for item in (row.get("sources") or ())),
-            active=bool(row["active"]),
-            created_by=str(row.get("created_by") or ""),
-            updated_by=str(row.get("updated_by") or ""),
-        )
+        return _record_from_row(row)
