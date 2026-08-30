@@ -79,7 +79,13 @@ TRACKED_PRESENT_ROW = {
     "calendarless_release_shell_trigger_exists": True,
     "tracked_event_release_skip_audit_table_exists": True,
     "record_tracked_event_release_skip_function_exists": True,
-    "runtime_schema_version": 15,
+    "runtime_schema_version": 16,
+}
+
+TRACKED_INSTRUMENT_PRESENT_ROW = {
+    "tracked_instruments_table_exists": True,
+    "upsert_tracked_instrument_function_exists": True,
+    "tracked_instrument_registry_schema_version": 1,
 }
 
 
@@ -88,11 +94,15 @@ def _responses(
     strategy_row=STRATEGY_PRESENT_ROW,
     official_source_row=OFFICIAL_SOURCE_PRESENT_ROW,
     tracked_row=TRACKED_PRESENT_ROW,
+    tracked_instrument_row=TRACKED_INSTRUMENT_PRESENT_ROW,
 ) -> dict[str, object]:
     return {
         "verify_strategy_draft_schema": SimpleNamespace(data=[strategy_row]),
         "verify_official_release_source_schema": SimpleNamespace(data=[official_source_row]),
         "verify_tracked_event_runtime_schema": SimpleNamespace(data=[tracked_row]),
+        "verify_tracked_instrument_registry_schema": SimpleNamespace(
+            data=[tracked_instrument_row]
+        ),
     }
 
 
@@ -148,12 +158,51 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertIn("deployed: 7", err)
 
     def test_fails_closed_on_old_runtime_schema_version(self) -> None:
-        row = dict(TRACKED_PRESENT_ROW, runtime_schema_version=13)
+        row = dict(TRACKED_PRESENT_ROW, runtime_schema_version=15)
         exit_code, _out, err = self._run_with_client(
             _FakeClient(_responses(tracked_row=row))
         )
         self.assertEqual(exit_code, 1)
-        self.assertIn("tracked-event runtime schema version 15", err)
+        self.assertIn("tracked-event runtime schema version 16", err)
+
+    def test_fails_closed_when_tracked_instrument_registry_rpc_is_missing(self) -> None:
+        responses = _responses()
+        responses["verify_tracked_instrument_registry_schema"] = RuntimeError(
+            "registry rpc unavailable"
+        )
+        exit_code, _out, err = self._run_with_client(_FakeClient(responses))
+        self.assertEqual(exit_code, 1)
+        self.assertIn("verify_tracked_instrument_registry_schema", err)
+
+    def test_fails_closed_when_tracked_instrument_table_is_missing(self) -> None:
+        row = dict(TRACKED_INSTRUMENT_PRESENT_ROW, tracked_instruments_table_exists=False)
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_instrument_row=row))
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("tracked_instruments table", err)
+
+    def test_fails_closed_when_tracked_instrument_upsert_is_missing(self) -> None:
+        row = dict(
+            TRACKED_INSTRUMENT_PRESENT_ROW,
+            upsert_tracked_instrument_function_exists=False,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_instrument_row=row))
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("upsert_tracked_instrument", err)
+
+    def test_fails_closed_on_old_tracked_instrument_registry_version(self) -> None:
+        row = dict(
+            TRACKED_INSTRUMENT_PRESENT_ROW,
+            tracked_instrument_registry_schema_version=0,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_instrument_row=row))
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("tracked-instrument registry schema version 1", err)
 
     def test_fails_closed_when_ingestion_audit_table_is_missing(self) -> None:
         row = dict(
@@ -310,6 +359,7 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
                 ("verify_strategy_draft_schema", {}),
                 ("verify_official_release_source_schema", {}),
                 ("verify_tracked_event_runtime_schema", {}),
+                ("verify_tracked_instrument_registry_schema", {}),
             ],
         )
 

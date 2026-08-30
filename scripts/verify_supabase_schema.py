@@ -4,8 +4,9 @@
 The existing strategy-draft and calendar/watchlist checks stay in place. The
 persistent tracked-event worker additionally requires the tracked-event runtime
 migrations through the canonical tracked-event release-shell version. Manual
-official release sources have a dedicated verifier RPC so a missing out-of-band
-migration fails before backend/systemd processes are restarted.
+official release sources and the canonical tracked-instrument registry have
+dedicated verifier RPCs so a missing out-of-band migration fails before
+backend/systemd processes are restarted.
 """
 
 from __future__ import annotations
@@ -158,9 +159,18 @@ REQUIRED_TRACKED_EVENT_CHECKS: tuple[tuple[str, str], ...] = (
     ),
 )
 
+REQUIRED_TRACKED_INSTRUMENT_CHECKS: tuple[tuple[str, str], ...] = (
+    ("tracked_instruments_table_exists", "tracked_instruments table"),
+    (
+        "upsert_tracked_instrument_function_exists",
+        "upsert_tracked_instrument(text,text,text,text,text) function",
+    ),
+)
+
 REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 3
 REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 8
-REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 15
+REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 16
+REQUIRED_TRACKED_INSTRUMENT_REGISTRY_SCHEMA_VERSION = 1
 POSTGRES_IDENTIFIER_MAX_BYTES = 63
 
 
@@ -302,6 +312,45 @@ def main() -> int:
             f"(deployed: {deployed_runtime_version!r})"
         )
 
+    try:
+        tracked_instrument_response = client.rpc(
+            "verify_tracked_instrument_registry_schema", {}
+        ).execute()
+    except Exception as exc:
+        print(
+            "SCHEMA GATE FAILED: could not call verify_tracked_instrument_registry_schema(). "
+            "Apply the pending canonical tracked-instrument migration before deploying. "
+            f"Underlying error: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    tracked_instrument_rows = getattr(tracked_instrument_response, "data", None) or []
+    if not tracked_instrument_rows:
+        print(
+            "SCHEMA GATE FAILED: verify_tracked_instrument_registry_schema() returned no rows.",
+            file=sys.stderr,
+        )
+        return 1
+    tracked_instrument_row: dict[str, Any] = tracked_instrument_rows[0]
+    missing.extend(
+        label
+        for key_name, label in REQUIRED_TRACKED_INSTRUMENT_CHECKS
+        if not _check_value(tracked_instrument_row, key_name)
+    )
+    deployed_tracked_instrument_version = _check_value(
+        tracked_instrument_row, "tracked_instrument_registry_schema_version"
+    )
+    if (
+        deployed_tracked_instrument_version
+        != REQUIRED_TRACKED_INSTRUMENT_REGISTRY_SCHEMA_VERSION
+    ):
+        missing.append(
+            "tracked-instrument registry schema version "
+            f"{REQUIRED_TRACKED_INSTRUMENT_REGISTRY_SCHEMA_VERSION} "
+            f"(deployed: {deployed_tracked_instrument_version!r})"
+        )
+
     if missing:
         print(
             "SCHEMA GATE FAILED: the following required Supabase objects are missing: "
@@ -314,7 +363,8 @@ def main() -> int:
 
     print(
         "Supabase schema gate passed: strategy/calendar, official-release-source, "
-        "and persistent tracked-event runtime dependencies are present."
+        "persistent tracked-event runtime, and canonical tracked-instrument "
+        "dependencies are present."
     )
     return 0
 
