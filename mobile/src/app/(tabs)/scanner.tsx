@@ -209,6 +209,9 @@ export default function ScannerScreen() {
           );
           const isTracked = Boolean(trackedInstrument);
           const editorOpen = trackedInstrument?.id === profileEditorId;
+          const profileRefreshVersion = trackedInstrument
+            ? (profileRefreshVersions[trackedInstrument.id] ?? 0)
+            : 0;
 
           return (
             <View key={row.ticker} style={shared.card}>
@@ -220,8 +223,9 @@ export default function ScannerScreen() {
               </Text>
               {trackedInstrument ? (
                 <TrackingProfileSummary
+                  key={`${trackedInstrument.id}:${profileRefreshVersion}`}
                   trackedInstrumentId={trackedInstrument.id}
-                  refreshToken={profileRefreshVersions[trackedInstrument.id] ?? 0}
+                  refreshToken={profileRefreshVersion}
                 />
               ) : null}
               <Pressable
