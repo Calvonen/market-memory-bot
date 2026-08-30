@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, Text, TextInput, View } from 'react-native';
 
 import { shared } from '@/components/screen-shell';
@@ -26,29 +26,46 @@ export function TrackingProfileEditor({ trackedInstrumentId }: Props) {
   const [selectedType, setSelectedType] = useState<TrackingProfileType>(DEFAULT_PROFILE_TYPE);
   const [specs, setSpecs] = useState('');
   const [enabled, setEnabled] = useState(false);
+  const [loadedInstrumentId, setLoadedInstrumentId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const mountedRef = useRef(true);
+  const activeInstrumentIdRef = useRef(trackedInstrumentId);
+  const selectedTypeRef = useRef(selectedType);
+
+  activeInstrumentIdRef.current = trackedInstrumentId;
+  selectedTypeRef.current = selectedType;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
 
     void getTrackingProfiles(trackedInstrumentId)
       .then((loaded) => {
-        if (!active) return;
+        if (!active || !mountedRef.current) return;
         setProfiles(loaded);
         const current = loaded.find(
           (profile) => profile.profile_type === DEFAULT_PROFILE_TYPE,
         );
+        setSelectedType(DEFAULT_PROFILE_TYPE);
         setSpecs(current?.specs ?? '');
         setEnabled(current?.enabled ?? false);
+        setLoadedInstrumentId(trackedInstrumentId);
+        setError('');
       })
       .catch((loadError) => {
-        if (!active) return;
+        if (!active || !mountedRef.current) return;
         setError(loadError instanceof Error ? loadError.message : 'Profiilien lataus epäonnistui');
       })
       .finally(() => {
-        if (active) setLoading(false);
+        if (active && mountedRef.current) setLoading(false);
       });
 
     return () => {
@@ -56,7 +73,10 @@ export function TrackingProfileEditor({ trackedInstrumentId }: Props) {
     };
   }, [trackedInstrumentId]);
 
+  const canonicalStateReady = loadedInstrumentId === trackedInstrumentId;
+
   function selectProfile(type: TrackingProfileType) {
+    if (saving || !canonicalStateReady) return;
     const current = profiles.find((profile) => profile.profile_type === type);
     setSelectedType(type);
     setSpecs(current?.specs ?? '');
@@ -65,29 +85,40 @@ export function TrackingProfileEditor({ trackedInstrumentId }: Props) {
   }
 
   async function saveProfile() {
+    if (!canonicalStateReady || saving) return;
+
+    const saveInstrumentId = trackedInstrumentId;
+    const saveProfileType = selectedType;
     setSaving(true);
     setError('');
     try {
       const saved = await setTrackingProfile(
-        trackedInstrumentId,
-        selectedType,
+        saveInstrumentId,
+        saveProfileType,
         { specs, enabled },
         PROFILE_ACTOR,
       );
+      if (!mountedRef.current || activeInstrumentIdRef.current !== saveInstrumentId) return;
+
       setProfiles((current) => [
         ...current.filter((profile) => profile.profile_type !== saved.profile_type),
         saved,
       ]);
-      setSpecs(saved.specs);
-      setEnabled(saved.enabled);
+      if (selectedTypeRef.current === saveProfileType) {
+        setSpecs(saved.specs);
+        setEnabled(saved.enabled);
+      }
     } catch (saveError) {
+      if (!mountedRef.current || activeInstrumentIdRef.current !== saveInstrumentId) return;
       setError(saveError instanceof Error ? saveError.message : 'Profiilin tallennus epäonnistui');
     } finally {
-      setSaving(false);
+      if (mountedRef.current && activeInstrumentIdRef.current === saveInstrumentId) {
+        setSaving(false);
+      }
     }
   }
 
-  if (loading) {
+  if (loading && !canonicalStateReady) {
     return <ActivityIndicator />;
   }
 
@@ -102,6 +133,7 @@ export function TrackingProfileEditor({ trackedInstrumentId }: Props) {
             <Pressable
               key={profile.type}
               accessibilityRole="button"
+              disabled={saving || !canonicalStateReady}
               onPress={() => selectProfile(profile.type)}
               style={[
                 shared.card,
@@ -118,7 +150,7 @@ export function TrackingProfileEditor({ trackedInstrumentId }: Props) {
 
       <Pressable
         accessibilityRole="button"
-        disabled={saving}
+        disabled={saving || !canonicalStateReady}
         onPress={() => setEnabled((current) => !current)}
         style={shared.button}>
         <Text style={shared.buttonText}>
@@ -130,7 +162,7 @@ export function TrackingProfileEditor({ trackedInstrumentId }: Props) {
         multiline
         value={specs}
         onChangeText={setSpecs}
-        editable={!saving}
+        editable={!saving && canonicalStateReady}
         placeholder="Mitä tästä yhtiöstä halutaan seurata?"
         style={[
           shared.card,
@@ -146,7 +178,7 @@ export function TrackingProfileEditor({ trackedInstrumentId }: Props) {
 
       <Pressable
         accessibilityRole="button"
-        disabled={saving}
+        disabled={saving || !canonicalStateReady}
         onPress={() => void saveProfile()}
         style={shared.button}>
         <Text style={shared.buttonText}>{saving ? 'Tallennetaan…' : 'Tallenna profiili'}</Text>
