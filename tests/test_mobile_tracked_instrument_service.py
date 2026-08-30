@@ -36,13 +36,25 @@ EXPECTED_TRACK_INSTRUMENT_IMPLEMENTATION = """export function trackInstrument(
 """
 
 
+def _tracked_instrument_implementation(source: str) -> str:
+    start = source.index("export function trackInstrument(")
+    end = start + len(EXPECTED_TRACK_INSTRUMENT_IMPLEMENTATION)
+    return source[start:end]
+
+
 class MobileTrackedInstrumentServiceTests(unittest.TestCase):
     def test_service_keeps_exact_canonical_implementation_boundary(self) -> None:
         source = SERVICE_PATH.read_text(encoding="utf-8")
-        start = source.index("export function trackInstrument(")
-        implementation = source[start:]
+        implementation = _tracked_instrument_implementation(source)
 
         self.assertEqual(implementation, EXPECTED_TRACK_INSTRUMENT_IMPLEMENTATION)
+
+    def test_unrelated_declaration_after_service_does_not_expand_snapshot(self) -> None:
+        source = EXPECTED_TRACK_INSTRUMENT_IMPLEMENTATION + "\nexport const unrelated = true;\n"
+        self.assertEqual(
+            _tracked_instrument_implementation(source),
+            EXPECTED_TRACK_INSTRUMENT_IMPLEMENTATION,
+        )
 
     def test_service_keeps_exact_source_union_and_input_contract(self) -> None:
         source = SERVICE_PATH.read_text(encoding="utf-8")
@@ -66,8 +78,7 @@ class MobileTrackedInstrumentServiceTests(unittest.TestCase):
 
     def test_service_has_no_downstream_tracking_or_trading_paths(self) -> None:
         source = SERVICE_PATH.read_text(encoding="utf-8")
-        start = source.index("export function trackInstrument(")
-        body = source[start:]
+        implementation = _tracked_instrument_implementation(source)
 
         forbidden = (
             "tracked-events",
@@ -79,7 +90,7 @@ class MobileTrackedInstrumentServiceTests(unittest.TestCase):
             "paper",
             "live-execution",
         )
-        lowered = body.lower()
+        lowered = implementation.lower()
         for value in forbidden:
             self.assertNotIn(value, lowered)
 
