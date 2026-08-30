@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import Enum
 
 from trading_system.models import TradingMode
@@ -11,6 +11,32 @@ class TradingTaskState(str, Enum):
     PENDING = "pending"
     APPROVED = "approved"
     CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True)
+class CanonicalTradingTaskExecutionContext:
+    """Read-only execution authority projected from an approved canonical task."""
+
+    task_id: str
+    source_event_id: str
+    instrument: str
+    mode: TradingMode
+
+    def __post_init__(self) -> None:
+        task_id = self.task_id.strip()
+        source_event_id = self.source_event_id.strip()
+        instrument = self.instrument.strip().upper()
+        if not task_id:
+            raise ValueError("task_id must not be blank")
+        if not source_event_id:
+            raise ValueError("source_event_id must not be blank")
+        if not instrument:
+            raise ValueError("instrument must not be blank")
+        if not isinstance(self.mode, TradingMode):
+            raise ValueError("mode must be a TradingMode")
+        object.__setattr__(self, "task_id", task_id)
+        object.__setattr__(self, "source_event_id", source_event_id)
+        object.__setattr__(self, "instrument", instrument)
 
 
 @dataclass(frozen=True)
@@ -86,11 +112,17 @@ class CanonicalTradingTask:
         object.__setattr__(self, "approved_by", approved_by)
         object.__setattr__(self, "cancelled_by", cancelled_by)
 
+    def execution_context(self) -> CanonicalTradingTaskExecutionContext:
+        if self.state is not TradingTaskState.APPROVED:
+            raise ValueError("canonical trading task is not approved")
+        return CanonicalTradingTaskExecutionContext(
+            task_id=self.task_id,
+            source_event_id=self.source_event_id,
+            instrument=self.instrument,
+            mode=self.mode,
+        )
+
 
 def _require_aware(value: datetime, name: str) -> None:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{name} must be timezone-aware")
-
-
-def utc_now() -> datetime:
-    return datetime.now(UTC)
