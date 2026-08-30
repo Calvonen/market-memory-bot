@@ -7,9 +7,10 @@ from unittest.mock import patch
 
 from trading_system.ai_event_analyzer import EventAnalysisPayload
 from trading_system.etoro_instrument_resolver import ResolvedEtoroInstrument
-from trading_system.models import EventExpectation, PortfolioState
+from trading_system.models import EventExpectation, PortfolioState, TradingMode
 from trading_system.post_release_paper import PostReleasePaperResult
 from trading_system.tracked_event_paper_bridge import (
+    CanonicalTradingTaskExecutionContext,
     build_tracked_event_price_confirmation,
     canonical_release_event_id,
     run_post_release_paper_from_tracked_event,
@@ -81,6 +82,21 @@ def expectation(*, event_id: str = "tracked:tracked-event-1") -> EventExpectatio
         instrument="EXM.ASX",
         event_name="FY26 results",
         scheduled_date=date(2026, 8, 31),
+    )
+
+
+def trading_task(
+    *,
+    task_id: str = "task-1",
+    source_event_id: str = "tracked:tracked-event-1",
+    instrument: str = "EXM.ASX",
+    mode: TradingMode = TradingMode.PAPER,
+) -> CanonicalTradingTaskExecutionContext:
+    return CanonicalTradingTaskExecutionContext(
+        task_id=task_id,
+        source_event_id=source_event_id,
+        instrument=instrument,
+        mode=mode,
     )
 
 
@@ -247,6 +263,38 @@ class TrackedEventPaperBridgeTests(unittest.TestCase):
                 resolver=FakeResolver(),
             )
 
+    def test_nonpaper_trading_task_fails_closed_before_pipeline(self) -> None:
+        with patch(
+            "trading_system.tracked_event_paper_bridge.run_post_release_paper"
+        ) as run_paper:
+            with self.assertRaisesRegex(ValueError, "does not explicitly request PAPER"):
+                run_post_release_paper_from_tracked_event(
+                    event=event(),
+                    expectation=expectation(),
+                    analysis=analysis(),
+                    reactions=(reaction(),),
+                    portfolio=portfolio(),
+                    resolver=FakeResolver(),
+                    trading_task=trading_task(mode=TradingMode.LIVE),
+                )
+        run_paper.assert_not_called()
+
+    def test_trading_task_event_mismatch_fails_closed_before_pipeline(self) -> None:
+        with patch(
+            "trading_system.tracked_event_paper_bridge.run_post_release_paper"
+        ) as run_paper:
+            with self.assertRaisesRegex(ValueError, "event identity differs"):
+                run_post_release_paper_from_tracked_event(
+                    event=event(),
+                    expectation=expectation(),
+                    analysis=analysis(),
+                    reactions=(reaction(),),
+                    portfolio=portfolio(),
+                    resolver=FakeResolver(),
+                    trading_task=trading_task(source_event_id="tracked:other"),
+                )
+        run_paper.assert_not_called()
+
     def test_flat_reaction_waits_without_entering_paper_pipeline(self) -> None:
         flat = reaction(
             close_price=Decimal("10.01"),
@@ -263,6 +311,7 @@ class TrackedEventPaperBridgeTests(unittest.TestCase):
                 reactions=(flat,),
                 portfolio=portfolio(),
                 resolver=FakeResolver(),
+                trading_task=trading_task(),
             )
         self.assertEqual(result.status, "waiting_confirmation")
         run_paper.assert_not_called()
@@ -280,6 +329,7 @@ class TrackedEventPaperBridgeTests(unittest.TestCase):
                 reactions=(reaction(),),
                 portfolio=portfolio(),
                 resolver=FakeResolver(),
+                trading_task=trading_task(),
             )
         self.assertIs(result, expected)
         self.assertEqual(run_paper.call_args.kwargs["confirmed_reaction_pct"], 2.0)
@@ -295,6 +345,7 @@ class TrackedEventPaperBridgeTests(unittest.TestCase):
                 reactions=(),
                 portfolio=portfolio(),
                 resolver=FakeResolver(),
+                trading_task=trading_task(),
             )
         self.assertEqual(result.status, "waiting_confirmation")
         run_paper.assert_not_called()
