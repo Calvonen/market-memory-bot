@@ -33,6 +33,12 @@ def _find_named_invocations(source: str, name: str) -> list[str]:
                 if char == "<":
                     depth += 1
                 elif char == ">":
+                    # A TypeScript function type may contain an arrow token
+                    # such as `() => void` inside generic type arguments. The
+                    # arrow's `>` is not a generic closing bracket.
+                    if cursor > 0 and source[cursor - 1] == "=":
+                        cursor += 1
+                        continue
                     depth -= 1
                     if depth == 0:
                         cursor += 1
@@ -84,6 +90,18 @@ class MobileTrackedInstrumentServiceTests(unittest.TestCase):
                 "post<ApiResponse<TrackedInstrument>>(",
                 "post(",
             ],
+        )
+
+    def test_arrow_type_generic_transport_invocations_are_counted(self) -> None:
+        injected = "post<{ callback: () => void }>(a);"
+        direct = "apiControlPost<{ callback: () => void }>(b);"
+        self.assertEqual(
+            _find_named_invocations(injected, "post"),
+            ["post<{ callback: () => void }>("],
+        )
+        self.assertEqual(
+            _find_named_invocations(direct, "apiControlPost"),
+            ["apiControlPost<{ callback: () => void }>("],
         )
 
     def test_direct_control_post_invocations_are_counted(self) -> None:
