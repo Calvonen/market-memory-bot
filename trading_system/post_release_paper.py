@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
+import math
 
 import pandas as pd
 
@@ -103,7 +104,7 @@ def _index_date(value: object) -> date | None:
 def _event_price_reaction_pct(df: pd.DataFrame, event_date: date) -> float | None:
     """Return the event-day close versus the immediately preceding market bar.
 
-    The event reaction is intentionally anchored to the scheduled event date.  If
+    The event reaction is intentionally anchored to the scheduled event date. If
     confirmation is still pending on a later day, a later daily move must not be
     mistaken for the original earnings reaction.
     """
@@ -156,13 +157,19 @@ def run_post_release_paper(
     technical: ComponentAssessment | None = None,
     market_memory: ComponentAssessment | None = None,
     pipeline: PaperTradingPipeline | None = None,
+    confirmed_reaction_pct: float | None = None,
 ) -> PostReleasePaperResult:
     """Run the event -> confirmation -> Strategy -> Risk -> PaperBroker path.
 
-    This is deliberately fail-closed.  It will not create a paper order until an
-    event-day market bar exists, the initial price reaction agrees with the event
-    hypothesis, spread/volatility inputs are available to Risk Engine, and both
-    technical and market-memory confirmation are directional.
+    This is deliberately fail-closed. It will not create a paper order until a
+    price reaction agrees with the event hypothesis, spread/volatility inputs are
+    available to Risk Engine, and both technical and market-memory confirmation
+    are directional.
+
+    ``confirmed_reaction_pct`` is an explicit canonical event-reaction override
+    for callers that have already validated a persisted live tracked-event
+    reaction. Existing callers that omit it retain the reviewed daily event-bar
+    fallback. The tracked-event bridge never uses that fallback.
     """
     completed = _completed_event_components(expectation, analysis)
     hypothesis = _hypothesis_from_components(completed)
@@ -170,6 +177,13 @@ def run_post_release_paper(
         return PostReleasePaperResult(
             "waiting_confirmation",
             "event direction is mixed or neutral",
+            completed_components=completed,
+        )
+
+    if confirmed_reaction_pct is not None and not math.isfinite(confirmed_reaction_pct):
+        return PostReleasePaperResult(
+            "waiting_confirmation",
+            "confirmed price reaction is invalid",
             completed_components=completed,
         )
 
@@ -182,13 +196,15 @@ def run_post_release_paper(
             "waiting_confirmation", "no market data", completed_components=completed
         )
 
-    reaction = _event_price_reaction_pct(market_df, expectation.scheduled_date)
+    reaction = confirmed_reaction_pct
     if reaction is None:
-        return PostReleasePaperResult(
-            "waiting_confirmation",
-            "no event-day market bar yet",
-            completed_components=completed,
-        )
+        reaction = _event_price_reaction_pct(market_df, expectation.scheduled_date)
+        if reaction is None:
+            return PostReleasePaperResult(
+                "waiting_confirmation",
+                "no event-day market bar yet",
+                completed_components=completed,
+            )
     if (hypothesis is Direction.LONG and reaction <= 0) or (
         hypothesis is Direction.SHORT and reaction >= 0
     ):
