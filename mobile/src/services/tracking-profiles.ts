@@ -26,6 +26,10 @@ type TrackingProfilePut = <T>(
   headers?: Record<string, string>,
 ) => Promise<T>;
 
+function codePointLength(value: string): number {
+  return Array.from(value).length;
+}
+
 function normalizeTrackedInstrumentId(trackedInstrumentId: string): string {
   const normalized = trackedInstrumentId.trim();
   if (!normalized) {
@@ -53,14 +57,14 @@ export function setTrackingProfile(
 ): Promise<TrackedInstrumentProfile> {
   const instrumentId = normalizeTrackedInstrumentId(trackedInstrumentId);
   const normalizedActor = actor.trim();
-  if (!normalizedActor || normalizedActor.length > 200) {
+  if (!normalizedActor || codePointLength(normalizedActor) > 200) {
     return Promise.reject(
       new Error('Tracking actor must be nonblank and at most 200 characters'),
     );
   }
 
   const specs = input.specs?.trim() ?? '';
-  if (specs.length > 4000) {
+  if (codePointLength(specs) > 4000) {
     return Promise.reject(new Error('Tracking specs must be at most 4000 characters'));
   }
 
