@@ -71,6 +71,8 @@ from trading_system.tracked_event_release_ingestion_api import (
 from trading_system.tracked_event_release_skip_api import (
     build_tracked_event_release_skip_router,
 )
+from trading_system.tracked_instrument_api import build_tracked_instrument_router
+from trading_system.tracked_instrument_registry import SupabaseTrackedInstrumentRegistry
 from trading_system.ai_event_analyzer import build_default_event_analyzer
 from trading_system.release_repository import SupabaseReleaseRepository
 from trading_system.tracked_event_result import (
@@ -382,6 +384,7 @@ def create_app(
     approval_repository: StrategyDraftApprovalRepository | None = None,
     calendar_repository: CalendarEventRepository | None = None,
     tracked_event_repository: SupabaseTrackedEventRepository | None = None,
+    tracked_instrument_registry: SupabaseTrackedInstrumentRegistry | None = None,
     workflow_evidence_loader: WorkflowReadinessEvidenceLoader | None = None,
     official_release_source_repository: OfficialReleaseSourceRepository | None = None,
     release_repository=None,
@@ -418,6 +421,9 @@ def create_app(
     approval_repo_cache: StrategyDraftApprovalRepository | None = approval_repository
     calendar_repo_cache: CalendarEventRepository | None = calendar_repository
     tracked_event_repo_cache: SupabaseTrackedEventRepository | None = tracked_event_repository
+    tracked_instrument_registry_cache: SupabaseTrackedInstrumentRegistry | None = (
+        tracked_instrument_registry
+    )
     workflow_evidence_loader_cache: WorkflowReadinessEvidenceLoader | None = workflow_evidence_loader
     official_release_source_repo_cache: OfficialReleaseSourceRepository | None = (
         official_release_source_repository
@@ -468,6 +474,12 @@ def create_app(
         if tracked_event_repo_cache is None:
             tracked_event_repo_cache = SupabaseTrackedEventRepository.from_env()
         return tracked_event_repo_cache
+
+    def get_tracked_instrument_registry() -> SupabaseTrackedInstrumentRegistry:
+        nonlocal tracked_instrument_registry_cache
+        if tracked_instrument_registry_cache is None:
+            tracked_instrument_registry_cache = SupabaseTrackedInstrumentRegistry.from_env()
+        return tracked_instrument_registry_cache
 
     def get_workflow_evidence_loader() -> WorkflowReadinessEvidenceLoader:
         nonlocal workflow_evidence_loader_cache
@@ -569,6 +581,12 @@ def create_app(
         if not x_marketai_control_key or not secrets.compare_digest(x_marketai_control_key, configured_control_api_key):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing control API key")
 
+    app.include_router(
+        build_tracked_instrument_router(
+            require_control=require_control,
+            get_tracked_instrument_registry=get_tracked_instrument_registry,
+        )
+    )
     app.include_router(
         build_tracked_event_release_source_router(
             require_read=require_read,
