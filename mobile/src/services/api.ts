@@ -291,6 +291,8 @@ export function approveStrategyDraft(
   eventId: string,
   request: StrategyDraftApprovalRequest,
 ): Promise<StrategyDraftApprovalResult> {
+  // apiControlPost injects X-MarketAI-Control-Key for this write; this function
+  // deliberately never supplies the read-tier key.
   return apiControlPost<StrategyDraftApprovalResult>(
     `/api/v1/events/${encodeURIComponent(eventId)}/strategy-draft/approve`,
     request,
