@@ -92,16 +92,35 @@ begin
     raise exception 'trading_task_instrument_mismatch';
   end if;
 
-  insert into public.trading_tasks (
-    tracked_event_id, source_event_id, instrument, mode, state, created_by
-  ) values (
-    input_tracked_event_id, canonical_source_event_id, instrument_value, mode_value, 'pending', actor
-  )
-  returning * into created;
-  return created;
-exception
-  when unique_violation then
-    raise exception 'trading_task_already_exists';
+  begin
+    insert into public.trading_tasks (
+      tracked_event_id, source_event_id, instrument, mode, state, created_by
+    ) values (
+      input_tracked_event_id, canonical_source_event_id, instrument_value, mode_value, 'pending', actor
+    )
+    returning * into created;
+    return created;
+  exception
+    when unique_violation then
+      -- Retry-safe creation: if the original insert committed but its RPC
+      -- response was lost, return the exact still-active canonical task so the
+      -- caller recovers its server-generated id and current lifecycle state.
+      select * into created
+      from public.trading_tasks
+      where tracked_event_id = input_tracked_event_id
+        and mode = mode_value
+        and state in ('pending', 'approved')
+      limit 2;
+
+      if not found then
+        raise exception 'trading_task_creation_conflict';
+      end if;
+      if created.source_event_id <> canonical_source_event_id
+         or upper(btrim(created.instrument)) <> instrument_value then
+        raise exception 'trading_task_creation_conflict';
+      end if;
+      return created;
+  end;
 end;
 $$;
 
