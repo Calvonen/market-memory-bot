@@ -18,6 +18,8 @@ class _Registry:
 
     def list_for_instrument(self, tracked_instrument_id: str):
         self.read_calls.append(tracked_instrument_id)
+        if self.missing:
+            raise TrackedInstrumentProfileInstrumentNotFound(tracked_instrument_id)
         return [
             TrackedInstrumentProfileRecord(
                 id="profile-1",
@@ -79,6 +81,18 @@ class TrackingProfileApiTests(unittest.TestCase):
         self.assertEqual(registry.read_calls, ["instrument-1"])
         self.assertEqual(registry.write_calls, [])
         self.assertEqual(response.json()[0]["profile_type"], "trend")
+
+    def test_get_maps_missing_canonical_instrument_to_404(self) -> None:
+        registry = _Registry()
+        registry.missing = True
+        response = self._client(registry).get(
+            "/api/v1/tracked-instruments/missing/profiles",
+            headers={"X-MarketAI-Key": "read"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(registry.read_calls, ["missing"])
+        self.assertEqual(registry.write_calls, [])
 
     def test_get_rejects_control_key_before_read(self) -> None:
         registry = _Registry()
