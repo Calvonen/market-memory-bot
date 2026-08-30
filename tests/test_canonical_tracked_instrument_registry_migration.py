@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -39,12 +40,25 @@ class CanonicalTrackedInstrumentRegistryMigrationTests(unittest.TestCase):
         # The canonical instrument upsert may mutate only its own registry table.
         # Because the SECURITY DEFINER function uses search_path=public,pg_temp,
         # downstream public surfaces are dangerous both schema-qualified and
-        # unqualified. Keep the exact public-surface guard and also reject broad
-        # downstream domain identifiers regardless of qualification.
+        # unqualified. Enforce the boundary structurally by allowlisting every
+        # DML target in this function body instead of trying to enumerate every
+        # downstream tracked-event/workflow table that exists now or later.
+        dml_targets = [
+            target
+            for _verb, target in re.findall(
+                r"\b(insert\s+into|update|delete\s+from|truncate(?:\s+table)?)\s+([a-z_][a-z0-9_.]*)",
+                upsert_body,
+            )
+        ]
+        self.assertTrue(dml_targets)
+        for target in dml_targets:
+            self.assertIn(target, ("tracked_instruments", "public.tracked_instruments"))
+
         downstream_surface = upsert_body.replace("public.tracked_instruments", "")
         self.assertNotIn("public.", downstream_surface)
 
         for forbidden_identifier in (
+            "tracked_event",
             "tracked_market_event",
             "market_event",
             "calendar_event",
@@ -62,8 +76,6 @@ class CanonicalTrackedInstrumentRegistryMigrationTests(unittest.TestCase):
             self.assertNotIn(forbidden_identifier, upsert_body)
 
         for forbidden_sql in (
-            "delete from ",
-            "truncate ",
             "perform ",
             "call ",
             "execute ",
