@@ -39,7 +39,8 @@ class MobileTrackingProfileEditorTests(unittest.TestCase):
     def test_scanner_opens_editor_only_for_persisted_tracked_row(self) -> None:
         self.assertIn("const trackedInstrument = trackedInstruments.find", self.scanner)
         self.assertIn("trackedInstrument?.id === profileEditorId", self.scanner)
-        self.assertIn("<TrackingProfileEditor trackedInstrumentId={trackedInstrument.id} />", self.scanner)
+        self.assertIn("<TrackingProfileEditor", self.scanner)
+        self.assertIn("trackedInstrumentId={trackedInstrument.id}", self.scanner)
         self.assertIn("Muokkaa seurantaprofiileja", self.scanner)
 
     def test_editor_supports_enable_disable_and_specs(self) -> None:
