@@ -1,0 +1,136 @@
+from __future__ import annotations
+
+import os
+from datetime import UTC, datetime
+from typing import Any
+
+from trading_system.models import TradingMode
+from trading_system.trading_task import CanonicalTradingTask, TradingTaskState
+from trading_system.tracked_event_paper_bridge import CanonicalTradingTaskExecutionContext
+
+
+class SupabaseTradingTaskRepository:
+    """Canonical read/control boundary for explicit trading execution intent."""
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+
+    @classmethod
+    def from_env(cls) -> "SupabaseTradingTaskRepository":
+        from supabase import create_client
+
+        url = os.environ.get("MARKETAI_SUPABASE_URL")
+        key = os.environ.get("MARKETAI_SUPABASE_SECRET_KEY")
+        if not url or not key:
+            raise RuntimeError(
+                "MARKETAI_SUPABASE_URL and MARKETAI_SUPABASE_SECRET_KEY are required"
+            )
+        return cls(create_client(url, key))
+
+    def create_pending(
+        self,
+        *,
+        tracked_event_id: str,
+        source_event_id: str,
+        instrument: str,
+        mode: TradingMode,
+        actor: str,
+    ) -> CanonicalTradingTask:
+        if not isinstance(mode, TradingMode):
+            raise ValueError("mode must be a TradingMode")
+        response = self.client.rpc(
+            "create_trading_task",
+            {
+                "input_tracked_event_id": tracked_event_id,
+                "input_source_event_id": source_event_id,
+                "input_instrument": instrument,
+                "input_mode": mode.value,
+                "input_actor": actor,
+            },
+        ).execute()
+        return self._one(response.data, "create_trading_task")
+
+    def approve(self, *, task_id: str, actor: str) -> CanonicalTradingTask:
+        response = self.client.rpc(
+            "approve_trading_task",
+            {"input_task_id": task_id, "input_actor": actor},
+        ).execute()
+        return self._one(response.data, "approve_trading_task")
+
+    def cancel(self, *, task_id: str, actor: str) -> CanonicalTradingTask:
+        response = self.client.rpc(
+            "cancel_trading_task",
+            {"input_task_id": task_id, "input_actor": actor},
+        ).execute()
+        return self._one(response.data, "cancel_trading_task")
+
+    def get(self, task_id: str) -> CanonicalTradingTask | None:
+        rows = (
+            self.client.table("trading_tasks")
+            .select("*")
+            .eq("id", task_id)
+            .limit(2)
+            .execute()
+            .data
+            or []
+        )
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise RuntimeError("canonical trading task read returned ambiguous rows")
+        return self._from_row(rows[0])
+
+    def execution_context(self, task_id: str) -> CanonicalTradingTaskExecutionContext:
+        task = self.get(task_id)
+        if task is None:
+            raise LookupError("canonical trading task not found")
+        if task.state is not TradingTaskState.APPROVED:
+            raise ValueError("canonical trading task is not approved")
+        return CanonicalTradingTaskExecutionContext(
+            task_id=task.task_id,
+            source_event_id=task.source_event_id,
+            instrument=task.instrument,
+            mode=task.mode,
+        )
+
+    @classmethod
+    def _one(cls, data: Any, operation: str) -> CanonicalTradingTask:
+        if isinstance(data, dict):
+            rows = [data]
+        else:
+            rows = data or []
+        if len(rows) != 1:
+            raise RuntimeError(f"{operation} returned {len(rows)} rows")
+        return cls._from_row(rows[0])
+
+    @staticmethod
+    def _from_row(row: dict[str, Any]) -> CanonicalTradingTask:
+        try:
+            return CanonicalTradingTask(
+                task_id=str(row["id"]),
+                tracked_event_id=str(row["tracked_event_id"]),
+                source_event_id=str(row["source_event_id"]),
+                instrument=str(row["instrument"]),
+                mode=TradingMode(str(row["mode"])),
+                state=TradingTaskState(str(row["state"])),
+                created_by=str(row["created_by"]),
+                created_at=_parse_datetime(row["created_at"]),
+                approved_by=row.get("approved_by"),
+                approved_at=_parse_datetime(row["approved_at"]) if row.get("approved_at") else None,
+                cancelled_by=row.get("cancelled_by"),
+                cancelled_at=_parse_datetime(row["cancelled_at"]) if row.get("cancelled_at") else None,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("malformed canonical trading task row") from exc
+
+
+def _parse_datetime(value: str | datetime) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    else:
+        raise ValueError("timestamp must be text or datetime")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("timestamp must be timezone-aware")
+    return parsed.astimezone(UTC)
