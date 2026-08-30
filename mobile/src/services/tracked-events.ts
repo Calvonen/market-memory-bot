@@ -86,6 +86,12 @@ export type TrackedEventReleaseIngestionResult = {
   overdue: boolean;
 };
 
+export type TrackedEventReleaseSkipResult = {
+  event_id: string;
+  release_event_id: string;
+  status: 'skipped';
+};
+
 export type TrackedMarketEvent = {
   event_id: string;
   tracked_instrument_id: string;
@@ -166,6 +172,18 @@ export function ingestTrackedEventRelease(
   return apiControlPost<TrackedEventReleaseIngestionResult>(
     `/api/v1/tracked-events/${encodeURIComponent(eventId)}/release-ingestion`,
     undefined,
+    { 'X-MarketAI-Actor': actor },
+  );
+}
+
+export function skipTrackedEventRelease(
+  eventId: string,
+  actor: string,
+  reason: string,
+): Promise<TrackedEventReleaseSkipResult> {
+  return apiControlPost<TrackedEventReleaseSkipResult>(
+    `/api/v1/tracked-events/${encodeURIComponent(eventId)}/release-skip`,
+    { reason },
     { 'X-MarketAI-Actor': actor },
   );
 }
