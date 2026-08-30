@@ -82,6 +82,37 @@ class SupabaseReleaseRepository:
         rows = response.data or []
         return rows[0] if rows else None
 
+    def get_analysis_for_event_version(
+        self,
+        *,
+        event_id: str,
+        expectation_version: int,
+    ) -> dict[str, Any] | None:
+        """Return the single canonical persisted analysis for one event version.
+
+        Execution orchestration must never guess which analysis owns a version.
+        Zero rows means analysis is not ready yet; more than one row is an
+        identity ambiguity and fails closed before Strategy/Risk/Broker code.
+        """
+        response = (
+            self.client.table("event_ai_analyses")
+            .select("*")
+            .eq("event_id", event_id)
+            .eq("expectation_version", expectation_version)
+            .order("created_at")
+            .limit(2)
+            .execute()
+        )
+        rows = list(response.data or [])
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise RuntimeError("canonical event analysis read returned ambiguous rows")
+        row = rows[0]
+        if not isinstance(row, dict):
+            raise RuntimeError("canonical event analysis row is not an object")
+        return row
+
     def has_analysis_for_event_version(
         self,
         *,
