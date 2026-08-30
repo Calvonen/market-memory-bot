@@ -59,7 +59,7 @@ EXPECTED_TRACKING_CONTROL = """          const status = trackingStatus[`${countr
 def _tracking_action(source: str) -> str:
     start = source.index("  async function addScannerResultToTracking(")
     end = source.index("\n  useEffect(() => {", start)
-    return source[start:end] + "\n"
+    return source[start:end]
 
 
 def _tracking_control(source: str) -> str:
