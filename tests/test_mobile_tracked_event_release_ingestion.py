@@ -74,10 +74,13 @@ class MobileTrackedEventReleaseIngestionTests(unittest.TestCase):
             screen,
         )
         self.assertIn(
-            "if (!eventId || !canProcessRelease || processing || submitting) return;",
+            "if (!eventId || !canProcessRelease || processing || submitting || skipping) return;",
             process_release,
         )
-        self.assertIn("disabled={!canProcessRelease || !actor.trim() || processing || submitting}", screen)
+        self.assertIn(
+            "disabled={!canProcessRelease || !actor.trim() || processing || submitting || skipping}",
+            screen,
+        )
         self.assertIn("Käsittele julkaisu", screen)
 
     def test_ingestion_success_refresh_is_guarded_and_updates_canonical_state(self) -> None:
