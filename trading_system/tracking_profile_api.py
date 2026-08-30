@@ -57,6 +57,10 @@ def build_tracking_profile_router(
                     tracked_instrument_id
                 )
             ]
+        except TrackedInstrumentProfileInstrumentNotFound as exc:
+            raise HTTPException(
+                status_code=404, detail="Tracked instrument not found"
+            ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except HTTPException:
