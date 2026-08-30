@@ -48,6 +48,7 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         current_version = self._current_expectation_version(release_event_id)
         latest_run = self._latest_release_run(release_event_id)
         tracked_release_blocker = self._tracked_release_blocker_metadata(event.event_id)
+        release_skipped = self._release_skip_present(event.event_id, release_event_id)
         paper_state = self._paper_state_for_version(release_event_id, current_version)
         persisted_release_document_present = self._exists(
             "event_source_documents", "event_id", release_event_id
@@ -67,11 +68,18 @@ class SupabaseWorkflowReadinessEvidenceLoader:
             tracked_release_blocker,
             release_document_present=release_document_present,
         )
+        if release_skipped:
+            # An explicit audited skip resolves an outstanding release action
+            # without mutating blocker rows. A genuinely persisted canonical
+            # release document still wins in the readiness projection.
+            release_action_code = None
+            release_action_reason = None
 
         return WorkflowReadinessEvidence(
             tracked_status=event.status,
             event_id=event.event_id,
             release_document_present=release_document_present,
+            release_skipped=release_skipped,
             release_failed=release_action_code is not None,
             release_action_code=release_action_code,
             release_action_reason=release_action_reason,
@@ -92,6 +100,17 @@ class SupabaseWorkflowReadinessEvidenceLoader:
             self.client.table(table)
             .select("id")
             .eq(field, value)
+            .limit(1)
+            .execute()
+        )
+        return bool(response.data or [])
+
+    def _release_skip_present(self, tracked_event_id: str, release_event_id: str) -> bool:
+        response = (
+            self.client.table("tracked_event_release_skip_audit")
+            .select("id")
+            .eq("tracked_event_id", tracked_event_id)
+            .eq("release_event_id", release_event_id)
             .limit(1)
             .execute()
         )
