@@ -92,6 +92,67 @@ class SupabaseTrackedInstrumentProfileRegistry:
             raise RuntimeError("tracked_instrument_profiles read returned invalid data")
         return [_record_from_row(row) for row in data]
 
+    def list_for_instruments(
+        self, tracked_instrument_ids: list[str]
+    ) -> dict[str, list[TrackedInstrumentProfileRecord]]:
+        instrument_ids: list[str] = []
+        seen: set[str] = set()
+        for raw_id in tracked_instrument_ids:
+            instrument_id = raw_id.strip()
+            if not instrument_id:
+                raise ValueError("tracked_instrument_id must be nonblank")
+            if instrument_id not in seen:
+                seen.add(instrument_id)
+                instrument_ids.append(instrument_id)
+
+        if not instrument_ids:
+            raise ValueError("at least one tracked_instrument_id is required")
+        if len(instrument_ids) > 50:
+            raise ValueError("at most 50 tracked_instrument_id values are allowed")
+
+        identity_response = (
+            self.client.table("tracked_instruments")
+            .select("id")
+            .in_("id", instrument_ids)
+            .execute()
+        )
+        identity_data = identity_response.data
+        if not isinstance(identity_data, list) or any(
+            not isinstance(row, dict) for row in identity_data
+        ):
+            raise RuntimeError("tracked_instruments batch identity read returned invalid data")
+
+        returned_ids = [row.get("id") for row in identity_data]
+        if len(returned_ids) != len(instrument_ids) or set(returned_ids) != set(instrument_ids):
+            missing = next((item for item in instrument_ids if item not in returned_ids), None)
+            if missing is not None:
+                raise TrackedInstrumentProfileInstrumentNotFound(missing)
+            raise RuntimeError("tracked_instruments batch identity read returned invalid data")
+
+        profile_response = (
+            self.client.table("tracked_instrument_profiles")
+            .select("*")
+            .in_("tracked_instrument_id", instrument_ids)
+            .order("tracked_instrument_id")
+            .order("profile_type")
+            .execute()
+        )
+        profile_data = profile_response.data
+        if not isinstance(profile_data, list) or any(
+            not isinstance(row, dict) for row in profile_data
+        ):
+            raise RuntimeError("tracked_instrument_profiles batch read returned invalid data")
+
+        records_by_instrument: dict[str, list[TrackedInstrumentProfileRecord]] = {
+            instrument_id: [] for instrument_id in instrument_ids
+        }
+        for row in profile_data:
+            instrument_id = row.get("tracked_instrument_id")
+            if instrument_id not in records_by_instrument:
+                raise RuntimeError("tracked_instrument_profiles batch read returned invalid data")
+            records_by_instrument[instrument_id].append(_record_from_row(row))
+        return records_by_instrument
+
     def upsert(
         self,
         *,

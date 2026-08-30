@@ -21,6 +21,10 @@ class _Query:
         self.calls.append(("eq", key, value))
         return self
 
+    def in_(self, key, values):
+        self.calls.append(("in", key, list(values)))
+        return self
+
     def order(self, key):
         self.calls.append(("order", key))
         return self
@@ -150,6 +154,65 @@ def test_list_for_instrument_rejects_blank_identity() -> None:
 
     with pytest.raises(ValueError, match="tracked_instrument_id is required"):
         registry.list_for_instrument("   ")
+
+
+def test_list_for_instruments_uses_two_batch_queries_and_groups_profiles() -> None:
+    client = _Client(
+        instrument_response=SimpleNamespace(
+            data=[{"id": "instrument-1"}, {"id": "instrument-2"}]
+        ),
+        profile_response=SimpleNamespace(
+            data=[
+                _row(),
+                _row(
+                    id="profile-2",
+                    tracked_instrument_id="instrument-2",
+                    profile_type="future_tech",
+                ),
+            ]
+        ),
+    )
+    registry = SupabaseTrackedInstrumentProfileRegistry(client)
+
+    records = registry.list_for_instruments(
+        [" instrument-1 ", "instrument-2", "instrument-1"]
+    )
+
+    assert list(records) == ["instrument-1", "instrument-2"]
+    assert [item.profile_type for item in records["instrument-1"]] == ["earnings"]
+    assert [item.profile_type for item in records["instrument-2"]] == ["future_tech"]
+    assert client.table_calls == [
+        ("table", "tracked_instruments"),
+        ("select", "id"),
+        ("in", "id", ["instrument-1", "instrument-2"]),
+        ("execute",),
+        ("table", "tracked_instrument_profiles"),
+        ("select", "*"),
+        ("in", "tracked_instrument_id", ["instrument-1", "instrument-2"]),
+        ("order", "tracked_instrument_id"),
+        ("order", "profile_type"),
+        ("execute",),
+    ]
+
+
+def test_list_for_instruments_fails_closed_when_any_identity_is_missing() -> None:
+    client = _Client(
+        instrument_response=SimpleNamespace(data=[{"id": "instrument-1"}])
+    )
+    registry = SupabaseTrackedInstrumentProfileRegistry(client)
+
+    with pytest.raises(TrackedInstrumentProfileInstrumentNotFound) as exc_info:
+        registry.list_for_instruments(["instrument-1", "missing"])
+
+    assert str(exc_info.value) == "missing"
+    assert all(call != ("table", "tracked_instrument_profiles") for call in client.table_calls)
+
+
+def test_list_for_instruments_rejects_empty_batch() -> None:
+    registry = SupabaseTrackedInstrumentProfileRegistry(_Client())
+
+    with pytest.raises(ValueError, match="at least one tracked_instrument_id is required"):
+        registry.list_for_instruments([])
 
 
 def test_upsert_uses_only_canonical_profile_rpc() -> None:

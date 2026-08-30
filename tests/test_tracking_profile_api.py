@@ -13,6 +13,7 @@ from trading_system.tracking_profile_registry import (
 class _Registry:
     def __init__(self) -> None:
         self.read_calls = []
+        self.batch_read_calls = []
         self.write_calls = []
         self.missing = False
 
@@ -31,6 +32,25 @@ class _Registry:
                 updated_by="mobile",
             )
         ]
+
+    def list_for_instruments(self, tracked_instrument_ids: list[str]):
+        self.batch_read_calls.append(tracked_instrument_ids)
+        if self.missing:
+            raise TrackedInstrumentProfileInstrumentNotFound("missing")
+        return {
+            tracked_instrument_id: [
+                TrackedInstrumentProfileRecord(
+                    id=f"profile-{index}",
+                    tracked_instrument_id=tracked_instrument_id,
+                    profile_type="trend",
+                    specs="Watch relative strength",
+                    enabled=True,
+                    created_by="mobile",
+                    updated_by="mobile",
+                )
+            ]
+            for index, tracked_instrument_id in enumerate(tracked_instrument_ids, start=1)
+        }
 
     def upsert(self, **kwargs):
         self.write_calls.append(kwargs)
@@ -79,8 +99,46 @@ class TrackingProfileApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(registry.read_calls, ["instrument-1"])
+        self.assertEqual(registry.batch_read_calls, [])
         self.assertEqual(registry.write_calls, [])
         self.assertEqual(response.json()[0]["profile_type"], "trend")
+
+    def test_batch_get_uses_one_registry_batch_read_and_read_auth(self) -> None:
+        registry = _Registry()
+        response = self._client(registry).get(
+            "/api/v1/tracked-instrument-profiles?tracked_instrument_id=instrument-1&tracked_instrument_id=instrument-2",
+            headers={"X-MarketAI-Key": "read"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            registry.batch_read_calls,
+            [["instrument-1", "instrument-2"]],
+        )
+        self.assertEqual(registry.read_calls, [])
+        self.assertEqual(registry.write_calls, [])
+        self.assertEqual(response.json()["instrument-2"][0]["profile_type"], "trend")
+
+    def test_batch_get_rejects_control_key_before_read(self) -> None:
+        registry = _Registry()
+        response = self._client(registry).get(
+            "/api/v1/tracked-instrument-profiles?tracked_instrument_id=instrument-1",
+            headers={"X-MarketAI-Control-Key": "control"},
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(registry.batch_read_calls, [])
+
+    def test_batch_get_maps_missing_canonical_instrument_to_404(self) -> None:
+        registry = _Registry()
+        registry.missing = True
+        response = self._client(registry).get(
+            "/api/v1/tracked-instrument-profiles?tracked_instrument_id=instrument-1&tracked_instrument_id=missing",
+            headers={"X-MarketAI-Key": "read"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(len(registry.batch_read_calls), 1)
 
     def test_get_maps_missing_canonical_instrument_to_404(self) -> None:
         registry = _Registry()
@@ -117,6 +175,7 @@ class TrackingProfileApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(registry.read_calls, [])
+        self.assertEqual(registry.batch_read_calls, [])
         self.assertEqual(
             registry.write_calls,
             [

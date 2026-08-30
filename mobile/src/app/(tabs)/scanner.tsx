@@ -1,14 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 
 import { ScreenShell, shared } from '@/components/screen-shell';
 import { TrackingProfileEditor } from '@/components/tracking-profile-editor';
+import { TrackingProfileSummary } from '@/components/tracking-profile-summary';
 import { apiGet, ScannerResult } from '@/services/api';
 import {
   getTrackedInstruments,
   TrackedInstrument,
   trackInstrument,
 } from '@/services/tracked-instruments';
+import {
+  getTrackingProfilesBatch,
+  TrackedInstrumentProfile,
+} from '@/services/tracking-profiles';
 
 const COUNTRIES = [
   { label: 'Suomi', value: 'Finland' },
@@ -22,6 +27,10 @@ const SCOPE_LIMITS: Record<(typeof SCOPES)[number], number> = { Top: 10, Full: 2
 const TRACKING_ACTOR = 'mobile-scanner';
 
 type TrackingStatus = 'saving' | 'error';
+type ProfileBatchState = {
+  key: string;
+  profilesByInstrument: Record<string, TrackedInstrumentProfile[]>;
+};
 
 function matchesTrackedInstrument(
   item: TrackedInstrument,
@@ -41,14 +50,37 @@ export default function ScannerScreen() {
   const [data, setData] = useState<ScannerResult | null>(null);
   const [trackedInstruments, setTrackedInstruments] = useState<TrackedInstrument[]>([]);
   const [profileEditorId, setProfileEditorId] = useState<string | null>(null);
+  const [profileBatch, setProfileBatch] = useState<ProfileBatchState>({
+    key: '',
+    profilesByInstrument: {},
+  });
+  const [profileBatchRefreshToken, setProfileBatchRefreshToken] = useState(0);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [trackingStatus, setTrackingStatus] = useState<Record<string, TrackingStatus>>({});
   const latestRequestId = useRef(0);
   const trackedMutationVersion = useRef(0);
+  const profileMutationVersion = useRef(0);
 
   const market = `${country} ${scope}`;
   const limit = SCOPE_LIMITS[scope];
+
+  const visibleTrackedInstrumentIds = useMemo(() => {
+    if (!data) return [];
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    for (const row of data.results) {
+      const trackedInstrument = trackedInstruments.find((item) =>
+        matchesTrackedInstrument(item, row.ticker, country),
+      );
+      if (trackedInstrument && !seen.has(trackedInstrument.id)) {
+        seen.add(trackedInstrument.id);
+        ids.push(trackedInstrument.id);
+      }
+    }
+    return ids;
+  }, [country, data, trackedInstruments]);
+  const visibleProfileBatchKey = visibleTrackedInstrumentIds.join(',');
 
   function invalidateScan() {
     latestRequestId.current += 1;
@@ -125,6 +157,25 @@ export default function ScannerScreen() {
     }
   }
 
+  function applySavedProfile(saved: TrackedInstrumentProfile) {
+    profileMutationVersion.current += 1;
+    setProfileBatch((current) => {
+      if (current.key !== visibleProfileBatchKey) return current;
+      const existing = current.profilesByInstrument[saved.tracked_instrument_id] ?? [];
+      return {
+        ...current,
+        profilesByInstrument: {
+          ...current.profilesByInstrument,
+          [saved.tracked_instrument_id]: [
+            ...existing.filter((profile) => profile.profile_type !== saved.profile_type),
+            saved,
+          ],
+        },
+      };
+    });
+    setProfileBatchRefreshToken((current) => current + 1);
+  }
+
   useEffect(() => {
     const timer = setTimeout(() => {
       void loadScanner();
@@ -132,6 +183,30 @@ export default function ScannerScreen() {
 
     return () => clearTimeout(timer);
   }, [loadScanner]);
+
+  useEffect(() => {
+    if (visibleTrackedInstrumentIds.length === 0) return;
+
+    let active = true;
+    const mutationVersionAtStart = profileMutationVersion.current;
+    void getTrackingProfilesBatch(visibleTrackedInstrumentIds)
+      .then((profilesByInstrument) => {
+        if (!active || mutationVersionAtStart !== profileMutationVersion.current) return;
+        setProfileBatch({
+          key: visibleProfileBatchKey,
+          profilesByInstrument,
+        });
+      })
+      .catch(() => {
+        // Profile annotations are supplemental; scanner rows remain usable.
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [profileBatchRefreshToken, visibleProfileBatchKey, visibleTrackedInstrumentIds]);
+
+  const profileBatchReady = profileBatch.key === visibleProfileBatchKey;
 
   return (
     <ScreenShell
@@ -200,6 +275,10 @@ export default function ScannerScreen() {
           );
           const isTracked = Boolean(trackedInstrument);
           const editorOpen = trackedInstrument?.id === profileEditorId;
+          const profiles =
+            trackedInstrument && profileBatchReady
+              ? (profileBatch.profilesByInstrument[trackedInstrument.id] ?? [])
+              : [];
 
           return (
             <View key={row.ticker} style={shared.card}>
@@ -209,6 +288,7 @@ export default function ScannerScreen() {
               <Text style={shared.text}>
                 {row.direction} · samankaltaisuus {row.best_similarity ?? '–'}
               </Text>
+              {trackedInstrument ? <TrackingProfileSummary profiles={profiles} /> : null}
               <Pressable
                 accessibilityRole="button"
                 disabled={status === 'saving' || isTracked}
@@ -240,7 +320,10 @@ export default function ScannerScreen() {
                     </Text>
                   </Pressable>
                   {editorOpen ? (
-                    <TrackingProfileEditor trackedInstrumentId={trackedInstrument.id} />
+                    <TrackingProfileEditor
+                      trackedInstrumentId={trackedInstrument.id}
+                      onSaved={applySavedProfile}
+                    />
                   ) : null}
                 </>
               ) : null}

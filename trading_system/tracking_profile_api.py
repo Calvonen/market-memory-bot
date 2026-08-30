@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Callable, Literal
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
 from trading_system.tracking_profile_registry import (
@@ -43,6 +43,33 @@ def build_tracking_profile_router(
     """Read/write tracked-instrument profile configuration only."""
 
     router = APIRouter()
+
+    @router.get("/api/v1/tracked-instrument-profiles")
+    def list_tracking_profiles_batch(
+        tracked_instrument_id: list[str] = Query(default=[]),
+        x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
+    ) -> dict[str, list[dict]]:
+        require_read(x_marketai_key)
+        try:
+            records = get_tracking_profile_registry().list_for_instruments(
+                tracked_instrument_id
+            )
+            return {
+                instrument_id: [asdict(record) for record in instrument_records]
+                for instrument_id, instrument_records in records.items()
+            }
+        except TrackedInstrumentProfileInstrumentNotFound as exc:
+            raise HTTPException(
+                status_code=404, detail="Tracked instrument not found"
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503, detail="Tracked instrument profile batch read failed"
+            ) from exc
 
     @router.get("/api/v1/tracked-instruments/{tracked_instrument_id}/profiles")
     def list_tracking_profiles(

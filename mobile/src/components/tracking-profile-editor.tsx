@@ -19,18 +19,20 @@ const PROFILE_TYPES: { type: TrackingProfileType; label: string }[] = [
 
 type Props = {
   trackedInstrumentId: string;
+  onSaved?: (profile: TrackedInstrumentProfile) => void;
 };
 
-export function TrackingProfileEditor({ trackedInstrumentId }: Props) {
+export function TrackingProfileEditor({ trackedInstrumentId, onSaved }: Props) {
   return (
     <TrackingProfileEditorGeneration
       key={trackedInstrumentId}
       trackedInstrumentId={trackedInstrumentId}
+      onSaved={onSaved}
     />
   );
 }
 
-function TrackingProfileEditorGeneration({ trackedInstrumentId }: Props) {
+function TrackingProfileEditorGeneration({ trackedInstrumentId, onSaved }: Props) {
   const [profiles, setProfiles] = useState<TrackedInstrumentProfile[]>([]);
   const [selectedType, setSelectedType] = useState<TrackingProfileType>(DEFAULT_PROFILE_TYPE);
   const [specs, setSpecs] = useState('');
@@ -103,6 +105,7 @@ function TrackingProfileEditorGeneration({ trackedInstrumentId }: Props) {
       ]);
       setSpecs(saved.specs);
       setEnabled(saved.enabled);
+      onSaved?.(saved);
     } catch (saveError) {
       if (!mountedRef.current) return;
       setError(saveError instanceof Error ? saveError.message : 'Profiilin tallennus epäonnistui');

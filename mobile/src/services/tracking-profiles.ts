@@ -48,6 +48,28 @@ export function getTrackingProfiles(
   );
 }
 
+export function getTrackingProfilesBatch(
+  trackedInstrumentIds: string[],
+  get: TrackingProfileGet = apiGet,
+): Promise<Record<string, TrackedInstrumentProfile[]>> {
+  const instrumentIds = Array.from(
+    new Set(trackedInstrumentIds.map(normalizeTrackedInstrumentId)),
+  );
+  if (instrumentIds.length === 0) {
+    return Promise.resolve({});
+  }
+  if (instrumentIds.length > 50) {
+    return Promise.reject(new Error('At most 50 tracked instrument ids are allowed'));
+  }
+
+  const query = instrumentIds
+    .map((instrumentId) => `tracked_instrument_id=${encodeURIComponent(instrumentId)}`)
+    .join('&');
+  return get<Record<string, TrackedInstrumentProfile[]>>(
+    `/api/v1/tracked-instrument-profiles?${query}`,
+  );
+}
+
 export function setTrackingProfile(
   trackedInstrumentId: string,
   profileType: TrackingProfileType,
