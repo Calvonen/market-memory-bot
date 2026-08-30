@@ -1,5 +1,7 @@
 import { apiControlPost, apiGet, apiPut } from '@/services/api';
 
+export const TRACKED_EVENT_RELEASE_SKIP_REASON_MAX_LENGTH = 1000;
+
 export type TrackedEventMonitoringStageSnapshot = {
   start_after_minutes: number;
   interval_minutes: number;
@@ -181,9 +183,18 @@ export function skipTrackedEventRelease(
   actor: string,
   reason: string,
 ): Promise<TrackedEventReleaseSkipResult> {
+  const normalizedReason = reason.trim();
+  if (!normalizedReason) {
+    return Promise.reject(new Error('Julkaisun ohituksen syy puuttuu.'));
+  }
+  if (Array.from(normalizedReason).length > TRACKED_EVENT_RELEASE_SKIP_REASON_MAX_LENGTH) {
+    return Promise.reject(
+      new Error(`Julkaisun ohituksen syy saa olla enintään ${TRACKED_EVENT_RELEASE_SKIP_REASON_MAX_LENGTH} merkkiä.`),
+    );
+  }
   return apiControlPost<TrackedEventReleaseSkipResult>(
     `/api/v1/tracked-events/${encodeURIComponent(eventId)}/release-skip`,
-    { reason },
+    { reason: normalizedReason },
     { 'X-MarketAI-Actor': actor },
   );
 }

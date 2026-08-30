@@ -18,7 +18,7 @@ class MobileTrackedEventReleaseSkipServiceTests(unittest.TestCase):
 
         self.assertIn("apiControlPost<TrackedEventReleaseSkipResult>", body)
         self.assertIn("/release-skip`", body)
-        self.assertIn("{ reason }", body)
+        self.assertIn("{ reason: normalizedReason }", body)
         self.assertIn("{ 'X-MarketAI-Actor': actor }", body)
         self.assertNotIn("release-ingestion", body)
         self.assertNotIn("createTradingTask", body)
