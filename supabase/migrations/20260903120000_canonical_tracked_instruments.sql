@@ -36,8 +36,8 @@ comment on table public.tracked_instruments is
   'Canonical persistent instrument tracking. Instrument tracking is separate from concrete market events and trading execution.';
 
 alter table public.tracked_instruments enable row level security;
-revoke all on table public.tracked_instruments from public, anon, authenticated;
-grant select, insert, update on table public.tracked_instruments to service_role;
+revoke all on table public.tracked_instruments from public, anon, authenticated, service_role;
+grant select on table public.tracked_instruments to service_role;
 
 create or replace function public.upsert_tracked_instrument(
   input_instrument text,
