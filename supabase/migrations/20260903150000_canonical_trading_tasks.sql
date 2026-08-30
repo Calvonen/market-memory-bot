@@ -31,7 +31,10 @@ create index if not exists trading_tasks_source_event_state_idx
   on public.trading_tasks(source_event_id, state);
 
 alter table public.trading_tasks enable row level security;
-revoke all on table public.trading_tasks from public, anon, authenticated;
+-- Fail closed even on databases where service_role inherited DML through
+-- default privileges or an earlier partial install. RPCs below are the only
+-- write boundary; service_role gets SELECT back explicitly afterwards.
+revoke all on table public.trading_tasks from public, anon, authenticated, service_role;
 grant select on table public.trading_tasks to service_role;
 
 create or replace function public.create_trading_task(
