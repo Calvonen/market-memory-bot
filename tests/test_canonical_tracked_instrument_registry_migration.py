@@ -37,12 +37,29 @@ class CanonicalTrackedInstrumentRegistryMigrationTests(unittest.TestCase):
         self.assertIn("active = true", upsert_body)
 
         # The canonical instrument upsert may mutate only its own registry table.
-        # Removing that exact object reference must leave no access to any other
-        # public table, function, or RPC surface. This is intentionally broader
-        # than a name-by-name denylist so new tracked-event/paper/trading mutators
-        # cannot silently enter this producer-neutral boundary later.
+        # Because the SECURITY DEFINER function uses search_path=public,pg_temp,
+        # downstream public surfaces are dangerous both schema-qualified and
+        # unqualified. Keep the exact public-surface guard and also reject broad
+        # downstream domain identifiers regardless of qualification.
         downstream_surface = upsert_body.replace("public.tracked_instruments", "")
         self.assertNotIn("public.", downstream_surface)
+
+        for forbidden_identifier in (
+            "tracked_market_event",
+            "market_event",
+            "calendar_event",
+            "event_expectation",
+            "expectation_version",
+            "release_shell",
+            "strategy",
+            "risk",
+            "broker",
+            "trading_task",
+            "trading_",
+            "paper_trade",
+            "paper_run",
+        ):
+            self.assertNotIn(forbidden_identifier, upsert_body)
 
         for forbidden_sql in (
             "delete from ",
@@ -52,15 +69,6 @@ class CanonicalTrackedInstrumentRegistryMigrationTests(unittest.TestCase):
             "execute ",
         ):
             self.assertNotIn(forbidden_sql, upsert_body)
-
-        for forbidden_domain in (
-            "strategy",
-            "risk",
-            "broker",
-            "trading_task",
-            "paper_trade",
-        ):
-            self.assertNotIn(forbidden_domain, upsert_body)
 
     def test_registry_mutations_are_rpc_only_and_source_values_are_bounded(self) -> None:
         self.assertIn("alter table public.tracked_instruments enable row level security", self.lower_sql)
