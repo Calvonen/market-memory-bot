@@ -3,6 +3,7 @@ import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 
 import { ScreenShell, shared } from '@/components/screen-shell';
 import { TrackingProfileEditor } from '@/components/tracking-profile-editor';
+import { TrackingProfileSummary } from '@/components/tracking-profile-summary';
 import { apiGet, ScannerResult } from '@/services/api';
 import {
   getTrackedInstruments,
@@ -41,6 +42,7 @@ export default function ScannerScreen() {
   const [data, setData] = useState<ScannerResult | null>(null);
   const [trackedInstruments, setTrackedInstruments] = useState<TrackedInstrument[]>([]);
   const [profileEditorId, setProfileEditorId] = useState<string | null>(null);
+  const [profileRefreshVersions, setProfileRefreshVersions] = useState<Record<string, number>>({});
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [trackingStatus, setTrackingStatus] = useState<Record<string, TrackingStatus>>({});
@@ -123,6 +125,13 @@ export default function ScannerScreen() {
     } catch {
       setTrackingStatus((current) => ({ ...current, [trackingKey]: 'error' }));
     }
+  }
+
+  function refreshProfileSummary(trackedInstrumentId: string) {
+    setProfileRefreshVersions((current) => ({
+      ...current,
+      [trackedInstrumentId]: (current[trackedInstrumentId] ?? 0) + 1,
+    }));
   }
 
   useEffect(() => {
@@ -209,6 +218,12 @@ export default function ScannerScreen() {
               <Text style={shared.text}>
                 {row.direction} · samankaltaisuus {row.best_similarity ?? '–'}
               </Text>
+              {trackedInstrument ? (
+                <TrackingProfileSummary
+                  trackedInstrumentId={trackedInstrument.id}
+                  refreshToken={profileRefreshVersions[trackedInstrument.id] ?? 0}
+                />
+              ) : null}
               <Pressable
                 accessibilityRole="button"
                 disabled={status === 'saving' || isTracked}
@@ -240,7 +255,10 @@ export default function ScannerScreen() {
                     </Text>
                   </Pressable>
                   {editorOpen ? (
-                    <TrackingProfileEditor trackedInstrumentId={trackedInstrument.id} />
+                    <TrackingProfileEditor
+                      trackedInstrumentId={trackedInstrument.id}
+                      onSaved={() => refreshProfileSummary(trackedInstrument.id)}
+                    />
                   ) : null}
                 </>
               ) : null}
