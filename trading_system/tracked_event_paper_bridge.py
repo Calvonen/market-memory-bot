@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Iterable
 
 import pandas as pd
 
 from trading_system.ai_event_analyzer import EventAnalysisPayload
+from trading_system.etoro_instrument_resolver import (
+    EtoroInstrumentResolver,
+    InstrumentResolutionRequest,
+)
 from trading_system.models import ComponentAssessment, EventExpectation, PortfolioState
 from trading_system.pipeline import PaperTradingPipeline
 from trading_system.post_release_paper import PostReleasePaperResult, run_post_release_paper
@@ -15,6 +19,10 @@ from trading_system.tracked_event_repository import (
     PersistentTrackedEvent,
     TrackedEventReactionRecord,
 )
+
+
+_CANONICAL_REFERENCE_KIND = "etoro_last_execution_pre_event_snapshot"
+_CANONICAL_FLAT_THRESHOLD_PCT = Decimal("0.25")
 
 
 @dataclass(frozen=True)
@@ -40,11 +48,54 @@ def canonical_release_event_id(event: PersistentTrackedEvent) -> str:
     return f"tracked:{event.event_id}"
 
 
+def _normalise_text(value: str) -> str:
+    return " ".join(value.strip().upper().split())
+
+
+def _validate_broker_identity(
+    event: PersistentTrackedEvent,
+    resolver: EtoroInstrumentResolver,
+) -> None:
+    """Re-resolve eToro identity and prove the persisted reference belongs to it."""
+    resolved = resolver.resolve(
+        InstrumentResolutionRequest(
+            instrument=event.instrument,
+            company_name=event.company_name,
+            market=event.market,
+        )
+    )
+    if resolved is None:
+        raise ValueError("eToro instrument resolution failed or was ambiguous")
+    if event.resolved_etoro_instrument_id != resolved.instrument_id:
+        raise ValueError("persisted reference eToro instrument id differs from current resolution")
+    if not event.resolved_etoro_symbol or _normalise_text(event.resolved_etoro_symbol) != _normalise_text(
+        resolved.symbol
+    ):
+        raise ValueError("persisted reference eToro symbol differs from current resolution")
+    if not event.resolved_etoro_display_name or _normalise_text(
+        event.resolved_etoro_display_name
+    ) != _normalise_text(resolved.display_name):
+        raise ValueError("persisted reference eToro display name differs from current resolution")
+    if not event.resolved_etoro_market or _normalise_text(event.resolved_etoro_market) != _normalise_text(
+        resolved.market
+    ):
+        raise ValueError("persisted reference eToro market differs from current resolution")
+
+
+def _canonical_direction(return_pct: Decimal) -> str:
+    if return_pct > _CANONICAL_FLAT_THRESHOLD_PCT:
+        return "positive"
+    if return_pct < -_CANONICAL_FLAT_THRESHOLD_PCT:
+        return "negative"
+    return "flat"
+
+
 def build_tracked_event_price_confirmation(
     *,
     event: PersistentTrackedEvent,
     expectation: EventExpectation,
     reactions: Iterable[TrackedEventReactionRecord],
+    resolver: EtoroInstrumentResolver,
 ) -> TrackedEventPriceConfirmation | None:
     """Validate and select the persisted first complete post-event 1m reaction.
 
@@ -65,10 +116,25 @@ def build_tracked_event_price_confirmation(
     reference = event.reference_price
     if anchor is None or reference is None:
         return None
+    if event.event_at.tzinfo is None or event.event_at.utcoffset() is None:
+        raise ValueError("tracked event time must be timezone-aware")
     if anchor.tzinfo is None or anchor.utcoffset() is None:
         raise ValueError("tracked reaction anchor must be timezone-aware")
     if reference <= 0 or not reference.is_finite():
         raise ValueError("tracked event reference price is invalid")
+    if event.reference_captured_at is None:
+        raise ValueError("tracked event reference capture timestamp is missing")
+    if (
+        event.reference_captured_at.tzinfo is None
+        or event.reference_captured_at.utcoffset() is None
+    ):
+        raise ValueError("tracked event reference capture timestamp must be timezone-aware")
+    if event.reference_captured_at.astimezone(UTC) > event.event_at.astimezone(UTC):
+        raise ValueError("tracked event reference was captured after event time")
+    if event.reference_kind != _CANONICAL_REFERENCE_KIND:
+        raise ValueError("tracked event reference kind is not canonical pre-event snapshot")
+
+    _validate_broker_identity(event, resolver)
 
     candidates = [
         reaction
@@ -89,8 +155,11 @@ def build_tracked_event_price_confirmation(
         raise ValueError("tracked reaction observed_at must be timezone-aware")
     if reaction.candle_start.astimezone(UTC) < event.event_at.astimezone(UTC):
         raise ValueError("tracked reaction precedes event time")
-    if reaction.observed_at.astimezone(UTC) < reaction.candle_start.astimezone(UTC):
-        raise ValueError("tracked reaction was observed before its candle started")
+    candle_complete_at = reaction.candle_start.astimezone(UTC) + timedelta(
+        minutes=reaction.interval_minutes
+    )
+    if reaction.observed_at.astimezone(UTC) < candle_complete_at:
+        raise ValueError("tracked reaction was observed before its candle completed")
     if reaction.reference_price != reference:
         raise ValueError("tracked reaction reference differs from event reference")
     if reaction.close_price <= 0 or not reaction.close_price.is_finite():
@@ -98,15 +167,14 @@ def build_tracked_event_price_confirmation(
     if not reaction.return_pct.is_finite():
         raise ValueError("tracked reaction return is invalid")
 
+    canonical_return = ((reaction.close_price - reference) / reference) * Decimal("100")
+    if reaction.return_pct != canonical_return:
+        raise ValueError("tracked reaction return differs from stored prices")
+
     direction = reaction.direction.strip().lower()
-    if direction not in {"positive", "negative", "flat"}:
-        raise ValueError("tracked reaction direction is invalid")
-    if direction == "positive" and reaction.return_pct <= 0:
-        raise ValueError("positive tracked reaction has non-positive return")
-    if direction == "negative" and reaction.return_pct >= 0:
-        raise ValueError("negative tracked reaction has non-negative return")
-    if direction == "flat" and abs(reaction.return_pct) > Decimal("0.25"):
-        raise ValueError("flat tracked reaction exceeds canonical flat threshold")
+    canonical_direction = _canonical_direction(canonical_return)
+    if direction != canonical_direction:
+        raise ValueError("tracked reaction direction differs from canonical return")
 
     return TrackedEventPriceConfirmation(
         tracked_market_event_id=event.event_id,
@@ -117,8 +185,8 @@ def build_tracked_event_price_confirmation(
         candle_start=reaction.candle_start,
         reference_price=reaction.reference_price,
         close_price=reaction.close_price,
-        return_pct=reaction.return_pct,
-        direction=direction,
+        return_pct=canonical_return,
+        direction=canonical_direction,
     )
 
 
@@ -129,6 +197,7 @@ def run_post_release_paper_from_tracked_event(
     analysis: EventAnalysisPayload,
     reactions: Iterable[TrackedEventReactionRecord],
     portfolio: PortfolioState,
+    resolver: EtoroInstrumentResolver,
     market_df: pd.DataFrame | None = None,
     technical: ComponentAssessment | None = None,
     market_memory: ComponentAssessment | None = None,
@@ -136,16 +205,16 @@ def run_post_release_paper_from_tracked_event(
 ) -> PostReleasePaperResult:
     """Use canonical persisted live reaction, then the existing paper pipeline.
 
-    This function does not create or mutate tracked events, expectations,
-    strategies, risk state, trading tasks, or broker state itself. It only
-    validates the tracked-event evidence and delegates the actual decision to
-    the existing ``run_post_release_paper`` Strategy -> Risk -> PaperBroker path.
-    There is deliberately no daily-bar fallback here.
+    The caller supplies the production eToro resolver so broker identity is
+    revalidated immediately before the persisted quote/reaction is accepted.
+    This function performs no persistence or broker writes itself and there is
+    deliberately no daily-bar fallback here.
     """
     confirmation = build_tracked_event_price_confirmation(
         event=event,
         expectation=expectation,
         reactions=reactions,
+        resolver=resolver,
     )
     if confirmation is None:
         return PostReleasePaperResult(
