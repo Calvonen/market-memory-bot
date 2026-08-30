@@ -187,7 +187,7 @@ export function skipTrackedEventRelease(
   if (!normalizedReason) {
     return Promise.reject(new Error('Julkaisun ohituksen syy puuttuu.'));
   }
-  if (normalizedReason.length > TRACKED_EVENT_RELEASE_SKIP_REASON_MAX_LENGTH) {
+  if (Array.from(normalizedReason).length > TRACKED_EVENT_RELEASE_SKIP_REASON_MAX_LENGTH) {
     return Promise.reject(
       new Error(`Julkaisun ohituksen syy saa olla enintään ${TRACKED_EVENT_RELEASE_SKIP_REASON_MAX_LENGTH} merkkiä.`),
     );
