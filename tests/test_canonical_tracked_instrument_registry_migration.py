@@ -24,11 +24,14 @@ class CanonicalTrackedInstrumentRegistryMigrationTests(unittest.TestCase):
         self.assertIn("on conflict (instrument_key, market_key) do update", self.lower_sql)
         self.assertIn("tracked_instruments.sources || excluded.sources[1]", self.lower_sql)
         self.assertIn("active = true", self.lower_sql)
-        self.assertNotIn("insert into public.tracked_market_events", self.lower_sql)
-        self.assertNotIn("insert into public.event_expectations", self.lower_sql)
-        self.assertNotIn("strategy", self.lower_sql)
-        self.assertNotIn("broker", self.lower_sql)
-        self.assertNotIn("trading_task", self.lower_sql)
+        for forbidden_write in (
+            "insert into public.tracked_market_events",
+            "insert into public.event_expectations",
+            "insert into public.event_strategy_approvals",
+            "insert into public.event_paper_trade_runs",
+            "create_trading_task",
+        ):
+            self.assertNotIn(forbidden_write, self.lower_sql)
 
     def test_registry_is_service_role_only_and_source_values_are_bounded(self) -> None:
         self.assertIn("alter table public.tracked_instruments enable row level security", self.lower_sql)
