@@ -3,6 +3,7 @@ import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 
 import { ScreenShell, shared } from '@/components/screen-shell';
 import { apiGet, ScannerResult } from '@/services/api';
+import { trackInstrument } from '@/services/tracked-instruments';
 
 const COUNTRIES = [
   { label: 'Suomi', value: 'Finland' },
@@ -13,6 +14,9 @@ const COUNTRIES = [
 
 const SCOPES = ['Top', 'Full'] as const;
 const SCOPE_LIMITS: Record<(typeof SCOPES)[number], number> = { Top: 10, Full: 25 };
+const TRACKING_ACTOR = 'mobile-scanner';
+
+type TrackingStatus = 'saving' | 'saved' | 'error';
 
 export default function ScannerScreen() {
   const [country, setCountry] = useState('Finland');
@@ -20,6 +24,7 @@ export default function ScannerScreen() {
   const [data, setData] = useState<ScannerResult | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [trackingStatus, setTrackingStatus] = useState<Record<string, TrackingStatus>>({});
   const latestRequestId = useRef(0);
 
   const market = `${country} ${scope}`;
@@ -59,6 +64,26 @@ export default function ScannerScreen() {
       }
     }
   }, [market, limit]);
+
+  async function addScannerResultToTracking(row: ScannerResult['results'][number]) {
+    const trackingKey = `${country}:${row.ticker}`;
+    setTrackingStatus((current) => ({ ...current, [trackingKey]: 'saving' }));
+
+    try {
+      await trackInstrument(
+        {
+          instrument: row.ticker,
+          company_name: '',
+          market: country,
+          source: 'scanner',
+        },
+        TRACKING_ACTOR,
+      );
+      setTrackingStatus((current) => ({ ...current, [trackingKey]: 'saved' }));
+    } catch {
+      setTrackingStatus((current) => ({ ...current, [trackingKey]: 'error' }));
+    }
+  }
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -137,16 +162,34 @@ export default function ScannerScreen() {
 
       {!loading &&
         !error &&
-        data?.results.map((row) => (
-          <View key={row.ticker} style={shared.card}>
-            <Text style={shared.heading}>
-              {row.ticker} · {row.price.toFixed(2)}
-            </Text>
-            <Text style={shared.text}>
-              {row.direction} · samankaltaisuus {row.best_similarity ?? '–'}
-            </Text>
-          </View>
-        ))}
+        data?.results.map((row) => {
+          const status = trackingStatus[`${country}:${row.ticker}`];
+          return (
+            <View key={row.ticker} style={shared.card}>
+              <Text style={shared.heading}>
+                {row.ticker} · {row.price.toFixed(2)}
+              </Text>
+              <Text style={shared.text}>
+                {row.direction} · samankaltaisuus {row.best_similarity ?? '–'}
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                disabled={status === 'saving' || status === 'saved'}
+                onPress={() => void addScannerResultToTracking(row)}
+                style={shared.button}>
+                <Text style={shared.buttonText}>
+                  {status === 'saving'
+                    ? 'Lisätään…'
+                    : status === 'saved'
+                      ? 'Seurannassa'
+                      : status === 'error'
+                        ? 'Yritä uudelleen'
+                        : 'Lisää seurantaan'}
+                </Text>
+              </Pressable>
+            </View>
+          );
+        })}
 
       {!loading && !error && data?.partial && (
         <Text style={shared.text}>
