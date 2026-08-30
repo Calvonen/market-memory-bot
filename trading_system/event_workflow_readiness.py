@@ -56,6 +56,7 @@ class WorkflowReadinessEvidence:
     tracked_status: TrackedEventStatus
     event_id: str | None = None
     release_document_present: bool = False
+    release_skipped: bool = False
     release_failed: bool = False
     release_action_code: str | None = None
     release_action_reason: str | None = None
@@ -74,6 +75,7 @@ class WorkflowReadinessEvidence:
                 raise ValueError("event_id must be a nonblank string or None")
         for field_name in (
             "release_document_present",
+            "release_skipped",
             "release_failed",
             "analysis_present",
             "reaction_present",
@@ -90,6 +92,8 @@ class WorkflowReadinessEvidence:
             raise ValueError("release action code and reason must be provided together")
         if self.release_action_code is not None and not self.release_failed:
             raise ValueError("release action metadata requires release_failed")
+        if self.release_skipped and self.release_failed:
+            raise ValueError("release cannot be both skipped and failed")
         if not isinstance(self.execution_outcome, WorkflowExecutionOutcome):
             raise ValueError("execution_outcome must be a WorkflowExecutionOutcome")
         if self.trading_mode is not None and not isinstance(self.trading_mode, TradingMode):
@@ -160,6 +164,8 @@ def _tracking_status(evidence: WorkflowReadinessEvidence) -> WorkflowStepStatus:
 def _release_status(evidence: WorkflowReadinessEvidence) -> WorkflowStepStatus:
     if evidence.release_document_present:
         return WorkflowStepStatus.COMPLETED
+    if evidence.release_skipped:
+        return WorkflowStepStatus.SKIPPED
     if evidence.release_failed:
         return WorkflowStepStatus.ACTION_REQUIRED
     return WorkflowStepStatus.PENDING
