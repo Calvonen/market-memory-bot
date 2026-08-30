@@ -32,9 +32,6 @@ export function TrackingProfileEditor({ trackedInstrumentId }: Props) {
 
   useEffect(() => {
     let active = true;
-    setLoading(true);
-    setError('');
-    setSelectedType(DEFAULT_PROFILE_TYPE);
 
     void getTrackingProfiles(trackedInstrumentId)
       .then((loaded) => {
