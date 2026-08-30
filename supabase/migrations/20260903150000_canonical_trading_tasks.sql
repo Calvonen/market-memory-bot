@@ -103,8 +103,8 @@ begin
   exception
     when unique_violation then
       -- Retry-safe creation: if the original insert committed but its RPC
-      -- response was lost, return the exact still-active canonical task so the
-      -- caller recovers its server-generated id and current lifecycle state.
+      -- response was lost, return the exact still-active canonical task only
+      -- for the same immutable request identity, including its creator.
       select * into created
       from public.trading_tasks
       where tracked_event_id = input_tracked_event_id
@@ -116,7 +116,8 @@ begin
         raise exception 'trading_task_creation_conflict';
       end if;
       if created.source_event_id <> canonical_source_event_id
-         or upper(btrim(created.instrument)) <> instrument_value then
+         or upper(btrim(created.instrument)) <> instrument_value
+         or created.created_by <> actor then
         raise exception 'trading_task_creation_conflict';
       end if;
       return created;
