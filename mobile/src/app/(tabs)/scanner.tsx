@@ -43,6 +43,7 @@ export default function ScannerScreen() {
   const [loading, setLoading] = useState(false);
   const [trackingStatus, setTrackingStatus] = useState<Record<string, TrackingStatus>>({});
   const latestRequestId = useRef(0);
+  const trackedMutationVersion = useRef(0);
 
   const market = `${country} ${scope}`;
   const limit = SCOPE_LIMITS[scope];
@@ -56,19 +57,32 @@ export default function ScannerScreen() {
 
   const loadScanner = useCallback(async () => {
     const requestId = ++latestRequestId.current;
+    const trackedVersionAtStart = trackedMutationVersion.current;
     setLoading(true);
     setError('');
 
+    // Persisted tracking annotations are useful but must not make the scanner
+    // unavailable if their read fails. They also must not overwrite a newer
+    // successful tracking mutation that completes while this read is in flight.
+    void getTrackedInstruments()
+      .then((canonicalTrackedInstruments) => {
+        if (
+          requestId === latestRequestId.current &&
+          trackedVersionAtStart === trackedMutationVersion.current
+        ) {
+          setTrackedInstruments(canonicalTrackedInstruments);
+        }
+      })
+      .catch(() => {
+        // Keep the last known canonical annotations; scanner results remain usable.
+      });
+
     try {
-      const [result, canonicalTrackedInstruments] = await Promise.all([
-        apiGet<ScannerResult>(
-          `/api/v1/scanner?market=${encodeURIComponent(market)}&limit=${limit}`,
-        ),
-        getTrackedInstruments(),
-      ]);
+      const result = await apiGet<ScannerResult>(
+        `/api/v1/scanner?market=${encodeURIComponent(market)}&limit=${limit}`,
+      );
       if (requestId === latestRequestId.current) {
         setData(result);
-        setTrackedInstruments(canonicalTrackedInstruments);
       }
     } catch (requestError) {
       if (requestId === latestRequestId.current) {
@@ -83,6 +97,8 @@ export default function ScannerScreen() {
 
   async function addScannerResultToTracking(row: ScannerResult['results'][number]) {
     const trackingKey = `${country}:${row.ticker}`;
+    // Invalidate any persisted-state read that started before this mutation.
+    trackedMutationVersion.current += 1;
     setTrackingStatus((current) => ({ ...current, [trackingKey]: 'saving' }));
 
     try {
@@ -95,6 +111,9 @@ export default function ScannerScreen() {
         },
         TRACKING_ACTOR,
       );
+      // Also invalidate reads that started while the POST was in flight; they
+      // may have captured the pre-save canonical collection.
+      trackedMutationVersion.current += 1;
       setTrackedInstruments((current) => [
         ...current.filter((item) => item.id !== saved.id),
         saved,
