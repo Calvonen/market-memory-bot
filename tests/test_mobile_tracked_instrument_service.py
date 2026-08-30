@@ -5,18 +5,18 @@ from pathlib import Path
 SERVICE_PATH = Path("mobile/src/services/tracked-instruments.ts")
 
 
-def _find_post_invocations(source: str) -> list[str]:
+def _find_named_invocations(source: str, name: str) -> list[str]:
     invocations: list[str] = []
     index = 0
     while True:
-        start = source.find("post", index)
+        start = source.find(name, index)
         if start < 0:
             return invocations
 
         before = source[start - 1] if start > 0 else ""
-        after_index = start + len("post")
+        after_index = start + len(name)
         after = source[after_index] if after_index < len(source) else ""
-        if (before.isalnum() or (before and before in "_$.")) or (
+        if (before.isalnum() or (before and before in "_$.") ) or (
             after.isalnum() or after in "_$"
         ):
             index = after_index
@@ -57,9 +57,9 @@ class MobileTrackedInstrumentServiceTests(unittest.TestCase):
         start = source.index("export function trackInstrument(")
         body = source[start:]
 
-        transport_calls = _find_post_invocations(body)
+        transport_calls = _find_named_invocations(body, "post")
         self.assertEqual(transport_calls, ["post<TrackedInstrument>("])
-        self.assertNotIn("apiControlPost<TrackedInstrument>(", body)
+        self.assertEqual(_find_named_invocations(body, "apiControlPost"), [])
         self.assertNotIn("fetch(", body)
         self.assertIn("post: TrackedInstrumentPost = apiControlPost", body)
 
@@ -78,12 +78,19 @@ class MobileTrackedInstrumentServiceTests(unittest.TestCase):
     def test_nested_generic_post_invocation_is_counted(self) -> None:
         source = "post<TrackedInstrument>(a); post<ApiResponse<TrackedInstrument>>(b); post(c);"
         self.assertEqual(
-            _find_post_invocations(source),
+            _find_named_invocations(source, "post"),
             [
                 "post<TrackedInstrument>(",
                 "post<ApiResponse<TrackedInstrument>>(",
                 "post(",
             ],
+        )
+
+    def test_direct_control_post_invocations_are_counted(self) -> None:
+        source = "apiControlPost(a); apiControlPost<Other>(b);"
+        self.assertEqual(
+            _find_named_invocations(source, "apiControlPost"),
+            ["apiControlPost(", "apiControlPost<Other>("],
         )
 
     def test_service_keeps_exact_source_union_and_actor_out_of_payload(self) -> None:
