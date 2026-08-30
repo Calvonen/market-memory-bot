@@ -1,0 +1,68 @@
+import unittest
+from pathlib import Path
+
+
+SCANNER = Path("mobile/src/app/(tabs)/scanner.tsx")
+EDITOR = Path("mobile/src/components/tracking-profile-editor.tsx")
+
+
+class MobileTrackingProfileEditorTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.scanner = SCANNER.read_text(encoding="utf-8")
+        cls.editor = EDITOR.read_text(encoding="utf-8")
+
+    def test_editor_uses_only_canonical_tracking_profile_service(self) -> None:
+        self.assertIn("getTrackingProfiles", self.editor)
+        self.assertIn("setTrackingProfile", self.editor)
+        self.assertIn("from '@/services/tracking-profiles';", self.editor)
+        self.assertNotIn("fetch(", self.editor)
+        self.assertNotIn("apiPut", self.editor)
+        self.assertNotIn("apiControlPost", self.editor)
+
+    def test_editor_exposes_only_initial_profile_types(self) -> None:
+        for profile_type, label in (
+            ("earnings", "Tulosjulkaisut"),
+            ("trend", "Trendi"),
+            ("future_tech", "Future Tech"),
+        ):
+            self.assertIn(f"type: '{profile_type}'", self.editor)
+            self.assertIn(f"label: '{label}'", self.editor)
+        self.assertNotIn("catalyst", self.editor)
+        self.assertNotIn("anomaly", self.editor)
+
+    def test_editor_reads_and_writes_by_canonical_tracked_instrument_id(self) -> None:
+        self.assertIn("getTrackingProfiles(trackedInstrumentId)", self.editor)
+        self.assertIn("trackedInstrumentId,\n        selectedType,", self.editor)
+        self.assertIn("const PROFILE_ACTOR = 'mobile-tracking-profile';", self.editor)
+
+    def test_scanner_opens_editor_only_for_persisted_tracked_row(self) -> None:
+        self.assertIn("const trackedInstrument = trackedInstruments.find", self.scanner)
+        self.assertIn("trackedInstrument?.id === profileEditorId", self.scanner)
+        self.assertIn("<TrackingProfileEditor trackedInstrumentId={trackedInstrument.id} />", self.scanner)
+        self.assertIn("Muokkaa seurantaprofiileja", self.scanner)
+
+    def test_editor_supports_enable_disable_and_specs(self) -> None:
+        self.assertIn("setEnabled((current) => !current)", self.editor)
+        self.assertIn("value={specs}", self.editor)
+        self.assertIn("onChangeText={setSpecs}", self.editor)
+        self.assertIn("{ specs, enabled }", self.editor)
+        self.assertIn("Tallenna profiili", self.editor)
+
+    def test_profile_ui_does_not_create_events_or_trading_state(self) -> None:
+        source = (self.scanner + self.editor).lower()
+        for forbidden in (
+            "tracked-events",
+            "calendar/",
+            "trading-tasks",
+            "strategyengine",
+            "riskengine",
+            "broker",
+            "paper_order",
+            "live-execution",
+        ):
+            self.assertNotIn(forbidden, source)
+
+
+if __name__ == "__main__":
+    unittest.main()
