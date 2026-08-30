@@ -294,5 +294,6 @@ export function approveStrategyDraft(
   return apiControlPost<StrategyDraftApprovalResult>(
     `/api/v1/events/${encodeURIComponent(eventId)}/strategy-draft/approve`,
     request,
+    { 'X-MarketAI-Control-Key': CONTROL_API_KEY },
   );
 }
