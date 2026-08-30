@@ -287,11 +287,19 @@ def _release_action_timestamp(
     run: dict[str, Any] | None,
     tracked_blocker: dict[str, Any] | None,
 ) -> datetime:
+    timestamps: list[datetime] = []
     if tracked_blocker is not None:
-        return _updated_at(tracked_blocker, "tracked release blocker")
-    if run is None:
+        timestamps.append(_updated_at(tracked_blocker, "tracked release blocker"))
+    if run is not None:
+        status = str(run.get("status") or "").strip().lower()
+        message = str(run.get("error_message") or "").strip().lower()
+        if _is_canonical_release_blocker(run) or status in _RELEASE_ERROR_STATUSES or (
+            status == "no_release" and "release overdue:" in message
+        ):
+            timestamps.append(_created_at(run, "release run"))
+    if not timestamps:
         raise RuntimeError("release action timestamp is missing")
-    return _created_at(run, "release run")
+    return max(timestamps)
 
 
 def _created_at(record: dict[str, Any], label: str) -> datetime:
