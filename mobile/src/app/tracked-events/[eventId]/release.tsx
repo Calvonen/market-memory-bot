@@ -5,22 +5,35 @@ import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-
 import { BackButton } from '@/components/back-button';
 import {
   getTrackedEventReleaseSource,
+  getTrackedEventWorkflow,
+  ingestTrackedEventRelease,
   putTrackedEventReleaseSource,
   type TrackedEventReleaseSource,
+  type TrackedEventWorkflowResponse,
 } from '@/services/tracked-events';
 
 export default function TrackedEventReleaseHandoffScreen() {
   const { eventId } = useLocalSearchParams<{ eventId: string }>();
   const [releaseSource, setReleaseSource] = useState<TrackedEventReleaseSource | null>(null);
+  const [workflow, setWorkflow] = useState<TrackedEventWorkflowResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sourceUrl, setSourceUrl] = useState('');
   const [sourceTitle, setSourceTitle] = useState('');
-  const [approver, setApprover] = useState('');
+  const [actor, setActor] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [processing, setProcessing] = useState(false);
   const [submitMessage, setSubmitMessage] = useState<string | null>(null);
+  const [processMessage, setProcessMessage] = useState<string | null>(null);
   const eventIdRef = useRef(eventId);
   const mountedRef = useRef(true);
+
+  const releaseStep = workflow?.steps.find((step) => step.key === 'release') ?? null;
+  const canProcessRelease = Boolean(
+    releaseSource?.active
+      && releaseStep?.status === 'action_required'
+      && releaseStep.action_target === 'release',
+  );
 
   useEffect(() => () => {
     mountedRef.current = false;
@@ -36,14 +49,17 @@ export default function TrackedEventReleaseHandoffScreen() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
     setReleaseSource(null);
+    setWorkflow(null);
     setError(null);
     setSourceUrl('');
     setSourceTitle('');
-    setApprover('');
+    setActor('');
     setSubmitting(false);
+    setProcessing(false);
     setSubmitMessage(null);
+    setProcessMessage(null);
 
-    async function loadReleaseSource() {
+    async function loadReleaseState() {
       if (!eventId) {
         setError('Tracked event puuttuu.');
         setLoading(false);
@@ -51,32 +67,37 @@ export default function TrackedEventReleaseHandoffScreen() {
       }
 
       try {
-        const source = await getTrackedEventReleaseSource(eventId);
+        const [source, currentWorkflow] = await Promise.all([
+          getTrackedEventReleaseSource(eventId),
+          getTrackedEventWorkflow(eventId),
+        ]);
         if (!cancelled) {
           setReleaseSource(source);
+          setWorkflow(currentWorkflow);
           setSourceUrl(source.source_url ?? '');
           setSourceTitle(source.source_title ?? '');
           setError(null);
         }
       } catch (loadError) {
         if (!cancelled) {
-          setError(loadError instanceof Error ? loadError.message : 'Julkaisulähteen lataus epäonnistui.');
+          setError(loadError instanceof Error ? loadError.message : 'Julkaisutilan lataus epäonnistui.');
         }
       } finally {
         if (!cancelled) setLoading(false);
       }
     }
 
-    void loadReleaseSource();
+    void loadReleaseState();
     return () => {
       cancelled = true;
     };
   }, [eventId]);
 
   async function submitReleaseSource() {
-    if (!eventId || !releaseSource || submitting) return;
+    if (!eventId || !releaseSource || submitting || processing) return;
 
     setSubmitMessage(null);
+    setProcessMessage(null);
 
     const normalizedUrl = sourceUrl.trim();
     if (!normalizedUrl.startsWith('https://')) {
@@ -84,9 +105,9 @@ export default function TrackedEventReleaseHandoffScreen() {
       return;
     }
 
-    const normalizedApprover = approver.trim();
-    if (!normalizedApprover) {
-      setError('Syötä hyväksyjän tunniste.');
+    const normalizedActor = actor.trim();
+    if (!normalizedActor) {
+      setError('Syötä toimijan tunniste.');
       return;
     }
 
@@ -105,7 +126,7 @@ export default function TrackedEventReleaseHandoffScreen() {
           ...(sourceTitle.trim() ? { source_title: sourceTitle.trim() } : {}),
           expected_version: releaseSource.version,
         },
-        normalizedApprover,
+        normalizedActor,
       );
       if (mountedRef.current && eventIdRef.current === submittedEventId) {
         setReleaseSource(saved);
@@ -134,6 +155,64 @@ export default function TrackedEventReleaseHandoffScreen() {
     }
   }
 
+  async function processRelease() {
+    if (!eventId || !canProcessRelease || processing || submitting) return;
+
+    const normalizedActor = actor.trim();
+    if (!normalizedActor) {
+      setError('Syötä toimijan tunniste ennen julkaisun käsittelyä.');
+      return;
+    }
+
+    const submittedEventId = eventId;
+    setProcessing(true);
+    setError(null);
+    setSubmitMessage(null);
+    setProcessMessage(null);
+
+    try {
+      const result = await ingestTrackedEventRelease(submittedEventId, normalizedActor);
+      const [currentSource, currentWorkflow] = await Promise.all([
+        getTrackedEventReleaseSource(submittedEventId),
+        getTrackedEventWorkflow(submittedEventId),
+      ]);
+      if (mountedRef.current && eventIdRef.current === submittedEventId) {
+        setReleaseSource(currentSource);
+        setWorkflow(currentWorkflow);
+        setSourceUrl(currentSource.source_url ?? '');
+        setSourceTitle(currentSource.source_title ?? '');
+        setProcessMessage(
+          result.message?.trim()
+            ? `${result.status}: ${result.message}`
+            : `Käsittely valmis: ${result.status}`,
+        );
+      }
+    } catch (processError) {
+      if (mountedRef.current && eventIdRef.current === submittedEventId) {
+        const writeError =
+          processError instanceof Error ? processError.message : 'Julkaisun käsittely epäonnistui.';
+        setError(writeError);
+        try {
+          const [currentSource, currentWorkflow] = await Promise.all([
+            getTrackedEventReleaseSource(submittedEventId),
+            getTrackedEventWorkflow(submittedEventId),
+          ]);
+          if (mountedRef.current && eventIdRef.current === submittedEventId) {
+            setReleaseSource(currentSource);
+            setWorkflow(currentWorkflow);
+            setSourceUrl(currentSource.source_url ?? '');
+            setSourceTitle(currentSource.source_title ?? '');
+            setError(writeError);
+          }
+        } catch {
+          // Keep the original ingestion error visible if canonical refresh also fails.
+        }
+      }
+    } finally {
+      if (mountedRef.current && eventIdRef.current === submittedEventId) setProcessing(false);
+    }
+  }
+
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <BackButton />
@@ -141,7 +220,7 @@ export default function TrackedEventReleaseHandoffScreen() {
       <Text style={styles.title}>Julkaisun tarkistus</Text>
       <Text style={styles.body}>
         Tämä näkymä näyttää canonical tracked-event -workflow’hun liitetyn virallisen
-        julkaisulähteen. Lähteen muuttaminen lisätään erillisessä vaiheessa.
+        julkaisulähteen ja mahdollistaa yhden käyttäjän käynnistämän käsittely-yrityksen.
       </Text>
 
       <View style={styles.card}>
@@ -155,7 +234,7 @@ export default function TrackedEventReleaseHandoffScreen() {
         <Text style={styles.label}>Julkaisulähde</Text>
         {loading ? <Text style={styles.value}>Ladataan…</Text> : null}
         {!loading && error ? <Text style={styles.error}>{error}</Text> : null}
-        {!loading && !error && releaseSource ? (
+        {!loading && releaseSource ? (
           releaseSource.active ? (
             <>
               <Text style={styles.status}>Aktiivinen lähde</Text>
@@ -197,18 +276,18 @@ export default function TrackedEventReleaseHandoffScreen() {
         <TextInput
           autoCapitalize="none"
           autoCorrect={false}
-          onChangeText={setApprover}
-          placeholder="Hyväksyjän tunniste"
+          onChangeText={setActor}
+          placeholder="Toimijan tunniste (tallennus / käsittely)"
           placeholderTextColor="#677386"
           style={styles.input}
-          value={approver}
+          value={actor}
         />
         <Pressable
-          disabled={!releaseSource || !sourceUrl.trim() || !approver.trim() || submitting}
+          disabled={!releaseSource || !sourceUrl.trim() || !actor.trim() || submitting || processing}
           onPress={() => void submitReleaseSource()}
           style={({ pressed }) => [
             styles.button,
-            (!releaseSource || !sourceUrl.trim() || !approver.trim() || submitting) && styles.buttonDisabled,
+            (!releaseSource || !sourceUrl.trim() || !actor.trim() || submitting || processing) && styles.buttonDisabled,
             pressed && styles.buttonPressed,
           ]}>
           <Text style={styles.buttonText}>{submitting ? 'Tallennetaan…' : 'Tallenna lähde'}</Text>
@@ -216,8 +295,33 @@ export default function TrackedEventReleaseHandoffScreen() {
         {submitMessage ? <Text style={styles.success}>{submitMessage}</Text> : null}
       </View>
 
+      <View style={styles.card}>
+        <Text style={styles.label}>Julkaisun käsittely</Text>
+        <Text style={styles.meta}>
+          Workflow: {releaseStep?.status ?? 'tuntematon'}
+        </Text>
+        {releaseStep?.action_reason ? <Text style={styles.value}>{releaseStep.action_reason}</Text> : null}
+        <Pressable
+          disabled={!canProcessRelease || !actor.trim() || processing || submitting}
+          onPress={() => void processRelease()}
+          style={({ pressed }) => [
+            styles.button,
+            (!canProcessRelease || !actor.trim() || processing || submitting) && styles.buttonDisabled,
+            pressed && styles.buttonPressed,
+          ]}>
+          <Text style={styles.buttonText}>{processing ? 'Käsitellään…' : 'Käsittele julkaisu'}</Text>
+        </Pressable>
+        {!releaseSource?.active ? (
+          <Text style={styles.meta}>Lisää ensin aktiivinen hyväksytty julkaisulähde.</Text>
+        ) : null}
+        {releaseSource?.active && !canProcessRelease ? (
+          <Text style={styles.meta}>Canonical workflow ei tällä hetkellä pyydä julkaisun käsittelyä.</Text>
+        ) : null}
+        {processMessage ? <Text style={styles.success}>{processMessage}</Text> : null}
+      </View>
+
       <Text style={styles.note}>
-        Lähteen tallentaminen ei käynnistä käsittelyä, muuta workflow-tilaa eikä luo kaupankäyntitehtävää.
+        Käsittely tekee vain yhden explicit ingestion -yrityksen canonical backend -polun kautta. Se ei luo kaupankäyntitehtävää eikä käynnistä Strategy/Risk/Broker-polkuja.
       </Text>
     </ScrollView>
   );

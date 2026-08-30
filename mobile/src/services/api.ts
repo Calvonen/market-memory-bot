@@ -1,11 +1,10 @@
 export const API_URL = process.env.EXPO_PUBLIC_MARKETAI_API_URL ?? 'http://127.0.0.1:8001';
 const READ_API_KEY = process.env.EXPO_PUBLIC_MARKETAI_READ_API_KEY ?? '';
-// Strong write-auth for the strategy-draft approve endpoint only - a
-// separate, narrower-scoped credential from READ_API_KEY (which must never
-// authorize a write). This is still an MVP-tier shared secret bundled into
-// the client, same caveat as READ_API_KEY: it must never be the backend's
-// admin token or any Supabase service-role secret - this file must never
-// reference either.
+// Strong write-auth for explicit control-plane actions - a separate,
+// narrower-scoped credential from READ_API_KEY (which must never authorize a
+// write). This is still an MVP-tier shared secret bundled into the client,
+// same caveat as READ_API_KEY: it must never be the backend's admin token or
+// any Supabase service-role secret - this file must never reference either.
 const CONTROL_API_KEY = process.env.EXPO_PUBLIC_MARKETAI_CONTROL_API_KEY ?? '';
 
 async function parseJsonResponse<T>(response: Response): Promise<T> {
@@ -34,6 +33,17 @@ async function apiPost<T>(path: string, body: unknown, authHeader: Record<string
     body: JSON.stringify(body),
   });
   return parseJsonResponse<T>(response);
+}
+
+export async function apiControlPost<T>(
+  path: string,
+  body: unknown,
+  headers: Record<string, string> = {},
+): Promise<T> {
+  return apiPost<T>(path, body, {
+    'X-MarketAI-Control-Key': CONTROL_API_KEY,
+    ...headers,
+  });
 }
 
 export async function apiPut<T>(
@@ -234,18 +244,16 @@ export function getUpcomingCalendarEvents(fromDate?: string, toDate?: string): P
 // key (never the read key, never a new EXPO_PUBLIC_* secret) - the same
 // credential this file already ships for approveStrategyDraft().
 export function trackCalendarEvent(calendarEventId: string): Promise<CalendarEvent> {
-  return apiPost<CalendarEvent>(
+  return apiControlPost<CalendarEvent>(
     `/api/v1/calendar/${encodeURIComponent(calendarEventId)}/track`,
     undefined,
-    { 'X-MarketAI-Control-Key': CONTROL_API_KEY },
   );
 }
 
 export function untrackCalendarEvent(calendarEventId: string): Promise<CalendarEvent> {
-  return apiPost<CalendarEvent>(
+  return apiControlPost<CalendarEvent>(
     `/api/v1/calendar/${encodeURIComponent(calendarEventId)}/untrack`,
     undefined,
-    { 'X-MarketAI-Control-Key': CONTROL_API_KEY },
   );
 }
 
@@ -276,16 +284,15 @@ export type StrategyDraftApprovalResult = EventExpectation & {
   approved_by: string;
 };
 
-// The only write in this file. Requires the control key - never the read
-// key - and the backend independently re-validates the draft fingerprint
-// and expectation-version CAS before persisting anything.
+// Control-plane write. Requires the control key - never the read key - and
+// the backend independently re-validates the draft fingerprint and
+// expectation-version CAS before persisting anything.
 export function approveStrategyDraft(
   eventId: string,
   request: StrategyDraftApprovalRequest,
 ): Promise<StrategyDraftApprovalResult> {
-  return apiPost<StrategyDraftApprovalResult>(
+  return apiControlPost<StrategyDraftApprovalResult>(
     `/api/v1/events/${encodeURIComponent(eventId)}/strategy-draft/approve`,
     request,
-    { 'X-MarketAI-Control-Key': CONTROL_API_KEY },
   );
 }

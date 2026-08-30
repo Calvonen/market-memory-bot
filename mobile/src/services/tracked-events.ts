@@ -1,4 +1,4 @@
-import { apiGet, apiPut } from '@/services/api';
+import { apiControlPost, apiGet, apiPut } from '@/services/api';
 
 export type TrackedEventMonitoringStageSnapshot = {
   start_after_minutes: number;
@@ -76,6 +76,16 @@ export type PutTrackedEventReleaseSourceInput = {
   expected_version: number;
 };
 
+export type TrackedEventReleaseIngestionResult = {
+  event_id: string;
+  release_event_id: string;
+  status: string;
+  source_document_id: string | null;
+  analysis_id: string | null;
+  message: string | null;
+  overdue: boolean;
+};
+
 export type TrackedMarketEvent = {
   event_id: string;
   tracked_instrument_id: string;
@@ -145,6 +155,17 @@ export function putTrackedEventReleaseSource(
   return apiPut<TrackedEventReleaseSource>(
     `/api/v1/tracked-events/${encodeURIComponent(eventId)}/release-source`,
     input,
+    { 'X-MarketAI-Actor': actor },
+  );
+}
+
+export function ingestTrackedEventRelease(
+  eventId: string,
+  actor: string,
+): Promise<TrackedEventReleaseIngestionResult> {
+  return apiControlPost<TrackedEventReleaseIngestionResult>(
+    `/api/v1/tracked-events/${encodeURIComponent(eventId)}/release-ingestion`,
+    undefined,
     { 'X-MarketAI-Actor': actor },
   );
 }
