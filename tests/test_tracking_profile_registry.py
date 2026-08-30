@@ -123,6 +123,28 @@ def test_list_for_instrument_maps_missing_canonical_identity_to_specific_error()
     ]
 
 
+@pytest.mark.parametrize(
+    "identity_data",
+    [
+        {"unexpected": "shape"},
+        [{}],
+        [{"id": "different"}],
+        [{"id": "instrument-1"}, {"id": "instrument-1"}],
+        [{"id": "instrument-1"}, {"id": "different"}],
+    ],
+)
+def test_list_for_instrument_rejects_malformed_or_mismatched_identity_rows(
+    identity_data,
+) -> None:
+    client = _Client(instrument_response=SimpleNamespace(data=identity_data))
+    registry = SupabaseTrackedInstrumentProfileRegistry(client)
+
+    with pytest.raises(RuntimeError, match="identity read returned invalid data"):
+        registry.list_for_instrument("instrument-1")
+
+    assert all(call != ("table", "tracked_instrument_profiles") for call in client.table_calls)
+
+
 def test_list_for_instrument_rejects_blank_identity() -> None:
     registry = SupabaseTrackedInstrumentProfileRegistry(_Client())
 
@@ -171,16 +193,6 @@ def test_upsert_maps_missing_instrument_to_specific_error() -> None:
             enabled=True,
             actor="user",
         )
-
-
-def test_invalid_identity_read_payload_fails_closed() -> None:
-    client = _Client(
-        instrument_response=SimpleNamespace(data={"unexpected": "shape"})
-    )
-    registry = SupabaseTrackedInstrumentProfileRegistry(client)
-
-    with pytest.raises(RuntimeError, match="identity read returned invalid data"):
-        registry.list_for_instrument("instrument-1")
 
 
 def test_invalid_profile_read_payload_fails_closed() -> None:
