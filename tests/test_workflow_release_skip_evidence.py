@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from trading_system.event_workflow import EARNINGS_WORKFLOW, WorkflowStepKey, WorkflowStepStatus
 from trading_system.event_workflow_readiness import (
     WorkflowReadinessEvidence,
@@ -286,3 +288,93 @@ def test_loader_does_not_accept_skip_for_different_tracked_event_identity() -> N
 
     assert evidence.release_skipped is False
     assert _release_status(evidence) is WorkflowStepStatus.PENDING
+
+
+def test_loader_post_skip_tracked_blocker_reopens_action_required() -> None:
+    event = _event()
+    release_id = f"tracked:{event.event_id}"
+    client = _Client(
+        {
+            "current_event_expectations": [{"event_id": release_id, "version": 1}],
+            "tracked_event_release_skip_audit": [
+                {
+                    "id": 1,
+                    "tracked_event_id": event.event_id,
+                    "release_event_id": release_id,
+                    "created_at": "2026-08-29T12:05:00+00:00",
+                }
+            ],
+            "tracked_event_workflow_blockers": [
+                {
+                    "tracked_market_event_id": event.event_id,
+                    "step_key": "release",
+                    "blocker_code": "release_source_missing",
+                    "message": "A new release failure needs attention",
+                    "resolved_at": None,
+                    "updated_at": "2026-08-29T12:10:00+00:00",
+                }
+            ],
+        }
+    )
+
+    evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(event)
+
+    assert evidence.release_skipped is False
+    assert evidence.release_failed is True
+    assert evidence.release_action_code == "release_source_missing"
+    assert _release_status(evidence) is WorkflowStepStatus.ACTION_REQUIRED
+
+
+def test_loader_post_skip_canonical_run_reopens_action_required() -> None:
+    event = _event()
+    release_id = f"tracked:{event.event_id}"
+    client = _Client(
+        {
+            "current_event_expectations": [{"event_id": release_id, "version": 1}],
+            "tracked_event_release_skip_audit": [
+                {
+                    "id": 1,
+                    "tracked_event_id": event.event_id,
+                    "release_event_id": release_id,
+                    "created_at": "2026-08-29T12:05:00+00:00",
+                }
+            ],
+            "event_ingestion_runs": [
+                {
+                    "event_id": release_id,
+                    "provider": "canonical_release_worker",
+                    "status": "error",
+                    "error_message": "action_required: new canonical release failure",
+                    "created_at": "2026-08-29T12:10:00+00:00",
+                }
+            ],
+        }
+    )
+
+    evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(event)
+
+    assert evidence.release_skipped is False
+    assert evidence.release_failed is True
+    assert evidence.release_action_code == "release_action_required"
+    assert _release_status(evidence) is WorkflowStepStatus.ACTION_REQUIRED
+
+
+def test_loader_rejects_invalid_skip_timestamp_without_document() -> None:
+    event = _event()
+    release_id = f"tracked:{event.event_id}"
+    client = _Client(
+        {
+            "current_event_expectations": [{"event_id": release_id, "version": 1}],
+            "tracked_event_release_skip_audit": [
+                {
+                    "id": 1,
+                    "tracked_event_id": event.event_id,
+                    "release_event_id": release_id,
+                    "created_at": "not-a-timestamp",
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="release skip created_at is invalid"):
+        SupabaseWorkflowReadinessEvidenceLoader(client).load(event)
