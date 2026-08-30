@@ -31,41 +31,53 @@ export function TrackingProfileEditor({ trackedInstrumentId }: Props) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const mountedRef = useRef(true);
-  const activeInstrumentIdRef = useRef(trackedInstrumentId);
+  const editorGenerationRef = useRef(0);
   const selectedTypeRef = useRef(selectedType);
 
-  activeInstrumentIdRef.current = trackedInstrumentId;
   selectedTypeRef.current = selectedType;
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      editorGenerationRef.current += 1;
     };
   }, []);
 
   useEffect(() => {
     let active = true;
+    const generation = ++editorGenerationRef.current;
+
+    // A replacement instrument is a new editor generation. Any pending save
+    // from the previous generation must stop owning the UI immediately.
+    setSaving(false);
+    setLoading(true);
+    setLoadedInstrumentId(null);
+    setProfiles([]);
+    setSelectedType(DEFAULT_PROFILE_TYPE);
+    setSpecs('');
+    setEnabled(false);
+    setError('');
 
     void getTrackingProfiles(trackedInstrumentId)
       .then((loaded) => {
-        if (!active || !mountedRef.current) return;
+        if (!active || !mountedRef.current || editorGenerationRef.current !== generation) return;
         setProfiles(loaded);
         const current = loaded.find(
           (profile) => profile.profile_type === DEFAULT_PROFILE_TYPE,
         );
-        setSelectedType(DEFAULT_PROFILE_TYPE);
         setSpecs(current?.specs ?? '');
         setEnabled(current?.enabled ?? false);
         setLoadedInstrumentId(trackedInstrumentId);
-        setError('');
       })
       .catch((loadError) => {
-        if (!active || !mountedRef.current) return;
+        if (!active || !mountedRef.current || editorGenerationRef.current !== generation) return;
         setError(loadError instanceof Error ? loadError.message : 'Profiilien lataus epäonnistui');
       })
       .finally(() => {
-        if (active && mountedRef.current) setLoading(false);
+        if (active && mountedRef.current && editorGenerationRef.current === generation) {
+          setLoading(false);
+        }
       });
 
     return () => {
@@ -89,6 +101,7 @@ export function TrackingProfileEditor({ trackedInstrumentId }: Props) {
 
     const saveInstrumentId = trackedInstrumentId;
     const saveProfileType = selectedType;
+    const saveGeneration = editorGenerationRef.current;
     setSaving(true);
     setError('');
     try {
@@ -98,7 +111,7 @@ export function TrackingProfileEditor({ trackedInstrumentId }: Props) {
         { specs, enabled },
         PROFILE_ACTOR,
       );
-      if (!mountedRef.current || activeInstrumentIdRef.current !== saveInstrumentId) return;
+      if (!mountedRef.current || editorGenerationRef.current !== saveGeneration) return;
 
       setProfiles((current) => [
         ...current.filter((profile) => profile.profile_type !== saved.profile_type),
@@ -109,10 +122,10 @@ export function TrackingProfileEditor({ trackedInstrumentId }: Props) {
         setEnabled(saved.enabled);
       }
     } catch (saveError) {
-      if (!mountedRef.current || activeInstrumentIdRef.current !== saveInstrumentId) return;
+      if (!mountedRef.current || editorGenerationRef.current !== saveGeneration) return;
       setError(saveError instanceof Error ? saveError.message : 'Profiilin tallennus epäonnistui');
     } finally {
-      if (mountedRef.current && activeInstrumentIdRef.current === saveInstrumentId) {
+      if (mountedRef.current && editorGenerationRef.current === saveGeneration) {
         setSaving(false);
       }
     }
