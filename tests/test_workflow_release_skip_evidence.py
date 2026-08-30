@@ -128,11 +128,13 @@ def test_loader_uses_only_matching_canonical_skip_and_suppresses_release_blocker
                     "id": 1,
                     "tracked_event_id": event.event_id,
                     "release_event_id": release_id,
+                    "created_at": "2026-08-29T12:05:00+00:00",
                 },
                 {
                     "id": 2,
                     "tracked_event_id": event.event_id,
                     "release_event_id": "tracked:other",
+                    "created_at": "2026-08-29T12:06:00+00:00",
                 },
             ],
             "tracked_event_workflow_blockers": [
@@ -157,6 +159,89 @@ def test_loader_uses_only_matching_canonical_skip_and_suppresses_release_blocker
     assert _release_status(evidence) is WorkflowStepStatus.SKIPPED
 
 
+def test_loader_document_created_after_skip_wins_even_with_unresolved_blocker() -> None:
+    event = _event()
+    release_id = f"tracked:{event.event_id}"
+    client = _Client(
+        {
+            "current_event_expectations": [{"event_id": release_id, "version": 1}],
+            "tracked_event_release_skip_audit": [
+                {
+                    "id": 1,
+                    "tracked_event_id": event.event_id,
+                    "release_event_id": release_id,
+                    "created_at": "2026-08-29T12:05:00+00:00",
+                }
+            ],
+            "event_source_documents": [
+                {
+                    "id": "doc-1",
+                    "event_id": release_id,
+                    "created_at": "2026-08-29T12:10:00+00:00",
+                }
+            ],
+            "tracked_event_workflow_blockers": [
+                {
+                    "tracked_market_event_id": event.event_id,
+                    "step_key": "release",
+                    "blocker_code": "release_source_missing",
+                    "message": "Approved source is missing",
+                    "resolved_at": None,
+                    "updated_at": "2026-08-29T12:00:00+00:00",
+                }
+            ],
+        }
+    )
+
+    evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(event)
+
+    assert evidence.release_skipped is True
+    assert evidence.release_document_present is True
+    assert evidence.release_failed is False
+    assert _release_status(evidence) is WorkflowStepStatus.COMPLETED
+
+
+def test_loader_document_older_than_skip_remains_masked_by_unresolved_blocker() -> None:
+    event = _event()
+    release_id = f"tracked:{event.event_id}"
+    client = _Client(
+        {
+            "current_event_expectations": [{"event_id": release_id, "version": 1}],
+            "tracked_event_release_skip_audit": [
+                {
+                    "id": 1,
+                    "tracked_event_id": event.event_id,
+                    "release_event_id": release_id,
+                    "created_at": "2026-08-29T12:05:00+00:00",
+                }
+            ],
+            "event_source_documents": [
+                {
+                    "id": "doc-old",
+                    "event_id": release_id,
+                    "created_at": "2026-08-29T11:55:00+00:00",
+                }
+            ],
+            "tracked_event_workflow_blockers": [
+                {
+                    "tracked_market_event_id": event.event_id,
+                    "step_key": "release",
+                    "blocker_code": "release_source_missing",
+                    "message": "Approved source is missing",
+                    "resolved_at": None,
+                    "updated_at": "2026-08-29T12:00:00+00:00",
+                }
+            ],
+        }
+    )
+
+    evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(event)
+
+    assert evidence.release_document_present is False
+    assert evidence.release_skipped is True
+    assert _release_status(evidence) is WorkflowStepStatus.SKIPPED
+
+
 def test_loader_does_not_accept_skip_for_different_release_identity() -> None:
     event = _event()
     release_id = f"tracked:{event.event_id}"
@@ -168,6 +253,30 @@ def test_loader_does_not_accept_skip_for_different_release_identity() -> None:
                     "id": 1,
                     "tracked_event_id": event.event_id,
                     "release_event_id": "tracked:other",
+                    "created_at": "2026-08-29T12:05:00+00:00",
+                }
+            ],
+        }
+    )
+
+    evidence = SupabaseWorkflowReadinessEvidenceLoader(client).load(event)
+
+    assert evidence.release_skipped is False
+    assert _release_status(evidence) is WorkflowStepStatus.PENDING
+
+
+def test_loader_does_not_accept_skip_for_different_tracked_event_identity() -> None:
+    event = _event()
+    release_id = f"tracked:{event.event_id}"
+    client = _Client(
+        {
+            "current_event_expectations": [{"event_id": release_id, "version": 1}],
+            "tracked_event_release_skip_audit": [
+                {
+                    "id": 1,
+                    "tracked_event_id": "33333333-3333-3333-3333-333333333333",
+                    "release_event_id": release_id,
+                    "created_at": "2026-08-29T12:05:00+00:00",
                 }
             ],
         }
