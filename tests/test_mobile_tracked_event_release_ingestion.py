@@ -27,7 +27,7 @@ def _braced_block(source: str, signature: str) -> str:
 
 def _tracked_event_value_imports(source: str) -> set[str]:
     match = re.search(
-        r"import\s*\{(?P<body>.*?)\}\s*from\s*['\"]@/services/tracked-events['\"];",
+        r"import\s*\{(?P<body>[^}]*)\}\s*from\s*['\"]@/services/tracked-events['\"];",
         source,
         flags=re.DOTALL,
     )
