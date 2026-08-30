@@ -13,7 +13,12 @@ from trading_system.etoro_instrument_resolver import (
     InstrumentResolutionRequest,
 )
 from trading_system.market_reaction import DEFAULT_FLAT_THRESHOLD_PCT
-from trading_system.models import ComponentAssessment, EventExpectation, PortfolioState
+from trading_system.models import (
+    ComponentAssessment,
+    EventExpectation,
+    PortfolioState,
+    TradingMode,
+)
 from trading_system.pipeline import PaperTradingPipeline
 from trading_system.post_release_paper import PostReleasePaperResult, run_post_release_paper
 from trading_system.tracked_event_repository import (
@@ -23,6 +28,21 @@ from trading_system.tracked_event_repository import (
 
 
 _CANONICAL_REFERENCE_KIND = "etoro_last_execution_pre_event_snapshot"
+
+
+@dataclass(frozen=True)
+class CanonicalTradingTaskExecutionContext:
+    """Read-only execution authority loaded from the canonical trading task.
+
+    The bridge never creates this authority. Its caller must obtain it from the
+    canonical trading-task source and pass the task identity, event identity,
+    instrument and explicit execution mode unchanged.
+    """
+
+    task_id: str
+    source_event_id: str
+    instrument: str
+    mode: TradingMode
 
 
 @dataclass(frozen=True)
@@ -54,6 +74,24 @@ def _normalise_text(value: str) -> str:
 
 def _is_aware(value: datetime) -> bool:
     return value.tzinfo is not None and value.utcoffset() is not None
+
+
+def _validate_trading_task_execution(
+    trading_task: CanonicalTradingTaskExecutionContext,
+    *,
+    release_event_id: str,
+    instrument: str,
+) -> None:
+    if not isinstance(trading_task, CanonicalTradingTaskExecutionContext):
+        raise ValueError("canonical trading task execution context is required")
+    if not trading_task.task_id.strip():
+        raise ValueError("canonical trading task id must not be blank")
+    if trading_task.source_event_id != release_event_id:
+        raise ValueError("canonical trading task event identity differs from tracked event")
+    if _normalise_text(trading_task.instrument) != _normalise_text(instrument):
+        raise ValueError("canonical trading task instrument differs from tracked event")
+    if trading_task.mode is not TradingMode.PAPER:
+        raise ValueError("canonical trading task does not explicitly request PAPER execution")
 
 
 def _validate_broker_identity(
@@ -206,6 +244,7 @@ def run_post_release_paper_from_tracked_event(
     reactions: Iterable[TrackedEventReactionRecord],
     portfolio: PortfolioState,
     resolver: EtoroInstrumentResolver,
+    trading_task: CanonicalTradingTaskExecutionContext,
     market_df: pd.DataFrame | None = None,
     technical: ComponentAssessment | None = None,
     market_memory: ComponentAssessment | None = None,
@@ -213,11 +252,19 @@ def run_post_release_paper_from_tracked_event(
 ) -> PostReleasePaperResult:
     """Use canonical persisted live reaction, then the existing paper pipeline.
 
-    The caller supplies the production eToro resolver so broker identity is
-    revalidated immediately before the persisted quote/reaction is accepted.
-    This function performs no persistence or broker writes itself and there is
-    deliberately no daily-bar fallback here.
+    Observation evidence alone never authorizes execution. The caller must also
+    supply read-only execution authority loaded from the canonical trading task;
+    the task must be bound to this event/instrument and explicitly request PAPER.
+    The bridge performs no persistence or broker writes itself and has no
+    daily-bar fallback.
     """
+    release_event_id = canonical_release_event_id(event)
+    _validate_trading_task_execution(
+        trading_task,
+        release_event_id=release_event_id,
+        instrument=event.instrument,
+    )
+
     confirmation = build_tracked_event_price_confirmation(
         event=event,
         expectation=expectation,
