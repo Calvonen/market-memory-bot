@@ -1,9 +1,52 @@
-import re
 import unittest
 from pathlib import Path
 
 
 SERVICE_PATH = Path("mobile/src/services/tracked-instruments.ts")
+
+
+def _find_post_invocations(source: str) -> list[str]:
+    invocations: list[str] = []
+    index = 0
+    while True:
+        start = source.find("post", index)
+        if start < 0:
+            return invocations
+
+        before = source[start - 1] if start > 0 else ""
+        after_index = start + len("post")
+        after = source[after_index] if after_index < len(source) else ""
+        if (before.isalnum() or before in "_$.") or (after.isalnum() or after in "_$"):
+            index = after_index
+            continue
+
+        cursor = after_index
+        while cursor < len(source) and source[cursor].isspace():
+            cursor += 1
+
+        if cursor < len(source) and source[cursor] == "<":
+            depth = 0
+            while cursor < len(source):
+                char = source[cursor]
+                if char == "<":
+                    depth += 1
+                elif char == ">":
+                    depth -= 1
+                    if depth == 0:
+                        cursor += 1
+                        break
+                cursor += 1
+            else:
+                index = after_index
+                continue
+
+            while cursor < len(source) and source[cursor].isspace():
+                cursor += 1
+
+        if cursor < len(source) and source[cursor] == "(":
+            invocations.append(source[start : cursor + 1])
+
+        index = after_index
 
 
 class MobileTrackedInstrumentServiceTests(unittest.TestCase):
@@ -12,7 +55,7 @@ class MobileTrackedInstrumentServiceTests(unittest.TestCase):
         start = source.index("export function trackInstrument(")
         body = source[start:]
 
-        transport_calls = re.findall(r"\bpost(?:<[^>]+>)?\s*\(", body)
+        transport_calls = _find_post_invocations(body)
         self.assertEqual(transport_calls, ["post<TrackedInstrument>("])
         self.assertNotIn("apiControlPost<TrackedInstrument>(", body)
         self.assertNotIn("fetch(", body)
@@ -29,6 +72,17 @@ class MobileTrackedInstrumentServiceTests(unittest.TestCase):
     { 'X-MarketAI-Actor': normalizedActor },
   );"""
         self.assertIn(expected_call, body)
+
+    def test_nested_generic_post_invocation_is_counted(self) -> None:
+        source = "post<TrackedInstrument>(a); post<ApiResponse<TrackedInstrument>>(b); post(c);"
+        self.assertEqual(
+            _find_post_invocations(source),
+            [
+                "post<TrackedInstrument>(",
+                "post<ApiResponse<TrackedInstrument>>(",
+                "post(",
+            ],
+        )
 
     def test_service_keeps_exact_source_union_and_actor_out_of_payload(self) -> None:
         source = SERVICE_PATH.read_text(encoding="utf-8")
