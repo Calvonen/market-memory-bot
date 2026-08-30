@@ -18,6 +18,7 @@ TASK_ID = "11111111-1111-1111-1111-111111111111"
 ANALYSIS_ID = "33333333-3333-3333-3333-333333333333"
 DOCUMENT_ID = "44444444-4444-4444-4444-444444444444"
 RELEASE_EVENT_ID = f"tracked:{TRACKED_ID}"
+_DEFAULT_ANALYSIS = object()
 
 
 def event():
@@ -104,8 +105,8 @@ class Expectations:
 
 
 class Releases:
-    def __init__(self, row=None) -> None:
-        self.row = analysis_row() if row is None else row
+    def __init__(self, row=_DEFAULT_ANALYSIS) -> None:
+        self.row = analysis_row() if row is _DEFAULT_ANALYSIS else row
 
     def get_analysis_for_event_version(self, *, event_id: str, expectation_version: int):
         self.read = (event_id, expectation_version)
@@ -214,9 +215,9 @@ class TrackedEventPaperOrchestrationTests(unittest.TestCase):
             resolver=SimpleNamespace(),
             portfolio=PORTFOLIO,
         )
-        # Releases(row=None) intentionally means the default row; explicitly
-        # replace after construction to model no analysis.
-        self.assertNotEqual(result.status, "waiting_analysis")
+        self.assertEqual(result.status, "waiting_analysis")
+        self.assertEqual(paper.claim_calls, [])
+        self.assertFalse(hasattr(tasks, "requested"))
 
     def test_unowned_claim_never_calls_bridge(self) -> None:
         paper = PaperRuns(
