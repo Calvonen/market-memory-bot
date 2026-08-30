@@ -38,6 +38,24 @@ def _service_call_multiset(source: str, body: str) -> Counter[str]:
     return +calls
 
 
+def _service_modules(source: str) -> set[str]:
+    return set(re.findall(r"from\s*['\"](?P<module>@/services/[^'\"]+)['\"]", source))
+
+
+def _assert_refresh_setters_are_route_guarded(test: unittest.TestCase, branch: str) -> None:
+    guarded_refresh = re.search(
+        r"if\s*\(mountedRef\.current\s*&&\s*eventIdRef\.current\s*===\s*submittedEventId\)\s*\{"
+        r"(?P<body>.*?)"
+        r"\n\s*\}",
+        branch,
+        flags=re.DOTALL,
+    )
+    test.assertIsNotNone(guarded_refresh)
+    guard_body = guarded_refresh.group("body") if guarded_refresh else ""
+    test.assertIn("setReleaseSource(currentSource)", guard_body)
+    test.assertIn("setWorkflow(currentWorkflow)", guard_body)
+
+
 class MobileTrackedEventReleaseSkipUiTests(unittest.TestCase):
     def test_skip_is_gated_by_canonical_release_action_not_active_source(self) -> None:
         source = SCREEN_PATH.read_text(encoding="utf-8")
@@ -63,6 +81,18 @@ class MobileTrackedEventReleaseSkipUiTests(unittest.TestCase):
                 }
             ),
         )
+        self.assertEqual(_service_modules(source), {"@/services/tracked-events"})
+        for direct_request in (
+            "fetch(",
+            "apiGet(",
+            "apiPost(",
+            "apiControlPost(",
+            "apiPut(",
+            "apiControlPut(",
+            "apiDelete(",
+            "apiControlDelete(",
+        ):
+            self.assertNotIn(direct_request, body)
         self.assertIn("normalizedActor", body)
         self.assertIn("normalizedReason", body)
 
@@ -79,8 +109,7 @@ class MobileTrackedEventReleaseSkipUiTests(unittest.TestCase):
         for branch in (success, failure):
             self.assertEqual(branch.count("getTrackedEventReleaseSource(submittedEventId)"), 1)
             self.assertEqual(branch.count("getTrackedEventWorkflow(submittedEventId)"), 1)
-            self.assertIn("mountedRef.current && eventIdRef.current === submittedEventId", branch)
-            self.assertIn("setWorkflow(currentWorkflow)", branch)
+            _assert_refresh_setters_are_route_guarded(self, branch)
 
         self.assertIn("setSkipReason('')", success)
         self.assertNotIn("setSkipReason('')", failure)
