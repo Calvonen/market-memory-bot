@@ -25,11 +25,12 @@ class TradingTaskMigrationTests(unittest.TestCase):
         self.assertIn("'calendar:' || event_row.calendar_event_id::text", self.sql)
         self.assertIn("'tracked:' || event_row.id::text", self.sql)
 
-    def test_creation_retry_returns_existing_active_task(self) -> None:
+    def test_creation_retry_returns_only_same_creator_active_task(self) -> None:
         self.assertIn("when unique_violation then", self.sql)
         self.assertIn("where tracked_event_id = input_tracked_event_id", self.sql)
         self.assertIn("and mode = mode_value", self.sql)
         self.assertIn("and state in ('pending', 'approved')", self.sql)
+        self.assertIn("or created.created_by <> actor", self.sql)
         self.assertIn("return created", self.sql)
         self.assertIn("trading_task_creation_conflict", self.sql)
 
