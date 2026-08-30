@@ -65,6 +65,59 @@ def _claim_is_owned(
     )
 
 
+def _claim_event_for_task(
+    paper_runs: SupabasePaperTradeRepository,
+    *,
+    event_id: str,
+    analysis_id: str,
+    task_id: str,
+    lease_seconds: int,
+) -> dict[str, Any]:
+    """Claim a paper run while durably binding the execution authority.
+
+    Production uses the task-aware RPC added by the matching migration. Tests may
+    provide an explicit claim_event_for_task fake instead of exposing a Supabase
+    client. The task binding happens in the same database transaction as the
+    event claim, so a cancelled/replaced task cannot be silently substituted
+    after Strategy/Risk work has started.
+    """
+    claim_for_task = getattr(paper_runs, "claim_event_for_task", None)
+    if callable(claim_for_task):
+        return claim_for_task(
+            event_id=event_id,
+            analysis_id=analysis_id,
+            task_id=task_id,
+            lease_seconds=lease_seconds,
+            claim_token=paper_runs.claim_token,
+        )
+
+    response = paper_runs.client.rpc(
+        "claim_event_paper_run_for_task",
+        {
+            "input_event_id": event_id,
+            "input_analysis_id": analysis_id,
+            "input_task_id": task_id,
+            "input_claim_token": paper_runs.claim_token,
+            "input_lease_seconds": max(1, lease_seconds),
+        },
+    ).execute()
+    rows = response.data or []
+    if not rows:
+        raise RuntimeError(f"task-bound paper event claim returned no owner for {event_id}")
+    return rows[0]
+
+
+def _persisted_result(persisted: dict[str, Any]) -> TrackedPaperOrchestrationResult:
+    """Project the authoritative database outcome back to the caller."""
+    status = str(persisted.get("status") or "").strip()
+    message = str(persisted.get("message") or "").strip()
+    if not status:
+        raise RuntimeError("persisted paper result is missing status")
+    if not message:
+        message = "canonical paper result persisted"
+    return TrackedPaperOrchestrationResult(status, message, persisted)
+
+
 def run_approved_tracked_paper_once(
     *,
     tracked_event_id: str,
@@ -87,8 +140,9 @@ def run_approved_tracked_paper_once(
     This function creates no execution authority. It requires an already-approved
     canonical PAPER trading task, an already-persisted current release analysis,
     and the persisted tracked-event reaction evidence consumed by the #230 bridge.
-    The paper-run lease is claimed before Strategy/Risk/Broker code so concurrent
-    workers cannot both execute the same analysis at the same time.
+    The task-bound paper-run lease is claimed before Strategy/Risk/Broker code so
+    concurrent workers cannot both execute the same analysis and the durable run
+    can always identify the exact approval that authorized it.
     """
     event_id = tracked_event_id.strip()
     requested_task_id = task_id.strip()
@@ -152,14 +206,18 @@ def run_approved_tracked_paper_once(
 
     reactions = tracked_events.list_reactions(event.event_id)
 
-    claim = paper_runs.claim_event(
+    claim = _claim_event_for_task(
+        paper_runs,
         event_id=release_event_id,
         analysis_id=analysis_id,
+        task_id=requested_task_id,
         lease_seconds=lease_seconds,
-        claim_token=paper_runs.claim_token,
     )
     terminal_status = str(claim.get("terminal_status") or "").strip()
     if terminal_status:
+        persisted = paper_runs.get_latest_for_event(release_event_id)
+        if persisted is not None:
+            return _persisted_result(persisted)
         return TrackedPaperOrchestrationResult(
             terminal_status,
             "canonical paper run already has a terminal result",
@@ -197,8 +255,4 @@ def run_approved_tracked_paper_once(
         result=result,
         claim_token=paper_runs.claim_token,
     )
-    return TrackedPaperOrchestrationResult(
-        result.status,
-        result.message,
-        persisted,
-    )
+    return _persisted_result(persisted)
