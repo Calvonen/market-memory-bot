@@ -60,7 +60,7 @@ class MobileTrackedEventReleaseSourceSubmitTests(unittest.TestCase):
         self.assertIn("'X-MarketAI-Actor': actor", service_source)
         self.assertNotIn("'X-MarketAI-Actor': 'marketai-mobile'", service_source)
         self.assertIn("const [actor, setActor]", screen_source)
-        self.assertIn("placeholder=\"Toimijan tunniste\"", screen_source)
+        self.assertIn('placeholder="Toimijan tunniste (tallennus / käsittely)"', screen_source)
         self.assertIn("const normalizedActor = actor.trim();", screen_source)
         self.assertIn("normalizedActor,", screen_source)
 
