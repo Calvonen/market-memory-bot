@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from trading_system.event_workflow_readiness import (
@@ -48,10 +49,13 @@ class SupabaseWorkflowReadinessEvidenceLoader:
         current_version = self._current_expectation_version(release_event_id)
         latest_run = self._latest_release_run(release_event_id)
         tracked_release_blocker = self._tracked_release_blocker_metadata(event.event_id)
-        paper_state = self._paper_state_for_version(release_event_id, current_version)
-        persisted_release_document_present = self._exists(
-            "event_source_documents", "event_id", release_event_id
+        latest_skip = self._latest_release_skip(event.event_id, release_event_id)
+        skip_at = (
+            _created_at(latest_skip, "release skip") if latest_skip is not None else None
         )
+        paper_state = self._paper_state_for_version(release_event_id, current_version)
+        latest_release_document = self._latest_release_document(release_event_id)
+        persisted_release_document_present = latest_release_document is not None
         analysis_present = self._analysis_exists_for_version(
             release_event_id, current_version
         )
@@ -59,19 +63,48 @@ class SupabaseWorkflowReadinessEvidenceLoader:
             _is_canonical_release_blocker(latest_run)
             or tracked_release_blocker is not None
         )
-        release_document_present = (
-            persisted_release_document_present and not canonical_blocker
+        blocker_at = _canonical_blocker_timestamp(latest_run, tracked_release_blocker)
+        document_supersedes_skip_blocker = _document_supersedes_skip_blocker(
+            latest_release_document,
+            skip_at=skip_at,
+            blocker_at=blocker_at,
         )
-        release_action_code, release_action_reason = _release_action_metadata(
-            latest_run,
-            tracked_release_blocker,
-            release_document_present=release_document_present,
+        release_document_present = persisted_release_document_present and (
+            not canonical_blocker or document_supersedes_skip_blocker
         )
+
+        if release_document_present and canonical_blocker:
+            # This branch is reachable only when a post-skip canonical document
+            # is newer than every still-persisted canonical blocker evidence.
+            release_action_code = None
+            release_action_reason = None
+        else:
+            release_action_code, release_action_reason = _release_action_metadata(
+                latest_run,
+                tracked_release_blocker,
+                release_document_present=release_document_present,
+            )
+
+        release_skipped = latest_skip is not None
+        if release_skipped and release_action_code is not None:
+            action_at = _release_action_timestamp(latest_run, tracked_release_blocker)
+            if skip_at is None:
+                raise RuntimeError("release skip created_at is missing")
+            if action_at > skip_at:
+                # A new durable failure after the operator's skip is a new action
+                # and must be visible again instead of being hidden indefinitely.
+                release_skipped = False
+            else:
+                # The audited skip resolves only action evidence that already
+                # existed at or before the skip decision.
+                release_action_code = None
+                release_action_reason = None
 
         return WorkflowReadinessEvidence(
             tracked_status=event.status,
             event_id=event.event_id,
             release_document_present=release_document_present,
+            release_skipped=release_skipped,
             release_failed=release_action_code is not None,
             release_action_code=release_action_code,
             release_action_reason=release_action_reason,
@@ -96,6 +129,33 @@ class SupabaseWorkflowReadinessEvidenceLoader:
             .execute()
         )
         return bool(response.data or [])
+
+    def _latest_release_skip(
+        self, tracked_event_id: str, release_event_id: str
+    ) -> dict[str, Any] | None:
+        response = (
+            self.client.table("tracked_event_release_skip_audit")
+            .select("id,created_at")
+            .eq("tracked_event_id", tracked_event_id)
+            .eq("release_event_id", release_event_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        return rows[0] if rows else None
+
+    def _latest_release_document(self, release_event_id: str) -> dict[str, Any] | None:
+        response = (
+            self.client.table("event_source_documents")
+            .select("id,created_at")
+            .eq("event_id", release_event_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        return rows[0] if rows else None
 
     def _current_expectation_version(self, event_id: str) -> int | None:
         response = (
@@ -195,6 +255,74 @@ def canonical_release_event_id(event: PersistentTrackedEvent) -> str:
     if not event_id:
         raise ValueError("tracked event id must not be blank")
     return f"tracked:{event_id}"
+
+
+def _document_supersedes_skip_blocker(
+    document: dict[str, Any] | None,
+    *,
+    skip_at: datetime | None,
+    blocker_at: datetime | None,
+) -> bool:
+    if document is None or skip_at is None:
+        return False
+    document_at = _created_at(document, "release document")
+    if document_at <= skip_at:
+        return False
+    return blocker_at is None or document_at > blocker_at
+
+
+def _canonical_blocker_timestamp(
+    run: dict[str, Any] | None,
+    tracked_blocker: dict[str, Any] | None,
+) -> datetime | None:
+    timestamps: list[datetime] = []
+    if _is_canonical_release_blocker(run):
+        timestamps.append(_created_at(run or {}, "release run"))
+    if tracked_blocker is not None:
+        timestamps.append(_updated_at(tracked_blocker, "tracked release blocker"))
+    return max(timestamps) if timestamps else None
+
+
+def _release_action_timestamp(
+    run: dict[str, Any] | None,
+    tracked_blocker: dict[str, Any] | None,
+) -> datetime:
+    timestamps: list[datetime] = []
+    if tracked_blocker is not None:
+        timestamps.append(_updated_at(tracked_blocker, "tracked release blocker"))
+    if run is not None:
+        status = str(run.get("status") or "").strip().lower()
+        message = str(run.get("error_message") or "").strip().lower()
+        if _is_canonical_release_blocker(run) or status in _RELEASE_ERROR_STATUSES or (
+            status == "no_release" and "release overdue:" in message
+        ):
+            timestamps.append(_created_at(run, "release run"))
+    if not timestamps:
+        raise RuntimeError("release action timestamp is missing")
+    return max(timestamps)
+
+
+def _created_at(record: dict[str, Any], label: str) -> datetime:
+    return _timestamp(record.get("created_at"), f"{label} created_at")
+
+
+def _updated_at(record: dict[str, Any], label: str) -> datetime:
+    return _timestamp(record.get("updated_at"), f"{label} updated_at")
+
+
+def _timestamp(value: Any, label: str) -> datetime:
+    if isinstance(value, datetime):
+        timestamp = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            timestamp = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise RuntimeError(f"{label} is invalid") from exc
+    else:
+        raise RuntimeError(f"{label} is missing")
+    if timestamp.tzinfo is None:
+        raise RuntimeError(f"{label} must be timezone-aware")
+    return timestamp
 
 
 def _is_canonical_release_blocker(run: dict[str, Any] | None) -> bool:
