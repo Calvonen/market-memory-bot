@@ -1,0 +1,209 @@
+from __future__ import annotations
+
+import unittest
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from unittest.mock import patch
+
+from trading_system.ai_event_analyzer import EventAnalysisPayload
+from trading_system.models import EventExpectation, PortfolioState
+from trading_system.post_release_paper import PostReleasePaperResult
+from trading_system.tracked_event_paper_bridge import (
+    build_tracked_event_price_confirmation,
+    canonical_release_event_id,
+    run_post_release_paper_from_tracked_event,
+)
+from trading_system.tracked_event_repository import (
+    PersistentTrackedEvent,
+    TrackedEventReactionRecord,
+    TrackedEventStatus,
+    TrackedEventTimeStatus,
+)
+
+
+EVENT_AT = datetime(2026, 8, 31, 0, 0, tzinfo=UTC)
+ANCHOR_AT = EVENT_AT + timedelta(hours=1)
+
+
+def event(*, anchor: datetime | None = ANCHOR_AT) -> PersistentTrackedEvent:
+    return PersistentTrackedEvent(
+        event_id="tracked-event-1",
+        tracked_instrument_id="instrument-1",
+        calendar_event_id=None,
+        company_name="Example Ltd",
+        instrument="EXM.ASX",
+        market="ASX",
+        source="manual_ir",
+        external_key="example-fy26",
+        kind="earnings",
+        title="FY26 results",
+        event_at=EVENT_AT,
+        event_time_status=TrackedEventTimeStatus.CONFIRMED,
+        status=TrackedEventStatus.MONITORING,
+        reference_price=Decimal("10.00"),
+        reference_captured_at=EVENT_AT - timedelta(minutes=1),
+        reference_kind="etoro_last_execution_pre_event_snapshot",
+        reaction_anchor_at=anchor,
+    )
+
+
+def expectation(*, event_id: str = "tracked:tracked-event-1") -> EventExpectation:
+    return EventExpectation(
+        event_id=event_id,
+        instrument="EXM.ASX",
+        event_name="FY26 results",
+        scheduled_date=date(2026, 8, 31),
+    )
+
+
+def reaction(
+    *,
+    reference_price: Decimal = Decimal("10.00"),
+    return_pct: Decimal = Decimal("2.00"),
+    direction: str = "positive",
+) -> TrackedEventReactionRecord:
+    return TrackedEventReactionRecord(
+        tracked_market_event_id="tracked-event-1",
+        interval_minutes=1,
+        candle_start=ANCHOR_AT,
+        reference_price=reference_price,
+        close_price=Decimal("10.20"),
+        return_pct=return_pct,
+        direction=direction,
+        evolution="initial",
+        observed_at=ANCHOR_AT + timedelta(minutes=1),
+    )
+
+
+def analysis() -> EventAnalysisPayload:
+    return EventAnalysisPayload(
+        metrics=[],
+        guidance_summary="guidance",
+        management_summary="management",
+        catalyst_direction="BULLISH",
+        catalyst_score_0_25=20,
+        fundamental_direction="BULLISH",
+        fundamental_score_0_35=30,
+        key_positive_surprises=[],
+        key_negative_surprises=[],
+        uncertainties=[],
+        invalidation_flags=[],
+        evidence_quotes=[],
+    )
+
+
+class TrackedEventPaperBridgeTests(unittest.TestCase):
+    def test_canonical_release_identity_uses_tracked_event_without_calendar(self) -> None:
+        self.assertEqual(canonical_release_event_id(event()), "tracked:tracked-event-1")
+
+    def test_selects_only_anchored_one_minute_reaction(self) -> None:
+        selected = build_tracked_event_price_confirmation(
+            event=event(),
+            expectation=expectation(),
+            reactions=(reaction(),),
+        )
+
+        self.assertIsNotNone(selected)
+        assert selected is not None
+        self.assertEqual(selected.tracked_market_event_id, "tracked-event-1")
+        self.assertEqual(selected.release_event_id, "tracked:tracked-event-1")
+        self.assertEqual(selected.return_pct, Decimal("2.00"))
+        self.assertEqual(selected.direction, "positive")
+
+    def test_missing_anchor_returns_none_instead_of_falling_back(self) -> None:
+        selected = build_tracked_event_price_confirmation(
+            event=event(anchor=None),
+            expectation=expectation(),
+            reactions=(reaction(),),
+        )
+        self.assertIsNone(selected)
+
+    def test_expectation_identity_mismatch_fails_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "identity differs"):
+            build_tracked_event_price_confirmation(
+                event=event(),
+                expectation=expectation(event_id="tracked:other"),
+                reactions=(reaction(),),
+            )
+
+    def test_reference_mismatch_fails_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "reference differs"):
+            build_tracked_event_price_confirmation(
+                event=event(),
+                expectation=expectation(),
+                reactions=(reaction(reference_price=Decimal("9.99")),),
+            )
+
+    def test_flat_reaction_waits_without_entering_paper_pipeline(self) -> None:
+        flat = reaction(return_pct=Decimal("0.10"), direction="flat")
+        with patch(
+            "trading_system.tracked_event_paper_bridge.run_post_release_paper"
+        ) as run_paper:
+            result = run_post_release_paper_from_tracked_event(
+                event=event(),
+                expectation=expectation(),
+                analysis=analysis(),
+                reactions=(flat,),
+                portfolio=PortfolioState(
+                    equity=10_000,
+                    cash=10_000,
+                    open_positions=0,
+                    spread_pct=0.1,
+                    volatility_pct=2.0,
+                ),
+            )
+
+        self.assertEqual(result.status, "waiting_confirmation")
+        self.assertIn("flat", result.message)
+        run_paper.assert_not_called()
+
+    def test_anchored_live_reaction_is_explicit_input_to_existing_paper_path(self) -> None:
+        expected = PostReleasePaperResult("waiting_confirmation", "delegated")
+        with patch(
+            "trading_system.tracked_event_paper_bridge.run_post_release_paper",
+            return_value=expected,
+        ) as run_paper:
+            result = run_post_release_paper_from_tracked_event(
+                event=event(),
+                expectation=expectation(),
+                analysis=analysis(),
+                reactions=(reaction(),),
+                portfolio=PortfolioState(
+                    equity=10_000,
+                    cash=10_000,
+                    open_positions=0,
+                    spread_pct=0.1,
+                    volatility_pct=2.0,
+                ),
+            )
+
+        self.assertIs(result, expected)
+        kwargs = run_paper.call_args.kwargs
+        self.assertEqual(kwargs["confirmed_reaction_pct"], 2.0)
+        self.assertEqual(kwargs["expectation"].event_id, "tracked:tracked-event-1")
+
+    def test_no_canonical_reaction_waits_without_daily_bar_fallback(self) -> None:
+        with patch(
+            "trading_system.tracked_event_paper_bridge.run_post_release_paper"
+        ) as run_paper:
+            result = run_post_release_paper_from_tracked_event(
+                event=event(),
+                expectation=expectation(),
+                analysis=analysis(),
+                reactions=(),
+                portfolio=PortfolioState(
+                    equity=10_000,
+                    cash=10_000,
+                    open_positions=0,
+                    spread_pct=0.1,
+                    volatility_pct=2.0,
+                ),
+            )
+
+        self.assertEqual(result.status, "waiting_confirmation")
+        self.assertIn("no canonical anchored 1m", result.message)
+        run_paper.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()
