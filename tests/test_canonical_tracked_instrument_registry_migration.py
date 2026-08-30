@@ -38,15 +38,12 @@ class CanonicalTrackedInstrumentRegistryMigrationTests(unittest.TestCase):
         self.assertIn("active = true", upsert_body)
 
         # The canonical instrument upsert may mutate only its own registry table.
-        # Because the SECURITY DEFINER function uses search_path=public,pg_temp,
-        # downstream public surfaces are dangerous both schema-qualified and
-        # unqualified. Enforce the boundary structurally by allowlisting every
-        # DML target in this function body instead of trying to enumerate every
-        # downstream tracked-event/workflow table that exists now or later.
+        # Match standalone DML statements only. In particular, do not interpret
+        # `ON CONFLICT ... DO UPDATE SET` as a separate `UPDATE <table>` statement.
         dml_targets = [
             target
             for _verb, target in re.findall(
-                r"\b(insert\s+into|update|delete\s+from|truncate(?:\s+table)?)\s+([a-z_][a-z0-9_.]*)",
+                r"(?im)^\s*(insert\s+into|update|delete\s+from|truncate(?:\s+table)?)\s+([a-z_][a-z0-9_.]*)",
                 upsert_body,
             )
         ]
