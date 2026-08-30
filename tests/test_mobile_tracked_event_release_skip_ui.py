@@ -42,12 +42,18 @@ def _service_modules(source: str) -> set[str]:
     return set(re.findall(r"from\s*['\"](?P<module>@/services/[^'\"]+)['\"]", source))
 
 
-def _assert_refresh_setters_are_route_guarded(test: unittest.TestCase, branch: str) -> None:
-    guarded_refresh = re.search(
-        r"if\s*\(mountedRef\.current\s*&&\s*eventIdRef\.current\s*===\s*submittedEventId\)\s*\{"
+def _assert_post_refresh_setters_are_route_guarded(
+    test: unittest.TestCase, branch: str
+) -> None:
+    refresh_marker = "const [currentSource, currentWorkflow] = await Promise.all(["
+    refresh_start = branch.index(refresh_marker)
+    refresh_end = branch.index("]);", refresh_start) + len("]);")
+    post_refresh = branch[refresh_end:]
+    guarded_refresh = re.match(
+        r"\s*if\s*\(mountedRef\.current\s*&&\s*eventIdRef\.current\s*===\s*submittedEventId\)\s*\{"
         r"(?P<body>.*?)"
         r"\n\s*\}",
-        branch,
+        post_refresh,
         flags=re.DOTALL,
     )
     test.assertIsNotNone(guarded_refresh)
@@ -109,7 +115,7 @@ class MobileTrackedEventReleaseSkipUiTests(unittest.TestCase):
         for branch in (success, failure):
             self.assertEqual(branch.count("getTrackedEventReleaseSource(submittedEventId)"), 1)
             self.assertEqual(branch.count("getTrackedEventWorkflow(submittedEventId)"), 1)
-            _assert_refresh_setters_are_route_guarded(self, branch)
+            _assert_post_refresh_setters_are_route_guarded(self, branch)
 
         self.assertIn("setSkipReason('')", success)
         self.assertNotIn("setSkipReason('')", failure)
