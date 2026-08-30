@@ -7,6 +7,13 @@ MIGRATION_PATH = Path(
 )
 
 
+def _function_body(sql: str, signature: str) -> str:
+    start = sql.index(signature)
+    body_start = sql.index("as $$", start)
+    end = sql.index("\n$$;", body_start)
+    return sql[body_start:end].lower()
+
+
 class CanonicalTrackedInstrumentRegistryMigrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -19,24 +26,54 @@ class CanonicalTrackedInstrumentRegistryMigrationTests(unittest.TestCase):
         self.assertIn("market_key text generated always as", self.lower_sql)
         self.assertIn("unique (instrument_key, market_key)", self.lower_sql)
 
-    def test_upsert_merges_sources_and_reactivates_without_creating_events(self) -> None:
+    def test_upsert_merges_sources_and_reactivates_without_downstream_trading_writes(self) -> None:
         self.assertIn("create or replace function public.upsert_tracked_instrument", self.lower_sql)
-        self.assertIn("on conflict (instrument_key, market_key) do update", self.lower_sql)
-        self.assertIn("tracked_instruments.sources || excluded.sources[1]", self.lower_sql)
-        self.assertIn("active = true", self.lower_sql)
-        for forbidden_write in (
-            "insert into public.tracked_market_events",
-            "insert into public.event_expectations",
-            "insert into public.event_strategy_approvals",
-            "insert into public.event_paper_trade_runs",
-            "create_trading_task",
-        ):
-            self.assertNotIn(forbidden_write, self.lower_sql)
+        upsert_body = _function_body(
+            self.sql,
+            "create or replace function public.upsert_tracked_instrument(",
+        )
+        self.assertIn("on conflict (instrument_key, market_key) do update", upsert_body)
+        self.assertIn("tracked_instruments.sources || excluded.sources[1]", upsert_body)
+        self.assertIn("active = true", upsert_body)
 
-    def test_registry_is_service_role_only_and_source_values_are_bounded(self) -> None:
+        forbidden_writes = (
+            "insert into public.tracked_market_events",
+            "update public.tracked_market_events",
+            "insert into public.market_events",
+            "update public.market_events",
+            "insert into public.event_expectations",
+            "update public.event_expectations",
+            "insert into public.event_expectation_versions",
+            "update public.event_expectation_versions",
+            "insert into public.event_strategy_approvals",
+            "update public.event_strategy_approvals",
+            "insert into public.event_paper_trade_runs",
+            "update public.event_paper_trade_runs",
+            "insert into public.trading_tasks",
+            "update public.trading_tasks",
+            "approve_strategy_draft(",
+            "save_event_paper_trade_result(",
+            "create_trading_task(",
+            "strategy",
+            "risk",
+            "broker",
+        )
+        for forbidden_write in forbidden_writes:
+            self.assertNotIn(forbidden_write, upsert_body)
+
+    def test_registry_mutations_are_rpc_only_and_source_values_are_bounded(self) -> None:
         self.assertIn("alter table public.tracked_instruments enable row level security", self.lower_sql)
         self.assertIn(
-            "revoke all on table public.tracked_instruments from public, anon, authenticated",
+            "revoke all on table public.tracked_instruments from public, anon, authenticated, service_role",
+            self.lower_sql,
+        )
+        self.assertIn("grant select on table public.tracked_instruments to service_role", self.lower_sql)
+        self.assertNotIn(
+            "grant select, insert, update on table public.tracked_instruments to service_role",
+            self.lower_sql,
+        )
+        self.assertIn(
+            "grant execute on function public.upsert_tracked_instrument(text, text, text, text, text)",
             self.lower_sql,
         )
         self.assertIn("'scanner', 'calendar', 'manual'", self.lower_sql)
