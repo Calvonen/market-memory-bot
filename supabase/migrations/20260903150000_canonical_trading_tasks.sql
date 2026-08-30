@@ -14,13 +14,18 @@ create table if not exists public.trading_tasks (
   approved_at timestamptz null,
   cancelled_by text null check (cancelled_by is null or length(btrim(cancelled_by)) between 1 and 200),
   cancelled_at timestamptz null,
-  unique (tracked_event_id, mode),
   check (
     (state = 'pending' and approved_by is null and approved_at is null and cancelled_by is null and cancelled_at is null)
     or (state = 'approved' and approved_by is not null and approved_at is not null and cancelled_by is null and cancelled_at is null)
     or (state = 'cancelled' and cancelled_by is not null and cancelled_at is not null)
   )
 );
+
+-- At most one live request per event/mode, but cancellation releases the slot
+-- so a later explicit request creates a new task instead of mutating history.
+create unique index if not exists trading_tasks_active_event_mode_uidx
+  on public.trading_tasks(tracked_event_id, mode)
+  where state in ('pending', 'approved');
 
 create index if not exists trading_tasks_source_event_state_idx
   on public.trading_tasks(source_event_id, state);
