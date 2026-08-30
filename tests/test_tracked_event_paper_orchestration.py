@@ -133,24 +133,39 @@ class TradingTasks:
 
 
 class PaperRuns:
-    def __init__(self, *, claim=None) -> None:
+    def __init__(self, *, claim=None, persisted=None, latest=None) -> None:
         self.claim_token = "claim-token"
         self.claim = claim or {
             "event_id": RELEASE_EVENT_ID,
             "analysis_id": ANALYSIS_ID,
             "claim_token": self.claim_token,
+            "task_id": TASK_ID,
             "lease_expires_at": "2026-08-31T00:05:00+00:00",
         }
+        self.persisted = persisted
+        self.latest = latest
         self.claim_calls = []
         self.save_calls = []
 
-    def claim_event(self, **kwargs):
+    def claim_event_for_task(self, **kwargs):
         self.claim_calls.append(kwargs)
         return self.claim
 
+    def get_latest_for_event(self, event_id: str):
+        self.latest_event_id = event_id
+        return self.latest
+
     def save_result(self, **kwargs):
         self.save_calls.append(kwargs)
-        return {"status": kwargs["result"].status, "analysis_id": kwargs["analysis_id"]}
+        if self.persisted is not None:
+            return self.persisted
+        return {
+            "event_id": kwargs["event_id"],
+            "analysis_id": kwargs["analysis_id"],
+            "task_id": TASK_ID,
+            "status": kwargs["result"].status,
+            "message": kwargs["result"].message,
+        }
 
 
 PORTFOLIO = PortfolioState(
@@ -225,6 +240,7 @@ class TrackedEventPaperOrchestrationTests(unittest.TestCase):
                 "event_id": RELEASE_EVENT_ID,
                 "analysis_id": "other-analysis",
                 "claim_token": "other-token",
+                "task_id": TASK_ID,
             }
         )
         with patch(
@@ -245,14 +261,22 @@ class TrackedEventPaperOrchestrationTests(unittest.TestCase):
         bridge.assert_not_called()
         self.assertEqual(paper.save_calls, [])
 
-    def test_terminal_claim_never_reexecutes(self) -> None:
+    def test_terminal_claim_returns_persisted_terminal_owner(self) -> None:
+        winner = {
+            "event_id": RELEASE_EVENT_ID,
+            "analysis_id": "older-analysis",
+            "task_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "status": "expired_no_trade",
+            "message": "confirmation window expired without a trade",
+        }
         paper = PaperRuns(
             claim={
                 "event_id": RELEASE_EVENT_ID,
-                "analysis_id": ANALYSIS_ID,
+                "analysis_id": "older-analysis",
                 "claim_token": "old-token",
-                "terminal_status": "paper_executed",
-            }
+                "terminal_status": "expired_no_trade",
+            },
+            latest=winner,
         )
         with patch(
             "trading_system.tracked_event_paper_orchestration.run_post_release_paper_from_tracked_event"
@@ -268,7 +292,9 @@ class TrackedEventPaperOrchestrationTests(unittest.TestCase):
                 resolver=SimpleNamespace(),
                 portfolio=PORTFOLIO,
             )
-        self.assertEqual(result.status, "paper_executed")
+        self.assertEqual(result.status, "expired_no_trade")
+        self.assertEqual(result.message, winner["message"])
+        self.assertIs(result.persisted, winner)
         bridge.assert_not_called()
         self.assertEqual(paper.save_calls, [])
 
@@ -297,6 +323,7 @@ class TrackedEventPaperOrchestrationTests(unittest.TestCase):
         self.assertEqual(tasks.execution_context_calls, 1)
         self.assertEqual(tracked.reaction_reads, 1)
         self.assertEqual(len(paper.claim_calls), 1)
+        self.assertEqual(paper.claim_calls[0]["task_id"], TASK_ID)
         bridge.assert_called_once()
         self.assertEqual(len(paper.save_calls), 1)
         saved = paper.save_calls[0]
@@ -306,6 +333,65 @@ class TrackedEventPaperOrchestrationTests(unittest.TestCase):
         self.assertEqual(saved["analysis_id"], ANALYSIS_ID)
         self.assertEqual(saved["claim_token"], paper.claim_token)
         self.assertIs(saved["result"], bridge_result)
+
+    def test_lost_lease_reports_persisted_rejection_not_local_execution(self) -> None:
+        persisted = {
+            "event_id": RELEASE_EVENT_ID,
+            "analysis_id": ANALYSIS_ID,
+            "task_id": TASK_ID,
+            "status": "waiting_confirmation",
+            "message": "paper result was rejected after the event lease was lost",
+            "write_rejection": "lease_lost",
+        }
+        paper = PaperRuns(persisted=persisted)
+        local = PostReleasePaperResult("paper_executed", "LOCAL ORDER")
+        with patch(
+            "trading_system.tracked_event_paper_orchestration.run_post_release_paper_from_tracked_event",
+            return_value=local,
+        ):
+            result = run_approved_tracked_paper_once(
+                tracked_event_id=TRACKED_ID,
+                task_id=TASK_ID,
+                tracked_events=TrackedEvents(),
+                expectations=Expectations(),
+                releases=Releases(),
+                trading_tasks=TradingTasks(task()),
+                paper_runs=paper,
+                resolver=SimpleNamespace(),
+                portfolio=PORTFOLIO,
+            )
+        self.assertEqual(result.status, "waiting_confirmation")
+        self.assertEqual(result.message, persisted["message"])
+        self.assertIs(result.persisted, persisted)
+
+    def test_lost_lease_reports_other_terminal_winner(self) -> None:
+        persisted = {
+            "event_id": RELEASE_EVENT_ID,
+            "analysis_id": "other-analysis",
+            "task_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "status": "paper_executed",
+            "message": "winner order",
+        }
+        paper = PaperRuns(persisted=persisted)
+        local = PostReleasePaperResult("paper_executed", "stale local order")
+        with patch(
+            "trading_system.tracked_event_paper_orchestration.run_post_release_paper_from_tracked_event",
+            return_value=local,
+        ):
+            result = run_approved_tracked_paper_once(
+                tracked_event_id=TRACKED_ID,
+                task_id=TASK_ID,
+                tracked_events=TrackedEvents(),
+                expectations=Expectations(),
+                releases=Releases(),
+                trading_tasks=TradingTasks(task()),
+                paper_runs=paper,
+                resolver=SimpleNamespace(),
+                portfolio=PORTFOLIO,
+            )
+        self.assertEqual(result.status, "paper_executed")
+        self.assertEqual(result.message, "winner order")
+        self.assertIs(result.persisted, persisted)
 
 
 if __name__ == "__main__":
