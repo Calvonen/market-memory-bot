@@ -74,7 +74,7 @@ class MobileTrackedEventReleaseIngestionTests(unittest.TestCase):
             screen,
         )
         self.assertIn(
-            "if (!eventId || !canProcessRelease || processing || submitting) return;",
+            "if (!eventId || !canProcessRelease || processing || submitting || skipping) return;",
             process_release,
         )
         self.assertIn("disabled={!canProcessRelease || !actor.trim() || processing || submitting}", screen)
