@@ -35,6 +35,8 @@ class _FakeTrackedInstrumentRegistry:
             company_name=company_name,
             sources=(source,),
             active=True,
+            created_by=actor,
+            updated_by=actor,
         )
 
 
