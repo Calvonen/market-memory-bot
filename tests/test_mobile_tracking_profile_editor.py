@@ -62,15 +62,22 @@ class MobileTrackingProfileEditorTests(unittest.TestCase):
         self.assertIn("const saveProfileType = selectedType;", self.editor)
         self.assertIn("selectedTypeRef.current === saveProfileType", self.editor)
 
-    def test_editor_ignores_save_completion_after_unmount_or_instrument_change(self) -> None:
-        self.assertIn("const mountedRef = useRef(true);", self.editor)
-        self.assertIn("mountedRef.current = false;", self.editor)
-        guard = "!mountedRef.current || activeInstrumentIdRef.current !== saveInstrumentId"
+    def test_instrument_change_starts_fresh_editor_generation_and_unlocks_save_state(self) -> None:
+        self.assertIn("const editorGenerationRef = useRef(0);", self.editor)
+        self.assertIn("const generation = ++editorGenerationRef.current;", self.editor)
+        self.assertIn("setSaving(false);", self.editor)
+        self.assertIn("setLoadedInstrumentId(null);", self.editor)
+        self.assertIn("setLoading(true);", self.editor)
+
+    def test_save_completion_is_bound_to_exact_editor_generation(self) -> None:
+        self.assertIn("const saveGeneration = editorGenerationRef.current;", self.editor)
+        guard = "!mountedRef.current || editorGenerationRef.current !== saveGeneration"
         self.assertGreaterEqual(self.editor.count(guard), 2)
         self.assertIn(
-            "mountedRef.current && activeInstrumentIdRef.current === saveInstrumentId",
+            "mountedRef.current && editorGenerationRef.current === saveGeneration",
             self.editor,
         )
+        self.assertNotIn("activeInstrumentIdRef", self.editor)
 
     def test_profile_ui_does_not_create_events_or_trading_state(self) -> None:
         source = (self.scanner + self.editor).lower()
