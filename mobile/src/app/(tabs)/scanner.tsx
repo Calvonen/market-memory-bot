@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 
 import { ScreenShell, shared } from '@/components/screen-shell';
+import { TrackingProfileEditor } from '@/components/tracking-profile-editor';
 import { apiGet, ScannerResult } from '@/services/api';
 import {
   getTrackedInstruments,
@@ -39,6 +40,7 @@ export default function ScannerScreen() {
   const [scope, setScope] = useState<(typeof SCOPES)[number]>('Top');
   const [data, setData] = useState<ScannerResult | null>(null);
   const [trackedInstruments, setTrackedInstruments] = useState<TrackedInstrument[]>([]);
+  const [profileEditorId, setProfileEditorId] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [trackingStatus, setTrackingStatus] = useState<Record<string, TrackingStatus>>({});
@@ -51,6 +53,7 @@ export default function ScannerScreen() {
   function invalidateScan() {
     latestRequestId.current += 1;
     setData(null);
+    setProfileEditorId(null);
     setLoading(true);
     setError('');
   }
@@ -61,9 +64,6 @@ export default function ScannerScreen() {
     setLoading(true);
     setError('');
 
-    // Persisted tracking annotations are useful but must not make the scanner
-    // unavailable if their read fails. They also must not overwrite a newer
-    // successful tracking mutation that completes while this read is in flight.
     void getTrackedInstruments()
       .then((canonicalTrackedInstruments) => {
         if (
@@ -97,7 +97,6 @@ export default function ScannerScreen() {
 
   async function addScannerResultToTracking(row: ScannerResult['results'][number]) {
     const trackingKey = `${country}:${row.ticker}`;
-    // Invalidate any persisted-state read that started before this mutation.
     trackedMutationVersion.current += 1;
     setTrackingStatus((current) => ({ ...current, [trackingKey]: 'saving' }));
 
@@ -111,8 +110,6 @@ export default function ScannerScreen() {
         },
         TRACKING_ACTOR,
       );
-      // Also invalidate reads that started while the POST was in flight; they
-      // may have captured the pre-save canonical collection.
       trackedMutationVersion.current += 1;
       setTrackedInstruments((current) => [
         ...current.filter((item) => item.id !== saved.id),
@@ -188,10 +185,7 @@ export default function ScannerScreen() {
       {!loading && error && (
         <>
           <Text style={{ color: '#ff8d8d' }}>{error}</Text>
-          <Pressable
-            accessibilityRole="button"
-            onPress={loadScanner}
-            style={shared.button}>
+          <Pressable accessibilityRole="button" onPress={loadScanner} style={shared.button}>
             <Text style={shared.buttonText}>Yritä uudelleen</Text>
           </Pressable>
         </>
@@ -201,9 +195,12 @@ export default function ScannerScreen() {
         !error &&
         data?.results.map((row) => {
           const status = trackingStatus[`${country}:${row.ticker}`];
-          const isTracked = trackedInstruments.some((item) =>
+          const trackedInstrument = trackedInstruments.find((item) =>
             matchesTrackedInstrument(item, row.ticker, country),
           );
+          const isTracked = Boolean(trackedInstrument);
+          const editorOpen = trackedInstrument?.id === profileEditorId;
+
           return (
             <View key={row.ticker} style={shared.card}>
               <Text style={shared.heading}>
@@ -227,6 +224,26 @@ export default function ScannerScreen() {
                         : 'Lisää seurantaan'}
                 </Text>
               </Pressable>
+
+              {trackedInstrument ? (
+                <>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() =>
+                      setProfileEditorId((current) =>
+                        current === trackedInstrument.id ? null : trackedInstrument.id,
+                      )
+                    }
+                    style={shared.button}>
+                    <Text style={shared.buttonText}>
+                      {editorOpen ? 'Sulje seurantaprofiilit' : 'Muokkaa seurantaprofiileja'}
+                    </Text>
+                  </Pressable>
+                  {editorOpen ? (
+                    <TrackingProfileEditor trackedInstrumentId={trackedInstrument.id} />
+                  ) : null}
+                </>
+              ) : null}
             </View>
           );
         })}
