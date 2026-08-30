@@ -33,8 +33,7 @@ class MobileTrackingProfileEditorTests(unittest.TestCase):
 
     def test_editor_reads_and_writes_by_canonical_tracked_instrument_id(self) -> None:
         self.assertIn("getTrackingProfiles(trackedInstrumentId)", self.editor)
-        self.assertIn("const saveInstrumentId = trackedInstrumentId;", self.editor)
-        self.assertIn("saveInstrumentId,\n        saveProfileType,", self.editor)
+        self.assertIn("trackedInstrumentId,\n        saveProfileType,", self.editor)
         self.assertIn("const PROFILE_ACTOR = 'mobile-tracking-profile';", self.editor)
 
     def test_scanner_opens_editor_only_for_persisted_tracked_row(self) -> None:
@@ -51,33 +50,44 @@ class MobileTrackingProfileEditorTests(unittest.TestCase):
         self.assertIn("Tallenna profiili", self.editor)
 
     def test_editor_fails_closed_until_canonical_state_loads(self) -> None:
-        self.assertIn("const canonicalStateReady = loadedInstrumentId === trackedInstrumentId;", self.editor)
+        self.assertIn("const canonicalStateReady = loaded;", self.editor)
         self.assertIn("if (!canonicalStateReady || saving) return;", self.editor)
         self.assertIn("disabled={saving || !canonicalStateReady}", self.editor)
         self.assertIn("editable={!saving && canonicalStateReady}", self.editor)
-        self.assertIn("setLoadedInstrumentId(trackedInstrumentId);", self.editor)
+        self.assertIn("setLoaded(true);", self.editor)
 
     def test_editor_locks_profile_selection_while_save_is_in_flight(self) -> None:
         self.assertIn("if (saving || !canonicalStateReady) return;", self.editor)
         self.assertIn("const saveProfileType = selectedType;", self.editor)
-        self.assertIn("selectedTypeRef.current === saveProfileType", self.editor)
+        self.assertNotIn("selectedTypeRef", self.editor)
 
-    def test_instrument_change_starts_fresh_editor_generation_and_unlocks_save_state(self) -> None:
-        self.assertIn("const editorGenerationRef = useRef(0);", self.editor)
-        self.assertIn("const generation = ++editorGenerationRef.current;", self.editor)
-        self.assertIn("setSaving(false);", self.editor)
-        self.assertIn("setLoadedInstrumentId(null);", self.editor)
-        self.assertIn("setLoading(true);", self.editor)
+    def test_instrument_change_uses_keyed_fresh_editor_generation(self) -> None:
+        wrapper = self.editor.split("function TrackingProfileEditorGeneration", 1)[0]
+        self.assertIn("key={trackedInstrumentId}", wrapper)
+        self.assertIn("trackedInstrumentId={trackedInstrumentId}", wrapper)
+        self.assertNotIn("setSaving(false)", wrapper)
+        self.assertNotIn("editorGenerationRef", self.editor)
 
-    def test_save_completion_is_bound_to_exact_editor_generation(self) -> None:
-        self.assertIn("const saveGeneration = editorGenerationRef.current;", self.editor)
-        guard = "!mountedRef.current || editorGenerationRef.current !== saveGeneration"
-        self.assertGreaterEqual(self.editor.count(guard), 2)
-        self.assertIn(
-            "mountedRef.current && editorGenerationRef.current === saveGeneration",
-            self.editor,
-        )
-        self.assertNotIn("activeInstrumentIdRef", self.editor)
+    def test_editor_effect_does_not_synchronously_reset_state(self) -> None:
+        effect_start = self.editor.index("  useEffect(() => {")
+        load_start = self.editor.index("    void getTrackingProfiles", effect_start)
+        effect_prefix = self.editor[effect_start:load_start]
+        for setter in (
+            "setSaving(",
+            "setLoading(",
+            "setProfiles(",
+            "setSelectedType(",
+            "setSpecs(",
+            "setEnabled(",
+            "setError(",
+        ):
+            self.assertNotIn(setter, effect_prefix)
+
+    def test_save_completion_is_ignored_after_keyed_generation_unmounts(self) -> None:
+        self.assertIn("const mountedRef = useRef(false);", self.editor)
+        self.assertIn("mountedRef.current = false;", self.editor)
+        self.assertGreaterEqual(self.editor.count("if (!mountedRef.current) return;"), 2)
+        self.assertIn("if (mountedRef.current) setSaving(false);", self.editor)
 
     def test_profile_ui_does_not_create_events_or_trading_state(self) -> None:
         source = (self.scanner + self.editor).lower()
