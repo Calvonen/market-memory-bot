@@ -63,14 +63,16 @@ class MobileTrackedEventReleaseIngestionTests(unittest.TestCase):
 
     def test_screen_gates_ingestion_on_complete_canonical_release_condition(self) -> None:
         screen = SCREEN_PATH.read_text(encoding="utf-8")
-        expected_gate = """const canProcessRelease = Boolean(
-    releaseSource?.active
-      && releaseStep?.status === 'action_required'
-      && releaseStep.action_target === 'release',
+        expected_release_action_gate = """const releaseActionRequired = Boolean(
+    releaseStep?.status === 'action_required' && releaseStep.action_target === 'release',
   );"""
         process_release = _braced_block(screen, "async function processRelease() {")
 
-        self.assertIn(expected_gate, screen)
+        self.assertIn(expected_release_action_gate, screen)
+        self.assertIn(
+            "const canProcessRelease = Boolean(releaseSource?.active && releaseActionRequired);",
+            screen,
+        )
         self.assertIn(
             "if (!eventId || !canProcessRelease || processing || submitting) return;",
             process_release,
