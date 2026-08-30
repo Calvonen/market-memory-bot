@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -11,7 +12,8 @@ class MobileTrackedInstrumentServiceTests(unittest.TestCase):
         start = source.index("export function trackInstrument(")
         body = source[start:]
 
-        self.assertEqual(body.count("post<TrackedInstrument>("), 1)
+        transport_calls = re.findall(r"\bpost(?:<[^>]+>)?\s*\(", body)
+        self.assertEqual(transport_calls, ["post<TrackedInstrument>("])
         self.assertNotIn("apiControlPost<TrackedInstrument>(", body)
         self.assertNotIn("fetch(", body)
         self.assertIn("post: TrackedInstrumentPost = apiControlPost", body)
@@ -35,6 +37,13 @@ class MobileTrackedInstrumentServiceTests(unittest.TestCase):
             source,
         )
         self.assertNotIn("export type TrackedInstrumentSource = string", source)
+
+        input_start = source.index("export type TrackInstrumentInput = {")
+        input_end = source.index("\n};", input_start) + len("\n};")
+        input_block = source[input_start:input_end]
+        self.assertIn("source: TrackedInstrumentSource;", input_block)
+        self.assertNotIn("source: string;", input_block)
+        self.assertNotIn("TrackedInstrumentSource | string", input_block)
 
         start = source.index("export function trackInstrument(")
         body = source[start:]
