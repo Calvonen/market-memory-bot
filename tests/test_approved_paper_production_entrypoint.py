@@ -78,10 +78,23 @@ class ApprovedPaperProductionEntrypointTests(unittest.TestCase):
         self.assertIn('EtoroDemoBroker.from_env(', self.worker)
         self.assertIn('pipeline=PaperTradingPipeline(broker=broker)', self.worker)
 
-    def test_etoro_demo_preflight_happens_before_portfolio_execution_authority(self) -> None:
-        preflight = self.worker.index("broker.verify_demo_access()")
-        claim = self.worker.index("if not _claim_portfolio_lease(")
-        self.assertLess(preflight, claim)
+    def test_etoro_demo_preflight_runs_immediately_before_each_durable_attempt(self) -> None:
+        class_start = self.worker.index("class _PortfolioLeasePaperRuns:")
+        begin_start = self.worker.index("    def begin_broker_attempt(", class_start)
+        preflight = self.worker.index("            self._preflight()", begin_start)
+        reserve = self.worker.index(
+            '            "begin_event_paper_broker_attempt_with_portfolio_lease",',
+            begin_start,
+        )
+        self.assertLess(preflight, reserve)
+        self.assertIn("preflight=(etoro_broker.verify_demo_access", self.worker)
+        self.assertNotIn("demo_access_verified", self.worker)
+
+    def test_etoro_completed_orders_use_reconciled_notional_for_portfolio_risk(self) -> None:
+        self.assertIn('raw_notional = order.get("notional_usd")', self.worker)
+        self.assertIn('payload["notional_usd"] = notional', self.worker)
+        self.assertIn('payload["broker_position_id"] = position_id', self.worker)
+        self.assertIn('payload["status"] = "ETORO_DEMO_FILLED"', self.worker)
 
     def test_internal_paper_broker_remains_safe_default(self) -> None:
         self.assertIn('DEFAULT_BROKER_MODE = "internal"', self.worker)
