@@ -2,17 +2,20 @@ from pathlib import Path
 
 
 HOME_SOURCE = Path("mobile/src/app/(tabs)/index.tsx")
+TRACKED_SECTION_SOURCE = Path("mobile/src/components/TrackedEventsSection.tsx")
 
 
-def test_calendarless_tracked_expectations_hide_only_with_complete_snapshot():
-    source = HOME_SOURCE.read_text(encoding="utf-8")
+def test_loaded_tracked_event_ids_suppress_only_matching_shells():
+    home = HOME_SOURCE.read_text(encoding="utf-8")
+    tracked = TRACKED_SECTION_SOURCE.read_text(encoding="utf-8")
 
-    assert "const TRACKED_EVENT_LIST_LIMIT = 20;" in source
-    assert "if (event.event_id.startsWith('tracked:'))" in source
-    assert "return !suppressTrackedShells;" in source
-    assert "trackedEventCount < TRACKED_EVENT_LIST_LIMIT" in source
-    assert "visibleEvents?.map((event) =>" in source
-    assert "events?.map((event) =>" not in source
+    assert "eventIds: string[];" in home
+    assert "setPersistentEventIds(new Set(snapshot.eventIds));" in home
+    assert "const trackedEventId = event.event_id.slice('tracked:'.length);" in home
+    assert "return !loadedTrackedEventIds.has(trackedEventId);" in home
+    assert "eventIds: list.map((event) => event.event_id)," in tracked
+    assert "visibleEvents?.map((event) =>" in home
+    assert "events?.map((event) =>" not in home
 
 
 def test_uncertain_past_expectations_remain_visible_until_status_is_known():
