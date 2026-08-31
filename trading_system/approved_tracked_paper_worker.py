@@ -6,11 +6,10 @@ import time
 from typing import Any
 from uuid import uuid4
 
-from trading_system.brokers.base import BrokerOrder
 from trading_system.brokers.paper import PaperBroker
 from trading_system.etoro_instrument_resolver import EtoroInstrumentResolver
 from trading_system.etoro_market_data import EtoroMarketDataProvider
-from trading_system.models import PortfolioState, TradeProposal
+from trading_system.models import PortfolioState
 from trading_system.paper_trade_repository import SupabasePaperTradeRepository
 from trading_system.pipeline import PaperTradingPipeline
 from trading_system.release_repository import SupabaseReleaseRepository
@@ -234,29 +233,65 @@ def _release_portfolio_lease(repository: SupabasePaperTradeRepository, *, token:
     ).execute()
 
 
-class _PortfolioLeaseBroker:
-    """Revalidate the account-wide lease immediately before actual broker execution."""
+class _PortfolioLeasePaperRuns:
+    """Renew account authority before the durable broker-attempt reservation.
+
+    The canonical orchestrator asks this object to begin the broker attempt. The
+    portfolio lease is renewed first; only after that succeeds is the durable
+    `started` attempt inserted. Therefore a known pre-submission lease failure is
+    retryable and can never strand the task as an uncertain broker outcome.
+    """
 
     def __init__(
         self,
-        broker: PaperBroker,
         repository: SupabasePaperTradeRepository,
         *,
-        token: str,
-        lease_seconds: int,
+        portfolio_token: str,
+        portfolio_lease_seconds: int,
     ) -> None:
-        self._broker = broker
         self._repository = repository
-        self._token = token
-        self._lease_seconds = lease_seconds
+        self._portfolio_token = portfolio_token
+        self._portfolio_lease_seconds = portfolio_lease_seconds
 
-    def execute(self, proposal: TradeProposal) -> BrokerOrder:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._repository, name)
+
+    def begin_broker_attempt(
+        self,
+        *,
+        event_id: str,
+        analysis_id: str,
+        task_id: str,
+        expectation_version: int,
+        claim_token: str,
+        execution_token: str,
+        lease_seconds: int,
+        strategy_payload: dict[str, Any],
+        risk_payload: dict[str, Any],
+    ) -> dict[str, Any]:
         _renew_portfolio_lease(
             self._repository,
-            token=self._token,
-            lease_seconds=self._lease_seconds,
+            token=self._portfolio_token,
+            lease_seconds=self._portfolio_lease_seconds,
         )
-        return self._broker.execute(proposal)
+        response = self._repository.client.rpc(
+            "begin_event_paper_broker_attempt",
+            {
+                "input_event_id": event_id,
+                "input_analysis_id": analysis_id,
+                "input_task_id": task_id,
+                "input_expectation_version": expectation_version,
+                "input_claim_token": claim_token,
+                "input_execution_token": execution_token,
+                "input_lease_seconds": max(1, lease_seconds),
+                "input_strategy_payload": strategy_payload,
+                "input_risk_payload": risk_payload,
+            },
+        ).execute()
+        rows = response.data or []
+        if not rows:
+            raise RuntimeError("canonical broker execution attempt returned no state")
+        return rows[0]
 
 
 def run_forever() -> None:
@@ -292,21 +327,15 @@ def run_forever() -> None:
                 ):
                     continue
                 try:
-                    # The account-wide lease is held across snapshot -> Strategy/Risk
-                    # -> durable broker attempt. The broker wrapper renews and proves
-                    # ownership again immediately before the underlying PaperBroker.
                     portfolio = _paper_portfolio_for_instrument(
                         paper_runs,
                         instrument=instrument,
                         page_size=batch_size,
                     )
-                    pipeline = PaperTradingPipeline(
-                        broker=_PortfolioLeaseBroker(
-                            PaperBroker(),
-                            paper_runs,
-                            token=portfolio_token,
-                            lease_seconds=portfolio_lease_seconds,
-                        )
+                    lease_aware_runs = _PortfolioLeasePaperRuns(
+                        paper_runs,
+                        portfolio_token=portfolio_token,
+                        portfolio_lease_seconds=portfolio_lease_seconds,
                     )
                     result = run_approved_tracked_paper_once(
                         tracked_event_id=tracked_event_id,
@@ -315,11 +344,11 @@ def run_forever() -> None:
                         expectations=expectations,
                         releases=releases,
                         trading_tasks=trading_tasks,
-                        paper_runs=paper_runs,
+                        paper_runs=lease_aware_runs,
                         resolver=resolver,
                         portfolio=portfolio,
                         lease_seconds=lease_seconds,
-                        pipeline=pipeline,
+                        pipeline=PaperTradingPipeline(broker=PaperBroker()),
                     )
                     print(
                         f"approved-paper task={task_id} event={tracked_event_id} "
