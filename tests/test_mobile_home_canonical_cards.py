@@ -18,6 +18,12 @@ def test_loaded_tracked_event_ids_suppress_only_matching_shells():
     assert "events?.map((event) =>" not in home
 
 
+def test_active_tracked_snapshot_uses_backend_maximum_limit():
+    tracked = TRACKED_SECTION_SOURCE.read_text(encoding="utf-8")
+
+    assert "getTrackedEvents('active', 100)" in tracked
+
+
 def test_unloaded_tracked_shells_still_pass_normal_stale_filtering():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
@@ -37,12 +43,13 @@ def test_uncertain_past_expectations_remain_visible_until_status_is_known():
     assert "for (const event of visibleEvents ?? [])" in source
 
 
-def test_canonical_tracked_card_preserves_expectation_navigation():
+def test_canonical_tracked_card_preserves_expectation_navigation_only_for_earnings():
     tracked = TRACKED_SECTION_SOURCE.read_text(encoding="utf-8")
 
     assert "pathname: '/events/[eventId]'" in tracked
-    assert "const expectationEventId = event.calendar_event_id" in tracked
+    assert "event.kind === 'earnings'" in tracked
     assert "? `calendar:${event.calendar_event_id}`" in tracked
-    assert ": `tracked:${event.event_id}`;" in tracked
+    assert ": `tracked:${event.event_id}`" in tracked
+    assert "{expectationEventId ? (" in tracked
     assert "params: { eventId: expectationEventId }" in tracked
     assert "Odotukset ja strategia →" in tracked
