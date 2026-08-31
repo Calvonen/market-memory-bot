@@ -181,6 +181,7 @@ def _begin_broker_attempt(
     task_id: str,
     expectation_version: int,
     execution_token: str,
+    lease_seconds: int,
 ) -> dict[str, Any]:
     begin_attempt = getattr(paper_runs, "begin_broker_attempt", None)
     if callable(begin_attempt):
@@ -191,6 +192,7 @@ def _begin_broker_attempt(
             expectation_version=expectation_version,
             claim_token=paper_runs.claim_token,
             execution_token=execution_token,
+            lease_seconds=lease_seconds,
         )
 
     response = paper_runs.client.rpc(
@@ -202,6 +204,7 @@ def _begin_broker_attempt(
             "input_expectation_version": expectation_version,
             "input_claim_token": paper_runs.claim_token,
             "input_execution_token": execution_token,
+            "input_lease_seconds": max(1, lease_seconds),
         },
     ).execute()
     rows = response.data or []
@@ -248,6 +251,7 @@ def _guard_pipeline(
     analysis_id: str,
     task_id: str,
     expectation_version: int,
+    lease_seconds: int,
 ) -> PaperTradingPipeline:
     base = pipeline or PaperTradingPipeline()
     return PaperTradingPipeline(
@@ -262,6 +266,7 @@ def _guard_pipeline(
                 task_id=task_id,
                 expectation_version=expectation_version,
                 execution_token=execution_token,
+                lease_seconds=lease_seconds,
             ),
             lambda execution_token, order: _complete_broker_attempt(
                 paper_runs,
@@ -410,6 +415,7 @@ def run_approved_tracked_paper_once(
         analysis_id=analysis_id,
         task_id=requested_task_id,
         expectation_version=expectation.version,
+        lease_seconds=lease_seconds,
     )
 
     result: PostReleasePaperResult = run_post_release_paper_from_tracked_event(
