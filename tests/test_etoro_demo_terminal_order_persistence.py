@@ -32,9 +32,10 @@ class EtoroDemoTerminalOrderPersistenceTests(unittest.TestCase):
     def test_terminal_paper_run_uses_canonical_broker_order_serializer(self) -> None:
         source = PAPER_REPOSITORY.read_text(encoding="utf-8")
         self.assertIn(
-            'payload["paper_order"] = broker_order_payload(result.pipeline.order)',
+            "terminal_order = broker_order_payload(result.pipeline.order)",
             source,
         )
+        self.assertIn('payload["paper_order"] = terminal_order', source)
         self.assertIn(
             "from trading_system.brokers.base import broker_order_payload",
             source,
