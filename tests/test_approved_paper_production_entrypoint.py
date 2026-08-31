@@ -40,6 +40,14 @@ class ApprovedPaperProductionEntrypointTests(unittest.TestCase):
         orchestration = self.worker.index("result = run_approved_tracked_paper_once(")
         self.assertLess(portfolio_refresh, orchestration)
 
+    def test_portfolio_lease_is_renewed_before_broker_attempt_reservation(self) -> None:
+        class_start = self.worker.index("class _PortfolioLeasePaperRuns:")
+        begin_start = self.worker.index("    def begin_broker_attempt(", class_start)
+        renew = self.worker.index("        _renew_portfolio_lease(", begin_start)
+        reserve = self.worker.index('            "begin_event_paper_broker_attempt",', begin_start)
+        self.assertLess(renew, reserve)
+        self.assertNotIn("class _PortfolioLeaseBroker:", self.worker)
+
     def test_systemd_runs_the_production_worker(self) -> None:
         self.assertIn("python -m trading_system.approved_tracked_paper_worker", self.service)
         self.assertIn("EnvironmentFile=/home/marko/marketai/.env", self.service)
