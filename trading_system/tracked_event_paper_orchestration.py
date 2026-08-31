@@ -57,10 +57,12 @@ def _claim_is_owned(
     claim: dict[str, Any],
     *,
     analysis_id: str,
+    task_id: str,
     claim_token: str,
 ) -> bool:
     return (
         str(claim.get("analysis_id") or "") == analysis_id
+        and str(claim.get("task_id") or "") == task_id
         and str(claim.get("claim_token") or "") == claim_token
     )
 
@@ -71,22 +73,17 @@ def _claim_event_for_task(
     event_id: str,
     analysis_id: str,
     task_id: str,
+    expectation_version: int,
     lease_seconds: int,
 ) -> dict[str, Any]:
-    """Claim a paper run while durably binding the execution authority.
-
-    Production uses the task-aware RPC added by the matching migration. Tests may
-    provide an explicit claim_event_for_task fake instead of exposing a Supabase
-    client. The task binding happens in the same database transaction as the
-    event claim, so a cancelled/replaced task cannot be silently substituted
-    after Strategy/Risk work has started.
-    """
+    """Claim a paper run while atomically validating execution authority/version."""
     claim_for_task = getattr(paper_runs, "claim_event_for_task", None)
     if callable(claim_for_task):
         return claim_for_task(
             event_id=event_id,
             analysis_id=analysis_id,
             task_id=task_id,
+            expectation_version=expectation_version,
             lease_seconds=lease_seconds,
             claim_token=paper_runs.claim_token,
         )
@@ -97,6 +94,7 @@ def _claim_event_for_task(
             "input_event_id": event_id,
             "input_analysis_id": analysis_id,
             "input_task_id": task_id,
+            "input_expectation_version": expectation_version,
             "input_claim_token": paper_runs.claim_token,
             "input_lease_seconds": max(1, lease_seconds),
         },
@@ -211,6 +209,7 @@ def run_approved_tracked_paper_once(
         event_id=release_event_id,
         analysis_id=analysis_id,
         task_id=requested_task_id,
+        expectation_version=expectation.version,
         lease_seconds=lease_seconds,
     )
     terminal_status = str(claim.get("terminal_status") or "").strip()
@@ -226,6 +225,7 @@ def run_approved_tracked_paper_once(
     if not _claim_is_owned(
         claim,
         analysis_id=analysis_id,
+        task_id=requested_task_id,
         claim_token=paper_runs.claim_token,
     ):
         return TrackedPaperOrchestrationResult(
