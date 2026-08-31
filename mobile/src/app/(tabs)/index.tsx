@@ -82,17 +82,12 @@ function isHomeExpectationVisible(
   if (event.event_id.startsWith('calendar:')) {
     const calendarEventId = event.event_id.slice('calendar:'.length);
     if (!calendarEventId) return false;
-    // A loaded calendar-backed canonical event is merged into this expectation
-    // card via trackedEvent below, so the expectation remains the one Home card.
     if (loadedCalendarEventIds.has(calendarEventId)) return true;
   }
 
   const today = formatLocalDate(new Date());
   if (event.scheduled_date >= today) return true;
 
-  // Past tracked/calendar expectations outside the bounded 20-card canonical
-  // snapshot use exact canonical occurrence activity. Loading/error fail open;
-  // only a confirmed inactive result allows normal stale filtering below.
   if (isTrackedExpectation(event.event_id) && trackedActivity !== 'inactive') return true;
 
   if (!status || status.statusError) return true;
@@ -106,6 +101,8 @@ export default function HomeScreen() {
   const [trackedActivityByEventId, setTrackedActivityByEventId] = useState<
     Record<string, TrackedActivityState>
   >({});
+  const [trackedActivityError, setTrackedActivityError] = useState<string | null>(null);
+  const [activityRetryToken, setActivityRetryToken] = useState(0);
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[] | null>(null);
   const [trackedEventCount, setTrackedEventCount] = useState<number | null>(null);
   const [persistentEventIds, setPersistentEventIds] = useState<Set<string>>(() => new Set());
@@ -188,6 +185,7 @@ export default function HomeScreen() {
   useEffect(() => {
     if (!events || trackedEventCount === null) return;
 
+    setTrackedActivityError(null);
     const today = formatLocalDate(new Date());
     const candidates = events.filter(
       (event) =>
@@ -210,6 +208,7 @@ export default function HomeScreen() {
     void getTrackedEventActivities(candidateIds)
       .then((activityByOccurrenceId) => {
         if (!active) return;
+        setTrackedActivityError(null);
         setTrackedActivityByEventId(
           Object.fromEntries(
             candidateIds.map((eventId) => [
@@ -221,6 +220,9 @@ export default function HomeScreen() {
       })
       .catch(() => {
         if (!active) return;
+        setTrackedActivityError(
+          'Seurantatilaa ei juuri nyt saatu varmistettua. Mahdolliset aktiiviset seurannat pidetään näkyvissä.',
+        );
         setTrackedActivityByEventId(
           Object.fromEntries(candidateIds.map((eventId) => [eventId, 'error'])),
         );
@@ -229,7 +231,13 @@ export default function HomeScreen() {
     return () => {
       active = false;
     };
-  }, [events, trackedEventCount, persistentEventIds, persistentCalendarEventIds]);
+  }, [
+    events,
+    trackedEventCount,
+    persistentEventIds,
+    persistentCalendarEventIds,
+    activityRetryToken,
+  ]);
 
   const visibleEvents = useMemo(() => {
     if (!events) return null;
@@ -348,21 +356,33 @@ export default function HomeScreen() {
         </View>
       ) : null}
 
+      {trackedActivityError ? (
+        <View style={styles.calendarErrorCard}>
+          <Text style={styles.errorText}>{trackedActivityError}</Text>
+          <Text style={styles.calendarErrorHint}>
+            Kortteja ei piiloteta ennen kuin canonical-seurannan tila voidaan varmistaa.
+          </Text>
+          <Pressable
+            style={styles.retryButton}
+            onPress={() => setActivityRetryToken((value) => value + 1)}
+          >
+            <Text style={styles.retryButtonText}>Yritä uudelleen</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
       {visibleEvents &&
       visibleEvents.length === 0 &&
       trackedEventCount === 0 &&
       trackedCalendarEvents &&
       trackedCalendarEvents.length === 0 &&
-      !calendarError ? (
+      !calendarError &&
+      !trackedActivityError ? (
         <View style={styles.emptyCard}>
-          <Text style={styles.emptyText}>
-            Ei vielä seurattavia tulosjulkaisuja.
-          </Text>
+          <Text style={styles.emptyText}>Ei vielä seurattavia tulosjulkaisuja.</Text>
         </View>
       ) : null}
 
-      {/* Generic /api/v1/events rendering still follows the old events?.map invariant,
-          but only after canonical/stale filtering through visibleEvents. */}
       {visibleEvents?.map((event) => {
         const calendarEventId = event.event_id.startsWith('calendar:')
           ? event.event_id.slice('calendar:'.length)
