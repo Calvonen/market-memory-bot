@@ -3,6 +3,8 @@ from pathlib import Path
 
 HOME_SOURCE = Path("mobile/src/app/(tabs)/index.tsx")
 TRACKED_SECTION_SOURCE = Path("mobile/src/components/TrackedEventsSection.tsx")
+TRACKED_SERVICE_SOURCE = Path("mobile/src/services/tracked-events.ts")
+TRACKED_RELEASE_API_SOURCE = Path("trading_system/tracked_event_release_source_api.py")
 
 
 def test_loaded_tracked_event_ids_suppress_only_matching_shells():
@@ -18,20 +20,33 @@ def test_loaded_tracked_event_ids_suppress_only_matching_shells():
     assert "events?.map((event) =>" not in home
 
 
-def test_active_tracked_snapshot_uses_backend_maximum_limit():
+def test_canonical_card_list_stays_bounded_to_service_default():
     tracked = TRACKED_SECTION_SOURCE.read_text(encoding="utf-8")
 
-    assert "getTrackedEvents('active', 100)" in tracked
+    assert "return getTrackedEvents()" in tracked
+    assert "getTrackedEvents('active', 100)" not in tracked
 
 
-def test_unloaded_tracked_shells_still_pass_normal_stale_filtering():
+def test_past_unloaded_tracked_shell_uses_exact_canonical_activity():
+    home = HOME_SOURCE.read_text(encoding="utf-8")
+    service = TRACKED_SERVICE_SOURCE.read_text(encoding="utf-8")
+    backend = TRACKED_RELEASE_API_SOURCE.read_text(encoding="utf-8")
+
+    assert "getTrackedEventActivity" in home
+    assert "event.scheduled_date < today" in home
+    assert "getTrackedEventActivity(trackedEventId)" in home
+    assert "activity.active ? 'active' : 'inactive'" in home
+    assert "if (trackedActivity !== 'inactive') return true;" in home
+    assert "export function getTrackedEventActivity(" in service
+    assert 'router.get("/api/v1/tracked-events/{event_id}/activity")' in backend
+    assert '"exists": False, "active": False' in backend
+
+
+def test_tracked_activity_lookup_fails_open_for_active_workflow_safety():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
-    tracked_guard = source.index("if (event.event_id.startsWith('tracked:'))")
-    today_guard = source.index("const today = formatLocalDate(new Date());", tracked_guard)
-    loaded_return = source.index("if (loadedTrackedEventIds.has(trackedEventId)) return false;", tracked_guard)
-    assert loaded_return < today_guard
-    assert "return !loadedTrackedEventIds.has(trackedEventId);" not in source
+    assert "[event.event_id]: 'error'" in source
+    assert "if (trackedActivity !== 'inactive') return true;" in source
 
 
 def test_uncertain_past_expectations_remain_visible_until_status_is_known():
