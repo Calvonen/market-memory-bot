@@ -7,7 +7,9 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKER = ROOT / "trading_system" / "approved_tracked_paper_worker.py"
 SERVICE = ROOT / "deploy" / "systemd" / "marketai-approved-paper.service"
-MIGRATION = ROOT / "supabase" / "migrations" / "20260903157000_broker_attempt_decision_audit.sql"
+AUDIT_MIGRATION = ROOT / "supabase" / "migrations" / "20260903157000_broker_attempt_decision_audit.sql"
+ATOMIC_MIGRATION = ROOT / "supabase" / "migrations" / "20260903159000_atomic_portfolio_attempt_reservation.sql"
+AUTHORITY_MIGRATION = ROOT / "supabase" / "migrations" / "20260903160000_require_portfolio_lease_for_broker_attempt.sql"
 
 
 class ApprovedPaperProductionEntrypointTests(unittest.TestCase):
@@ -15,7 +17,9 @@ class ApprovedPaperProductionEntrypointTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.worker = WORKER.read_text(encoding="utf-8")
         cls.service = SERVICE.read_text(encoding="utf-8")
-        cls.sql = MIGRATION.read_text(encoding="utf-8")
+        cls.audit_sql = AUDIT_MIGRATION.read_text(encoding="utf-8")
+        cls.atomic_sql = ATOMIC_MIGRATION.read_text(encoding="utf-8")
+        cls.authority_sql = AUTHORITY_MIGRATION.read_text(encoding="utf-8")
 
     def test_worker_discovers_only_approved_paper_tasks_and_calls_orchestrator(self) -> None:
         self.assertIn('.eq("state", "approved")', self.worker)
@@ -40,28 +44,45 @@ class ApprovedPaperProductionEntrypointTests(unittest.TestCase):
         orchestration = self.worker.index("result = run_approved_tracked_paper_once(")
         self.assertLess(portfolio_refresh, orchestration)
 
-    def test_portfolio_lease_is_renewed_before_broker_attempt_reservation(self) -> None:
+    def test_portfolio_lease_and_broker_attempt_reservation_are_atomic(self) -> None:
         class_start = self.worker.index("class _PortfolioLeasePaperRuns:")
         begin_start = self.worker.index("    def begin_broker_attempt(", class_start)
-        renew = self.worker.index("        _renew_portfolio_lease(", begin_start)
-        reserve = self.worker.index('            "begin_event_paper_broker_attempt",', begin_start)
-        self.assertLess(renew, reserve)
+        atomic_call = self.worker.index(
+            '            "begin_event_paper_broker_attempt_with_portfolio_lease",',
+            begin_start,
+        )
+        self.assertGreater(atomic_call, begin_start)
+        self.assertIn("for update", self.atomic_sql.lower())
+        self.assertIn("where singleton = true", self.atomic_sql)
+        self.assertIn("input_portfolio_lease_token", self.atomic_sql)
+        self.assertNotIn("_renew_portfolio_lease(", self.worker[begin_start:atomic_call])
         self.assertNotIn("class _PortfolioLeaseBroker:", self.worker)
+
+    def test_direct_broker_attempt_reservation_is_not_service_role_callable(self) -> None:
+        self.assertIn(
+            "revoke execute on function public.begin_event_paper_broker_attempt(",
+            self.authority_sql,
+        )
+        self.assertIn(
+            "grant execute on function public.begin_event_paper_broker_attempt_with_portfolio_lease(",
+            self.authority_sql,
+        )
+        self.assertIn("security definer", self.authority_sql.lower())
 
     def test_systemd_runs_the_production_worker(self) -> None:
         self.assertIn("python -m trading_system.approved_tracked_paper_worker", self.service)
         self.assertIn("EnvironmentFile=/home/marko/marketai/.env", self.service)
 
     def test_broker_attempt_persists_strategy_and_risk_before_io(self) -> None:
-        self.assertIn("strategy_payload jsonb", self.sql)
-        self.assertIn("risk_payload jsonb", self.sql)
-        self.assertIn("input_strategy_payload jsonb", self.sql)
-        self.assertIn("input_risk_payload jsonb", self.sql)
-        self.assertIn("'strategy', attempt_row.strategy_payload", self.sql)
-        self.assertIn("'risk', attempt_row.risk_payload", self.sql)
+        self.assertIn("strategy_payload jsonb", self.audit_sql)
+        self.assertIn("risk_payload jsonb", self.audit_sql)
+        self.assertIn("input_strategy_payload jsonb", self.audit_sql)
+        self.assertIn("input_risk_payload jsonb", self.audit_sql)
+        self.assertIn("'strategy', attempt_row.strategy_payload", self.audit_sql)
+        self.assertIn("'risk', attempt_row.risk_payload", self.audit_sql)
         self.assertIn(
             "revoke execute on function public.begin_event_paper_broker_attempt(text, uuid, uuid, integer, uuid, uuid, integer)",
-            self.sql,
+            self.audit_sql,
         )
 
 
