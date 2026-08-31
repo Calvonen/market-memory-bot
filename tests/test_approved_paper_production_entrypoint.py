@@ -24,6 +24,22 @@ class ApprovedPaperProductionEntrypointTests(unittest.TestCase):
         self.assertNotIn("create_pending(", self.worker)
         self.assertNotIn(".approve(", self.worker)
 
+    def test_approved_task_discovery_pages_past_the_first_batch(self) -> None:
+        self.assertIn('.range(offset, offset + page_size - 1)', self.worker)
+        self.assertIn('offset += page_size', self.worker)
+        self.assertIn('.select("id,tracked_event_id,instrument")', self.worker)
+        self.assertNotIn('.limit(limit)', self.worker)
+
+    def test_portfolio_is_refreshed_before_every_task_risk_decision(self) -> None:
+        self.assertIn("def _paper_portfolio_for_instrument(", self.worker)
+        self.assertIn('.eq("status", "paper_executed")', self.worker)
+        self.assertIn('open_positions=base.open_positions + len(orders)', self.worker)
+        self.assertIn('cash=max(0.0, base.cash - total_notional)', self.worker)
+        self.assertIn('persisted_exposure_pct = (instrument_notional / base.equity) * 100.0', self.worker)
+        portfolio_refresh = self.worker.index("portfolio = _paper_portfolio_for_instrument(")
+        orchestration = self.worker.index("result = run_approved_tracked_paper_once(")
+        self.assertLess(portfolio_refresh, orchestration)
+
     def test_systemd_runs_the_production_worker(self) -> None:
         self.assertIn("python -m trading_system.approved_tracked_paper_worker", self.service)
         self.assertIn("EnvironmentFile=/home/marko/marketai/.env", self.service)
