@@ -13,14 +13,7 @@ from trading_system.models import Direction, RiskStatus, TradeProposal, TradingM
 
 
 class EtoroDemoBroker(Broker):
-    """Submit and reconcile risk-approved eToro Virtual Portfolio orders only.
-
-    Both portfolio verification and execution are pinned to eToro's demo paths;
-    this broker intentionally has no real-money execution path. A successful POST
-    is not treated as a fill. The returned position id must become visible in the
-    demo portfolio before a completed BrokerOrder is returned to the durable
-    orchestration boundary.
-    """
+    """Submit and reconcile risk-approved eToro Virtual Portfolio orders only."""
 
     DEMO_PORTFOLIO_URL = "https://public-api.etoro.com/api/v1/trading/info/demo/portfolio"
     DEMO_ORDERS_URL = "https://public-api.etoro.com/api/v2/trading/execution/demo/orders"
@@ -105,21 +98,16 @@ class EtoroDemoBroker(Broker):
         return body
 
     def verify_demo_access(self) -> None:
-        """Fail before durable execution authority is reserved if demo access is unavailable."""
         self._get_demo_portfolio()
 
     def preflight_execution(self, _proposal: TradeProposal) -> None:
-        """Re-check credentials immediately before each durable broker attempt."""
         self.verify_demo_access()
 
     def _approved_amount_usd(self, proposal: TradeProposal) -> float:
-        entry = float(proposal.candidate.entry or 0.0)
-        position_cap = float(proposal.risk.max_position_value)
-        quantity_cap = float(proposal.risk.max_quantity) * entry
-        values = (entry, position_cap, quantity_cap)
-        if any(not math.isfinite(value) or value <= 0 for value in values):
-            raise ValueError("RiskEngine proposal has no finite positive executable position value")
-        amount = min(self.amount_usd, position_cap, quantity_cap)
+        risk_notional = float(proposal.risk.max_fractional_notional_usd)
+        if not math.isfinite(risk_notional) or risk_notional <= 0:
+            raise ValueError("RiskEngine proposal has no finite positive fractional notional")
+        amount = min(self.amount_usd, risk_notional)
         if not math.isfinite(amount) or amount <= 0:
             raise ValueError("Risk-approved eToro demo amount must be positive")
         return float(amount)
@@ -162,9 +150,7 @@ class EtoroDemoBroker(Broker):
                 raw_position_id = self._field(position, "positionId", "positionID", "PositionID", "id")
                 if str(raw_position_id or "") != position_id:
                     continue
-                raw_instrument_id = self._field(
-                    position, "instrumentId", "instrumentID", "InstrumentID"
-                )
+                raw_instrument_id = self._field(position, "instrumentId", "instrumentID", "InstrumentID")
                 try:
                     observed_instrument_id = int(raw_instrument_id)
                 except (TypeError, ValueError) as exc:
@@ -173,12 +159,7 @@ class EtoroDemoBroker(Broker):
                     raise RuntimeError("reconciled eToro position belongs to a different instrument")
 
                 raw_amount = self._field(
-                    position,
-                    "amount",
-                    "Amount",
-                    "investedAmount",
-                    "InvestedAmount",
-                    "openAmount",
+                    position, "amount", "Amount", "investedAmount", "InvestedAmount", "openAmount"
                 )
                 if raw_amount is not None:
                     try:
@@ -190,11 +171,7 @@ class EtoroDemoBroker(Broker):
                 else:
                     raw_units = self._field(position, "units", "Units", "amountInUnits")
                     raw_rate = self._field(
-                        position,
-                        "openRate",
-                        "openPrice",
-                        "averageOpenPrice",
-                        "avgOpenPrice",
+                        position, "openRate", "openPrice", "averageOpenPrice", "avgOpenPrice"
                     )
                     try:
                         units = float(raw_units)
@@ -235,8 +212,6 @@ class EtoroDemoBroker(Broker):
             raise ValueError("EtoroDemoBroker cannot execute NO_TRADE")
         if proposal.candidate.entry is None or proposal.candidate.entry <= 0:
             raise ValueError("Proposal has no valid entry price")
-        if proposal.risk.max_quantity < 1:
-            raise ValueError("Risk-approved quantity must be at least one")
         if not proposal.proposal_id.strip():
             raise ValueError("Trade proposal must have a stable proposal id")
 
