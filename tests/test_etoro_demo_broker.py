@@ -61,6 +61,7 @@ def _portfolio(
     direction: Direction = Direction.LONG,
     equity: float = 10_000.0,
     cash: float = 8_000.0,
+    daily_pnl: float = -50.0,
 ) -> dict:
     stop = 75810.0 if direction is Direction.LONG else 76190.0
     target = 76380.0 if direction is Direction.LONG else 75620.0
@@ -68,6 +69,7 @@ def _portfolio(
         "data": {
             "equity": equity,
             "availableCash": cash,
+            "dailyPnl": daily_pnl,
             "positions": [
                 {
                     "positionId": position_id,
@@ -98,29 +100,43 @@ class EtoroDemoBrokerTests(unittest.TestCase):
         broker.verify_demo_access()
         self.assertEqual(calls[0][0], EtoroDemoBroker.DEMO_PORTFOLIO_URL)
 
-    def test_live_portfolio_drives_risk_state(self) -> None:
+    def test_live_portfolio_drives_risk_state_and_ignores_stale_supplied_pnl(self) -> None:
         def fake_get(_url, **_kwargs):
-            return _FakeResponse(_portfolio(amount=750.0, equity=12_000.0, cash=7_500.0))
+            return _FakeResponse(
+                _portfolio(amount=750.0, equity=12_000.0, cash=7_500.0, daily_pnl=-275.0)
+            )
 
         broker = EtoroDemoBroker(
             api_key="api", user_key="user", instrument_id=100000, http_get=fake_get
         )
-        state = broker.risk_portfolio_state(spread_pct=0.25, daily_pnl=-50.0)
+        state = broker.risk_portfolio_state(spread_pct=0.25, daily_pnl=999.0)
         self.assertEqual(state.equity, 12_000.0)
         self.assertEqual(state.cash, 7_500.0)
         self.assertEqual(state.open_positions, 1)
         self.assertAlmostEqual(state.instrument_exposure_pct, 6.25)
-        self.assertEqual(state.daily_pnl, -50.0)
+        self.assertEqual(state.daily_pnl, -275.0)
 
     def test_live_portfolio_missing_cash_fails_closed(self) -> None:
         def fake_get(_url, **_kwargs):
-            return _FakeResponse({"data": {"equity": 10_000.0, "positions": []}})
+            return _FakeResponse({"data": {"equity": 10_000.0, "dailyPnl": -10.0, "positions": []}})
 
         broker = EtoroDemoBroker(
             api_key="api", user_key="user", instrument_id=100000, http_get=fake_get
         )
         with self.assertRaisesRegex(RuntimeError, "authoritative account field"):
             broker.risk_portfolio_state(spread_pct=0.2)
+
+    def test_live_portfolio_missing_daily_pnl_fails_closed(self) -> None:
+        def fake_get(_url, **_kwargs):
+            return _FakeResponse(
+                {"data": {"equity": 10_000.0, "availableCash": 8_000.0, "positions": []}}
+            )
+
+        broker = EtoroDemoBroker(
+            api_key="api", user_key="user", instrument_id=100000, http_get=fake_get
+        )
+        with self.assertRaisesRegex(RuntimeError, "dailyPnl"):
+            broker.risk_portfolio_state(spread_pct=0.2, daily_pnl=0.0)
 
     def test_execute_reconciles_open_position_and_protection_before_filled(self) -> None:
         post_calls = []
@@ -166,6 +182,22 @@ class EtoroDemoBrokerTests(unittest.TestCase):
             http_get=fake_get, http_post=fake_post, reconcile_delay_seconds=0,
         )
         with self.assertRaisesRegex(RuntimeError, "broker-side protection"):
+            broker.execute(_proposal())
+
+    def test_high_price_protection_difference_is_not_hidden_by_relative_tolerance(self) -> None:
+        def fake_post(_url, **_kwargs):
+            return _FakeResponse({"data": {"orderId": 123, "positionId": "p-123"}})
+
+        def fake_get(_url, **_kwargs):
+            body = _portfolio()
+            body["data"]["positions"][0]["stopLossRate"] = 75810.02
+            return _FakeResponse(body)
+
+        broker = EtoroDemoBroker(
+            api_key="api", user_key="user", instrument_id=100000,
+            http_get=fake_get, http_post=fake_post, reconcile_delay_seconds=0,
+        )
+        with self.assertRaisesRegex(RuntimeError, "stop-loss differs"):
             broker.execute(_proposal())
 
     def test_order_amount_uses_fractional_risk_notional(self) -> None:
