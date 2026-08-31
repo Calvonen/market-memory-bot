@@ -47,8 +47,15 @@ class RiskEngine:
         *,
         requested_mode: TradingMode = TradingMode.PAPER,
         now: datetime | None = None,
+        allow_fractional_sizing: bool = False,
     ) -> TradeProposal:
-        decision = self._evaluate(candidate=candidate, portfolio=portfolio, requested_mode=requested_mode, now=now)
+        decision = self._evaluate(
+            candidate=candidate,
+            portfolio=portfolio,
+            requested_mode=requested_mode,
+            now=now,
+            allow_fractional_sizing=allow_fractional_sizing,
+        )
         return TradeProposal(candidate=candidate, risk=decision, mode=requested_mode)
 
     def _evaluate(
@@ -57,15 +64,13 @@ class RiskEngine:
         portfolio: PortfolioState,
         requested_mode: TradingMode,
         now: datetime | None,
+        allow_fractional_sizing: bool = False,
     ) -> RiskDecision:
         reasons: list[str] = []
         current_time = now or datetime.now(UTC)
 
         max_risk_amount = max(portfolio.equity, 0.0) * (self.config.max_risk_per_trade_pct / 100.0)
         equity_position_limit = max(portfolio.equity, 0.0) * (self.config.max_position_pct / 100.0)
-        # Available cash is a hard sizing ceiling for PAPER execution. This keeps
-        # a refreshed portfolio snapshot meaningful even when equity remains high
-        # after prior orders have consumed the account's spendable balance.
         max_position_value = min(equity_position_limit, max(portfolio.cash, 0.0))
 
         if candidate.direction is Direction.NO_TRADE:
@@ -75,6 +80,7 @@ class RiskEngine:
                 max_risk_amount=max_risk_amount,
                 max_position_value=max_position_value,
                 max_quantity=0,
+                max_fractional_notional_usd=0.0,
                 reward_risk=None,
             )
 
@@ -146,14 +152,21 @@ class RiskEngine:
                     reasons.append("reward_risk_below_minimum")
 
         max_quantity = 0
+        max_fractional_notional_usd = 0.0
         if entry and entry > 0 and risk_per_unit_decimal > 0:
             max_risk_decimal = _decimal(max_risk_amount)
             max_position_decimal = _decimal(max_position_value)
             entry_decimal = _decimal(entry)
-            by_risk = int((max_risk_decimal / risk_per_unit_decimal).to_integral_value(rounding=ROUND_FLOOR))
-            by_position_value = int((max_position_decimal / entry_decimal).to_integral_value(rounding=ROUND_FLOOR))
+            by_risk_units = max_risk_decimal / risk_per_unit_decimal
+            by_position_units = max_position_decimal / entry_decimal
+            approved_units = max(Decimal("0"), min(by_risk_units, by_position_units))
+            max_fractional_notional_usd = float(approved_units * entry_decimal)
+            by_risk = int(by_risk_units.to_integral_value(rounding=ROUND_FLOOR))
+            by_position_value = int(by_position_units.to_integral_value(rounding=ROUND_FLOOR))
             max_quantity = max(0, min(by_risk, by_position_value))
-            if max_quantity < 1:
+            if max_quantity < 1 and not (
+                allow_fractional_sizing and max_fractional_notional_usd > 0
+            ):
                 reasons.append("position_size_below_one_unit")
 
         if reasons:
@@ -163,6 +176,7 @@ class RiskEngine:
                 max_risk_amount=max_risk_amount,
                 max_position_value=max_position_value,
                 max_quantity=0,
+                max_fractional_notional_usd=0.0,
                 reward_risk=reward_risk,
             )
         return RiskDecision(
@@ -171,5 +185,6 @@ class RiskEngine:
             max_risk_amount=max_risk_amount,
             max_position_value=max_position_value,
             max_quantity=max_quantity,
+            max_fractional_notional_usd=max_fractional_notional_usd,
             reward_risk=reward_risk,
         )
