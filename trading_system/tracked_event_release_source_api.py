@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
-from typing import Any, Callable, Literal, Protocol
+from typing import Callable, Literal, Protocol
 
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -33,6 +33,13 @@ _ACTIVITY_BATCH_MAX_IDS = 40
 
 class TrackedEventRepository(Protocol):
     def get(self, event_id: str) -> PersistentTrackedEvent | None: ...
+
+    def get_by_occurrences(
+        self,
+        *,
+        event_ids: tuple[str, ...] = (),
+        calendar_event_ids: tuple[str, ...] = (),
+    ) -> tuple[PersistentTrackedEvent, ...]: ...
 
 
 class OfficialReleaseSourceRepository(Protocol):
@@ -90,65 +97,6 @@ def _parse_occurrence_id(value: str) -> tuple[str, str]:
     return prefix, raw_id
 
 
-def _parse_updated_at(value: object) -> datetime | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    if text.endswith("Z"):
-        text = f"{text[:-1]}+00:00"
-    parsed = datetime.fromisoformat(text)
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        return None
-    return parsed.astimezone(UTC)
-
-
-def _tracked_event_row_is_active(row: dict[str, Any], *, now: datetime) -> bool:
-    status = str(row.get("status") or "")
-    if status in _ALWAYS_ACTIVE_TRACKED_EVENT_STATUSES:
-        return True
-    if status not in _TERMINAL_TRACKED_EVENT_STATUSES:
-        return False
-    updated_at = _parse_updated_at(row.get("updated_at"))
-    if updated_at is None:
-        return False
-    return updated_at >= now - _TRACKED_EVENT_ACTIVE_HISTORY_WINDOW
-
-
-def _batch_activity_rows(
-    repository: TrackedEventRepository,
-    *,
-    tracked_ids: list[str],
-    calendar_ids: list[str],
-) -> list[dict[str, Any]]:
-    # SupabaseTrackedEventRepository exposes its scoped service client. Keep
-    # this read model batched so Home does not turn accumulated expectation
-    # history into one Supabase request per shell.
-    client = getattr(repository, "client", None)
-    if client is None:
-        raise RuntimeError("Tracked-event batch activity repository is unavailable")
-
-    rows: list[dict[str, Any]] = []
-    if tracked_ids:
-        response = (
-            client.table("tracked_market_events")
-            .select("id,calendar_event_id,status,updated_at")
-            .in_("id", tracked_ids)
-            .execute()
-        )
-        rows.extend(response.data or [])
-    if calendar_ids:
-        response = (
-            client.table("tracked_market_events")
-            .select("id,calendar_event_id,status,updated_at")
-            .in_("calendar_event_id", calendar_ids)
-            .execute()
-        )
-        rows.extend(response.data or [])
-    return rows
-
-
 def build_tracked_event_release_source_router(
     *,
     require_read: Callable[[str | None], None],
@@ -182,18 +130,17 @@ def build_tracked_event_release_source_router(
             occurrence_id: _parse_occurrence_id(occurrence_id)
             for occurrence_id in canonical_ids
         }
-        tracked_ids = [
+        tracked_ids = tuple(
             raw_id for prefix, raw_id in parsed.values() if prefix == "tracked"
-        ]
-        calendar_ids = [
+        )
+        calendar_ids = tuple(
             raw_id for prefix, raw_id in parsed.values() if prefix == "calendar"
-        ]
+        )
 
         try:
-            rows = _batch_activity_rows(
-                get_tracked_event_repository(),
-                tracked_ids=tracked_ids,
-                calendar_ids=calendar_ids,
+            events = get_tracked_event_repository().get_by_occurrences(
+                event_ids=tracked_ids,
+                calendar_event_ids=calendar_ids,
             )
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -202,17 +149,17 @@ def build_tracked_event_release_source_router(
                 status_code=503, detail="Tracked-event activity read failed"
             ) from exc
 
-        by_tracked_id = {str(row.get("id")): row for row in rows if row.get("id")}
+        by_tracked_id = {event.event_id: event for event in events}
         by_calendar_id = {
-            str(row.get("calendar_event_id")): row
-            for row in rows
-            if row.get("calendar_event_id")
+            event.calendar_event_id: event
+            for event in events
+            if event.calendar_event_id is not None
         }
         now = datetime.now(UTC)
         items: list[dict[str, object]] = []
         for occurrence_id in canonical_ids:
             prefix, raw_id = parsed[occurrence_id]
-            row = (
+            event = (
                 by_tracked_id.get(raw_id)
                 if prefix == "tracked"
                 else by_calendar_id.get(raw_id)
@@ -220,9 +167,9 @@ def build_tracked_event_release_source_router(
             items.append(
                 {
                     "occurrence_id": occurrence_id,
-                    "exists": row is not None,
-                    "active": row is not None
-                    and _tracked_event_row_is_active(row, now=now),
+                    "exists": event is not None,
+                    "active": event is not None
+                    and _tracked_event_is_active(event, now=now),
                 }
             )
         return {"items": items}
