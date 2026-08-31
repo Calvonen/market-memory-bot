@@ -50,8 +50,6 @@ class PipelineResult:
 
 
 class PaperTradingPipeline:
-    """Strategy -> candidate -> risk -> paper broker, with an audit journal at every step."""
-
     def __init__(
         self,
         *,
@@ -65,7 +63,10 @@ class PaperTradingPipeline:
         self.risk_engine = risk_engine or RiskEngine()
         self.broker = broker or PaperBroker()
         self.journal = journal or InMemoryDecisionJournal()
-        broker_supports_fractional = bool(getattr(self.broker, "supports_fractional_sizing", False))
+        broker_supports_fractional = bool(
+            getattr(self.broker, "supports_fractional_sizing", False)
+            or self.broker.__class__.__name__ == "EtoroDemoBroker"
+        )
         self.allow_fractional_sizing = (
             broker_supports_fractional
             if allow_fractional_sizing is None
@@ -82,7 +83,6 @@ class PaperTradingPipeline:
     ) -> PipelineResult:
         strategy = self.strategy_engine.evaluate(inputs)
         self.journal.record_strategy(strategy)
-
         candidate = TradeCandidate(
             instrument=strategy.instrument,
             direction=strategy.direction,
@@ -95,7 +95,6 @@ class PaperTradingPipeline:
             source_event_id=strategy.source_event_id,
             strategy_decision_id=strategy.decision_id,
         )
-
         proposal = self.risk_engine.evaluate(
             candidate,
             portfolio,
@@ -104,10 +103,8 @@ class PaperTradingPipeline:
         )
         proposal = replace(proposal, strategy_decision=strategy)
         self.journal.record_proposal(proposal)
-
         order: BrokerOrder | None = None
         if strategy.direction in {Direction.LONG, Direction.SHORT} and proposal.risk.status is RiskStatus.PASS:
             order = self.broker.execute(proposal)
             self.journal.record_order(order)
-
         return PipelineResult(strategy=strategy, proposal=proposal, order=order)
