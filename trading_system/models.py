@@ -109,7 +109,7 @@ class PortfolioState:
     cash: float
     open_positions: int
     instrument_exposure_pct: float = 0.0
-    daily_pnl: float = 0.0
+    daily_pnl: float | None = 0.0
     spread_pct: float | None = None
     volatility_pct: float | None = None
     last_loss_at: datetime | None = None
