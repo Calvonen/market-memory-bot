@@ -21,15 +21,11 @@ class BrokerOrder:
     reference_price: float
     status: str
     created_at: datetime = field(default_factory=utc_now)
-    # Amount-based brokers such as eToro may execute fractional units. Persist
-    # the broker-reconciled USD notional explicitly so portfolio accounting does
-    # not have to infer it from the integer RiskEngine quantity ceiling.
     notional_usd: float | None = None
     broker_position_id: str | None = None
 
 
 def broker_order_payload(order: BrokerOrder) -> dict[str, Any]:
-    """Serialize one broker order identically for attempts and terminal runs."""
     payload: dict[str, Any] = {
         "order_id": order.order_id,
         "instrument": order.instrument,
@@ -46,8 +42,29 @@ def broker_order_payload(order: BrokerOrder) -> dict[str, Any]:
     return payload
 
 
+def broker_order_from_payload(payload: dict[str, Any]) -> BrokerOrder:
+    try:
+        created_at = datetime.fromisoformat(str(payload["created_at"]).replace("Z", "+00:00"))
+        if created_at.tzinfo is None or created_at.utcoffset() is None:
+            raise ValueError("created_at must be timezone-aware")
+        raw_notional = payload.get("notional_usd")
+        raw_position_id = payload.get("broker_position_id")
+        return BrokerOrder(
+            order_id=str(payload["order_id"]),
+            instrument=str(payload["instrument"]),
+            direction=Direction(str(payload["direction"])),
+            quantity=int(payload["quantity"]),
+            reference_price=float(payload["reference_price"]),
+            status=str(payload["status"]),
+            created_at=created_at.astimezone(UTC),
+            notional_usd=float(raw_notional) if raw_notional is not None else None,
+            broker_position_id=str(raw_position_id) if raw_position_id not in (None, "") else None,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("persisted broker attempt contains malformed order payload") from exc
+
+
 class Broker(ABC):
     @abstractmethod
     def execute(self, proposal: TradeProposal) -> BrokerOrder:
-        """Execute an already risk-approved trade proposal."""
         raise NotImplementedError
