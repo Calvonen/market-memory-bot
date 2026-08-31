@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Callable
+from uuid import uuid4
 
 import pandas as pd
 
 from trading_system.ai_event_analyzer import analysis_from_record
+from trading_system.brokers.base import BrokerOrder
 from trading_system.etoro_instrument_resolver import EtoroInstrumentResolver
 from trading_system.models import (
     ComponentAssessment,
+    Direction,
     PortfolioState,
     TradingMode,
 )
@@ -33,16 +37,68 @@ class TrackedPaperOrchestrationResult:
     persisted: dict[str, Any] | None = None
 
 
+def _order_payload(order: BrokerOrder) -> dict[str, Any]:
+    return {
+        "order_id": order.order_id,
+        "instrument": order.instrument,
+        "direction": order.direction.value,
+        "quantity": order.quantity,
+        "reference_price": order.reference_price,
+        "status": order.status,
+        "created_at": order.created_at.isoformat(),
+    }
+
+
+def _order_from_payload(payload: dict[str, Any]) -> BrokerOrder:
+    try:
+        created_at = datetime.fromisoformat(str(payload["created_at"]).replace("Z", "+00:00"))
+        if created_at.tzinfo is None or created_at.utcoffset() is None:
+            raise ValueError("created_at must be timezone-aware")
+        return BrokerOrder(
+            order_id=str(payload["order_id"]),
+            instrument=str(payload["instrument"]),
+            direction=Direction(str(payload["direction"])),
+            quantity=int(payload["quantity"]),
+            reference_price=float(payload["reference_price"]),
+            status=str(payload["status"]),
+            created_at=created_at.astimezone(UTC),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("persisted broker attempt contains malformed order payload") from exc
+
+
 class _LeaseGuardedBroker:
-    """Revalidate the canonical execution lease immediately before broker execute."""
+    """Reserve one durable task execution before calling the broker."""
 
-    def __init__(self, broker: Any, guard: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        broker: Any,
+        begin_attempt: Callable[[str], dict[str, Any]],
+        complete_attempt: Callable[[str, BrokerOrder], None],
+    ) -> None:
         self._broker = broker
-        self._guard = guard
+        self._begin_attempt = begin_attempt
+        self._complete_attempt = complete_attempt
 
-    def execute(self, proposal: Any) -> Any:
-        self._guard()
-        return self._broker.execute(proposal)
+    def execute(self, proposal: Any) -> BrokerOrder:
+        execution_token = str(uuid4())
+        attempt = self._begin_attempt(execution_token)
+        status = str(attempt.get("attempt_status") or attempt.get("status") or "").strip()
+        can_execute = attempt.get("can_execute") is True
+        existing_payload = attempt.get("order_payload")
+
+        if status == "completed":
+            if not isinstance(existing_payload, dict):
+                raise RuntimeError("completed broker attempt is missing order payload")
+            return _order_from_payload(existing_payload)
+        if not can_execute:
+            raise RuntimeError(
+                "canonical broker execution attempt is already in progress or outcome is uncertain"
+            )
+
+        order = self._broker.execute(proposal)
+        self._complete_attempt(execution_token, order)
+        return order
 
 
 def _validate_analysis_row(
@@ -117,59 +173,103 @@ def _claim_event_for_task(
     return rows[0]
 
 
-def _revalidate_task_execution_lease(
+def _begin_broker_attempt(
     paper_runs: SupabasePaperTradeRepository,
     *,
     event_id: str,
     analysis_id: str,
     task_id: str,
     expectation_version: int,
-    lease_seconds: int,
-) -> None:
-    """Fail closed unless this exact task still owns the lease just before broker I/O."""
-    revalidate = getattr(paper_runs, "revalidate_task_execution_lease", None)
-    if callable(revalidate):
-        claim = revalidate(
+    execution_token: str,
+) -> dict[str, Any]:
+    begin_attempt = getattr(paper_runs, "begin_broker_attempt", None)
+    if callable(begin_attempt):
+        return begin_attempt(
             event_id=event_id,
             analysis_id=analysis_id,
             task_id=task_id,
             expectation_version=expectation_version,
             claim_token=paper_runs.claim_token,
-            lease_seconds=lease_seconds,
+            execution_token=execution_token,
         )
-    else:
-        response = paper_runs.client.rpc(
-            "revalidate_event_paper_run_task_lease",
-            {
-                "input_event_id": event_id,
-                "input_analysis_id": analysis_id,
-                "input_task_id": task_id,
-                "input_expectation_version": expectation_version,
-                "input_claim_token": paper_runs.claim_token,
-                "input_lease_seconds": max(1, lease_seconds),
-            },
-        ).execute()
-        rows = response.data or []
-        claim = rows[0] if rows else None
 
-    if claim is None or not _claim_is_owned(
-        claim,
-        analysis_id=analysis_id,
-        task_id=task_id,
-        claim_token=paper_runs.claim_token,
-    ):
-        raise RuntimeError("canonical paper execution lease was lost before broker execution")
+    response = paper_runs.client.rpc(
+        "begin_event_paper_broker_attempt",
+        {
+            "input_event_id": event_id,
+            "input_analysis_id": analysis_id,
+            "input_task_id": task_id,
+            "input_expectation_version": expectation_version,
+            "input_claim_token": paper_runs.claim_token,
+            "input_execution_token": execution_token,
+        },
+    ).execute()
+    rows = response.data or []
+    if not rows:
+        raise RuntimeError("canonical broker execution attempt returned no state")
+    return rows[0]
+
+
+def _complete_broker_attempt(
+    paper_runs: SupabasePaperTradeRepository,
+    *,
+    task_id: str,
+    execution_token: str,
+    order: BrokerOrder,
+) -> None:
+    complete_attempt = getattr(paper_runs, "complete_broker_attempt", None)
+    payload = _order_payload(order)
+    if callable(complete_attempt):
+        complete_attempt(
+            task_id=task_id,
+            execution_token=execution_token,
+            order_payload=payload,
+        )
+        return
+
+    response = paper_runs.client.rpc(
+        "complete_event_paper_broker_attempt",
+        {
+            "input_task_id": task_id,
+            "input_execution_token": execution_token,
+            "input_order_payload": payload,
+        },
+    ).execute()
+    rows = response.data or []
+    if not rows:
+        raise RuntimeError("canonical broker execution completion returned no state")
 
 
 def _guard_pipeline(
     pipeline: PaperTradingPipeline | None,
-    guard: Callable[[], None],
+    *,
+    paper_runs: SupabasePaperTradeRepository,
+    event_id: str,
+    analysis_id: str,
+    task_id: str,
+    expectation_version: int,
 ) -> PaperTradingPipeline:
     base = pipeline or PaperTradingPipeline()
     return PaperTradingPipeline(
         strategy_engine=base.strategy_engine,
         risk_engine=base.risk_engine,
-        broker=_LeaseGuardedBroker(base.broker, guard),
+        broker=_LeaseGuardedBroker(
+            base.broker,
+            lambda execution_token: _begin_broker_attempt(
+                paper_runs,
+                event_id=event_id,
+                analysis_id=analysis_id,
+                task_id=task_id,
+                expectation_version=expectation_version,
+                execution_token=execution_token,
+            ),
+            lambda execution_token, order: _complete_broker_attempt(
+                paper_runs,
+                task_id=task_id,
+                execution_token=execution_token,
+                order=order,
+            ),
+        ),
         journal=base.journal,
     )
 
@@ -207,9 +307,9 @@ def run_approved_tracked_paper_once(
     This function creates no execution authority. It requires an already-approved
     canonical PAPER trading task, an already-persisted current release analysis,
     and the persisted tracked-event reaction evidence consumed by the #230 bridge.
-    The task-bound paper-run lease is claimed before Strategy/Risk work and is
-    revalidated/renewed again immediately before the broker call so an expired
-    worker cannot execute after another runner has reclaimed the event.
+    The task-bound paper-run lease is claimed before Strategy/Risk work. Immediately
+    before broker I/O, one durable broker-attempt row is reserved for the canonical
+    task so a retry can never submit a second order after an uncertain prior result.
     """
     event_id = tracked_event_id.strip()
     requested_task_id = task_id.strip()
@@ -305,14 +405,11 @@ def run_approved_tracked_paper_once(
 
     guarded_pipeline = _guard_pipeline(
         pipeline,
-        lambda: _revalidate_task_execution_lease(
-            paper_runs,
-            event_id=release_event_id,
-            analysis_id=analysis_id,
-            task_id=requested_task_id,
-            expectation_version=expectation.version,
-            lease_seconds=lease_seconds,
-        ),
+        paper_runs=paper_runs,
+        event_id=release_event_id,
+        analysis_id=analysis_id,
+        task_id=requested_task_id,
+        expectation_version=expectation.version,
     )
 
     result: PostReleasePaperResult = run_post_release_paper_from_tracked_event(
