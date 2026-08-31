@@ -5,7 +5,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from trading_system.brokers.base import BrokerOrder
-from trading_system.models import Direction
+from trading_system.models import (
+    Direction,
+    RiskDecision,
+    RiskStatus,
+    ScoreBreakdown,
+    StrategyDecision,
+    TradeCandidate,
+    TradeProposal,
+)
 from trading_system.tracked_event_paper_orchestration import _LeaseGuardedBroker
 
 
@@ -29,6 +37,35 @@ class _Broker:
         )
 
 
+def _proposal() -> TradeProposal:
+    strategy = StrategyDecision(
+        instrument="EXM.ASX",
+        direction=Direction.LONG,
+        confidence=80,
+        scores=ScoreBreakdown(fundamental=2, catalyst=2, technical=2, market_memory=2),
+        source_event_id="tracked:event-1",
+    )
+    candidate = TradeCandidate(
+        instrument="EXM.ASX",
+        direction=Direction.LONG,
+        confidence=80,
+        entry=10.0,
+        stop=9.5,
+        target_1=11.0,
+        source_event_id="tracked:event-1",
+        strategy_decision_id=strategy.decision_id,
+    )
+    risk = RiskDecision(
+        status=RiskStatus.PASS,
+        reasons=(),
+        max_risk_amount=10.0,
+        max_position_value=10.0,
+        max_quantity=1,
+        reward_risk=2.0,
+    )
+    return TradeProposal(candidate=candidate, risk=risk, strategy_decision=strategy)
+
+
 class TaskExecutionLeaseGuardTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -38,7 +75,7 @@ class TaskExecutionLeaseGuardTests(unittest.TestCase):
         events: list[str] = []
         broker = _Broker()
 
-        def begin(token):
+        def begin(token, strategy, risk):
             events.append("reserve")
             return {"can_execute": True, "attempt_status": "started", "order_payload": None}
 
@@ -46,7 +83,7 @@ class TaskExecutionLeaseGuardTests(unittest.TestCase):
             events.append("complete")
 
         guarded = _LeaseGuardedBroker(broker, begin, complete)
-        guarded.execute("proposal")
+        guarded.execute(_proposal())
         self.assertEqual(events, ["reserve", "complete"])
         self.assertEqual(broker.calls, 1)
 
@@ -54,11 +91,15 @@ class TaskExecutionLeaseGuardTests(unittest.TestCase):
         broker = _Broker()
         guarded = _LeaseGuardedBroker(
             broker,
-            lambda token: {"can_execute": False, "attempt_status": "started", "order_payload": None},
+            lambda token, strategy, risk: {
+                "can_execute": False,
+                "attempt_status": "started",
+                "order_payload": None,
+            },
             lambda token, order: self.fail("blocked attempt must not complete"),
         )
         with self.assertRaisesRegex(RuntimeError, "outcome is uncertain"):
-            guarded.execute("proposal")
+            guarded.execute(_proposal())
         self.assertEqual(broker.calls, 0)
 
     def test_approval_and_claim_use_expectation_writer_lock_key(self) -> None:
