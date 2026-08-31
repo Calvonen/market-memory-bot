@@ -9,15 +9,12 @@ from typing import Any, Callable
 import requests
 
 from trading_system.brokers.base import Broker, BrokerOrder
-from trading_system.models import Direction, RiskStatus, TradeProposal, TradingMode
+from trading_system.models import Direction, PortfolioState, RiskStatus, TradeProposal, TradingMode
 
 
 class EtoroDemoBroker(Broker):
     """Submit and reconcile risk-approved eToro Virtual Portfolio orders only."""
 
-    # Explicit capability used by the canonical pipeline and preserved through
-    # durable lease/idempotency wrappers. Avoid relying on class-name heuristics
-    # for a safety-critical sizing capability.
     supports_fractional_sizing = True
 
     DEMO_PORTFOLIO_URL = "https://public-api.etoro.com/api/v1/trading/info/demo/portfolio"
@@ -118,17 +115,23 @@ class EtoroDemoBroker(Broker):
         return float(amount)
 
     @staticmethod
-    def _portfolio_positions(body: dict[str, Any]) -> list[dict[str, Any]]:
-        containers: list[Any] = [body]
-        if isinstance(body.get("data"), dict):
-            containers.append(body["data"])
-        if isinstance(body.get("clientPortfolio"), dict):
-            containers.append(body["clientPortfolio"])
+    def _portfolio_containers(body: dict[str, Any]) -> list[dict[str, Any]]:
+        containers: list[dict[str, Any]] = [body]
         data = body.get("data")
-        if isinstance(data, dict) and isinstance(data.get("clientPortfolio"), dict):
-            containers.append(data["clientPortfolio"])
-        for container in containers:
-            positions = container.get("positions") if isinstance(container, dict) else None
+        if isinstance(data, dict):
+            containers.append(data)
+            nested = data.get("clientPortfolio")
+            if isinstance(nested, dict):
+                containers.append(nested)
+        direct = body.get("clientPortfolio")
+        if isinstance(direct, dict):
+            containers.append(direct)
+        return containers
+
+    @classmethod
+    def _portfolio_positions(cls, body: dict[str, Any]) -> list[dict[str, Any]]:
+        for container in cls._portfolio_containers(body):
+            positions = container.get("positions")
             if isinstance(positions, list):
                 if not all(isinstance(row, dict) for row in positions):
                     raise RuntimeError("eToro demo portfolio contains malformed positions")
@@ -143,11 +146,105 @@ class EtoroDemoBroker(Broker):
                 return value
         return None
 
+    @classmethod
+    def _portfolio_scalar(cls, body: dict[str, Any], *names: str) -> float:
+        for container in cls._portfolio_containers(body):
+            raw = cls._field(container, *names)
+            if raw is None:
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("eToro demo portfolio contains malformed account balance") from exc
+            if not math.isfinite(value):
+                raise RuntimeError("eToro demo portfolio contains non-finite account balance")
+            return value
+        raise RuntimeError(f"eToro demo portfolio is missing authoritative account field: {names[0]}")
+
+    @classmethod
+    def _position_notional(cls, position: dict[str, Any]) -> float:
+        raw_amount = cls._field(
+            position, "amount", "Amount", "investedAmount", "InvestedAmount", "openAmount"
+        )
+        if raw_amount is not None:
+            try:
+                notional = abs(float(raw_amount))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("eToro demo position has invalid amount") from exc
+        else:
+            raw_units = cls._field(position, "units", "Units", "amountInUnits")
+            raw_rate = cls._field(position, "openRate", "openPrice", "averageOpenPrice", "avgOpenPrice")
+            try:
+                notional = abs(float(raw_units) * float(raw_rate))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("eToro demo position is missing authoritative amount/units") from exc
+        if not math.isfinite(notional) or notional <= 0:
+            raise RuntimeError("eToro demo position has invalid notional")
+        return notional
+
+    def risk_portfolio_state(self, *, spread_pct: float, daily_pnl: float = 0.0) -> PortfolioState:
+        """Build RiskEngine state from the live Virtual Portfolio, never local order history."""
+        if not math.isfinite(spread_pct) or spread_pct < 0:
+            raise ValueError("spread_pct must be finite and non-negative")
+        if not math.isfinite(daily_pnl):
+            raise ValueError("daily_pnl must be finite")
+        body = self._get_demo_portfolio()
+        equity = self._portfolio_scalar(body, "equity", "Equity", "totalEquity", "netLiquidationValue", "balance")
+        cash = self._portfolio_scalar(
+            body,
+            "cash",
+            "Cash",
+            "availableCash",
+            "availableBalance",
+            "AvailableBalance",
+            "cashAvailable",
+            "freeCash",
+        )
+        if equity <= 0 or cash < 0:
+            raise RuntimeError("eToro demo portfolio returned invalid live equity/cash")
+        positions = self._portfolio_positions(body)
+        instrument_notional = 0.0
+        for position in positions:
+            raw_instrument_id = self._field(position, "instrumentId", "instrumentID", "InstrumentID")
+            try:
+                position_instrument_id = int(raw_instrument_id)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("eToro demo position has invalid instrument id") from exc
+            notional = self._position_notional(position)
+            if position_instrument_id == self.instrument_id:
+                instrument_notional += notional
+        return PortfolioState(
+            equity=equity,
+            cash=cash,
+            open_positions=len(positions),
+            instrument_exposure_pct=(instrument_notional / equity) * 100.0,
+            daily_pnl=daily_pnl,
+            spread_pct=spread_pct,
+            volatility_pct=None,
+        )
+
+    @staticmethod
+    def _protected_rate(position: dict[str, Any], *names: str) -> float:
+        raw = EtoroDemoBroker._field(position, *names)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("reconciled eToro position is missing broker-side protection") from exc
+        if not math.isfinite(value) or value <= 0:
+            raise RuntimeError("reconciled eToro position has invalid broker-side protection")
+        return value
+
+    @staticmethod
+    def _same_rate(observed: float, expected: float) -> bool:
+        return math.isclose(observed, expected, rel_tol=0.001, abs_tol=0.01)
+
     def _reconciled_position(
         self,
         *,
         position_id: str,
         submitted_amount_usd: float,
+        expected_stop: float,
+        expected_target: float,
     ) -> tuple[float, float | None]:
         for attempt in range(self.reconcile_attempts):
             positions = self._portfolio_positions(self._get_demo_portfolio())
@@ -163,34 +260,16 @@ class EtoroDemoBroker(Broker):
                 if observed_instrument_id != self.instrument_id:
                     raise RuntimeError("reconciled eToro position belongs to a different instrument")
 
-                raw_amount = self._field(
-                    position, "amount", "Amount", "investedAmount", "InvestedAmount", "openAmount"
-                )
-                if raw_amount is not None:
-                    try:
-                        notional = float(raw_amount)
-                    except (TypeError, ValueError) as exc:
-                        raise RuntimeError("reconciled eToro position has invalid amount") from exc
-                    if not math.isfinite(notional) or notional <= 0:
-                        raise RuntimeError("reconciled eToro position has non-positive amount")
-                else:
-                    raw_units = self._field(position, "units", "Units", "amountInUnits")
-                    raw_rate = self._field(
-                        position, "openRate", "openPrice", "averageOpenPrice", "avgOpenPrice"
-                    )
-                    try:
-                        units = float(raw_units)
-                        rate = float(raw_rate)
-                    except (TypeError, ValueError) as exc:
-                        raise RuntimeError(
-                            "reconciled eToro position is missing authoritative amount/units"
-                        ) from exc
-                    notional = abs(units * rate)
-                    if not math.isfinite(notional) or notional <= 0:
-                        raise RuntimeError("reconciled eToro position has invalid notional")
-
+                notional = self._position_notional(position)
                 if notional > submitted_amount_usd * 1.001 + 0.01:
                     raise RuntimeError("reconciled eToro position exceeds submitted risk-bounded amount")
+
+                stop_rate = self._protected_rate(position, "stopLossRate", "StopLossRate", "stopLoss")
+                target_rate = self._protected_rate(position, "takeProfitRate", "TakeProfitRate", "takeProfit")
+                if not self._same_rate(stop_rate, expected_stop):
+                    raise RuntimeError("reconciled eToro position stop-loss differs from RiskEngine stop")
+                if not self._same_rate(target_rate, expected_target):
+                    raise RuntimeError("reconciled eToro position take-profit differs from RiskEngine target")
 
                 raw_units = self._field(position, "units", "Units", "amountInUnits")
                 units_value: float | None = None
@@ -217,12 +296,18 @@ class EtoroDemoBroker(Broker):
             raise ValueError("EtoroDemoBroker cannot execute NO_TRADE")
         if proposal.candidate.entry is None or proposal.candidate.entry <= 0:
             raise ValueError("Proposal has no valid entry price")
+        if proposal.candidate.stop is None or not math.isfinite(float(proposal.candidate.stop)) or proposal.candidate.stop <= 0:
+            raise ValueError("Proposal has no valid protective stop")
+        if proposal.candidate.target_1 is None or not math.isfinite(float(proposal.candidate.target_1)) or proposal.candidate.target_1 <= 0:
+            raise ValueError("Proposal has no valid protective target")
         if not proposal.proposal_id.strip():
             raise ValueError("Trade proposal must have a stable proposal id")
 
         request_id = proposal.proposal_id
         transaction = "buy" if proposal.candidate.direction is Direction.LONG else "sell"
         amount_usd = self._approved_amount_usd(proposal)
+        stop_rate = float(proposal.candidate.stop)
+        target_rate = float(proposal.candidate.target_1)
         payload = {
             "action": "open",
             "transaction": transaction,
@@ -231,6 +316,8 @@ class EtoroDemoBroker(Broker):
             "amount": amount_usd,
             "orderCurrency": "usd",
             "leverage": 1,
+            "stopLossRate": stop_rate,
+            "takeProfitRate": target_rate,
         }
         try:
             response = self._http_post(
@@ -265,6 +352,8 @@ class EtoroDemoBroker(Broker):
         reconciled_notional, _reconciled_units = self._reconciled_position(
             position_id=position_id,
             submitted_amount_usd=amount_usd,
+            expected_stop=stop_rate,
+            expected_target=target_rate,
         )
 
         self.last_response = body
