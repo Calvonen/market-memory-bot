@@ -69,6 +69,24 @@ class ApprovedPaperProductionEntrypointTests(unittest.TestCase):
         )
         self.assertIn("security definer", self.authority_sql.lower())
 
+    def test_etoro_demo_execution_is_explicit_and_uses_persisted_identity(self) -> None:
+        self.assertIn('MARKETAI_PAPER_BROKER', self.worker)
+        self.assertIn('{"internal", "etoro_demo"}', self.worker)
+        self.assertIn('MARKETAI_ETORO_DEMO_MAX_AMOUNT_USD', self.worker)
+        self.assertIn('event.resolved_etoro_instrument_id', self.worker)
+        self.assertIn('event.resolved_etoro_symbol', self.worker)
+        self.assertIn('EtoroDemoBroker.from_env(', self.worker)
+        self.assertIn('pipeline=PaperTradingPipeline(broker=broker)', self.worker)
+
+    def test_etoro_demo_preflight_happens_before_portfolio_execution_authority(self) -> None:
+        preflight = self.worker.index("broker.verify_demo_access()")
+        claim = self.worker.index("if not _claim_portfolio_lease(")
+        self.assertLess(preflight, claim)
+
+    def test_internal_paper_broker_remains_safe_default(self) -> None:
+        self.assertIn('DEFAULT_BROKER_MODE = "internal"', self.worker)
+        self.assertIn('broker = PaperBroker()', self.worker)
+
     def test_systemd_runs_the_production_worker(self) -> None:
         self.assertIn("python -m trading_system.approved_tracked_paper_worker", self.service)
         self.assertIn("EnvironmentFile=/home/marko/marketai/.env", self.service)
