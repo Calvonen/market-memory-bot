@@ -1,6 +1,6 @@
 -- Make the task-aware claim wrapper executable without exposing its delegated
 -- primitive directly to service_role, and make one broker execution attempt
--- durable per canonical trading task.
+-- durable per canonical event/task.
 
 alter function public.claim_event_paper_run_for_task_v2(text, uuid, uuid, integer, uuid, integer)
   security definer;
@@ -24,6 +24,9 @@ create table if not exists public.event_paper_broker_attempts (
   )
 );
 
+create unique index if not exists event_paper_broker_attempts_event_uidx
+  on public.event_paper_broker_attempts(event_id);
+
 alter table public.event_paper_broker_attempts enable row level security;
 revoke all on table public.event_paper_broker_attempts
   from public, anon, authenticated, service_role;
@@ -35,7 +38,8 @@ create or replace function public.begin_event_paper_broker_attempt(
   input_task_id uuid,
   input_expectation_version integer,
   input_claim_token uuid,
-  input_execution_token uuid
+  input_execution_token uuid,
+  input_lease_seconds integer
 )
 returns table (
   can_execute boolean,
@@ -61,7 +65,9 @@ begin
      or input_expectation_version is null
      or input_expectation_version < 1
      or input_claim_token is null
-     or input_execution_token is null then
+     or input_execution_token is null
+     or input_lease_seconds is null
+     or input_lease_seconds < 1 then
     raise exception 'paper_broker_attempt_identity_invalid';
   end if;
 
@@ -120,14 +126,17 @@ begin
     input_task_id, input_event_id, input_analysis_id, input_expectation_version,
     input_claim_token, input_execution_token, 'started', now_value
   )
-  on conflict (task_id) do nothing;
+  on conflict do nothing;
 
   select * into attempt_row
   from public.event_paper_broker_attempts
-  where task_id = input_task_id
+  where event_id = input_event_id
   for update;
+  if not found then
+    raise exception 'paper_broker_attempt_reservation_missing';
+  end if;
 
-  if attempt_row.event_id <> input_event_id
+  if attempt_row.task_id <> input_task_id
      or attempt_row.analysis_id <> input_analysis_id
      or attempt_row.expectation_version <> input_expectation_version
      or attempt_row.claim_token <> input_claim_token then
@@ -149,7 +158,10 @@ begin
   -- Renew the claim only for the execution token that owns this one durable
   -- attempt. This closes the gap between reservation and the immediate broker call.
   update public.event_paper_trade_event_claims
-  set lease_expires_at = greatest(lease_expires_at, now_value + interval '120 seconds'),
+  set lease_expires_at = greatest(
+        lease_expires_at,
+        now_value + make_interval(secs => greatest(input_lease_seconds, 1))
+      ),
       updated_at = now_value
   where event_id = input_event_id
     and task_id = input_task_id
@@ -208,11 +220,11 @@ begin
 end;
 $$;
 
-revoke all on function public.begin_event_paper_broker_attempt(text, uuid, uuid, integer, uuid, uuid)
+revoke all on function public.begin_event_paper_broker_attempt(text, uuid, uuid, integer, uuid, uuid, integer)
   from public, anon, authenticated;
 revoke all on function public.complete_event_paper_broker_attempt(uuid, uuid, jsonb)
   from public, anon, authenticated;
-grant execute on function public.begin_event_paper_broker_attempt(text, uuid, uuid, integer, uuid, uuid)
+grant execute on function public.begin_event_paper_broker_attempt(text, uuid, uuid, integer, uuid, uuid, integer)
   to service_role;
 grant execute on function public.complete_event_paper_broker_attempt(uuid, uuid, jsonb)
   to service_role;
