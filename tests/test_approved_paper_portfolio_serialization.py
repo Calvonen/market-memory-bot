@@ -19,19 +19,22 @@ class ApprovedPaperPortfolioSerializationTests(unittest.TestCase):
         self.assertIn("claim_paper_portfolio_execution_lease", self.worker)
         self.assertIn("renew_paper_portfolio_execution_lease", self.worker)
         self.assertIn("release_paper_portfolio_execution_lease", self.worker)
-        self.assertIn("class _PortfolioLeaseBroker", self.worker)
+        self.assertIn("class _PortfolioLeasePaperRuns", self.worker)
         claim = self.worker.index("if not _claim_portfolio_lease(")
         snapshot = self.worker.index("portfolio = _paper_portfolio_for_instrument(")
+        wrapper = self.worker.index("lease_aware_runs = _PortfolioLeasePaperRuns(")
         orchestration = self.worker.index("result = run_approved_tracked_paper_once(")
         self.assertLess(claim, snapshot)
-        self.assertLess(snapshot, orchestration)
+        self.assertLess(snapshot, wrapper)
+        self.assertLess(wrapper, orchestration)
+        self.assertIn("paper_runs=lease_aware_runs", self.worker)
         self.assertIn("finally:\n                    _release_portfolio_lease", self.worker)
 
-    def test_broker_revalidates_account_lease_immediately_before_execution(self) -> None:
-        execute = self.worker.index("def execute(self, proposal: TradeProposal) -> BrokerOrder:")
-        renew = self.worker.index("_renew_portfolio_lease(", execute)
-        broker = self.worker.index("return self._broker.execute(proposal)", execute)
-        self.assertLess(renew, broker)
+    def test_account_lease_is_renewed_before_broker_attempt_reservation(self) -> None:
+        begin = self.worker.index("def begin_broker_attempt(")
+        renew = self.worker.index("_renew_portfolio_lease(", begin)
+        reserve = self.worker.index('"begin_event_paper_broker_attempt"', begin)
+        self.assertLess(renew, reserve)
 
     def test_portfolio_lease_rpcs_are_service_role_only(self) -> None:
         self.assertIn("create table if not exists public.paper_portfolio_execution_lease", self.sql)
