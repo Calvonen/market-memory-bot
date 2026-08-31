@@ -102,7 +102,12 @@ class ApprovedPaperProductionEntrypointTests(unittest.TestCase):
 
     def test_systemd_runs_the_production_worker(self) -> None:
         self.assertIn("python -m trading_system.approved_tracked_paper_worker", self.service)
-        self.assertIn("EnvironmentFile=/home/marko/marketai/.env", self.service)
+        self.assertIn(
+            "EnvironmentFile=/home/marko/marketai-deploy-state/approved-paper-prepared.env",
+            self.service,
+        )
+        self.assertNotIn("EnvironmentFile=/home/marko/marketai/.env", self.service)
+        self.assertIn("Restart=no", self.service)
 
     def test_broker_attempt_persists_strategy_and_risk_before_io(self) -> None:
         self.assertIn("strategy_payload jsonb", self.audit_sql)
