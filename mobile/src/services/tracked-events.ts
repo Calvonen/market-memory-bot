@@ -1,6 +1,7 @@
 import { apiControlPost, apiGet, apiPut } from '@/services/api';
 
 export const TRACKED_EVENT_RELEASE_SKIP_REASON_MAX_LENGTH = 1000;
+const TRACKED_EVENT_ACTIVITY_BATCH_SIZE = 40;
 
 export type TrackedEventMonitoringStageSnapshot = {
   start_after_minutes: number;
@@ -72,9 +73,13 @@ export type TrackedEventReleaseSource = {
 };
 
 export type TrackedEventActivityResponse = {
-  event_id: string;
+  occurrence_id: string;
   exists: boolean;
   active: boolean;
+};
+
+type TrackedEventActivityBatchResponse = {
+  items: TrackedEventActivityResponse[];
 };
 
 export type PutTrackedEventReleaseSourceInput = {
@@ -141,9 +146,27 @@ export function getTrackedEvents(
   );
 }
 
-export function getTrackedEventActivity(eventId: string): Promise<TrackedEventActivityResponse> {
-  return apiGet<TrackedEventActivityResponse>(
-    `/api/v1/tracked-events/${encodeURIComponent(eventId)}/activity`,
+export async function getTrackedEventActivities(
+  occurrenceIds: readonly string[],
+): Promise<Record<string, TrackedEventActivityResponse>> {
+  const uniqueIds = Array.from(new Set(occurrenceIds.filter(Boolean)));
+  if (uniqueIds.length === 0) return {};
+
+  const batches: string[][] = [];
+  for (let index = 0; index < uniqueIds.length; index += TRACKED_EVENT_ACTIVITY_BATCH_SIZE) {
+    batches.push(uniqueIds.slice(index, index + TRACKED_EVENT_ACTIVITY_BATCH_SIZE));
+  }
+
+  const responses = await Promise.all(
+    batches.map((batch) =>
+      apiGet<TrackedEventActivityBatchResponse>(
+        `/api/v1/tracked-events/activity?occurrence_ids=${encodeURIComponent(batch.join(','))}`,
+      ),
+    ),
+  );
+
+  return Object.fromEntries(
+    responses.flatMap((response) => response.items).map((item) => [item.occurrence_id, item]),
   );
 }
 
