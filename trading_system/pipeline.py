@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from trading_system.brokers.base import BrokerOrder
@@ -92,6 +92,9 @@ class PaperTradingPipeline:
             portfolio,
             requested_mode=TradingMode.PAPER,
         )
+        # Carry the exact Strategy decision into the immutable broker proposal so
+        # a durable broker-attempt can persist both Strategy and Risk before I/O.
+        proposal = replace(proposal, strategy_decision=strategy)
         self.journal.record_proposal(proposal)
 
         order: BrokerOrder | None = None
