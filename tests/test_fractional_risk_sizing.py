@@ -37,8 +37,8 @@ class FractionalRiskSizingTests(unittest.TestCase):
             proposal.risk.max_fractional_notional_usd,
             proposal.risk.max_position_value,
         )
-        # $50 risk budget / $190 risk per whole BTC = 0.263157... BTC.
-        self.assertAlmostEqual(proposal.risk.max_fractional_notional_usd, 20_000.0, delta=0.01)
+        # Stop-risk would allow more, but the 20% position-value ceiling is $2,000.
+        self.assertAlmostEqual(proposal.risk.max_fractional_notional_usd, 2_000.0, delta=0.01)
 
     def test_same_candidate_still_rejects_for_integer_only_broker(self) -> None:
         candidate = TradeCandidate(
