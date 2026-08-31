@@ -30,6 +30,7 @@ type TrackedEventSnapshot = {
 };
 
 const CALENDAR_WINDOW_DAYS = 30;
+const TRACKED_EVENT_LIST_LIMIT = 20;
 
 function formatLocalDate(date: Date): string {
   const yyyy = date.getFullYear();
@@ -44,20 +45,31 @@ function deviceLocalCalendarWindow(): { fromDate: string; toDate: string } {
   return { fromDate: formatLocalDate(now), toDate: formatLocalDate(to) };
 }
 
-function isHomeExpectationVisible(event: EventExpectation, status?: EventStatus): boolean {
-  // Calendar-less canonical tracked events own their home card through
-  // TrackedEventsSection. The expectation remains persisted and available to
-  // Strategy/detail views, but rendering it here would duplicate one event as
-  // a small expectation card plus a large persistent tracked-event card.
-  if (event.event_id.startsWith('tracked:')) return false;
+function isHomeExpectationVisible(
+  event: EventExpectation,
+  status: EventStatus | undefined,
+  suppressTrackedShells: boolean,
+): boolean {
+  if (event.event_id.startsWith('tracked:')) {
+    // Suppress calendar-less shells only when the tracked-event snapshot is
+    // known to be complete. At the API limit the response may be truncated;
+    // keeping shells visible is preferable to making an active workflow
+    // disappear from Home.
+    return !suppressTrackedShells;
+  }
 
   const today = formatLocalDate(new Date());
   if (event.scheduled_date >= today) return true;
 
-  // A past event can stay on Home only while the trading workflow genuinely
-  // waits for post-release market confirmation. Terminal/stale expectations
-  // belong in history instead of remaining as "Odottaa julkaisua" cards.
-  return status?.run?.status === 'waiting_confirmation';
+  // A failed or still-pending status lookup is not evidence that the past
+  // event is stale. Keep it visible so Home can show the existing loading or
+  // error state instead of silently hiding a workflow whose true state is
+  // unknown.
+  if (!status || status.statusError) return true;
+
+  // Once status is known, a past expectation remains on Home only while the
+  // trading workflow genuinely waits for post-release confirmation.
+  return status.run?.status === 'waiting_confirmation';
 }
 
 export default function HomeScreen() {
@@ -141,8 +153,15 @@ export default function HomeScreen() {
 
   const visibleEvents = useMemo(() => {
     if (!events) return null;
-    return events.filter((event) => isHomeExpectationVisible(event, statuses[event.event_id]));
-  }, [events, statuses]);
+    // TrackedEventsSection currently reads at most 20 active rows. A count
+    // below that limit proves the snapshot is complete; a count at the limit
+    // may be truncated, so tracked shells must remain visible in that case.
+    const suppressTrackedShells =
+      trackedEventCount !== null && trackedEventCount < TRACKED_EVENT_LIST_LIMIT;
+    return events.filter((event) =>
+      isHomeExpectationVisible(event, statuses[event.event_id], suppressTrackedShells),
+    );
+  }, [events, statuses, trackedEventCount]);
 
   const expectationCalendarEventIds = useMemo(() => {
     const ids = new Set<string>();
