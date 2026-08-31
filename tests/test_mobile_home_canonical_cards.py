@@ -4,17 +4,21 @@ from pathlib import Path
 HOME_SOURCE = Path("mobile/src/app/(tabs)/index.tsx")
 
 
-def test_calendarless_tracked_expectations_do_not_render_duplicate_home_cards():
+def test_calendarless_tracked_expectations_hide_only_with_complete_snapshot():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
-    assert "if (event.event_id.startsWith('tracked:')) return false;" in source
+    assert "const TRACKED_EVENT_LIST_LIMIT = 20;" in source
+    assert "if (event.event_id.startsWith('tracked:'))" in source
+    assert "return !suppressTrackedShells;" in source
+    assert "trackedEventCount < TRACKED_EVENT_LIST_LIMIT" in source
     assert "visibleEvents?.map((event) =>" in source
     assert "events?.map((event) =>" not in source
 
 
-def test_stale_past_expectations_stay_off_home_unless_waiting_for_confirmation():
+def test_uncertain_past_expectations_remain_visible_until_status_is_known():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
     assert "if (event.scheduled_date >= today) return true;" in source
-    assert "return status?.run?.status === 'waiting_confirmation';" in source
+    assert "if (!status || status.statusError) return true;" in source
+    assert "return status.run?.status === 'waiting_confirmation';" in source
     assert "for (const event of visibleEvents ?? [])" in source
