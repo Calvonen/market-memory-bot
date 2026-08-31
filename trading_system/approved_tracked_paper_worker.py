@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import math
 import os
 import time
+from typing import Any
 
 from trading_system.etoro_instrument_resolver import EtoroInstrumentResolver
 from trading_system.etoro_market_data import EtoroMarketDataProvider
@@ -27,7 +29,7 @@ def _required_float(name: str) -> float:
         value = float(raw)
     except ValueError as exc:
         raise RuntimeError(f"{name} must be numeric") from exc
-    if not (value == value):
+    if not math.isfinite(value):
         raise RuntimeError(f"{name} must be finite")
     return value
 
@@ -40,7 +42,7 @@ def _optional_float(name: str, default: float) -> float:
         value = float(raw)
     except ValueError as exc:
         raise RuntimeError(f"{name} must be numeric") from exc
-    if not (value == value):
+    if not math.isfinite(value):
         raise RuntimeError(f"{name} must be finite")
     return value
 
@@ -79,6 +81,7 @@ def _positive_int(name: str, default: int) -> int:
 
 
 def _portfolio_from_env() -> PortfolioState:
+    """Read the operator-supplied PAPER account baseline fresh for one decision."""
     equity = _required_float("MARKETAI_PAPER_EQUITY")
     cash = _required_float("MARKETAI_PAPER_CASH")
     spread_pct = _required_float("MARKETAI_PAPER_SPREAD_PCT")
@@ -97,20 +100,109 @@ def _portfolio_from_env() -> PortfolioState:
     )
 
 
-def _approved_task_rows(repository: SupabaseTradingTaskRepository, limit: int) -> list[dict]:
-    response = (
-        repository.client.table("trading_tasks")
-        .select("id,tracked_event_id")
-        .eq("state", "approved")
-        .eq("mode", "PAPER")
-        .order("approved_at")
-        .limit(limit)
-        .execute()
+def _approved_task_rows(
+    repository: SupabaseTradingTaskRepository,
+    page_size: int,
+) -> list[dict[str, Any]]:
+    """Return every approved PAPER task without allowing the first page to starve later work."""
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        response = (
+            repository.client.table("trading_tasks")
+            .select("id,tracked_event_id,instrument")
+            .eq("state", "approved")
+            .eq("mode", "PAPER")
+            .order("approved_at")
+            .order("id")
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        page = response.data or []
+        if not isinstance(page, list):
+            raise RuntimeError("approved PAPER task discovery returned malformed data")
+        rows.extend(page)
+        if len(page) < page_size:
+            return rows
+        offset += page_size
+
+
+def _executed_paper_orders(
+    repository: SupabasePaperTradeRepository,
+    page_size: int,
+) -> list[dict[str, Any]]:
+    """Read the durable internal PAPER orders that remain open in this PR's broker model."""
+    orders: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        response = (
+            repository.client.table("event_paper_trade_runs")
+            .select("paper_order")
+            .eq("status", "paper_executed")
+            .order("updated_at")
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        page = response.data or []
+        if not isinstance(page, list):
+            raise RuntimeError("PAPER portfolio read returned malformed data")
+        for row in page:
+            if not isinstance(row, dict) or not isinstance(row.get("paper_order"), dict):
+                raise RuntimeError("executed PAPER run is missing a canonical paper_order")
+            orders.append(row["paper_order"])
+        if len(page) < page_size:
+            return orders
+        offset += page_size
+
+
+def _paper_portfolio_for_instrument(
+    repository: SupabasePaperTradeRepository,
+    *,
+    instrument: str,
+    page_size: int,
+) -> PortfolioState:
+    """Build current fail-closed PAPER risk state immediately before one decision.
+
+    Environment values are re-read on every task and act as the operator/account
+    baseline. Every durable `paper_executed` order produced by the internal broker
+    is then folded into open-position count, available cash and instrument exposure.
+    The internal broker in this PR has no close lifecycle, so counting its executed
+    orders as still open is the conservative representation until eToro Virtual
+    Portfolio becomes the authoritative account source in the next execution PR.
+    """
+    base = _portfolio_from_env()
+    target = instrument.strip().upper()
+    if not target:
+        raise RuntimeError("approved PAPER task has blank instrument")
+
+    orders = _executed_paper_orders(repository, page_size)
+    total_notional = 0.0
+    instrument_notional = 0.0
+    for order in orders:
+        order_instrument = str(order.get("instrument") or "").strip().upper()
+        try:
+            quantity = int(order.get("quantity"))
+            reference_price = float(order.get("reference_price"))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("executed PAPER order contains malformed sizing") from exc
+        if not order_instrument or quantity < 1 or not math.isfinite(reference_price) or reference_price <= 0:
+            raise RuntimeError("executed PAPER order contains invalid sizing identity")
+        notional = quantity * reference_price
+        total_notional += notional
+        if order_instrument == target:
+            instrument_notional += notional
+
+    persisted_exposure_pct = (instrument_notional / base.equity) * 100.0
+    return PortfolioState(
+        equity=base.equity,
+        cash=max(0.0, base.cash - total_notional),
+        open_positions=base.open_positions + len(orders),
+        instrument_exposure_pct=base.instrument_exposure_pct + persisted_exposure_pct,
+        daily_pnl=base.daily_pnl,
+        spread_pct=base.spread_pct,
+        volatility_pct=None,
+        last_loss_at=base.last_loss_at,
     )
-    rows = response.data or []
-    if not isinstance(rows, list):
-        raise RuntimeError("approved PAPER task discovery returned malformed data")
-    return rows
 
 
 def run_forever() -> None:
@@ -123,7 +215,6 @@ def run_forever() -> None:
     poll_seconds = _positive_float("MARKETAI_APPROVED_PAPER_POLL_SECONDS", DEFAULT_POLL_SECONDS)
     lease_seconds = _positive_int("MARKETAI_APPROVED_PAPER_LEASE_SECONDS", DEFAULT_LEASE_SECONDS)
     batch_size = _positive_int("MARKETAI_APPROVED_PAPER_BATCH_SIZE", DEFAULT_BATCH_SIZE)
-    portfolio = _portfolio_from_env()
 
     tracked_events = SupabaseTrackedEventRepository.from_env()
     expectations = SupabaseEventExpectationRepository.from_env()
@@ -138,9 +229,18 @@ def run_forever() -> None:
             for row in rows:
                 task_id = str(row.get("id") or "").strip()
                 tracked_event_id = str(row.get("tracked_event_id") or "").strip()
-                if not task_id or not tracked_event_id:
+                instrument = str(row.get("instrument") or "").strip()
+                if not task_id or not tracked_event_id or not instrument:
                     raise RuntimeError("approved PAPER task discovery returned blank identity")
                 try:
+                    # Risk state is deliberately refreshed immediately before each
+                    # task. A preceding successful order therefore changes the next
+                    # task's open-position/cash/exposure gates in the same worker pass.
+                    portfolio = _paper_portfolio_for_instrument(
+                        paper_runs,
+                        instrument=instrument,
+                        page_size=batch_size,
+                    )
                     result = run_approved_tracked_paper_once(
                         tracked_event_id=tracked_event_id,
                         task_id=task_id,
