@@ -75,6 +75,14 @@ jobs:
           # is owned. Re-check immediately before and after installation as well.
           verify_runtime_sha
 
+          # Readiness is preparation only. If execution is already active, refuse
+          # before touching the installed unit, daemon state or boot enablement.
+          # This makes a rerun side-effect free for an active production worker.
+          if /usr/bin/systemctl is-active --quiet marketai-approved-paper.service; then
+            echo "::error::marketai-approved-paper.service is already active; refusing to modify its unit or enablement state."
+            exit 1
+          fi
+
           set -a
           # shellcheck disable=SC1091
           source /home/marko/marketai/.env
@@ -262,7 +270,7 @@ jobs:
             exit 1
           fi
           if /usr/bin/systemctl is-active --quiet marketai-approved-paper.service; then
-            echo "::error::marketai-approved-paper.service was already active; refusing readiness preparation."
+            echo "::error::marketai-approved-paper.service became active during readiness preparation."
             exit 1
           fi
 
