@@ -4,11 +4,15 @@ import math
 import os
 import time
 from typing import Any
+from uuid import uuid4
 
+from trading_system.brokers.base import BrokerOrder
+from trading_system.brokers.paper import PaperBroker
 from trading_system.etoro_instrument_resolver import EtoroInstrumentResolver
 from trading_system.etoro_market_data import EtoroMarketDataProvider
-from trading_system.models import PortfolioState
+from trading_system.models import PortfolioState, TradeProposal
 from trading_system.paper_trade_repository import SupabasePaperTradeRepository
+from trading_system.pipeline import PaperTradingPipeline
 from trading_system.release_repository import SupabaseReleaseRepository
 from trading_system.supabase_event_repository import SupabaseEventExpectationRepository
 from trading_system.tracked_event_paper_orchestration import run_approved_tracked_paper_once
@@ -19,6 +23,7 @@ from trading_system.trading_task_repository import SupabaseTradingTaskRepository
 DEFAULT_POLL_SECONDS = 30.0
 DEFAULT_LEASE_SECONDS = 120
 DEFAULT_BATCH_SIZE = 50
+DEFAULT_PORTFOLIO_LEASE_SECONDS = 900
 
 
 def _required_float(name: str) -> float:
@@ -81,21 +86,21 @@ def _positive_int(name: str, default: int) -> int:
 
 
 def _portfolio_from_env() -> PortfolioState:
-    """Read the operator-supplied PAPER account baseline fresh for one decision."""
     equity = _required_float("MARKETAI_PAPER_EQUITY")
     cash = _required_float("MARKETAI_PAPER_CASH")
     spread_pct = _required_float("MARKETAI_PAPER_SPREAD_PCT")
-    if equity <= 0 or cash < 0 or spread_pct < 0:
-        raise RuntimeError("PAPER equity must be positive and cash/spread must be non-negative")
+    exposure_pct = _optional_float("MARKETAI_PAPER_INSTRUMENT_EXPOSURE_PCT", 0.0)
+    if equity <= 0 or cash < 0 or spread_pct < 0 or exposure_pct < 0:
+        raise RuntimeError(
+            "PAPER equity must be positive and cash/spread/instrument exposure must be non-negative"
+        )
     return PortfolioState(
         equity=equity,
         cash=cash,
         open_positions=_required_nonnegative_int("MARKETAI_PAPER_OPEN_POSITIONS"),
-        instrument_exposure_pct=_optional_float("MARKETAI_PAPER_INSTRUMENT_EXPOSURE_PCT", 0.0),
+        instrument_exposure_pct=exposure_pct,
         daily_pnl=_optional_float("MARKETAI_PAPER_DAILY_PNL", 0.0),
         spread_pct=spread_pct,
-        # Leave volatility unset so the reviewed post-release path derives it
-        # from the same market frame used for levels/confirmation.
         volatility_pct=None,
     )
 
@@ -104,7 +109,6 @@ def _approved_task_rows(
     repository: SupabaseTradingTaskRepository,
     page_size: int,
 ) -> list[dict[str, Any]]:
-    """Return every approved PAPER task without allowing the first page to starve later work."""
     rows: list[dict[str, Any]] = []
     offset = 0
     while True:
@@ -131,15 +135,15 @@ def _executed_paper_orders(
     repository: SupabasePaperTradeRepository,
     page_size: int,
 ) -> list[dict[str, Any]]:
-    """Read the durable internal PAPER orders that remain open in this PR's broker model."""
     orders: list[dict[str, Any]] = []
     offset = 0
     while True:
         response = (
             repository.client.table("event_paper_trade_runs")
-            .select("paper_order")
+            .select("id,paper_order")
             .eq("status", "paper_executed")
             .order("updated_at")
+            .order("id")
             .range(offset, offset + page_size - 1)
             .execute()
         )
@@ -161,15 +165,6 @@ def _paper_portfolio_for_instrument(
     instrument: str,
     page_size: int,
 ) -> PortfolioState:
-    """Build current fail-closed PAPER risk state immediately before one decision.
-
-    Environment values are re-read on every task and act as the operator/account
-    baseline. Every durable `paper_executed` order produced by the internal broker
-    is then folded into open-position count, available cash and instrument exposure.
-    The internal broker in this PR has no close lifecycle, so counting its executed
-    orders as still open is the conservative representation until eToro Virtual
-    Portfolio becomes the authoritative account source in the next execution PR.
-    """
     base = _portfolio_from_env()
     target = instrument.strip().upper()
     if not target:
@@ -205,16 +200,72 @@ def _paper_portfolio_for_instrument(
     )
 
 
-def run_forever() -> None:
-    """Discover approved canonical PAPER tasks and run the tracked-event orchestrator.
+def _claim_portfolio_lease(
+    repository: SupabasePaperTradeRepository,
+    *,
+    token: str,
+    lease_seconds: int,
+) -> bool:
+    response = repository.client.rpc(
+        "claim_paper_portfolio_execution_lease",
+        {"input_lease_token": token, "input_lease_seconds": lease_seconds},
+    ).execute()
+    return response.data is True
 
-    This worker creates and approves nothing. It is the production entry point
-    that turns already-approved canonical execution intent into the fail-closed
-    orchestration boundary. Internal PaperBroker remains the default in this PR.
-    """
+
+def _renew_portfolio_lease(
+    repository: SupabasePaperTradeRepository,
+    *,
+    token: str,
+    lease_seconds: int,
+) -> None:
+    response = repository.client.rpc(
+        "renew_paper_portfolio_execution_lease",
+        {"input_lease_token": token, "input_lease_seconds": lease_seconds},
+    ).execute()
+    if response.data is not True:
+        raise RuntimeError("PAPER portfolio execution lease is no longer owned")
+
+
+def _release_portfolio_lease(repository: SupabasePaperTradeRepository, *, token: str) -> None:
+    repository.client.rpc(
+        "release_paper_portfolio_execution_lease",
+        {"input_lease_token": token},
+    ).execute()
+
+
+class _PortfolioLeaseBroker:
+    """Revalidate the account-wide lease immediately before actual broker execution."""
+
+    def __init__(
+        self,
+        broker: PaperBroker,
+        repository: SupabasePaperTradeRepository,
+        *,
+        token: str,
+        lease_seconds: int,
+    ) -> None:
+        self._broker = broker
+        self._repository = repository
+        self._token = token
+        self._lease_seconds = lease_seconds
+
+    def execute(self, proposal: TradeProposal) -> BrokerOrder:
+        _renew_portfolio_lease(
+            self._repository,
+            token=self._token,
+            lease_seconds=self._lease_seconds,
+        )
+        return self._broker.execute(proposal)
+
+
+def run_forever() -> None:
     poll_seconds = _positive_float("MARKETAI_APPROVED_PAPER_POLL_SECONDS", DEFAULT_POLL_SECONDS)
     lease_seconds = _positive_int("MARKETAI_APPROVED_PAPER_LEASE_SECONDS", DEFAULT_LEASE_SECONDS)
     batch_size = _positive_int("MARKETAI_APPROVED_PAPER_BATCH_SIZE", DEFAULT_BATCH_SIZE)
+    portfolio_lease_seconds = _positive_int(
+        "MARKETAI_PAPER_PORTFOLIO_LEASE_SECONDS", DEFAULT_PORTFOLIO_LEASE_SECONDS
+    )
 
     tracked_events = SupabaseTrackedEventRepository.from_env()
     expectations = SupabaseEventExpectationRepository.from_env()
@@ -232,14 +283,30 @@ def run_forever() -> None:
                 instrument = str(row.get("instrument") or "").strip()
                 if not task_id or not tracked_event_id or not instrument:
                     raise RuntimeError("approved PAPER task discovery returned blank identity")
+
+                portfolio_token = str(uuid4())
+                if not _claim_portfolio_lease(
+                    paper_runs,
+                    token=portfolio_token,
+                    lease_seconds=portfolio_lease_seconds,
+                ):
+                    continue
                 try:
-                    # Risk state is deliberately refreshed immediately before each
-                    # task. A preceding successful order therefore changes the next
-                    # task's open-position/cash/exposure gates in the same worker pass.
+                    # The account-wide lease is held across snapshot -> Strategy/Risk
+                    # -> durable broker attempt. The broker wrapper renews and proves
+                    # ownership again immediately before the underlying PaperBroker.
                     portfolio = _paper_portfolio_for_instrument(
                         paper_runs,
                         instrument=instrument,
                         page_size=batch_size,
+                    )
+                    pipeline = PaperTradingPipeline(
+                        broker=_PortfolioLeaseBroker(
+                            PaperBroker(),
+                            paper_runs,
+                            token=portfolio_token,
+                            lease_seconds=portfolio_lease_seconds,
+                        )
                     )
                     result = run_approved_tracked_paper_once(
                         tracked_event_id=tracked_event_id,
@@ -252,6 +319,7 @@ def run_forever() -> None:
                         resolver=resolver,
                         portfolio=portfolio,
                         lease_seconds=lease_seconds,
+                        pipeline=pipeline,
                     )
                     print(
                         f"approved-paper task={task_id} event={tracked_event_id} "
@@ -259,14 +327,13 @@ def run_forever() -> None:
                         flush=True,
                     )
                 except Exception as exc:
-                    # One malformed/not-ready task must not stop discovery for all
-                    # other explicitly approved tasks. Every execution boundary
-                    # inside the orchestrator remains fail-closed.
                     print(
                         f"approved-paper retryable failure task={task_id} "
                         f"event={tracked_event_id}: {exc}",
                         flush=True,
                     )
+                finally:
+                    _release_portfolio_lease(paper_runs, token=portfolio_token)
         except Exception as exc:
             print(f"approved-paper discovery failure: {exc}", flush=True)
 
