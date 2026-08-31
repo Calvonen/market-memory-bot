@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 
+from trading_system.brokers.base import BrokerOrder
+from trading_system.models import Direction
 from trading_system.tracked_event_paper_orchestration import _LeaseGuardedBroker
 
 
@@ -15,7 +18,15 @@ class _Broker:
 
     def execute(self, proposal):
         self.calls += 1
-        return ("order", proposal)
+        return BrokerOrder(
+            order_id="order-1",
+            instrument="EXM.ASX",
+            direction=Direction.LONG,
+            quantity=1,
+            reference_price=10.0,
+            status="FILLED",
+            created_at=datetime(2026, 8, 31, 3, 0, tzinfo=UTC),
+        )
 
 
 class TaskExecutionLeaseGuardTests(unittest.TestCase):
@@ -23,26 +34,30 @@ class TaskExecutionLeaseGuardTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.sql = MIGRATION.read_text(encoding="utf-8").lower()
 
-    def test_guard_runs_immediately_before_broker(self) -> None:
+    def test_durable_attempt_runs_immediately_before_broker(self) -> None:
         events: list[str] = []
-
-        class Broker:
-            def execute(self, proposal):
-                events.append("broker")
-                return proposal
-
-        guarded = _LeaseGuardedBroker(Broker(), lambda: events.append("guard"))
-        self.assertEqual(guarded.execute("proposal"), "proposal")
-        self.assertEqual(events, ["guard", "broker"])
-
-    def test_failed_guard_never_calls_broker(self) -> None:
         broker = _Broker()
 
-        def reject() -> None:
-            raise RuntimeError("lease lost")
+        def begin(token):
+            events.append("reserve")
+            return {"can_execute": True, "attempt_status": "started", "order_payload": None}
 
-        guarded = _LeaseGuardedBroker(broker, reject)
-        with self.assertRaisesRegex(RuntimeError, "lease lost"):
+        def complete(token, order):
+            events.append("complete")
+
+        guarded = _LeaseGuardedBroker(broker, begin, complete)
+        guarded.execute("proposal")
+        self.assertEqual(events, ["reserve", "complete"])
+        self.assertEqual(broker.calls, 1)
+
+    def test_failed_reservation_never_calls_broker(self) -> None:
+        broker = _Broker()
+        guarded = _LeaseGuardedBroker(
+            broker,
+            lambda token: {"can_execute": False, "attempt_status": "started", "order_payload": None},
+            lambda token, order: self.fail("blocked attempt must not complete"),
+        )
+        with self.assertRaisesRegex(RuntimeError, "outcome is uncertain"):
             guarded.execute("proposal")
         self.assertEqual(broker.calls, 0)
 
