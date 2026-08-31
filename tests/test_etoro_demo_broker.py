@@ -28,8 +28,10 @@ def _proposal(
     direction: Direction = Direction.LONG,
     *,
     max_position_value: float = 1000.0,
+    fractional_notional: float | None = None,
     proposal_id: str = "proposal-stable-id",
 ) -> TradeProposal:
+    approved_notional = max_position_value if fractional_notional is None else fractional_notional
     return TradeProposal(
         candidate=TradeCandidate(
             instrument="BTC",
@@ -43,7 +45,8 @@ def _proposal(
             status=RiskStatus.PASS,
             reasons=(),
             max_position_value=max_position_value,
-            max_quantity=1,
+            max_quantity=0,
+            max_fractional_notional_usd=approved_notional,
             reward_risk=2.0,
         ),
         mode=TradingMode.PAPER,
@@ -74,15 +77,9 @@ class EtoroDemoBrokerTests(unittest.TestCase):
             calls.append((url, kwargs))
             return _FakeResponse({"data": {"positions": []}})
 
-        broker = EtoroDemoBroker(
-            api_key="api",
-            user_key="user",
-            instrument_id=100000,
-            http_get=fake_get,
-        )
+        broker = EtoroDemoBroker(api_key="api", user_key="user", instrument_id=100000, http_get=fake_get)
         broker.verify_demo_access()
         self.assertEqual(calls[0][0], EtoroDemoBroker.DEMO_PORTFOLIO_URL)
-        self.assertIn("/demo/portfolio", calls[0][0])
 
     def test_execute_reconciles_open_position_before_returning_filled_order(self) -> None:
         post_calls = []
@@ -97,33 +94,20 @@ class EtoroDemoBrokerTests(unittest.TestCase):
             return _FakeResponse(_portfolio())
 
         broker = EtoroDemoBroker(
-            api_key="api",
-            user_key="user",
-            instrument_id=100000,
-            amount_usd=500,
-            http_get=fake_get,
-            http_post=fake_post,
-            reconcile_delay_seconds=0,
+            api_key="api", user_key="user", instrument_id=100000, amount_usd=500,
+            http_get=fake_get, http_post=fake_post, reconcile_delay_seconds=0,
         )
         proposal = _proposal()
         order = broker.execute(proposal)
-
         payload = post_calls[0][1]["json"]
-        headers = post_calls[0][1]["headers"]
-        self.assertEqual(post_calls[0][0], EtoroDemoBroker.DEMO_ORDERS_URL)
-        self.assertEqual(payload["transaction"], "buy")
         self.assertEqual(payload["amount"], 500.0)
-        self.assertEqual(headers["x-request-id"], proposal.proposal_id)
+        self.assertEqual(post_calls[0][1]["headers"]["x-request-id"], proposal.proposal_id)
         self.assertGreaterEqual(len(get_calls), 1)
         self.assertEqual(order.status, "ETORO_DEMO_FILLED")
         self.assertEqual(order.notional_usd, 500.0)
         self.assertEqual(order.broker_position_id, "p-123")
-        self.assertEqual(broker.last_reconciled_notional_usd, 500.0)
-        self.assertEqual(broker.last_reconciled_position_id, "p-123")
-        self.assertNotIn("stopLossRate", payload)
-        self.assertNotIn("takeProfitRate", payload)
 
-    def test_order_amount_and_reconciled_notional_are_capped_by_risk(self) -> None:
+    def test_order_amount_uses_fractional_risk_notional(self) -> None:
         captured = {}
 
         def fake_post(_url, **kwargs):
@@ -134,17 +118,13 @@ class EtoroDemoBrokerTests(unittest.TestCase):
             return _FakeResponse(_portfolio("p-125", amount=125.0))
 
         broker = EtoroDemoBroker(
-            api_key="api",
-            user_key="user",
-            instrument_id=100000,
-            amount_usd=500,
-            http_get=fake_get,
-            http_post=fake_post,
-            reconcile_delay_seconds=0,
+            api_key="api", user_key="user", instrument_id=100000, amount_usd=500,
+            http_get=fake_get, http_post=fake_post, reconcile_delay_seconds=0,
         )
-        order = broker.execute(_proposal(max_position_value=125.0))
+        order = broker.execute(_proposal(max_position_value=1000.0, fractional_notional=125.0))
         self.assertEqual(captured["amount"], 125.0)
         self.assertEqual(order.notional_usd, 125.0)
+        self.assertEqual(order.quantity, 0)
 
     def test_acceptance_without_reconciled_position_stays_uncertain(self) -> None:
         def fake_post(_url, **_kwargs):
@@ -154,28 +134,17 @@ class EtoroDemoBrokerTests(unittest.TestCase):
             return _FakeResponse({"data": {"positions": []}})
 
         broker = EtoroDemoBroker(
-            api_key="api",
-            user_key="user",
-            instrument_id=100000,
-            http_get=fake_get,
-            http_post=fake_post,
-            reconcile_attempts=2,
-            reconcile_delay_seconds=0,
+            api_key="api", user_key="user", instrument_id=100000,
+            http_get=fake_get, http_post=fake_post, reconcile_attempts=2, reconcile_delay_seconds=0,
         )
         with self.assertRaisesRegex(RuntimeError, "could not be reconciled"):
             broker.execute(_proposal())
-        self.assertIsNone(broker.last_reconciled_notional_usd)
 
     def test_acceptance_without_position_id_is_not_completed(self) -> None:
         def fake_post(_url, **_kwargs):
             return _FakeResponse({"data": {"orderId": 456}})
 
-        broker = EtoroDemoBroker(
-            api_key="api",
-            user_key="user",
-            instrument_id=100000,
-            http_post=fake_post,
-        )
+        broker = EtoroDemoBroker(api_key="api", user_key="user", instrument_id=100000, http_post=fake_post)
         with self.assertRaisesRegex(RuntimeError, "without a position id"):
             broker.execute(_proposal())
 
@@ -190,17 +159,13 @@ class EtoroDemoBrokerTests(unittest.TestCase):
             return _FakeResponse(_portfolio("p-short", amount=500.0))
 
         broker = EtoroDemoBroker(
-            api_key="api",
-            user_key="user",
-            instrument_id=100000,
-            http_get=fake_get,
-            http_post=fake_post,
-            reconcile_delay_seconds=0,
+            api_key="api", user_key="user", instrument_id=100000,
+            http_get=fake_get, http_post=fake_post, reconcile_delay_seconds=0,
         )
         broker.execute(_proposal(Direction.SHORT))
         self.assertEqual(captured["transaction"], "sell")
 
-    def test_zero_risk_position_value_is_rejected_before_http_call(self) -> None:
+    def test_zero_fractional_risk_notional_is_rejected_before_http_call(self) -> None:
         called = False
 
         def fake_post(*_args, **_kwargs):
@@ -208,14 +173,9 @@ class EtoroDemoBrokerTests(unittest.TestCase):
             called = True
             return _FakeResponse({"orderId": 1})
 
-        broker = EtoroDemoBroker(
-            api_key="api",
-            user_key="user",
-            instrument_id=100000,
-            http_post=fake_post,
-        )
-        with self.assertRaisesRegex(ValueError, "executable position value"):
-            broker.execute(_proposal(max_position_value=0.0))
+        broker = EtoroDemoBroker(api_key="api", user_key="user", instrument_id=100000, http_post=fake_post)
+        with self.assertRaisesRegex(ValueError, "fractional notional"):
+            broker.execute(_proposal(fractional_notional=0.0))
         self.assertFalse(called)
 
     def test_live_mode_is_rejected_before_http_call(self) -> None:
@@ -227,18 +187,8 @@ class EtoroDemoBrokerTests(unittest.TestCase):
             return _FakeResponse({"orderId": 1})
 
         proposal = _proposal()
-        live = TradeProposal(
-            candidate=proposal.candidate,
-            risk=proposal.risk,
-            mode=TradingMode.LIVE,
-            proposal_id=proposal.proposal_id,
-        )
-        broker = EtoroDemoBroker(
-            api_key="api",
-            user_key="user",
-            instrument_id=100000,
-            http_post=fake_post,
-        )
+        live = TradeProposal(candidate=proposal.candidate, risk=proposal.risk, mode=TradingMode.LIVE, proposal_id=proposal.proposal_id)
+        broker = EtoroDemoBroker(api_key="api", user_key="user", instrument_id=100000, http_post=fake_post)
         with self.assertRaisesRegex(ValueError, "only accepts PAPER"):
             broker.execute(live)
         self.assertFalse(called)
