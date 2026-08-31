@@ -25,11 +25,13 @@ class ApprovedPaperPortfolioSerializationTests(unittest.TestCase):
         snapshot = self.worker.index("portfolio = _paper_portfolio_for_instrument(")
         wrapper = self.worker.index("lease_aware_runs = _PortfolioLeasePaperRuns(")
         orchestration = self.worker.index("result = run_approved_tracked_paper_once(")
+        release = self.worker.index("_release_portfolio_lease(", orchestration)
         self.assertLess(claim, snapshot)
         self.assertLess(snapshot, wrapper)
         self.assertLess(wrapper, orchestration)
+        self.assertLess(orchestration, release)
         self.assertIn("paper_runs=lease_aware_runs", self.worker)
-        self.assertIn("finally:\n                    _release_portfolio_lease", self.worker)
+        self.assertIn("finally:", self.worker[orchestration:release])
 
     def test_account_lease_and_attempt_reservation_are_one_rpc_transaction(self) -> None:
         begin = self.worker.index("def begin_broker_attempt(")

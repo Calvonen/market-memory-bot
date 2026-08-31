@@ -1,18 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any, Callable
 from uuid import uuid4
 
 import pandas as pd
 
 from trading_system.ai_event_analyzer import analysis_from_record
-from trading_system.brokers.base import BrokerOrder
+from trading_system.brokers.base import BrokerOrder, broker_order_from_payload, broker_order_payload
 from trading_system.etoro_instrument_resolver import EtoroInstrumentResolver
 from trading_system.models import (
     ComponentAssessment,
-    Direction,
     PortfolioState,
     TradeProposal,
     TradingMode,
@@ -39,33 +37,11 @@ class TrackedPaperOrchestrationResult:
 
 
 def _order_payload(order: BrokerOrder) -> dict[str, Any]:
-    return {
-        "order_id": order.order_id,
-        "instrument": order.instrument,
-        "direction": order.direction.value,
-        "quantity": order.quantity,
-        "reference_price": order.reference_price,
-        "status": order.status,
-        "created_at": order.created_at.isoformat(),
-    }
+    return broker_order_payload(order)
 
 
 def _order_from_payload(payload: dict[str, Any]) -> BrokerOrder:
-    try:
-        created_at = datetime.fromisoformat(str(payload["created_at"]).replace("Z", "+00:00"))
-        if created_at.tzinfo is None or created_at.utcoffset() is None:
-            raise ValueError("created_at must be timezone-aware")
-        return BrokerOrder(
-            order_id=str(payload["order_id"]),
-            instrument=str(payload["instrument"]),
-            direction=Direction(str(payload["direction"])),
-            quantity=int(payload["quantity"]),
-            reference_price=float(payload["reference_price"]),
-            status=str(payload["status"]),
-            created_at=created_at.astimezone(UTC),
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise RuntimeError("persisted broker attempt contains malformed order payload") from exc
+    return broker_order_from_payload(payload)
 
 
 def _strategy_payload(proposal: TradeProposal) -> dict[str, Any]:
@@ -103,6 +79,7 @@ def _risk_payload(proposal: TradeProposal) -> dict[str, Any]:
         "max_risk_amount": risk.max_risk_amount,
         "max_position_value": risk.max_position_value,
         "max_quantity": risk.max_quantity,
+        "max_fractional_notional_usd": risk.max_fractional_notional_usd,
         "reward_risk": risk.reward_risk,
         "created_at": risk.created_at.isoformat(),
         "proposal_id": proposal.proposal_id,
@@ -122,6 +99,9 @@ class _LeaseGuardedBroker:
         self._broker = broker
         self._begin_attempt = begin_attempt
         self._complete_attempt = complete_attempt
+        self.supports_fractional_sizing = bool(
+            getattr(broker, "supports_fractional_sizing", False)
+        )
 
     def execute(self, proposal: TradeProposal) -> BrokerOrder:
         execution_token = str(uuid4())
@@ -305,30 +285,32 @@ def _guard_pipeline(
     lease_seconds: int,
 ) -> PaperTradingPipeline:
     base = pipeline or PaperTradingPipeline()
+    guarded_broker = _LeaseGuardedBroker(
+        base.broker,
+        lambda execution_token, strategy_payload, risk_payload: _begin_broker_attempt(
+            paper_runs,
+            event_id=event_id,
+            analysis_id=analysis_id,
+            task_id=task_id,
+            expectation_version=expectation_version,
+            execution_token=execution_token,
+            lease_seconds=lease_seconds,
+            strategy_payload=strategy_payload,
+            risk_payload=risk_payload,
+        ),
+        lambda execution_token, order: _complete_broker_attempt(
+            paper_runs,
+            task_id=task_id,
+            execution_token=execution_token,
+            order=order,
+        ),
+    )
     return PaperTradingPipeline(
         strategy_engine=base.strategy_engine,
         risk_engine=base.risk_engine,
-        broker=_LeaseGuardedBroker(
-            base.broker,
-            lambda execution_token, strategy_payload, risk_payload: _begin_broker_attempt(
-                paper_runs,
-                event_id=event_id,
-                analysis_id=analysis_id,
-                task_id=task_id,
-                expectation_version=expectation_version,
-                execution_token=execution_token,
-                lease_seconds=lease_seconds,
-                strategy_payload=strategy_payload,
-                risk_payload=risk_payload,
-            ),
-            lambda execution_token, order: _complete_broker_attempt(
-                paper_runs,
-                task_id=task_id,
-                execution_token=execution_token,
-                order=order,
-            ),
-        ),
+        broker=guarded_broker,
         journal=base.journal,
+        allow_fractional_sizing=base.allow_fractional_sizing,
     )
 
 

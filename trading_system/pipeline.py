@@ -50,8 +50,6 @@ class PipelineResult:
 
 
 class PaperTradingPipeline:
-    """Strategy -> candidate -> risk -> paper broker, with an audit journal at every step."""
-
     def __init__(
         self,
         *,
@@ -59,11 +57,23 @@ class PaperTradingPipeline:
         risk_engine: RiskEngine | None = None,
         broker: PaperBroker | None = None,
         journal: DecisionJournal | None = None,
+        allow_fractional_sizing: bool | None = None,
     ) -> None:
         self.strategy_engine = strategy_engine or StrategyEngine()
         self.risk_engine = risk_engine or RiskEngine()
         self.broker = broker or PaperBroker()
         self.journal = journal or InMemoryDecisionJournal()
+        broker_supports_fractional = bool(
+            getattr(self.broker, "supports_fractional_sizing", False)
+            or self.broker.__class__.__name__ == "EtoroDemoBroker"
+        )
+        self.allow_fractional_sizing = (
+            broker_supports_fractional
+            if allow_fractional_sizing is None
+            else bool(allow_fractional_sizing)
+        )
+        if self.allow_fractional_sizing and not broker_supports_fractional:
+            raise ValueError("fractional sizing requires a broker that explicitly supports it")
 
     def run(
         self,
@@ -73,7 +83,6 @@ class PaperTradingPipeline:
     ) -> PipelineResult:
         strategy = self.strategy_engine.evaluate(inputs)
         self.journal.record_strategy(strategy)
-
         candidate = TradeCandidate(
             instrument=strategy.instrument,
             direction=strategy.direction,
@@ -86,20 +95,16 @@ class PaperTradingPipeline:
             source_event_id=strategy.source_event_id,
             strategy_decision_id=strategy.decision_id,
         )
-
         proposal = self.risk_engine.evaluate(
             candidate,
             portfolio,
             requested_mode=TradingMode.PAPER,
+            allow_fractional_sizing=self.allow_fractional_sizing,
         )
-        # Carry the exact Strategy decision into the immutable broker proposal so
-        # a durable broker-attempt can persist both Strategy and Risk before I/O.
         proposal = replace(proposal, strategy_decision=strategy)
         self.journal.record_proposal(proposal)
-
         order: BrokerOrder | None = None
         if strategy.direction in {Direction.LONG, Direction.SHORT} and proposal.risk.status is RiskStatus.PASS:
             order = self.broker.execute(proposal)
             self.journal.record_order(order)
-
         return PipelineResult(strategy=strategy, proposal=proposal, order=order)

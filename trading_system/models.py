@@ -125,6 +125,9 @@ class RiskDecision:
     reward_risk: float | None = None
     decision_id: str = field(default_factory=new_id)
     created_at: datetime = field(default_factory=utc_now)
+    # New fields must remain after every legacy positional field so older
+    # positional constructors preserve decision_id/created_at semantics.
+    max_fractional_notional_usd: float = 0.0
 
 
 @dataclass(frozen=True)

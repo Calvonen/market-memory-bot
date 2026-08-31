@@ -3,9 +3,10 @@ from __future__ import annotations
 import math
 import os
 import time
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
+from trading_system.brokers.etoro_demo import EtoroDemoBroker
 from trading_system.brokers.paper import PaperBroker
 from trading_system.etoro_instrument_resolver import EtoroInstrumentResolver
 from trading_system.etoro_market_data import EtoroMarketDataProvider
@@ -15,7 +16,7 @@ from trading_system.pipeline import PaperTradingPipeline
 from trading_system.release_repository import SupabaseReleaseRepository
 from trading_system.supabase_event_repository import SupabaseEventExpectationRepository
 from trading_system.tracked_event_paper_orchestration import run_approved_tracked_paper_once
-from trading_system.tracked_event_repository import SupabaseTrackedEventRepository
+from trading_system.tracked_event_repository import PersistentTrackedEvent, SupabaseTrackedEventRepository
 from trading_system.trading_task_repository import SupabaseTradingTaskRepository
 
 
@@ -23,6 +24,7 @@ DEFAULT_POLL_SECONDS = 30.0
 DEFAULT_LEASE_SECONDS = 120
 DEFAULT_BATCH_SIZE = 50
 DEFAULT_PORTFOLIO_LEASE_SECONDS = 900
+DEFAULT_BROKER_MODE = "internal"
 
 
 def _required_float(name: str) -> float:
@@ -81,6 +83,20 @@ def _positive_int(name: str, default: int) -> int:
         raise RuntimeError(f"{name} must be an integer") from exc
     if value < 1:
         raise RuntimeError(f"{name} must be positive")
+    return value
+
+
+def _broker_mode() -> str:
+    mode = os.environ.get("MARKETAI_PAPER_BROKER", DEFAULT_BROKER_MODE).strip().lower()
+    if mode not in {"internal", "etoro_demo"}:
+        raise RuntimeError("MARKETAI_PAPER_BROKER must be 'internal' or 'etoro_demo'")
+    return mode
+
+
+def _etoro_demo_amount_cap() -> float:
+    value = _required_float("MARKETAI_ETORO_DEMO_MAX_AMOUNT_USD")
+    if value <= 0:
+        raise RuntimeError("MARKETAI_ETORO_DEMO_MAX_AMOUNT_USD must be positive")
     return value
 
 
@@ -151,11 +167,7 @@ def _authoritative_paper_orders(
     repository: SupabasePaperTradeRepository,
     page_size: int,
 ) -> list[dict[str, Any]]:
-    """Return each durable PAPER order exactly once, including unreconciled completions."""
-    # A started attempt means broker submission may already have happened but its
-    # outcome is not yet authoritative. Treating it as zero exposure could permit
-    # another order against stale cash/position state, so the entire account path
-    # must stop until that attempt is explicitly reconciled.
+    """Return each durable PAPER order exactly once, including reconciled completions."""
     _assert_no_uncertain_broker_attempts(repository)
 
     orders_by_task: dict[str, dict[str, Any]] = {}
@@ -183,8 +195,6 @@ def _authoritative_paper_orders(
             break
         offset += page_size
 
-    # A completed broker attempt is already authoritative even if the worker died
-    # before terminal paper-run persistence. Fold those orders into risk state too.
     offset = 0
     while True:
         response = (
@@ -231,14 +241,25 @@ def _paper_portfolio_for_instrument(
     instrument_notional = 0.0
     for order in orders:
         order_instrument = str(order.get("instrument") or "").strip().upper()
-        try:
-            quantity = int(order.get("quantity"))
-            reference_price = float(order.get("reference_price"))
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError("executed PAPER order contains malformed sizing") from exc
-        if not order_instrument or quantity < 1 or not math.isfinite(reference_price) or reference_price <= 0:
-            raise RuntimeError("executed PAPER order contains invalid sizing identity")
-        notional = quantity * reference_price
+        raw_notional = order.get("notional_usd")
+        if raw_notional is not None:
+            try:
+                notional = float(raw_notional)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("executed PAPER order contains malformed broker notional") from exc
+            if not math.isfinite(notional) or notional <= 0:
+                raise RuntimeError("executed PAPER order contains invalid broker notional")
+        else:
+            try:
+                quantity = int(order.get("quantity"))
+                reference_price = float(order.get("reference_price"))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("executed PAPER order contains malformed sizing") from exc
+            if quantity < 1 or not math.isfinite(reference_price) or reference_price <= 0:
+                raise RuntimeError("executed PAPER order contains invalid sizing identity")
+            notional = quantity * reference_price
+        if not order_instrument:
+            raise RuntimeError("executed PAPER order contains blank instrument identity")
         total_notional += notional
         if order_instrument == target:
             instrument_notional += notional
@@ -276,8 +297,34 @@ def _release_portfolio_lease(repository: SupabasePaperTradeRepository, *, token:
     ).execute()
 
 
+def _etoro_demo_broker_for_event(
+    event: PersistentTrackedEvent,
+    *,
+    amount_cap_usd: float,
+) -> EtoroDemoBroker:
+    instrument_id = event.resolved_etoro_instrument_id
+    resolved_symbol = str(event.resolved_etoro_symbol or "").strip().upper()
+    event_symbol = event.instrument.strip().upper()
+    if instrument_id is None or instrument_id <= 0:
+        raise RuntimeError("tracked event has no persisted eToro instrument id")
+    if not resolved_symbol or resolved_symbol != event_symbol:
+        raise RuntimeError("tracked event persisted eToro symbol differs from canonical instrument")
+    return EtoroDemoBroker.from_env(
+        instrument_id=instrument_id,
+        amount_usd=amount_cap_usd,
+    )
+
+
+def _etoro_demo_portfolio(etoro_broker: EtoroDemoBroker) -> PortfolioState:
+    """Use the live Virtual Portfolio as the RiskEngine source of truth."""
+    return etoro_broker.risk_portfolio_state(
+        spread_pct=_required_float("MARKETAI_PAPER_SPREAD_PCT"),
+        daily_pnl=_optional_float("MARKETAI_PAPER_DAILY_PNL", 0.0),
+    )
+
+
 class _PortfolioLeasePaperRuns:
-    """Atomically renew account authority and reserve the broker attempt."""
+    """Atomically preflight, renew account authority and reserve the broker attempt."""
 
     def __init__(
         self,
@@ -285,10 +332,14 @@ class _PortfolioLeasePaperRuns:
         *,
         portfolio_token: str,
         portfolio_lease_seconds: int,
+        preflight: Callable[[], None] | None = None,
+        etoro_broker: EtoroDemoBroker | None = None,
     ) -> None:
         self._repository = repository
         self._portfolio_token = portfolio_token
         self._portfolio_lease_seconds = portfolio_lease_seconds
+        self._preflight = preflight
+        self._etoro_broker = etoro_broker
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._repository, name)
@@ -306,6 +357,8 @@ class _PortfolioLeasePaperRuns:
         strategy_payload: dict[str, Any],
         risk_payload: dict[str, Any],
     ) -> dict[str, Any]:
+        if self._preflight is not None:
+            self._preflight()
         response = self._repository.client.rpc(
             "begin_event_paper_broker_attempt_with_portfolio_lease",
             {
@@ -327,6 +380,43 @@ class _PortfolioLeasePaperRuns:
             raise RuntimeError("atomic PAPER portfolio/broker attempt returned no state")
         return rows[0]
 
+    def complete_broker_attempt(
+        self,
+        *,
+        task_id: str,
+        execution_token: str,
+        order_payload: dict[str, Any],
+    ) -> None:
+        payload = dict(order_payload)
+        if self._etoro_broker is not None:
+            notional = self._etoro_broker.last_reconciled_notional_usd
+            position_id = self._etoro_broker.last_reconciled_position_id
+            if notional is None or not math.isfinite(notional) or notional <= 0 or not position_id:
+                raise RuntimeError("eToro broker completion is missing reconciled fill identity")
+            payload["notional_usd"] = notional
+            payload["broker_position_id"] = position_id
+            payload["status"] = "ETORO_DEMO_FILLED"
+
+        complete = getattr(self._repository, "complete_broker_attempt", None)
+        if callable(complete):
+            complete(
+                task_id=task_id,
+                execution_token=execution_token,
+                order_payload=payload,
+            )
+            return
+        response = self._repository.client.rpc(
+            "complete_event_paper_broker_attempt",
+            {
+                "input_task_id": task_id,
+                "input_execution_token": execution_token,
+                "input_order_payload": payload,
+            },
+        ).execute()
+        rows = response.data or []
+        if not rows:
+            raise RuntimeError("canonical broker execution completion returned no state")
+
 
 def run_forever() -> None:
     poll_seconds = _positive_float("MARKETAI_APPROVED_PAPER_POLL_SECONDS", DEFAULT_POLL_SECONDS)
@@ -335,6 +425,8 @@ def run_forever() -> None:
     portfolio_lease_seconds = _positive_int(
         "MARKETAI_PAPER_PORTFOLIO_LEASE_SECONDS", DEFAULT_PORTFOLIO_LEASE_SECONDS
     )
+    broker_mode = _broker_mode()
+    etoro_amount_cap = _etoro_demo_amount_cap() if broker_mode == "etoro_demo" else None
 
     tracked_events = SupabaseTrackedEventRepository.from_env()
     expectations = SupabaseEventExpectationRepository.from_env()
@@ -353,50 +445,72 @@ def run_forever() -> None:
                 if not task_id or not tracked_event_id or not instrument:
                     raise RuntimeError("approved PAPER task discovery returned blank identity")
 
-                portfolio_token = str(uuid4())
-                if not _claim_portfolio_lease(
-                    paper_runs,
-                    token=portfolio_token,
-                    lease_seconds=portfolio_lease_seconds,
-                ):
-                    continue
                 try:
-                    portfolio = _paper_portfolio_for_instrument(
+                    etoro_broker: EtoroDemoBroker | None = None
+                    if broker_mode == "etoro_demo":
+                        event = tracked_events.get(tracked_event_id)
+                        if event is None:
+                            raise RuntimeError("approved PAPER task tracked event is missing")
+                        if event.instrument.strip().upper() != instrument.upper():
+                            raise RuntimeError("approved PAPER task instrument differs from tracked event")
+                        etoro_broker = _etoro_demo_broker_for_event(
+                            event,
+                            amount_cap_usd=float(etoro_amount_cap),
+                        )
+                        broker = etoro_broker
+                    else:
+                        broker = PaperBroker()
+
+                    portfolio_token = str(uuid4())
+                    if not _claim_portfolio_lease(
                         paper_runs,
-                        instrument=instrument,
-                        page_size=batch_size,
-                    )
-                    lease_aware_runs = _PortfolioLeasePaperRuns(
-                        paper_runs,
-                        portfolio_token=portfolio_token,
-                        portfolio_lease_seconds=portfolio_lease_seconds,
-                    )
-                    result = run_approved_tracked_paper_once(
-                        tracked_event_id=tracked_event_id,
-                        task_id=task_id,
-                        tracked_events=tracked_events,
-                        expectations=expectations,
-                        releases=releases,
-                        trading_tasks=trading_tasks,
-                        paper_runs=lease_aware_runs,
-                        resolver=resolver,
-                        portfolio=portfolio,
-                        lease_seconds=lease_seconds,
-                        pipeline=PaperTradingPipeline(broker=PaperBroker()),
-                    )
-                    print(
-                        f"approved-paper task={task_id} event={tracked_event_id} "
-                        f"status={result.status} message={result.message}",
-                        flush=True,
-                    )
+                        token=portfolio_token,
+                        lease_seconds=portfolio_lease_seconds,
+                    ):
+                        continue
+                    try:
+                        _assert_no_uncertain_broker_attempts(paper_runs)
+                        if etoro_broker is not None:
+                            portfolio = _etoro_demo_portfolio(etoro_broker)
+                        else:
+                            portfolio = _paper_portfolio_for_instrument(
+                                paper_runs,
+                                instrument=instrument,
+                                page_size=batch_size,
+                            )
+                        lease_aware_runs = _PortfolioLeasePaperRuns(
+                            paper_runs,
+                            portfolio_token=portfolio_token,
+                            portfolio_lease_seconds=portfolio_lease_seconds,
+                            preflight=(etoro_broker.verify_demo_access if etoro_broker is not None else None),
+                            etoro_broker=etoro_broker,
+                        )
+                        result = run_approved_tracked_paper_once(
+                            tracked_event_id=tracked_event_id,
+                            task_id=task_id,
+                            tracked_events=tracked_events,
+                            expectations=expectations,
+                            releases=releases,
+                            trading_tasks=trading_tasks,
+                            paper_runs=lease_aware_runs,
+                            resolver=resolver,
+                            portfolio=portfolio,
+                            lease_seconds=lease_seconds,
+                            pipeline=PaperTradingPipeline(broker=broker),
+                        )
+                        print(
+                            f"approved-paper broker={broker_mode} task={task_id} event={tracked_event_id} "
+                            f"status={result.status} message={result.message}",
+                            flush=True,
+                        )
+                    finally:
+                        _release_portfolio_lease(paper_runs, token=portfolio_token)
                 except Exception as exc:
                     print(
-                        f"approved-paper retryable failure task={task_id} "
+                        f"approved-paper retryable failure broker={broker_mode} task={task_id} "
                         f"event={tracked_event_id}: {exc}",
                         flush=True,
                     )
-                finally:
-                    _release_portfolio_lease(paper_runs, token=portfolio_token)
         except Exception as exc:
             print(f"approved-paper discovery failure: {exc}", flush=True)
 
