@@ -35,3 +35,11 @@ def test_uncertain_past_expectations_remain_visible_until_status_is_known():
     assert "if (!status || status.statusError) return true;" in source
     assert "return status.run?.status === 'waiting_confirmation';" in source
     assert "for (const event of visibleEvents ?? [])" in source
+
+
+def test_canonical_tracked_card_preserves_expectation_navigation():
+    tracked = TRACKED_SECTION_SOURCE.read_text(encoding="utf-8")
+
+    assert "pathname: '/events/[eventId]'" in tracked
+    assert "params: { eventId: `tracked:${event.event_id}` }" in tracked
+    assert "Odotukset ja strategia →" in tracked
