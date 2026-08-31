@@ -315,6 +315,14 @@ def _etoro_demo_broker_for_event(
     )
 
 
+def _etoro_demo_portfolio(etoro_broker: EtoroDemoBroker) -> PortfolioState:
+    """Use the live Virtual Portfolio as the RiskEngine source of truth."""
+    return etoro_broker.risk_portfolio_state(
+        spread_pct=_required_float("MARKETAI_PAPER_SPREAD_PCT"),
+        daily_pnl=_optional_float("MARKETAI_PAPER_DAILY_PNL", 0.0),
+    )
+
+
 class _PortfolioLeasePaperRuns:
     """Atomically preflight, renew account authority and reserve the broker attempt."""
 
@@ -349,9 +357,6 @@ class _PortfolioLeasePaperRuns:
         strategy_payload: dict[str, Any],
         risk_payload: dict[str, Any],
     ) -> dict[str, Any]:
-        # This is the last action before the durable `started` reservation. For
-        # eToro, credential/demo access is therefore rechecked for every actual
-        # execution attempt rather than cached for the worker lifetime.
         if self._preflight is not None:
             self._preflight()
         response = self._repository.client.rpc(
@@ -464,11 +469,15 @@ def run_forever() -> None:
                     ):
                         continue
                     try:
-                        portfolio = _paper_portfolio_for_instrument(
-                            paper_runs,
-                            instrument=instrument,
-                            page_size=batch_size,
-                        )
+                        _assert_no_uncertain_broker_attempts(paper_runs)
+                        if etoro_broker is not None:
+                            portfolio = _etoro_demo_portfolio(etoro_broker)
+                        else:
+                            portfolio = _paper_portfolio_for_instrument(
+                                paper_runs,
+                                instrument=instrument,
+                                page_size=batch_size,
+                            )
                         lease_aware_runs = _PortfolioLeasePaperRuns(
                             paper_runs,
                             portfolio_token=portfolio_token,
