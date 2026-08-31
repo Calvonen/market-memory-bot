@@ -132,6 +132,7 @@ class TradeProposal:
     candidate: TradeCandidate
     risk: RiskDecision
     mode: TradingMode = TradingMode.PAPER
+    strategy_decision: StrategyDecision | None = None
     proposal_id: str = field(default_factory=new_id)
     created_at: datetime = field(default_factory=utc_now)
 
