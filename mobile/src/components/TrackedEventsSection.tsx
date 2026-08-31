@@ -50,7 +50,11 @@ export function TrackedEventsSection({
   const load = useCallback(() => {
     const loadId = ++latestLoadId.current;
     setError(null);
-    return getTrackedEvents()
+    // Home needs the complete active snapshot up to the backend's explicit
+    // list cap, not the service helper's small display default. Otherwise an
+    // active workflow can lose both its canonical card and its shell simply
+    // because it happened to rank after the first 20 rows.
+    return getTrackedEvents('active', 100)
       .then((list) => {
         if (loadId !== latestLoadId.current) return;
         setEvents(list);
@@ -116,9 +120,16 @@ export function TrackedEventsSection({
 
 export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
   const scheduleText = formatTrackedEventSchedule(event);
-  const expectationEventId = event.calendar_event_id
-    ? `calendar:${event.calendar_event_id}`
-    : `tracked:${event.event_id}`;
+  // Release-shell expectations are currently created only for earnings.
+  // Calendar-backed earnings keep the calendar identity; calendar-less
+  // earnings use the tracked identity. Other tracked kinds own no expectation
+  // and therefore must not get a fabricated /events/... link that 404s.
+  const expectationEventId =
+    event.kind === 'earnings'
+      ? event.calendar_event_id
+        ? `calendar:${event.calendar_event_id}`
+        : `tracked:${event.event_id}`
+      : null;
 
   return (
     <View style={styles.eventCard}>
@@ -132,15 +143,17 @@ export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
         <Text style={styles.dateText}>{scheduleText}</Text>
       </View>
 
-      <Link
-        href={{
-          pathname: '/events/[eventId]',
-          params: { eventId: expectationEventId },
-        }}
-        style={styles.expectationLink}
-      >
-        Odotukset ja strategia →
-      </Link>
+      {expectationEventId ? (
+        <Link
+          href={{
+            pathname: '/events/[eventId]',
+            params: { eventId: expectationEventId },
+          }}
+          style={styles.expectationLink}
+        >
+          Odotukset ja strategia →
+        </Link>
+      ) : null}
 
       <TrackedEventDetails event={event} />
     </View>
@@ -358,9 +371,6 @@ function TrackedEventResult({ state }: { state: LatestReactionState }) {
   );
 }
 
-// Only schema_version 1 is understood - an unrecognized/future version falls
-// back to the "not recorded" copy rather than rendering fields that may no
-// longer mean what their names say.
 function formatTrackingConfigSnapshot(
   snapshot: TrackedMarketEvent['tracking_config_snapshot'],
 ): string {
@@ -383,18 +393,12 @@ function formatPersistedNumber(value: number): string {
   return String(value);
 }
 
-// event_time_status is descriptive event metadata, not a trading threshold
-// (see docs/tracked_event_runtime.md) - the label must never read as more
-// certain than the backend actually knows the timing to be.
 const EVENT_TIME_STATUS_LABELS: Record<TrackedMarketEvent['event_time_status'], string> = {
   confirmed: 'vahvistettu',
   estimated: 'arvioitu',
   unknown: 'aika epävarma',
 };
 
-// Local device time, not the backend host's - same principle as Home's own
-// date formatting (see app/(tabs)/index.tsx). Falls back to the raw
-// event_at string rather than crashing or hiding the row on an invalid date.
 function formatTrackedEventSchedule(event: TrackedMarketEvent): string {
   const timeStatusLabel = EVENT_TIME_STATUS_LABELS[event.event_time_status] ?? 'aika epävarma';
   const eventAt = new Date(event.event_at);
@@ -409,8 +413,6 @@ function formatTrackedEventSchedule(event: TrackedMarketEvent): string {
 
 const MAX_FAILURE_REASON_LENGTH = 180;
 
-// last_error is a raw backend/worker error string - never render it
-// unbounded, and never outside the 'failed' status it actually describes.
 function formatFailureReason(lastError: string | null): string {
   const trimmed = (lastError ?? '').trim();
   if (!trimmed) return 'Syytä ei ole tiedossa.';
