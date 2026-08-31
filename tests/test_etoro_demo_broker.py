@@ -70,6 +70,10 @@ def _portfolio(position_id: str = "p-123", *, amount: float = 500.0) -> dict:
 
 
 class EtoroDemoBrokerTests(unittest.TestCase):
+    def test_declares_fractional_sizing_capability(self) -> None:
+        broker = EtoroDemoBroker(api_key="api", user_key="user", instrument_id=100000)
+        self.assertIs(broker.supports_fractional_sizing, True)
+
     def test_preflight_uses_demo_portfolio_path(self) -> None:
         calls = []
 
