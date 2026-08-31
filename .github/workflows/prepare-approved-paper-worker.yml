@@ -28,7 +28,7 @@ jobs:
       - name: Checkout exact commit
         uses: actions/checkout@v4
 
-      - name: Verify deployed runtime SHA under deploy lock
+      - name: Verify and install under deploy lock
         env:
           DEPLOY_SHA: ${{ github.sha }}
         run: |
@@ -43,35 +43,38 @@ jobs:
             exit 1
           fi
 
-          test -f "$STATE_FILE" || {
-            echo "::error::No successfully deployed backend SHA has been recorded."
-            exit 1
-          }
-          DEPLOYED_SHA="$(tr -d '[:space:]' < "$STATE_FILE")"
-          if [ "$DEPLOYED_SHA" != "$DEPLOY_SHA" ]; then
-            echo "::error::Readiness commit ${DEPLOY_SHA} does not match deployed backend ${DEPLOYED_SHA}."
-            exit 1
-          fi
+          verify_runtime_sha() {
+            test -f "$STATE_FILE" || {
+              echo "::error::No successfully deployed backend SHA has been recorded."
+              return 1
+            }
+            DEPLOYED_SHA="$(tr -d '[:space:]' < "$STATE_FILE")"
+            if [ "$DEPLOYED_SHA" != "$DEPLOY_SHA" ]; then
+              echo "::error::Readiness commit ${DEPLOY_SHA} does not match deployed backend ${DEPLOYED_SHA}."
+              return 1
+            fi
 
-          cd "$RUNTIME_DIR"
-          RUNTIME_SHA="$(git rev-parse HEAD)"
-          if [ "$RUNTIME_SHA" != "$DEPLOY_SHA" ]; then
-            echo "::error::Production runtime checkout ${RUNTIME_SHA} does not match readiness commit ${DEPLOY_SHA}."
-            exit 1
-          fi
-          test "$(git branch --show-current)" = "feature/trading-system-foundation" || {
-            echo "::error::Production runtime is not on feature/trading-system-foundation."
-            exit 1
-          }
-          test -z "$(git status --porcelain --untracked-files=no)" || {
-            echo "::error::Production runtime has tracked working-tree changes."
-            exit 1
+            cd "$RUNTIME_DIR"
+            RUNTIME_SHA="$(git rev-parse HEAD)"
+            if [ "$RUNTIME_SHA" != "$DEPLOY_SHA" ]; then
+              echo "::error::Production runtime checkout ${RUNTIME_SHA} does not match readiness commit ${DEPLOY_SHA}."
+              return 1
+            fi
+            test "$(git branch --show-current)" = "feature/trading-system-foundation" || {
+              echo "::error::Production runtime is not on feature/trading-system-foundation."
+              return 1
+            }
+            test -z "$(git status --porcelain --untracked-files=no)" || {
+              echo "::error::Production runtime has tracked working-tree changes."
+              return 1
+            }
           }
 
-          echo "Production runtime SHA ${RUNTIME_SHA} is the exact reviewed readiness commit."
+          # Hold FD 200 for this entire shell: runtime verification, production
+          # preflight and unit installation all happen while the deploy/OTA lock
+          # is owned. Re-check immediately before and after installation as well.
+          verify_runtime_sha
 
-      - name: Verify production configuration, execution schema and eToro portfolio
-        run: |
           set -a
           # shellcheck disable=SC1091
           source /home/marko/marketai/.env
@@ -92,8 +95,8 @@ jobs:
           test -n "${ETORO_API_KEY:-}" || { echo "::error::ETORO_API_KEY is required."; exit 1; }
           test -n "${ETORO_USER_KEY:-}" || { echo "::error::ETORO_USER_KEY is required."; exit 1; }
 
-          cd /home/marko/marketai-repo
-          /home/marko/marketai-repo/.venv/bin/python - <<'PY'
+          cd "$RUNTIME_DIR"
+          "$RUNTIME_DIR/.venv/bin/python" - <<'PY'
           import math
           import os
 
@@ -136,7 +139,6 @@ jobs:
           tracked = SupabaseTrackedEventRepository.from_env()
           client = runs.client
 
-          # Verify the final #232 table/column contract, not just table existence.
           tasks.client.table("trading_tasks").select("id,approved_expectation_version").limit(1).execute()
           client.table("event_paper_trade_event_claims").select("event_id,task_id,claim_token,lease_expires_at").limit(1).execute()
           client.table("event_paper_trade_runs").select("id,task_id,paper_order").limit(1).execute()
@@ -145,8 +147,6 @@ jobs:
           ).limit(1).execute()
           client.table("paper_portfolio_execution_lease").select("singleton,lease_token,lease_expires_at").limit(1).execute()
 
-          # Required service-role RPC signatures must be present and callable. Invalid
-          # identities deliberately stop before any mutation and give a stable marker.
           expect_rpc_error(
               client,
               "claim_paper_portfolio_execution_lease",
@@ -201,8 +201,6 @@ jobs:
               "paper_portfolio_lease_identity_invalid",
           )
 
-          # Final 20260903160000 privilege boundary: service_role must not be able
-          # to bypass the singleton portfolio lease through the older primitive.
           expect_rpc_inaccessible(
               client,
               "begin_event_paper_broker_attempt",
@@ -219,9 +217,6 @@ jobs:
               },
           )
 
-          # Use a real persisted canonical eToro identity. No synthetic instrument ID
-          # is allowed in production readiness. Exercise the same authoritative demo
-          # portfolio parser that RiskEngine will use before an approved submission.
           event = next(
               (
                   candidate
@@ -250,15 +245,13 @@ jobs:
           )
           PY
 
-      - name: Install worker unit without activating execution
-        run: |
+          verify_runtime_sha
+
           sudo /usr/bin/install -m 0644 \
-            /home/marko/marketai-repo/deploy/systemd/marketai-approved-paper.service \
+            "$RUNTIME_DIR/deploy/systemd/marketai-approved-paper.service" \
             /etc/systemd/system/marketai-approved-paper.service
           sudo /usr/bin/systemctl daemon-reload
 
-          # Readiness must leave no boot-time or current execution path behind.
-          # A disable failure is fatal; inactivity alone is not sufficient.
           if ! sudo /usr/bin/systemctl disable marketai-approved-paper.service; then
             echo "::error::Failed to disable marketai-approved-paper.service."
             exit 1
@@ -273,4 +266,5 @@ jobs:
             exit 1
           fi
 
-          echo "marketai-approved-paper.service installed, disabled and inactive"
+          verify_runtime_sha
+          echo "marketai-approved-paper.service installed, disabled and inactive for ${DEPLOY_SHA}"
