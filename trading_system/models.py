@@ -122,11 +122,11 @@ class RiskDecision:
     max_risk_amount: float = 0.0
     max_position_value: float = 0.0
     max_quantity: int = 0
-    # Canonical notional approved by both the position-value and stop-risk
-    # ceilings. Amount/fractional brokers must use this instead of inferring a
-    # notional from the integer quantity ceiling.
-    max_fractional_notional_usd: float = 0.0
     reward_risk: float | None = None
+    # Appended after the legacy positional fields so older call sites retain
+    # their constructor meaning while amount/fractional brokers get an exact
+    # stop-risk-and-position-value-bounded USD authorization.
+    max_fractional_notional_usd: float = 0.0
     decision_id: str = field(default_factory=new_id)
     created_at: datetime = field(default_factory=utc_now)
 
