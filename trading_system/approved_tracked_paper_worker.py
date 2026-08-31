@@ -130,11 +130,34 @@ def _approved_task_rows(
         offset += page_size
 
 
+def _assert_no_uncertain_broker_attempts(repository: SupabasePaperTradeRepository) -> None:
+    response = (
+        repository.client.table("event_paper_broker_attempts")
+        .select("task_id,event_id,started_at")
+        .eq("status", "started")
+        .limit(1)
+        .execute()
+    )
+    rows = response.data or []
+    if not isinstance(rows, list):
+        raise RuntimeError("PAPER uncertain-attempt read returned malformed data")
+    if rows:
+        raise RuntimeError(
+            "PAPER portfolio execution blocked by unresolved broker attempt with uncertain outcome"
+        )
+
+
 def _authoritative_paper_orders(
     repository: SupabasePaperTradeRepository,
     page_size: int,
 ) -> list[dict[str, Any]]:
     """Return each durable PAPER order exactly once, including unreconciled completions."""
+    # A started attempt means broker submission may already have happened but its
+    # outcome is not yet authoritative. Treating it as zero exposure could permit
+    # another order against stale cash/position state, so the entire account path
+    # must stop until that attempt is explicitly reconciled.
+    _assert_no_uncertain_broker_attempts(repository)
+
     orders_by_task: dict[str, dict[str, Any]] = {}
     offset = 0
     while True:
