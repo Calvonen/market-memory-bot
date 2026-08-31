@@ -4,7 +4,7 @@ from dataclasses import replace
 import unittest
 
 from trading_system.brokers.etoro_demo import EtoroDemoBroker
-from trading_system.models import Direction, RiskStatus, TradeCandidate
+from trading_system.models import Direction, PortfolioState, RiskStatus, TradeCandidate
 from trading_system.risk import RiskEngine
 
 
@@ -89,6 +89,10 @@ def _broker_for_pnl(pnl: dict) -> EtoroDemoBroker:
 
 
 class EtoroDemoPnlAccountStateTests(unittest.TestCase):
+    def test_legacy_internal_portfolio_default_remains_known_zero(self) -> None:
+        state = PortfolioState(equity=10_000.0, cash=8_000.0, open_positions=0)
+        self.assertEqual(state.daily_pnl, 0.0)
+
     def test_risk_state_uses_demo_pnl_for_equity_and_cash_without_relabeling_unrealized_pnl(self) -> None:
         calls: list[str] = []
 
