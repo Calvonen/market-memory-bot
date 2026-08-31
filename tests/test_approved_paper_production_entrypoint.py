@@ -7,6 +7,8 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKER = ROOT / "trading_system" / "approved_tracked_paper_worker.py"
 SERVICE = ROOT / "deploy" / "systemd" / "marketai-approved-paper.service"
+READINESS = ROOT / ".github" / "workflows" / "prepare-approved-paper-worker.yml"
+START_HELPER = ROOT / "scripts" / "start_approved_paper_worker.sh"
 AUDIT_MIGRATION = ROOT / "supabase" / "migrations" / "20260903157000_broker_attempt_decision_audit.sql"
 ATOMIC_MIGRATION = ROOT / "supabase" / "migrations" / "20260903159000_atomic_portfolio_attempt_reservation.sql"
 AUTHORITY_MIGRATION = ROOT / "supabase" / "migrations" / "20260903160000_require_portfolio_lease_for_broker_attempt.sql"
@@ -17,6 +19,8 @@ class ApprovedPaperProductionEntrypointTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.worker = WORKER.read_text(encoding="utf-8")
         cls.service = SERVICE.read_text(encoding="utf-8")
+        cls.readiness = READINESS.read_text(encoding="utf-8")
+        cls.start_helper = START_HELPER.read_text(encoding="utf-8")
         cls.audit_sql = AUDIT_MIGRATION.read_text(encoding="utf-8")
         cls.atomic_sql = ATOMIC_MIGRATION.read_text(encoding="utf-8")
         cls.authority_sql = AUTHORITY_MIGRATION.read_text(encoding="utf-8")
@@ -108,6 +112,23 @@ class ApprovedPaperProductionEntrypointTests(unittest.TestCase):
         )
         self.assertNotIn("EnvironmentFile=/home/marko/marketai/.env", self.service)
         self.assertIn("Restart=no", self.service)
+
+    def test_readiness_preflight_cannot_inherit_marketai_runner_environment(self) -> None:
+        self.assertIn("env -i \\", self.readiness)
+        self.assertIn('PREPARED_ENV_TMP="$PREPARED_ENV_TMP"', self.readiness)
+        clean_env = self.readiness.index("env -i \\")
+        source_snapshot = self.readiness.index('source "$PREPARED_ENV_TMP"', clean_env)
+        broker_check = self.readiness.index('MARKETAI_PAPER_BROKER:-', source_snapshot)
+        self.assertLess(clean_env, source_snapshot)
+        self.assertLess(source_snapshot, broker_check)
+
+    def test_start_helper_rejects_dropins_and_extra_environment_files(self) -> None:
+        self.assertIn("--property=FragmentPath --value", self.start_helper)
+        self.assertIn("--property=DropInPaths --value", self.start_helper)
+        self.assertIn("unexpected systemd drop-ins", self.start_helper)
+        self.assertIn("--property=EnvironmentFiles --value", self.start_helper)
+        self.assertIn("effective EnvironmentFiles must contain exactly the prepared snapshot", self.start_helper)
+        self.assertNotIn('grep -Fq "$PREPARED_ENV_FILE"', self.start_helper)
 
     def test_broker_attempt_persists_strategy_and_risk_before_io(self) -> None:
         self.assertIn("strategy_payload jsonb", self.audit_sql)
