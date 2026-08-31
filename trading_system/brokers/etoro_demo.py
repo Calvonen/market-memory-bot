@@ -18,6 +18,7 @@ class EtoroDemoBroker(Broker):
     supports_fractional_sizing = True
 
     DEMO_PORTFOLIO_URL = "https://public-api.etoro.com/api/v1/trading/info/demo/portfolio"
+    DEMO_PNL_URL = "https://public-api.etoro.com/api/v1/trading/info/demo/pnl"
     DEMO_ORDERS_URL = "https://public-api.etoro.com/api/v2/trading/execution/demo/orders"
 
     def __init__(
@@ -79,25 +80,31 @@ class EtoroDemoBroker(Broker):
             "Content-Type": "application/json",
         }
 
-    def _get_demo_portfolio(self) -> dict[str, Any]:
+    def _get_demo_json(self, url: str, *, label: str) -> dict[str, Any]:
         request_id = str(uuid.uuid4())
         try:
             response = self._http_get(
-                self.DEMO_PORTFOLIO_URL,
+                url,
                 headers=self._headers(request_id),
                 timeout=self.timeout_seconds,
             )
         except requests.RequestException as exc:
-            raise RuntimeError(f"eToro demo portfolio check failed: {exc}") from exc
+            raise RuntimeError(f"eToro demo {label} check failed: {exc}") from exc
         if not response.ok:
-            raise RuntimeError(f"eToro demo portfolio HTTP {response.status_code}: {response.text[:500]}")
+            raise RuntimeError(f"eToro demo {label} HTTP {response.status_code}: {response.text[:500]}")
         try:
             body = response.json()
         except ValueError as exc:
-            raise RuntimeError("eToro demo portfolio returned invalid JSON") from exc
+            raise RuntimeError(f"eToro demo {label} returned invalid JSON") from exc
         if not isinstance(body, dict):
-            raise RuntimeError("eToro demo portfolio returned an invalid response")
+            raise RuntimeError(f"eToro demo {label} returned an invalid response")
         return body
+
+    def _get_demo_portfolio(self) -> dict[str, Any]:
+        return self._get_demo_json(self.DEMO_PORTFOLIO_URL, label="portfolio")
+
+    def _get_demo_pnl(self) -> dict[str, Any]:
+        return self._get_demo_json(self.DEMO_PNL_URL, label="pnl")
 
     def verify_demo_access(self) -> None:
         self._get_demo_portfolio()
@@ -161,6 +168,153 @@ class EtoroDemoBroker(Broker):
             return value
         raise RuntimeError(f"eToro demo portfolio is missing authoritative account field: {names[0]}")
 
+    @staticmethod
+    def _required_number(row: dict[str, Any], name: str, *, context: str) -> float:
+        raw = row.get(name)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"eToro demo pnl {context} has invalid {name}") from exc
+        if not math.isfinite(value):
+            raise RuntimeError(f"eToro demo pnl {context} has non-finite {name}")
+        return value
+
+    @classmethod
+    def _required_nonnegative_number(cls, row: dict[str, Any], name: str, *, context: str) -> float:
+        value = cls._required_number(row, name, context=context)
+        if value < 0:
+            raise RuntimeError(f"eToro demo pnl {context} has negative {name}")
+        return value
+
+    @staticmethod
+    def _required_rows(row: dict[str, Any], name: str, *, context: str) -> list[dict[str, Any]]:
+        value = row.get(name)
+        if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+            raise RuntimeError(f"eToro demo pnl {context} is missing valid {name}")
+        return value
+
+    @classmethod
+    def _pnl_client_portfolio(cls, body: dict[str, Any]) -> dict[str, Any]:
+        for container in cls._portfolio_containers(body):
+            client = container.get("clientPortfolio")
+            if isinstance(client, dict):
+                return client
+        if isinstance(body.get("credit"), (int, float, str)):
+            return body
+        keys = sorted({key for container in cls._portfolio_containers(body) for key in container.keys()})
+        raise RuntimeError(
+            "eToro demo pnl is missing clientPortfolio; available response keys=" + ",".join(keys)
+        )
+
+    @classmethod
+    def _nested_unrealized_pnl(cls, row: dict[str, Any], *, context: str) -> float:
+        payload = row.get("unrealizedPnL")
+        if isinstance(payload, dict):
+            raw = cls._field(payload, "pnL", "pnl", "PnL")
+        else:
+            raw = payload
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"eToro demo pnl {context} has invalid unrealizedPnL") from exc
+        if not math.isfinite(value):
+            raise RuntimeError(f"eToro demo pnl {context} has non-finite unrealizedPnL")
+        return value
+
+    @classmethod
+    def _pnl_account_state(cls, body: dict[str, Any]) -> tuple[float, float, float | None]:
+        client = cls._pnl_client_portfolio(body)
+        credit = cls._required_number(client, "credit", context="clientPortfolio")
+        positions = cls._required_rows(client, "positions", context="clientPortfolio")
+        mirrors = cls._required_rows(client, "mirrors", context="clientPortfolio")
+        orders_for_open = cls._required_rows(client, "ordersForOpen", context="clientPortfolio")
+        orders = cls._required_rows(client, "orders", context="clientPortfolio")
+
+        manual_open_orders: list[dict[str, Any]] = []
+        for order in orders_for_open:
+            raw_mirror = cls._field(order, "mirrorID", "mirrorId")
+            try:
+                mirror_id = int(raw_mirror)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("eToro demo pnl orderForOpen has invalid mirrorID") from exc
+            if mirror_id == 0:
+                manual_open_orders.append(order)
+
+        manual_open_amount = sum(
+            cls._required_nonnegative_number(order, "amount", context="orderForOpen")
+            for order in manual_open_orders
+        )
+        pending_order_amount = sum(
+            cls._required_nonnegative_number(order, "amount", context="order") for order in orders
+        )
+        cash = credit - manual_open_amount - pending_order_amount
+
+        position_amount = sum(
+            cls._required_nonnegative_number(position, "amount", context="position")
+            for position in positions
+        )
+        mirror_position_amount = 0.0
+        mirror_available_adjusted = 0.0
+        mirror_unrealized_pnl = 0.0
+        mirror_closed_profit = 0.0
+        for mirror in mirrors:
+            mirror_positions = cls._required_rows(mirror, "positions", context="mirror")
+            closed_profit = cls._required_number(mirror, "closedPositionsNetProfit", context="mirror")
+            mirror_closed_profit += closed_profit
+            mirror_available_adjusted += (
+                cls._required_nonnegative_number(mirror, "availableAmount", context="mirror") - closed_profit
+            )
+            for position in mirror_positions:
+                mirror_position_amount += cls._required_nonnegative_number(
+                    position, "amount", context="mirror position"
+                )
+                mirror_unrealized_pnl += cls._nested_unrealized_pnl(position, context="mirror position")
+
+        manual_external_costs = sum(
+            cls._required_nonnegative_number(order, "totalExternalCosts", context="orderForOpen")
+            for order in manual_open_orders
+        )
+        total_invested = (
+            position_amount
+            + mirror_position_amount
+            + mirror_available_adjusted
+            + manual_open_amount
+            + pending_order_amount
+            + manual_external_costs
+        )
+
+        raw_total_unrealized = cls._field(client, "unrealizedPnL", "unrealizedPnl")
+        if raw_total_unrealized not in (None, "") and not isinstance(raw_total_unrealized, dict):
+            try:
+                unrealized_pnl = float(raw_total_unrealized)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("eToro demo pnl clientPortfolio has invalid unrealizedPnL") from exc
+            if not math.isfinite(unrealized_pnl):
+                raise RuntimeError("eToro demo pnl clientPortfolio has non-finite unrealizedPnL")
+        else:
+            unrealized_pnl = (
+                sum(cls._nested_unrealized_pnl(position, context="position") for position in positions)
+                + mirror_unrealized_pnl
+                + mirror_closed_profit
+            )
+
+        equity = cash + total_invested + unrealized_pnl
+        if equity <= 0 or cash < 0:
+            raise RuntimeError("eToro demo pnl returned invalid derived live equity/cash")
+
+        raw_daily_pnl = cls._field(client, "dailyPnl", "dailyPnL", "DailyPnl", "DailyPnL")
+        if raw_daily_pnl is None:
+            daily_pnl = None
+        else:
+            try:
+                daily_pnl = float(raw_daily_pnl)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("eToro demo pnl clientPortfolio has invalid dailyPnl") from exc
+            if not math.isfinite(daily_pnl):
+                raise RuntimeError("eToro demo pnl clientPortfolio has non-finite dailyPnl")
+
+        return equity, cash, daily_pnl
+
     @classmethod
     def _position_notional(cls, position: dict[str, Any]) -> float:
         raw_amount = cls._field(
@@ -183,38 +337,16 @@ class EtoroDemoBroker(Broker):
         return notional
 
     def risk_portfolio_state(self, *, spread_pct: float, daily_pnl: float | None = None) -> PortfolioState:
-        """Build RiskEngine state only from the current Virtual Portfolio snapshot."""
+        """Build RiskEngine state from current demo portfolio + documented P&L data."""
         if not math.isfinite(spread_pct) or spread_pct < 0:
             raise ValueError("spread_pct must be finite and non-negative")
         # Kept only for call-site compatibility. A caller-supplied value must never
         # authorize execution because it can be stale relative to the demo account.
         _ = daily_pnl
-        body = self._get_demo_portfolio()
-        equity = self._portfolio_scalar(body, "equity", "Equity", "totalEquity", "netLiquidationValue", "balance")
-        cash = self._portfolio_scalar(
-            body,
-            "cash",
-            "Cash",
-            "availableCash",
-            "availableBalance",
-            "AvailableBalance",
-            "cashAvailable",
-            "freeCash",
-        )
-        current_daily_pnl = self._portfolio_scalar(
-            body,
-            "dailyPnl",
-            "dailyPnL",
-            "DailyPnl",
-            "DailyPnL",
-            "dailyProfitLoss",
-            "DailyProfitLoss",
-            "profitLossToday",
-            "pnlToday",
-        )
-        if equity <= 0 or cash < 0:
-            raise RuntimeError("eToro demo portfolio returned invalid live equity/cash")
-        positions = self._portfolio_positions(body)
+        portfolio_body = self._get_demo_portfolio()
+        pnl_body = self._get_demo_pnl()
+        equity, cash, authoritative_daily_pnl = self._pnl_account_state(pnl_body)
+        positions = self._portfolio_positions(portfolio_body)
         instrument_notional = 0.0
         for position in positions:
             raw_instrument_id = self._field(position, "instrumentId", "instrumentID", "InstrumentID")
@@ -230,7 +362,7 @@ class EtoroDemoBroker(Broker):
             cash=cash,
             open_positions=len(positions),
             instrument_exposure_pct=(instrument_notional / equity) * 100.0,
-            daily_pnl=current_daily_pnl,
+            daily_pnl=authoritative_daily_pnl,
             spread_pct=spread_pct,
             volatility_pct=None,
         )

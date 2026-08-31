@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, ROUND_FLOOR
@@ -102,7 +103,11 @@ class RiskEngine:
             reasons.append("max_instrument_exposure_reached")
 
         daily_loss_limit = max(portfolio.equity, 0.0) * (self.config.max_daily_loss_pct / 100.0)
-        if portfolio.daily_pnl <= -daily_loss_limit and daily_loss_limit > 0:
+        if portfolio.daily_pnl is None:
+            reasons.append("missing_daily_pnl")
+        elif not math.isfinite(portfolio.daily_pnl):
+            reasons.append("invalid_daily_pnl")
+        elif portfolio.daily_pnl <= -daily_loss_limit and daily_loss_limit > 0:
             reasons.append("max_daily_loss_reached")
 
         if portfolio.spread_pct is None:

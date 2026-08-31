@@ -59,17 +59,11 @@ def _portfolio(
     *,
     amount: float = 500.0,
     direction: Direction = Direction.LONG,
-    equity: float = 10_000.0,
-    cash: float = 8_000.0,
-    daily_pnl: float = -50.0,
 ) -> dict:
     stop = 75810.0 if direction is Direction.LONG else 76190.0
     target = 76380.0 if direction is Direction.LONG else 75620.0
     return {
         "data": {
-            "equity": equity,
-            "availableCash": cash,
-            "dailyPnl": daily_pnl,
             "positions": [
                 {
                     "positionId": position_id,
@@ -80,6 +74,20 @@ def _portfolio(
                     "takeProfitRate": target,
                 }
             ],
+        }
+    }
+
+
+def _pnl(*, equity: float = 10_000.0, cash: float = 8_000.0, pnl: float = -50.0) -> dict:
+    invested = equity - cash - pnl
+    return {
+        "clientPortfolio": {
+            "credit": cash,
+            "unrealizedPnL": pnl,
+            "positions": [{"amount": invested, "unrealizedPnL": {"pnL": pnl}}],
+            "mirrors": [],
+            "ordersForOpen": [],
+            "orders": [],
         }
     }
 
@@ -101,10 +109,13 @@ class EtoroDemoBrokerTests(unittest.TestCase):
         self.assertEqual(calls[0][0], EtoroDemoBroker.DEMO_PORTFOLIO_URL)
 
     def test_live_portfolio_drives_risk_state_and_ignores_stale_supplied_pnl(self) -> None:
-        def fake_get(_url, **_kwargs):
-            return _FakeResponse(
-                _portfolio(amount=750.0, equity=12_000.0, cash=7_500.0, daily_pnl=-275.0)
-            )
+        calls = []
+
+        def fake_get(url, **_kwargs):
+            calls.append(url)
+            if url == EtoroDemoBroker.DEMO_PORTFOLIO_URL:
+                return _FakeResponse(_portfolio(amount=750.0))
+            return _FakeResponse(_pnl(equity=12_000.0, cash=7_500.0, pnl=-275.0))
 
         broker = EtoroDemoBroker(
             api_key="api", user_key="user", instrument_id=100000, http_get=fake_get
@@ -114,28 +125,37 @@ class EtoroDemoBrokerTests(unittest.TestCase):
         self.assertEqual(state.cash, 7_500.0)
         self.assertEqual(state.open_positions, 1)
         self.assertAlmostEqual(state.instrument_exposure_pct, 6.25)
-        self.assertEqual(state.daily_pnl, -275.0)
+        self.assertIsNone(state.daily_pnl)
+        self.assertEqual(calls, [EtoroDemoBroker.DEMO_PORTFOLIO_URL, EtoroDemoBroker.DEMO_PNL_URL])
 
-    def test_live_portfolio_missing_cash_fails_closed(self) -> None:
-        def fake_get(_url, **_kwargs):
-            return _FakeResponse({"data": {"equity": 10_000.0, "dailyPnl": -10.0, "positions": []}})
+    def test_live_pnl_missing_credit_fails_closed(self) -> None:
+        pnl = _pnl()
+        pnl["clientPortfolio"].pop("credit")
+
+        def fake_get(url, **_kwargs):
+            if url == EtoroDemoBroker.DEMO_PORTFOLIO_URL:
+                return _FakeResponse({"data": {"positions": []}})
+            return _FakeResponse(pnl)
 
         broker = EtoroDemoBroker(
             api_key="api", user_key="user", instrument_id=100000, http_get=fake_get
         )
-        with self.assertRaisesRegex(RuntimeError, "authoritative account field"):
+        with self.assertRaisesRegex(RuntimeError, "credit"):
             broker.risk_portfolio_state(spread_pct=0.2)
 
-    def test_live_portfolio_missing_daily_pnl_fails_closed(self) -> None:
-        def fake_get(_url, **_kwargs):
-            return _FakeResponse(
-                {"data": {"equity": 10_000.0, "availableCash": 8_000.0, "positions": []}}
-            )
+    def test_live_pnl_malformed_unrealized_fails_closed(self) -> None:
+        pnl = _pnl()
+        pnl["clientPortfolio"]["unrealizedPnL"] = "not-a-number"
+
+        def fake_get(url, **_kwargs):
+            if url == EtoroDemoBroker.DEMO_PORTFOLIO_URL:
+                return _FakeResponse({"data": {"positions": []}})
+            return _FakeResponse(pnl)
 
         broker = EtoroDemoBroker(
             api_key="api", user_key="user", instrument_id=100000, http_get=fake_get
         )
-        with self.assertRaisesRegex(RuntimeError, "dailyPnl"):
+        with self.assertRaisesRegex(RuntimeError, "unrealizedPnL"):
             broker.risk_portfolio_state(spread_pct=0.2, daily_pnl=0.0)
 
     def test_execute_reconciles_open_position_and_protection_before_filled(self) -> None:
