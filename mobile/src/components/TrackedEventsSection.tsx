@@ -1,4 +1,4 @@
-import { useFocusEffect, useRouter } from 'expo-router';
+import { Link, useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
@@ -128,6 +128,16 @@ export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
         </View>
         <Text style={styles.dateText}>{scheduleText}</Text>
       </View>
+
+      <Link
+        href={{
+          pathname: '/events/[eventId]',
+          params: { eventId: `tracked:${event.event_id}` },
+        }}
+        style={styles.expectationLink}
+      >
+        Odotukset ja strategia →
+      </Link>
 
       <TrackedEventDetails event={event} />
     </View>
@@ -467,6 +477,12 @@ const styles = StyleSheet.create({
     color: '#aab3c2',
     fontSize: 13,
     fontWeight: '600',
+  },
+  expectationLink: {
+    color: '#72b8db',
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: 10,
   },
   statusBlock: {
     marginTop: 12,
