@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -31,6 +31,18 @@ class TrackedPaperOrchestrationResult:
     status: str
     message: str
     persisted: dict[str, Any] | None = None
+
+
+class _LeaseGuardedBroker:
+    """Revalidate the canonical execution lease immediately before broker execute."""
+
+    def __init__(self, broker: Any, guard: Callable[[], None]) -> None:
+        self._broker = broker
+        self._guard = guard
+
+    def execute(self, proposal: Any) -> Any:
+        self._guard()
+        return self._broker.execute(proposal)
 
 
 def _validate_analysis_row(
@@ -89,7 +101,7 @@ def _claim_event_for_task(
         )
 
     response = paper_runs.client.rpc(
-        "claim_event_paper_run_for_task",
+        "claim_event_paper_run_for_task_v2",
         {
             "input_event_id": event_id,
             "input_analysis_id": analysis_id,
@@ -103,6 +115,63 @@ def _claim_event_for_task(
     if not rows:
         raise RuntimeError(f"task-bound paper event claim returned no owner for {event_id}")
     return rows[0]
+
+
+def _revalidate_task_execution_lease(
+    paper_runs: SupabasePaperTradeRepository,
+    *,
+    event_id: str,
+    analysis_id: str,
+    task_id: str,
+    expectation_version: int,
+    lease_seconds: int,
+) -> None:
+    """Fail closed unless this exact task still owns the lease just before broker I/O."""
+    revalidate = getattr(paper_runs, "revalidate_task_execution_lease", None)
+    if callable(revalidate):
+        claim = revalidate(
+            event_id=event_id,
+            analysis_id=analysis_id,
+            task_id=task_id,
+            expectation_version=expectation_version,
+            claim_token=paper_runs.claim_token,
+            lease_seconds=lease_seconds,
+        )
+    else:
+        response = paper_runs.client.rpc(
+            "revalidate_event_paper_run_task_lease",
+            {
+                "input_event_id": event_id,
+                "input_analysis_id": analysis_id,
+                "input_task_id": task_id,
+                "input_expectation_version": expectation_version,
+                "input_claim_token": paper_runs.claim_token,
+                "input_lease_seconds": max(1, lease_seconds),
+            },
+        ).execute()
+        rows = response.data or []
+        claim = rows[0] if rows else None
+
+    if claim is None or not _claim_is_owned(
+        claim,
+        analysis_id=analysis_id,
+        task_id=task_id,
+        claim_token=paper_runs.claim_token,
+    ):
+        raise RuntimeError("canonical paper execution lease was lost before broker execution")
+
+
+def _guard_pipeline(
+    pipeline: PaperTradingPipeline | None,
+    guard: Callable[[], None],
+) -> PaperTradingPipeline:
+    base = pipeline or PaperTradingPipeline()
+    return PaperTradingPipeline(
+        strategy_engine=base.strategy_engine,
+        risk_engine=base.risk_engine,
+        broker=_LeaseGuardedBroker(base.broker, guard),
+        journal=base.journal,
+    )
 
 
 def _persisted_result(persisted: dict[str, Any]) -> TrackedPaperOrchestrationResult:
@@ -138,9 +207,9 @@ def run_approved_tracked_paper_once(
     This function creates no execution authority. It requires an already-approved
     canonical PAPER trading task, an already-persisted current release analysis,
     and the persisted tracked-event reaction evidence consumed by the #230 bridge.
-    The task-bound paper-run lease is claimed before Strategy/Risk/Broker code so
-    concurrent workers cannot both execute the same analysis and the durable run
-    can always identify the exact approval that authorized it.
+    The task-bound paper-run lease is claimed before Strategy/Risk work and is
+    revalidated/renewed again immediately before the broker call so an expired
+    worker cannot execute after another runner has reclaimed the event.
     """
     event_id = tracked_event_id.strip()
     requested_task_id = task_id.strip()
@@ -234,6 +303,18 @@ def run_approved_tracked_paper_once(
             claim,
         )
 
+    guarded_pipeline = _guard_pipeline(
+        pipeline,
+        lambda: _revalidate_task_execution_lease(
+            paper_runs,
+            event_id=release_event_id,
+            analysis_id=analysis_id,
+            task_id=requested_task_id,
+            expectation_version=expectation.version,
+            lease_seconds=lease_seconds,
+        ),
+    )
+
     result: PostReleasePaperResult = run_post_release_paper_from_tracked_event(
         event=event,
         expectation=expectation,
@@ -245,7 +326,7 @@ def run_approved_tracked_paper_once(
         market_df=market_df,
         technical=technical,
         market_memory=market_memory,
-        pipeline=pipeline,
+        pipeline=guarded_pipeline,
     )
     persisted = paper_runs.save_result(
         event_id=release_event_id,
