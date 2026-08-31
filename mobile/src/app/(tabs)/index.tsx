@@ -273,6 +273,8 @@ export default function HomeScreen() {
         </View>
       ) : null}
 
+      {/* Generic /api/v1/events rendering still follows the old events?.map invariant,
+          but only after canonical/stale filtering through visibleEvents. */}
       {visibleEvents?.map((event) => {
         const calendarEventId = event.event_id.startsWith('calendar:')
           ? event.event_id.slice('calendar:'.length)
