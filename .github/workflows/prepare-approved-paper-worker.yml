@@ -28,7 +28,49 @@ jobs:
       - name: Checkout exact commit
         uses: actions/checkout@v4
 
-      - name: Verify production configuration and schema
+      - name: Verify deployed runtime SHA under deploy lock
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          LOCK_FILE="/tmp/marketai-deploy-ota.lock"
+          LOCK_TIMEOUT_SECONDS=300
+          RUNTIME_DIR="/home/marko/marketai-repo"
+          STATE_FILE="/home/marko/marketai-deploy-state/last-deployed-backend.sha"
+
+          exec 200>"$LOCK_FILE"
+          if ! flock -w "$LOCK_TIMEOUT_SECONDS" 200; then
+            echo "::error::Could not acquire the MarketAI deploy/OTA lock within ${LOCK_TIMEOUT_SECONDS}s."
+            exit 1
+          fi
+
+          test -f "$STATE_FILE" || {
+            echo "::error::No successfully deployed backend SHA has been recorded."
+            exit 1
+          }
+          DEPLOYED_SHA="$(tr -d '[:space:]' < "$STATE_FILE")"
+          if [ "$DEPLOYED_SHA" != "$DEPLOY_SHA" ]; then
+            echo "::error::Readiness commit ${DEPLOY_SHA} does not match deployed backend ${DEPLOYED_SHA}."
+            exit 1
+          fi
+
+          cd "$RUNTIME_DIR"
+          RUNTIME_SHA="$(git rev-parse HEAD)"
+          if [ "$RUNTIME_SHA" != "$DEPLOY_SHA" ]; then
+            echo "::error::Production runtime checkout ${RUNTIME_SHA} does not match readiness commit ${DEPLOY_SHA}."
+            exit 1
+          fi
+          test "$(git branch --show-current)" = "feature/trading-system-foundation" || {
+            echo "::error::Production runtime is not on feature/trading-system-foundation."
+            exit 1
+          }
+          test -z "$(git status --porcelain --untracked-files=no)" || {
+            echo "::error::Production runtime has tracked working-tree changes."
+            exit 1
+          }
+
+          echo "Production runtime SHA ${RUNTIME_SHA} is the exact reviewed readiness commit."
+
+      - name: Verify production configuration, execution schema and eToro portfolio
         run: |
           set -a
           # shellcheck disable=SC1091
@@ -50,13 +92,37 @@ jobs:
           test -n "${ETORO_API_KEY:-}" || { echo "::error::ETORO_API_KEY is required."; exit 1; }
           test -n "${ETORO_USER_KEY:-}" || { echo "::error::ETORO_USER_KEY is required."; exit 1; }
 
+          cd /home/marko/marketai-repo
           /home/marko/marketai-repo/.venv/bin/python - <<'PY'
           import math
           import os
 
           from trading_system.brokers.etoro_demo import EtoroDemoBroker
           from trading_system.paper_trade_repository import SupabasePaperTradeRepository
+          from trading_system.tracked_event_repository import SupabaseTrackedEventRepository
           from trading_system.trading_task_repository import SupabaseTradingTaskRepository
+
+
+          def expect_rpc_error(client, name, payload, marker):
+              try:
+                  client.rpc(name, payload).execute()
+              except Exception as exc:
+                  if marker not in str(exc):
+                      raise RuntimeError(f"{name} exists but returned an unexpected readiness error: {exc}") from exc
+                  return
+              raise RuntimeError(f"{name} unexpectedly accepted an invalid readiness probe")
+
+
+          def expect_rpc_inaccessible(client, name, payload):
+              try:
+                  client.rpc(name, payload).execute()
+              except Exception as exc:
+                  text = str(exc).lower()
+                  if "permission denied" in text or "could not find the function" in text or "pgrst202" in text:
+                      return
+                  raise RuntimeError(f"{name} returned an unexpected privilege probe error: {exc}") from exc
+              raise RuntimeError(f"deprecated broker reservation RPC {name} is still callable by service_role")
+
 
           cap = float(os.environ["MARKETAI_ETORO_DEMO_MAX_AMOUNT_USD"])
           spread = float(os.environ["MARKETAI_PAPER_SPREAD_PCT"])
@@ -67,30 +133,144 @@ jobs:
 
           tasks = SupabaseTradingTaskRepository.from_env()
           runs = SupabasePaperTradeRepository.from_env()
-          tasks.client.table("trading_tasks").select("id").limit(1).execute()
-          runs.client.table("event_paper_broker_attempts").select("task_id").limit(1).execute()
-          runs.client.table("paper_portfolio_execution_lease").select("singleton").limit(1).execute()
+          tracked = SupabaseTrackedEventRepository.from_env()
+          client = runs.client
 
-          # Access-only check: instrument identity is validated later from the
-          # exact tracked event before any broker submission.
-          EtoroDemoBroker.from_env(instrument_id=1, amount_usd=cap).verify_demo_access()
-          print("approved PAPER readiness checks passed")
+          # Verify the final #232 table/column contract, not just table existence.
+          tasks.client.table("trading_tasks").select("id,approved_expectation_version").limit(1).execute()
+          client.table("event_paper_trade_event_claims").select("event_id,task_id,claim_token,lease_expires_at").limit(1).execute()
+          client.table("event_paper_trade_runs").select("id,task_id,paper_order").limit(1).execute()
+          client.table("event_paper_broker_attempts").select(
+              "task_id,event_id,analysis_id,expectation_version,execution_token,status,strategy_payload,risk_payload,order_payload"
+          ).limit(1).execute()
+          client.table("paper_portfolio_execution_lease").select("singleton,lease_token,lease_expires_at").limit(1).execute()
+
+          # Required service-role RPC signatures must be present and callable. Invalid
+          # identities deliberately stop before any mutation and give a stable marker.
+          expect_rpc_error(
+              client,
+              "claim_paper_portfolio_execution_lease",
+              {"input_lease_token": None, "input_lease_seconds": 1},
+              "paper_portfolio_lease_identity_invalid",
+          )
+          expect_rpc_error(
+              client,
+              "claim_event_paper_run_for_task_v2",
+              {
+                  "input_event_id": "readiness-invalid",
+                  "input_analysis_id": None,
+                  "input_task_id": None,
+                  "input_expectation_version": 1,
+                  "input_claim_token": None,
+                  "input_lease_seconds": 1,
+              },
+              "paper_run_task_missing",
+          )
+          expect_rpc_error(
+              client,
+              "begin_event_paper_broker_attempt_with_portfolio_lease",
+              {
+                  "input_event_id": "readiness-invalid",
+                  "input_analysis_id": None,
+                  "input_task_id": None,
+                  "input_expectation_version": 1,
+                  "input_claim_token": None,
+                  "input_execution_token": None,
+                  "input_lease_seconds": 1,
+                  "input_strategy_payload": {},
+                  "input_risk_payload": {},
+                  "input_portfolio_lease_token": None,
+                  "input_portfolio_lease_seconds": 1,
+              },
+              "paper_portfolio_execution_lease_identity_invalid",
+          )
+          expect_rpc_error(
+              client,
+              "complete_event_paper_broker_attempt",
+              {
+                  "input_task_id": None,
+                  "input_execution_token": None,
+                  "input_order_payload": None,
+              },
+              "paper_broker_attempt_completion_invalid",
+          )
+          expect_rpc_error(
+              client,
+              "release_paper_portfolio_execution_lease",
+              {"input_lease_token": None},
+              "paper_portfolio_lease_identity_invalid",
+          )
+
+          # Final 20260903160000 privilege boundary: service_role must not be able
+          # to bypass the singleton portfolio lease through the older primitive.
+          expect_rpc_inaccessible(
+              client,
+              "begin_event_paper_broker_attempt",
+              {
+                  "input_event_id": "readiness-invalid",
+                  "input_analysis_id": None,
+                  "input_task_id": None,
+                  "input_expectation_version": 1,
+                  "input_claim_token": None,
+                  "input_execution_token": None,
+                  "input_lease_seconds": 1,
+                  "input_strategy_payload": {},
+                  "input_risk_payload": {},
+              },
+          )
+
+          # Use a real persisted canonical eToro identity. No synthetic instrument ID
+          # is allowed in production readiness. Exercise the same authoritative demo
+          # portfolio parser that RiskEngine will use before an approved submission.
+          event = next(
+              (
+                  candidate
+                  for candidate in tracked.list_recent(limit=100)
+                  if candidate.resolved_etoro_instrument_id is not None
+                  and candidate.resolved_etoro_instrument_id > 0
+                  and candidate.resolved_etoro_symbol
+                  and candidate.resolved_etoro_symbol.strip().upper() == candidate.instrument.strip().upper()
+              ),
+              None,
+          )
+          if event is None:
+              raise RuntimeError("no tracked event has a canonical persisted eToro identity for readiness preflight")
+
+          broker = EtoroDemoBroker.from_env(
+              instrument_id=event.resolved_etoro_instrument_id,
+              amount_usd=cap,
+          )
+          portfolio = broker.risk_portfolio_state(spread_pct=spread)
+          if portfolio.equity <= 0 or portfolio.cash < 0 or portfolio.open_positions < 0:
+              raise RuntimeError("eToro demo portfolio readiness returned invalid authoritative state")
+
+          print(
+              "approved PAPER readiness checks passed for canonical eToro identity "
+              f"{event.instrument}/{event.resolved_etoro_instrument_id}"
+          )
           PY
 
       - name: Install worker unit without activating execution
         run: |
           sudo /usr/bin/install -m 0644 \
-            deploy/systemd/marketai-approved-paper.service \
+            /home/marko/marketai-repo/deploy/systemd/marketai-approved-paper.service \
             /etc/systemd/system/marketai-approved-paper.service
           sudo /usr/bin/systemctl daemon-reload
 
-          # This workflow deliberately does not enable or start the worker.
-          # Actual execution stays a separate explicit operator action after an
-          # exact canonical PAPER task has been reviewed and approved.
-          sudo /usr/bin/systemctl disable marketai-approved-paper.service >/dev/null 2>&1 || true
+          # Readiness must leave no boot-time or current execution path behind.
+          # A disable failure is fatal; inactivity alone is not sufficient.
+          if ! sudo /usr/bin/systemctl disable marketai-approved-paper.service; then
+            echo "::error::Failed to disable marketai-approved-paper.service."
+            exit 1
+          fi
+          ENABLED_STATE="$(/usr/bin/systemctl is-enabled marketai-approved-paper.service 2>/dev/null || true)"
+          if [ "$ENABLED_STATE" != "disabled" ]; then
+            echo "::error::marketai-approved-paper.service is not disabled (state: ${ENABLED_STATE:-unknown})."
+            exit 1
+          fi
           if /usr/bin/systemctl is-active --quiet marketai-approved-paper.service; then
             echo "::error::marketai-approved-paper.service was already active; refusing readiness preparation."
             exit 1
           fi
 
-          echo "marketai-approved-paper.service installed but inactive"
+          echo "marketai-approved-paper.service installed, disabled and inactive"
