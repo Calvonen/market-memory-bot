@@ -41,5 +41,8 @@ def test_canonical_tracked_card_preserves_expectation_navigation():
     tracked = TRACKED_SECTION_SOURCE.read_text(encoding="utf-8")
 
     assert "pathname: '/events/[eventId]'" in tracked
-    assert "params: { eventId: `tracked:${event.event_id}` }" in tracked
+    assert "const expectationEventId = event.calendar_event_id" in tracked
+    assert "? `calendar:${event.calendar_event_id}`" in tracked
+    assert ": `tracked:${event.event_id}`;" in tracked
+    assert "params: { eventId: expectationEventId }" in tracked
     assert "Odotukset ja strategia →" in tracked
