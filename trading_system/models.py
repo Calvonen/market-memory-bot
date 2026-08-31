@@ -134,6 +134,7 @@ class TradeProposal:
     mode: TradingMode = TradingMode.PAPER
     proposal_id: str = field(default_factory=new_id)
     created_at: datetime = field(default_factory=utc_now)
+    strategy_decision: StrategyDecision | None = None
 
 
 @dataclass(frozen=True)

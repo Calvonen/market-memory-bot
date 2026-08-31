@@ -1,0 +1,17 @@
+[Unit]
+Description=MarketAI approved canonical PAPER execution worker
+Documentation=file:///home/marko/marketai-repo/docs/approved_tracked_paper_runtime.md
+Wants=network-online.target
+After=network-online.target marketai-tracked-events.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/marko/marketai-repo
+EnvironmentFile=/home/marko/marketai/.env
+ExecStart=/home/marko/marketai-repo/.venv/bin/python -m trading_system.approved_tracked_paper_worker
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

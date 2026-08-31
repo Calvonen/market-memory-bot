@@ -31,11 +31,6 @@ class RiskConfig:
 
 
 def _decimal(value: float) -> Decimal:
-    """Convert configured/market floats through their decimal string form.
-
-    Risk sizing must not lose a whole unit because binary floating-point represents
-    simple decimal prices such as 0.80 - 0.76 as 0.040000000000000036.
-    """
     return Decimal(str(value))
 
 
@@ -67,11 +62,12 @@ class RiskEngine:
         current_time = now or datetime.now(UTC)
 
         max_risk_amount = max(portfolio.equity, 0.0) * (self.config.max_risk_per_trade_pct / 100.0)
-        max_position_value = max(portfolio.equity, 0.0) * (self.config.max_position_pct / 100.0)
+        equity_position_limit = max(portfolio.equity, 0.0) * (self.config.max_position_pct / 100.0)
+        # Available cash is a hard sizing ceiling for PAPER execution. This keeps
+        # a refreshed portfolio snapshot meaningful even when equity remains high
+        # after prior orders have consumed the account's spendable balance.
+        max_position_value = min(equity_position_limit, max(portfolio.cash, 0.0))
 
-        # A StrategyEngine NO_TRADE is already a complete, deterministic rejection.
-        # Do not run entry/stop/target geometry for a direction that will never be
-        # sent to a broker; doing so only adds misleading secondary reasons.
         if candidate.direction is Direction.NO_TRADE:
             return RiskDecision(
                 status=RiskStatus.REJECT,
@@ -84,19 +80,18 @@ class RiskEngine:
 
         if self.config.kill_switch:
             reasons.append("kill_switch_active")
-
         if requested_mode is TradingMode.LIVE and not self.config.live_trading_enabled:
             reasons.append("live_trading_disabled")
-
         if candidate.direction not in {Direction.LONG, Direction.SHORT}:
             reasons.append("unsupported_direction")
-
         if portfolio.equity <= 0:
             reasons.append("invalid_portfolio_equity")
-
+        if portfolio.cash < 0:
+            reasons.append("invalid_portfolio_cash")
+        elif portfolio.cash == 0:
+            reasons.append("insufficient_cash")
         if portfolio.open_positions >= self.config.max_open_positions:
             reasons.append("max_open_positions_reached")
-
         if portfolio.instrument_exposure_pct >= self.config.max_instrument_exposure_pct:
             reasons.append("max_instrument_exposure_reached")
 
@@ -104,15 +99,10 @@ class RiskEngine:
         if portfolio.daily_pnl <= -daily_loss_limit and daily_loss_limit > 0:
             reasons.append("max_daily_loss_reached")
 
-        # A deterministic gate must fail closed on missing market-quality data,
-        # not silently skip the check: an absent spread/volatility reading is
-        # not evidence that the trade is safe, and callers must never be able
-        # to reach PASS by simply omitting these fields from PortfolioState.
         if portfolio.spread_pct is None:
             reasons.append("missing_spread_data")
         elif portfolio.spread_pct > self.config.max_spread_pct:
             reasons.append("spread_too_wide")
-
         if portfolio.volatility_pct is None:
             reasons.append("missing_volatility_data")
         elif portfolio.volatility_pct > self.config.max_volatility_pct:
@@ -126,7 +116,6 @@ class RiskEngine:
         entry = candidate.entry
         stop = candidate.stop
         target = candidate.target_1
-
         if entry is None or entry <= 0:
             reasons.append("invalid_entry")
         if stop is None or stop <= 0:
@@ -136,24 +125,20 @@ class RiskEngine:
 
         reward_risk: float | None = None
         risk_per_unit_decimal = Decimal("0")
-
         if entry and stop and target and entry > 0 and stop > 0 and target > 0:
             entry_decimal = _decimal(entry)
             stop_decimal = _decimal(stop)
             target_decimal = _decimal(target)
-
             if candidate.direction is Direction.LONG:
                 risk_per_unit_decimal = entry_decimal - stop_decimal
                 reward_per_unit_decimal = target_decimal - entry_decimal
             else:
                 risk_per_unit_decimal = stop_decimal - entry_decimal
                 reward_per_unit_decimal = entry_decimal - target_decimal
-
             if risk_per_unit_decimal <= 0:
                 reasons.append("stop_on_wrong_side")
             if reward_per_unit_decimal <= 0:
                 reasons.append("target_on_wrong_side")
-
             if risk_per_unit_decimal > 0 and reward_per_unit_decimal > 0:
                 reward_risk_decimal = reward_per_unit_decimal / risk_per_unit_decimal
                 reward_risk = float(reward_risk_decimal)
@@ -161,7 +146,6 @@ class RiskEngine:
                     reasons.append("reward_risk_below_minimum")
 
         max_quantity = 0
-
         if entry and entry > 0 and risk_per_unit_decimal > 0:
             max_risk_decimal = _decimal(max_risk_amount)
             max_position_decimal = _decimal(max_position_value)
@@ -181,7 +165,6 @@ class RiskEngine:
                 max_quantity=0,
                 reward_risk=reward_risk,
             )
-
         return RiskDecision(
             status=RiskStatus.PASS,
             reasons=(),

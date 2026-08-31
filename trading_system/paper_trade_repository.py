@@ -82,6 +82,7 @@ class SupabasePaperTradeRepository:
         analysis_id: str,
         result: PostReleasePaperResult,
         claim_token: str | None = None,
+        task_id: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "event_id": event_id,
@@ -89,6 +90,7 @@ class SupabasePaperTradeRepository:
             "source_document_id": source_document_id,
             "analysis_id": analysis_id,
             "claim_token": claim_token or self.claim_token,
+            "task_id": task_id,
             "status": result.status,
             "message": result.message,
             "strategy": None,
@@ -163,8 +165,13 @@ class SupabasePaperTradeRepository:
                     "created_at": order.created_at.isoformat(),
                 }
 
+        rpc_name = (
+            "save_event_paper_trade_result_for_task"
+            if task_id is not None
+            else "save_event_paper_trade_result"
+        )
         response = self.client.rpc(
-            "save_event_paper_trade_result",
+            rpc_name,
             {"input_payload": payload},
         ).execute()
         rows = response.data or []
@@ -175,13 +182,16 @@ class SupabasePaperTradeRepository:
         if not rows:
             winner = self.get_for_analysis(analysis_id)
             if winner is None:
-                return {
+                rejection = {
                     "event_id": event_id,
                     "analysis_id": analysis_id,
                     "status": "waiting_confirmation",
                     "message": "paper result was rejected after the event lease was lost",
                     "write_rejection": "lease_lost",
                 }
+                if task_id is not None:
+                    rejection["task_id"] = task_id
+                return rejection
             return winner
         return rows[0]
 
