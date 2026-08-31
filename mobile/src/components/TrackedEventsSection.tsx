@@ -14,6 +14,7 @@ import {
 
 type Snapshot = {
   count: number;
+  eventIds: string[];
   calendarEventIds: string[];
   statusByCalendarEventId: Record<string, string>;
   eventByCalendarEventId: Record<string, TrackedMarketEvent>;
@@ -55,6 +56,7 @@ export function TrackedEventsSection({
         setEvents(list);
         onSnapshot?.({
           count: list.length,
+          eventIds: list.map((event) => event.event_id),
           calendarEventIds: list
             .map((event) => event.calendar_event_id)
             .filter((value): value is string => Boolean(value)),
