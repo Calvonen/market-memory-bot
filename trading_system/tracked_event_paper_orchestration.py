@@ -14,6 +14,7 @@ from trading_system.models import (
     ComponentAssessment,
     Direction,
     PortfolioState,
+    TradeProposal,
     TradingMode,
 )
 from trading_system.paper_trade_repository import SupabasePaperTradeRepository
@@ -67,22 +68,66 @@ def _order_from_payload(payload: dict[str, Any]) -> BrokerOrder:
         raise RuntimeError("persisted broker attempt contains malformed order payload") from exc
 
 
+def _strategy_payload(proposal: TradeProposal) -> dict[str, Any]:
+    strategy = proposal.strategy_decision
+    if strategy is None:
+        raise RuntimeError("broker proposal is missing its exact strategy decision audit")
+    return {
+        "decision_id": strategy.decision_id,
+        "instrument": strategy.instrument,
+        "direction": strategy.direction.value,
+        "confidence": strategy.confidence,
+        "scores": {
+            "fundamental": strategy.scores.fundamental,
+            "catalyst": strategy.scores.catalyst,
+            "technical": strategy.scores.technical,
+            "market_memory": strategy.scores.market_memory,
+            "news_sentiment": strategy.scores.news_sentiment,
+            "total": strategy.scores.total,
+        },
+        "rationale": list(strategy.rationale),
+        "invalidation": list(strategy.invalidation),
+        "long_evidence": strategy.long_evidence,
+        "short_evidence": strategy.short_evidence,
+        "source_event_id": strategy.source_event_id,
+        "created_at": strategy.created_at.isoformat(),
+    }
+
+
+def _risk_payload(proposal: TradeProposal) -> dict[str, Any]:
+    risk = proposal.risk
+    return {
+        "decision_id": risk.decision_id,
+        "status": risk.status.value,
+        "reasons": list(risk.reasons),
+        "max_risk_amount": risk.max_risk_amount,
+        "max_position_value": risk.max_position_value,
+        "max_quantity": risk.max_quantity,
+        "reward_risk": risk.reward_risk,
+        "created_at": risk.created_at.isoformat(),
+        "proposal_id": proposal.proposal_id,
+        "mode": proposal.mode.value,
+    }
+
+
 class _LeaseGuardedBroker:
     """Reserve one durable task execution before calling the broker."""
 
     def __init__(
         self,
         broker: Any,
-        begin_attempt: Callable[[str], dict[str, Any]],
+        begin_attempt: Callable[[str, dict[str, Any], dict[str, Any]], dict[str, Any]],
         complete_attempt: Callable[[str, BrokerOrder], None],
     ) -> None:
         self._broker = broker
         self._begin_attempt = begin_attempt
         self._complete_attempt = complete_attempt
 
-    def execute(self, proposal: Any) -> BrokerOrder:
+    def execute(self, proposal: TradeProposal) -> BrokerOrder:
         execution_token = str(uuid4())
-        attempt = self._begin_attempt(execution_token)
+        strategy_payload = _strategy_payload(proposal)
+        risk_payload = _risk_payload(proposal)
+        attempt = self._begin_attempt(execution_token, strategy_payload, risk_payload)
         status = str(attempt.get("attempt_status") or attempt.get("status") or "").strip()
         can_execute = attempt.get("can_execute") is True
         existing_payload = attempt.get("order_payload")
@@ -182,6 +227,8 @@ def _begin_broker_attempt(
     expectation_version: int,
     execution_token: str,
     lease_seconds: int,
+    strategy_payload: dict[str, Any],
+    risk_payload: dict[str, Any],
 ) -> dict[str, Any]:
     begin_attempt = getattr(paper_runs, "begin_broker_attempt", None)
     if callable(begin_attempt):
@@ -193,6 +240,8 @@ def _begin_broker_attempt(
             claim_token=paper_runs.claim_token,
             execution_token=execution_token,
             lease_seconds=lease_seconds,
+            strategy_payload=strategy_payload,
+            risk_payload=risk_payload,
         )
 
     response = paper_runs.client.rpc(
@@ -205,6 +254,8 @@ def _begin_broker_attempt(
             "input_claim_token": paper_runs.claim_token,
             "input_execution_token": execution_token,
             "input_lease_seconds": max(1, lease_seconds),
+            "input_strategy_payload": strategy_payload,
+            "input_risk_payload": risk_payload,
         },
     ).execute()
     rows = response.data or []
@@ -259,7 +310,7 @@ def _guard_pipeline(
         risk_engine=base.risk_engine,
         broker=_LeaseGuardedBroker(
             base.broker,
-            lambda execution_token: _begin_broker_attempt(
+            lambda execution_token, strategy_payload, risk_payload: _begin_broker_attempt(
                 paper_runs,
                 event_id=event_id,
                 analysis_id=analysis_id,
@@ -267,6 +318,8 @@ def _guard_pipeline(
                 expectation_version=expectation_version,
                 execution_token=execution_token,
                 lease_seconds=lease_seconds,
+                strategy_payload=strategy_payload,
+                risk_payload=risk_payload,
             ),
             lambda execution_token, order: _complete_broker_attempt(
                 paper_runs,
@@ -313,8 +366,8 @@ def run_approved_tracked_paper_once(
     canonical PAPER trading task, an already-persisted current release analysis,
     and the persisted tracked-event reaction evidence consumed by the #230 bridge.
     The task-bound paper-run lease is claimed before Strategy/Risk work. Immediately
-    before broker I/O, one durable broker-attempt row is reserved for the canonical
-    task so a retry can never submit a second order after an uncertain prior result.
+    before broker I/O, one durable broker-attempt row is reserved with the exact
+    Strategy and Risk audit so recovery can replay the original authorization.
     """
     event_id = tracked_event_id.strip()
     requested_task_id = task_id.strip()
