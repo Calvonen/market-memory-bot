@@ -35,9 +35,20 @@ class ApprovedPaperPortfolioSerializationTests(unittest.TestCase):
         begin = self.worker.index("def begin_broker_attempt(")
         self.assertIn('"begin_event_paper_broker_attempt_with_portfolio_lease"', self.worker[begin:])
         self.assertIn("for update", self.atomic_sql.lower())
+        self.assertIn("where singleton = true", self.atomic_sql)
+        self.assertNotIn("where id = 1", self.atomic_sql)
         self.assertIn("lease_token <> input_portfolio_lease_token", self.atomic_sql)
         self.assertIn("lease_expires_at <= now_value", self.atomic_sql)
         self.assertIn("public.begin_event_paper_broker_attempt(", self.atomic_sql)
+
+    def test_uncertain_started_attempt_blocks_portfolio_execution(self) -> None:
+        self.assertIn("def _assert_no_uncertain_broker_attempts(", self.worker)
+        self.assertIn('.eq("status", "started")', self.worker)
+        self.assertIn('.select("task_id,event_id,started_at")', self.worker)
+        self.assertIn("blocked by unresolved broker attempt with uncertain outcome", self.worker)
+        guard = self.worker.index("_assert_no_uncertain_broker_attempts(repository)")
+        terminal_read = self.worker.index('table("event_paper_trade_runs")', guard)
+        self.assertLess(guard, terminal_read)
 
     def test_completed_unreconciled_attempts_are_in_portfolio_snapshot(self) -> None:
         self.assertIn('table("event_paper_broker_attempts")', self.worker)
