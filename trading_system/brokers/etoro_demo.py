@@ -179,6 +179,13 @@ class EtoroDemoBroker(Broker):
             raise RuntimeError(f"eToro demo pnl {context} has non-finite {name}")
         return value
 
+    @classmethod
+    def _required_nonnegative_number(cls, row: dict[str, Any], name: str, *, context: str) -> float:
+        value = cls._required_number(row, name, context=context)
+        if value < 0:
+            raise RuntimeError(f"eToro demo pnl {context} has negative {name}")
+        return value
+
     @staticmethod
     def _required_rows(row: dict[str, Any], name: str, *, context: str) -> list[dict[str, Any]]:
         value = row.get(name)
@@ -215,7 +222,7 @@ class EtoroDemoBroker(Broker):
         return value
 
     @classmethod
-    def _pnl_account_state(cls, body: dict[str, Any]) -> tuple[float, float, float]:
+    def _pnl_account_state(cls, body: dict[str, Any]) -> tuple[float, float, float | None]:
         client = cls._pnl_client_portfolio(body)
         credit = cls._required_number(client, "credit", context="clientPortfolio")
         positions = cls._required_rows(client, "positions", context="clientPortfolio")
@@ -234,15 +241,17 @@ class EtoroDemoBroker(Broker):
                 manual_open_orders.append(order)
 
         manual_open_amount = sum(
-            cls._required_number(order, "amount", context="orderForOpen") for order in manual_open_orders
+            cls._required_nonnegative_number(order, "amount", context="orderForOpen")
+            for order in manual_open_orders
         )
         pending_order_amount = sum(
-            cls._required_number(order, "amount", context="order") for order in orders
+            cls._required_nonnegative_number(order, "amount", context="order") for order in orders
         )
         cash = credit - manual_open_amount - pending_order_amount
 
         position_amount = sum(
-            cls._required_number(position, "amount", context="position") for position in positions
+            cls._required_nonnegative_number(position, "amount", context="position")
+            for position in positions
         )
         mirror_position_amount = 0.0
         mirror_available_adjusted = 0.0
@@ -253,14 +262,16 @@ class EtoroDemoBroker(Broker):
             closed_profit = cls._required_number(mirror, "closedPositionsNetProfit", context="mirror")
             mirror_closed_profit += closed_profit
             mirror_available_adjusted += (
-                cls._required_number(mirror, "availableAmount", context="mirror") - closed_profit
+                cls._required_nonnegative_number(mirror, "availableAmount", context="mirror") - closed_profit
             )
             for position in mirror_positions:
-                mirror_position_amount += cls._required_number(position, "amount", context="mirror position")
+                mirror_position_amount += cls._required_nonnegative_number(
+                    position, "amount", context="mirror position"
+                )
                 mirror_unrealized_pnl += cls._nested_unrealized_pnl(position, context="mirror position")
 
         manual_external_costs = sum(
-            cls._required_number(order, "totalExternalCosts", context="orderForOpen")
+            cls._required_nonnegative_number(order, "totalExternalCosts", context="orderForOpen")
             for order in manual_open_orders
         )
         total_invested = (
@@ -291,12 +302,18 @@ class EtoroDemoBroker(Broker):
         if equity <= 0 or cash < 0:
             raise RuntimeError("eToro demo pnl returned invalid derived live equity/cash")
 
-        # The public demo P&L endpoint exposes the server-authoritative current
-        # account P&L but does not document a separate day-only scalar. Preserve
-        # fail-closed behavior for malformed values and never use a caller-supplied
-        # environment override as execution authority.
-        current_pnl = unrealized_pnl
-        return equity, cash, current_pnl
+        raw_daily_pnl = cls._field(client, "dailyPnl", "dailyPnL", "DailyPnl", "DailyPnL")
+        if raw_daily_pnl is None:
+            daily_pnl = None
+        else:
+            try:
+                daily_pnl = float(raw_daily_pnl)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("eToro demo pnl clientPortfolio has invalid dailyPnl") from exc
+            if not math.isfinite(daily_pnl):
+                raise RuntimeError("eToro demo pnl clientPortfolio has non-finite dailyPnl")
+
+        return equity, cash, daily_pnl
 
     @classmethod
     def _position_notional(cls, position: dict[str, Any]) -> float:
@@ -328,7 +345,7 @@ class EtoroDemoBroker(Broker):
         _ = daily_pnl
         portfolio_body = self._get_demo_portfolio()
         pnl_body = self._get_demo_pnl()
-        equity, cash, current_daily_pnl = self._pnl_account_state(pnl_body)
+        equity, cash, authoritative_daily_pnl = self._pnl_account_state(pnl_body)
         positions = self._portfolio_positions(portfolio_body)
         instrument_notional = 0.0
         for position in positions:
@@ -345,7 +362,7 @@ class EtoroDemoBroker(Broker):
             cash=cash,
             open_positions=len(positions),
             instrument_exposure_pct=(instrument_notional / equity) * 100.0,
-            daily_pnl=current_daily_pnl,
+            daily_pnl=authoritative_daily_pnl,
             spread_pct=spread_pct,
             volatility_pct=None,
         )
