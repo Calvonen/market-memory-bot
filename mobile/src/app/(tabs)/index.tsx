@@ -53,9 +53,11 @@ function isHomeExpectationVisible(
   if (event.event_id.startsWith('tracked:')) {
     const trackedEventId = event.event_id.slice('tracked:'.length);
     // Loaded canonical tracked-event cards always win over their expectation
-    // shells. If the active list is truncated, shells for omitted rows stay
-    // visible because their IDs are not present in this loaded snapshot.
-    return !loadedTrackedEventIds.has(trackedEventId);
+    // shells. If a tracked shell was not loaded (for example because the
+    // active endpoint was truncated), it still has to pass the same stale
+    // filtering as every other expectation below; otherwise archived shells
+    // would stay on Home forever after their canonical card moves to History.
+    if (loadedTrackedEventIds.has(trackedEventId)) return false;
   }
 
   const today = formatLocalDate(new Date());
