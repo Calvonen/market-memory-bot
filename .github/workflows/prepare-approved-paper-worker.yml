@@ -93,10 +93,6 @@ jobs:
               return 1
             fi
 
-            # First installation is allowed only when the systemd manager itself
-            # explicitly reports that this unit is not loaded/found. An absent
-            # unit-file listing alone is insufficient because a deleted file can
-            # leave a running unit loaded in manager memory.
             if [ "$LOAD_STATE" = "not-found" ]; then
               return 0
             fi
@@ -134,28 +130,36 @@ jobs:
           cp "$SOURCE_ENV_FILE" "$PREPARED_ENV_TMP"
           chmod 0600 "$PREPARED_ENV_TMP"
 
-          # Preflight exactly the environment snapshot that systemd will later
-          # consume. Changes to the mutable general .env after this point cannot
-          # alter an already-prepared execution runtime.
+          # Run the readiness-critical configuration and broker/schema preflight
+          # in an empty environment. Only HOME/PATH plus the snapshot/runtime
+          # locations are inherited; every MarketAI/eToro/Supabase value must be
+          # supplied by the exact snapshot that systemd will later consume.
+          env -i \
+            HOME="$HOME" \
+            PATH="$PATH" \
+            RUNTIME_DIR="$RUNTIME_DIR" \
+            PREPARED_ENV_TMP="$PREPARED_ENV_TMP" \
+            /bin/bash --noprofile --norc <<'PREFLIGHT'
+          set -euo pipefail
           set -a
           # shellcheck disable=SC1090
           source "$PREPARED_ENV_TMP"
           set +a
 
           test "${MARKETAI_PAPER_BROKER:-}" = "etoro_demo" || {
-            echo "::error::MARKETAI_PAPER_BROKER must be explicitly set to etoro_demo before preparing the worker."
+            echo "MARKETAI_PAPER_BROKER must be explicitly set to etoro_demo in the prepared snapshot." >&2
             exit 1
           }
           test -n "${MARKETAI_ETORO_DEMO_MAX_AMOUNT_USD:-}" || {
-            echo "::error::MARKETAI_ETORO_DEMO_MAX_AMOUNT_USD is required."
+            echo "MARKETAI_ETORO_DEMO_MAX_AMOUNT_USD is required in the prepared snapshot." >&2
             exit 1
           }
           test -n "${MARKETAI_PAPER_SPREAD_PCT:-}" || {
-            echo "::error::MARKETAI_PAPER_SPREAD_PCT is required."
+            echo "MARKETAI_PAPER_SPREAD_PCT is required in the prepared snapshot." >&2
             exit 1
           }
-          test -n "${ETORO_API_KEY:-}" || { echo "::error::ETORO_API_KEY is required."; exit 1; }
-          test -n "${ETORO_USER_KEY:-}" || { echo "::error::ETORO_USER_KEY is required."; exit 1; }
+          test -n "${ETORO_API_KEY:-}" || { echo "ETORO_API_KEY is required in the prepared snapshot." >&2; exit 1; }
+          test -n "${ETORO_USER_KEY:-}" || { echo "ETORO_USER_KEY is required in the prepared snapshot." >&2; exit 1; }
 
           cd "$RUNTIME_DIR"
           "$RUNTIME_DIR/.venv/bin/python" - <<'PY'
@@ -306,6 +310,7 @@ jobs:
               f"{event.instrument}/{event.resolved_etoro_instrument_id}"
           )
           PY
+          PREFLIGHT
 
           verify_runtime_sha
 
@@ -333,8 +338,6 @@ jobs:
           verify_worker_quiescent
           verify_runtime_sha
 
-          # Publish the exact environment snapshot only after all readiness checks
-          # and systemd mutations succeeded while both locks are held.
           mv -f "$PREPARED_ENV_TMP" "$PREPARED_ENV_FILE"
           chmod 0600 "$PREPARED_ENV_FILE"
           sha256sum "$PREPARED_ENV_FILE" | awk '{print $1}' > "$PREPARED_ENV_DIGEST_TMP"
