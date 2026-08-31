@@ -70,18 +70,18 @@ jobs:
             }
           }
 
+          verify_worker_inactive() {
+            if /usr/bin/systemctl is-active --quiet marketai-approved-paper.service; then
+              echo "::error::marketai-approved-paper.service is active; refusing to modify its unit or enablement state."
+              return 1
+            fi
+          }
+
           # Hold FD 200 for this entire shell: runtime verification, production
           # preflight and unit installation all happen while the deploy/OTA lock
           # is owned. Re-check immediately before and after installation as well.
           verify_runtime_sha
-
-          # Readiness is preparation only. If execution is already active, refuse
-          # before touching the installed unit, daemon state or boot enablement.
-          # This makes a rerun side-effect free for an active production worker.
-          if /usr/bin/systemctl is-active --quiet marketai-approved-paper.service; then
-            echo "::error::marketai-approved-paper.service is already active; refusing to modify its unit or enablement state."
-            exit 1
-          fi
+          verify_worker_inactive
 
           set -a
           # shellcheck disable=SC1091
@@ -255,6 +255,11 @@ jobs:
 
           verify_runtime_sha
 
+          # The explicit operator start action is not serialized by the deploy
+          # lock. Recheck immediately before the first systemd mutation so a
+          # worker started during the preflight is left completely untouched.
+          verify_worker_inactive
+
           sudo /usr/bin/install -m 0644 \
             "$RUNTIME_DIR/deploy/systemd/marketai-approved-paper.service" \
             /etc/systemd/system/marketai-approved-paper.service
@@ -269,10 +274,7 @@ jobs:
             echo "::error::marketai-approved-paper.service is not disabled (state: ${ENABLED_STATE:-unknown})."
             exit 1
           fi
-          if /usr/bin/systemctl is-active --quiet marketai-approved-paper.service; then
-            echo "::error::marketai-approved-paper.service became active during readiness preparation."
-            exit 1
-          fi
+          verify_worker_inactive
 
           verify_runtime_sha
           echo "marketai-approved-paper.service installed, disabled and inactive for ${DEPLOY_SHA}"
