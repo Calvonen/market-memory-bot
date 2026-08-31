@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import unittest
+from datetime import UTC, datetime
 
-from trading_system.models import Direction, PortfolioState, RiskStatus, TradeCandidate
+from trading_system.models import (
+    Direction,
+    PortfolioState,
+    RiskDecision,
+    RiskStatus,
+    TradeCandidate,
+)
 from trading_system.risk import RiskEngine
 
 
@@ -37,7 +44,6 @@ class FractionalRiskSizingTests(unittest.TestCase):
             proposal.risk.max_fractional_notional_usd,
             proposal.risk.max_position_value,
         )
-        # Stop-risk would allow more, but the 20% position-value ceiling is $2,000.
         self.assertAlmostEqual(proposal.risk.max_fractional_notional_usd, 2_000.0, delta=0.01)
 
     def test_same_candidate_still_rejects_for_integer_only_broker(self) -> None:
@@ -62,6 +68,22 @@ class FractionalRiskSizingTests(unittest.TestCase):
         self.assertEqual(proposal.risk.status, RiskStatus.REJECT)
         self.assertIn("position_size_below_one_unit", proposal.risk.reasons)
         self.assertEqual(proposal.risk.max_fractional_notional_usd, 0.0)
+
+    def test_fractional_field_does_not_shift_legacy_positional_audit_fields(self) -> None:
+        created_at = datetime(2026, 8, 31, 9, 0, tzinfo=UTC)
+        decision = RiskDecision(
+            RiskStatus.PASS,
+            (),
+            50.0,
+            1000.0,
+            2,
+            2.0,
+            "legacy-decision-id",
+            created_at,
+        )
+        self.assertEqual(decision.decision_id, "legacy-decision-id")
+        self.assertEqual(decision.created_at, created_at)
+        self.assertEqual(decision.max_fractional_notional_usd, 0.0)
 
 
 if __name__ == "__main__":
