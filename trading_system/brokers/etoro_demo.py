@@ -182,12 +182,13 @@ class EtoroDemoBroker(Broker):
             raise RuntimeError("eToro demo position has invalid notional")
         return notional
 
-    def risk_portfolio_state(self, *, spread_pct: float, daily_pnl: float = 0.0) -> PortfolioState:
-        """Build RiskEngine state from the live Virtual Portfolio, never local order history."""
+    def risk_portfolio_state(self, *, spread_pct: float, daily_pnl: float | None = None) -> PortfolioState:
+        """Build RiskEngine state only from the current Virtual Portfolio snapshot."""
         if not math.isfinite(spread_pct) or spread_pct < 0:
             raise ValueError("spread_pct must be finite and non-negative")
-        if not math.isfinite(daily_pnl):
-            raise ValueError("daily_pnl must be finite")
+        # Kept only for call-site compatibility. A caller-supplied value must never
+        # authorize execution because it can be stale relative to the demo account.
+        _ = daily_pnl
         body = self._get_demo_portfolio()
         equity = self._portfolio_scalar(body, "equity", "Equity", "totalEquity", "netLiquidationValue", "balance")
         cash = self._portfolio_scalar(
@@ -199,6 +200,17 @@ class EtoroDemoBroker(Broker):
             "AvailableBalance",
             "cashAvailable",
             "freeCash",
+        )
+        current_daily_pnl = self._portfolio_scalar(
+            body,
+            "dailyPnl",
+            "dailyPnL",
+            "DailyPnl",
+            "DailyPnL",
+            "dailyProfitLoss",
+            "DailyProfitLoss",
+            "profitLossToday",
+            "pnlToday",
         )
         if equity <= 0 or cash < 0:
             raise RuntimeError("eToro demo portfolio returned invalid live equity/cash")
@@ -218,7 +230,7 @@ class EtoroDemoBroker(Broker):
             cash=cash,
             open_positions=len(positions),
             instrument_exposure_pct=(instrument_notional / equity) * 100.0,
-            daily_pnl=daily_pnl,
+            daily_pnl=current_daily_pnl,
             spread_pct=spread_pct,
             volatility_pct=None,
         )
@@ -236,7 +248,11 @@ class EtoroDemoBroker(Broker):
 
     @staticmethod
     def _same_rate(observed: float, expected: float) -> bool:
-        return math.isclose(observed, expected, rel_tol=0.001, abs_tol=0.01)
+        # Do not use a price-relative tolerance here: on a high-priced instrument
+        # it could accept protection tens of dollars away from the authorized rate.
+        # One cent is intentionally fail-closed until instrument tick precision is
+        # available as authoritative metadata.
+        return math.isclose(observed, expected, rel_tol=0.0, abs_tol=0.01)
 
     def _reconciled_position(
         self,
