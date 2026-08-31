@@ -125,7 +125,7 @@ class EtoroDemoBrokerTests(unittest.TestCase):
         self.assertEqual(state.cash, 7_500.0)
         self.assertEqual(state.open_positions, 1)
         self.assertAlmostEqual(state.instrument_exposure_pct, 6.25)
-        self.assertEqual(state.daily_pnl, -275.0)
+        self.assertIsNone(state.daily_pnl)
         self.assertEqual(calls, [EtoroDemoBroker.DEMO_PORTFOLIO_URL, EtoroDemoBroker.DEMO_PNL_URL])
 
     def test_live_pnl_missing_credit_fails_closed(self) -> None:
