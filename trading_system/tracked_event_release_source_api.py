@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
 from typing import Callable, Literal, Protocol
 
 from fastapi import APIRouter, Header, HTTPException
@@ -24,6 +25,9 @@ _POSTGRES_UUID_TEXT = re.compile(
     r"(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
 )
+_TRACKED_EVENT_ACTIVE_HISTORY_WINDOW = timedelta(hours=24)
+_ALWAYS_ACTIVE_TRACKED_EVENT_STATUSES = {"tracked", "monitoring"}
+_TERMINAL_TRACKED_EVENT_STATUSES = {"completed", "cancelled", "failed"}
 
 
 class TrackedEventRepository(Protocol):
@@ -60,6 +64,16 @@ def _require_actor(actor: str | None) -> str:
     return canonical_actor
 
 
+def _tracked_event_is_active(event: PersistentTrackedEvent, *, now: datetime) -> bool:
+    """Mirror the repository's active/history read-model boundary for one exact row."""
+    status = event.status.value
+    if status in _ALWAYS_ACTIVE_TRACKED_EVENT_STATUSES:
+        return True
+    if status not in _TERMINAL_TRACKED_EVENT_STATUSES or event.updated_at is None:
+        return False
+    return event.updated_at >= now - _TRACKED_EVENT_ACTIVE_HISTORY_WINDOW
+
+
 def build_tracked_event_release_source_router(
     *,
     require_read: Callable[[str | None], None],
@@ -68,6 +82,32 @@ def build_tracked_event_release_source_router(
     get_official_release_source_repository: Callable[[], OfficialReleaseSourceRepository],
 ) -> APIRouter:
     router = APIRouter()
+
+    @router.get("/api/v1/tracked-events/{event_id}/activity")
+    def get_tracked_event_activity(
+        event_id: str,
+        x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
+    ) -> dict[str, object]:
+        require_read(x_marketai_key)
+        event_id = _require_valid_tracked_event_id(event_id)
+        try:
+            event = get_tracked_event_repository().get(event_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Tracked-event read failed") from exc
+
+        if event is None:
+            # The caller uses this read model to distinguish an archived/orphan
+            # expectation shell from an active canonical event. Missing is a
+            # normal negative lookup here, not a navigation-style 404.
+            return {"event_id": event_id, "exists": False, "active": False}
+
+        return {
+            "event_id": event_id,
+            "exists": True,
+            "active": _tracked_event_is_active(event, now=datetime.now(UTC)),
+        }
 
     @router.put("/api/v1/tracked-events/{event_id}/release-source")
     def set_tracked_event_release_source(
