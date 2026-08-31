@@ -10,13 +10,6 @@ from trading_system.post_release_paper import PostReleasePaperResult
 
 
 class SupabasePaperTradeRepository:
-    """Persist and read the latest paper confirmation state for one AI analysis.
-
-    One row per analysis is intentionally upserted as confirmation evolves from
-    waiting to an executed paper order.  This keeps a durable strategy/risk/order
-    audit without creating a row every five minutes while waiting for confirmation.
-    """
-
     def __init__(self, client: Any) -> None:
         self.client = client
         self.claim_token = str(uuid4())
@@ -73,6 +66,23 @@ class SupabasePaperTradeRepository:
         if not rows:
             raise RuntimeError(f"paper event claim returned no owner for {event_id}")
         return rows[0]
+
+    def _completed_order_payload(self, task_id: str) -> dict[str, Any] | None:
+        response = (
+            self.client.table("event_paper_broker_attempts")
+            .select("order_payload")
+            .eq("task_id", task_id)
+            .eq("status", "completed")
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            return None
+        payload = rows[0].get("order_payload")
+        if not isinstance(payload, dict):
+            raise RuntimeError("completed broker attempt is missing canonical order payload")
+        return payload
 
     def save_result(
         self,
@@ -149,13 +159,24 @@ class SupabasePaperTradeRepository:
                 "max_risk_amount": risk.max_risk_amount,
                 "max_position_value": risk.max_position_value,
                 "max_quantity": risk.max_quantity,
+                "max_fractional_notional_usd": risk.max_fractional_notional_usd,
                 "reward_risk": risk.reward_risk,
                 "created_at": risk.created_at.isoformat(),
                 "proposal_id": proposal.proposal_id,
                 "mode": proposal.mode.value,
             }
             if result.pipeline.order is not None:
-                payload["paper_order"] = broker_order_payload(result.pipeline.order)
+                terminal_order = broker_order_payload(result.pipeline.order)
+                if task_id is not None:
+                    completed_order = self._completed_order_payload(task_id)
+                    if completed_order is not None:
+                        for key in ("order_id", "instrument", "direction", "status"):
+                            if str(completed_order.get(key)) != str(terminal_order.get(key)):
+                                raise RuntimeError(
+                                    "terminal PAPER order differs from completed broker attempt"
+                                )
+                        terminal_order = completed_order
+                payload["paper_order"] = terminal_order
 
         rpc_name = (
             "save_event_paper_trade_result_for_task"
@@ -167,10 +188,6 @@ class SupabasePaperTradeRepository:
             {"input_payload": payload},
         ).execute()
         rows = response.data or []
-        # An empty result means the database atomically rejected this write.
-        # Prefer the analysis-specific winner when one exists. A first-attempt
-        # runner may have no row yet if its event lease was reclaimed while it
-        # was running; that is a normal stale-writer loss, not a transport error.
         if not rows:
             winner = self.get_for_analysis(analysis_id)
             if winner is None:
@@ -218,9 +235,7 @@ class SupabasePaperTradeRepository:
             return result
         deadline_response = self.client.rpc(
             "is_event_confirmation_deadline_reached",
-            {
-                "input_confirmation_deadline_at": confirmation_deadline_at.isoformat(),
-            },
+            {"input_confirmation_deadline_at": confirmation_deadline_at.isoformat()},
         ).execute()
         deadline_reached = deadline_response.data is True
         winner = self.get_for_analysis(analysis_id)
