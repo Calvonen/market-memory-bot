@@ -1,5 +1,5 @@
 import { Link, router, useFocusEffect } from 'expo-router';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -19,7 +19,7 @@ import {
   getUpcomingCalendarEvents,
   PaperRun,
 } from '@/services/api';
-import { getTrackedEventActivity, TrackedMarketEvent } from '@/services/tracked-events';
+import { getTrackedEventActivities, TrackedMarketEvent } from '@/services/tracked-events';
 
 type EventStatus = { run: PaperRun | null; statusError: boolean };
 type TrackedActivityState = 'loading' | 'active' | 'inactive' | 'error';
@@ -46,28 +46,55 @@ function deviceLocalCalendarWindow(): { fromDate: string; toDate: string } {
   return { fromDate: formatLocalDate(now), toDate: formatLocalDate(to) };
 }
 
+function isTrackedExpectation(eventId: string): boolean {
+  return eventId.startsWith('tracked:') || eventId.startsWith('calendar:');
+}
+
+function isExpectationBackedByLoadedTrackedEvent(
+  eventId: string,
+  loadedTrackedEventIds: ReadonlySet<string>,
+  loadedCalendarEventIds: ReadonlySet<string>,
+): boolean {
+  if (eventId.startsWith('tracked:')) {
+    const trackedEventId = eventId.slice('tracked:'.length);
+    return Boolean(trackedEventId) && loadedTrackedEventIds.has(trackedEventId);
+  }
+  if (eventId.startsWith('calendar:')) {
+    const calendarEventId = eventId.slice('calendar:'.length);
+    return Boolean(calendarEventId) && loadedCalendarEventIds.has(calendarEventId);
+  }
+  return false;
+}
+
 function isHomeExpectationVisible(
   event: EventExpectation,
   status: EventStatus | undefined,
   loadedTrackedEventIds: ReadonlySet<string>,
+  loadedCalendarEventIds: ReadonlySet<string>,
   trackedActivity: TrackedActivityState | undefined,
 ): boolean {
   if (event.event_id.startsWith('tracked:')) {
     const trackedEventId = event.event_id.slice('tracked:'.length);
     if (!trackedEventId) return false;
-
-    // A loaded canonical card always owns the occurrence. If it falls outside
-    // the bounded Home card list, exact activity for this canonical ID decides
-    // whether the expectation shell must remain as its lightweight fallback.
     if (loadedTrackedEventIds.has(trackedEventId)) return false;
-    if (trackedActivity !== 'inactive') return true;
+  }
+
+  if (event.event_id.startsWith('calendar:')) {
+    const calendarEventId = event.event_id.slice('calendar:'.length);
+    if (!calendarEventId) return false;
+    // A loaded calendar-backed canonical event is merged into this expectation
+    // card via trackedEvent below, so the expectation remains the one Home card.
+    if (loadedCalendarEventIds.has(calendarEventId)) return true;
   }
 
   const today = formatLocalDate(new Date());
   if (event.scheduled_date >= today) return true;
 
-  // A failed or still-pending paper-status lookup is not evidence that the
-  // past event is stale. Keep it visible so Home can surface the uncertainty.
+  // Past tracked/calendar expectations outside the bounded 20-card canonical
+  // snapshot use exact canonical occurrence activity. Loading/error fail open;
+  // only a confirmed inactive result allows normal stale filtering below.
+  if (isTrackedExpectation(event.event_id) && trackedActivity !== 'inactive') return true;
+
   if (!status || status.statusError) return true;
 
   return status.run?.status === 'waiting_confirmation';
@@ -109,15 +136,7 @@ export default function HomeScreen() {
         if (loadId !== latestLoadId.current) return;
         setEvents(list);
         setStatuses({});
-
-        const today = formatLocalDate(new Date());
-        const initialTrackedActivity: Record<string, TrackedActivityState> = {};
-        for (const event of list) {
-          if (event.event_id.startsWith('tracked:') && event.scheduled_date < today) {
-            initialTrackedActivity[event.event_id] = 'loading';
-          }
-        }
-        setTrackedActivityByEventId(initialTrackedActivity);
+        setTrackedActivityByEventId({});
 
         list.forEach((event) => {
           getPaperStatus(event.event_id)
@@ -133,25 +152,6 @@ export default function HomeScreen() {
               setStatuses((prev) => ({
                 ...prev,
                 [event.event_id]: { run: null, statusError: true },
-              }));
-            });
-
-          if (!event.event_id.startsWith('tracked:') || event.scheduled_date >= today) return;
-          const trackedEventId = event.event_id.slice('tracked:'.length);
-          if (!trackedEventId) return;
-          getTrackedEventActivity(trackedEventId)
-            .then((activity) => {
-              if (loadId !== latestLoadId.current) return;
-              setTrackedActivityByEventId((prev) => ({
-                ...prev,
-                [event.event_id]: activity.active ? 'active' : 'inactive',
-              }));
-            })
-            .catch(() => {
-              if (loadId !== latestLoadId.current) return;
-              setTrackedActivityByEventId((prev) => ({
-                ...prev,
-                [event.event_id]: 'error',
               }));
             });
         });
@@ -185,6 +185,52 @@ export default function HomeScreen() {
     setPersistentEventByCalendarEventId(snapshot.eventByCalendarEventId);
   }, []);
 
+  useEffect(() => {
+    if (!events || trackedEventCount === null) return;
+
+    const today = formatLocalDate(new Date());
+    const candidates = events.filter(
+      (event) =>
+        event.scheduled_date < today &&
+        isTrackedExpectation(event.event_id) &&
+        !isExpectationBackedByLoadedTrackedEvent(
+          event.event_id,
+          persistentEventIds,
+          persistentCalendarEventIds,
+        ),
+    );
+    const candidateIds = candidates.map((event) => event.event_id);
+    const loadingState = Object.fromEntries(
+      candidateIds.map((eventId) => [eventId, 'loading' as TrackedActivityState]),
+    );
+    setTrackedActivityByEventId(loadingState);
+    if (candidateIds.length === 0) return;
+
+    let active = true;
+    void getTrackedEventActivities(candidateIds)
+      .then((activityByOccurrenceId) => {
+        if (!active) return;
+        setTrackedActivityByEventId(
+          Object.fromEntries(
+            candidateIds.map((eventId) => [
+              eventId,
+              activityByOccurrenceId[eventId]?.active ? 'active' : 'inactive',
+            ]),
+          ),
+        );
+      })
+      .catch(() => {
+        if (!active) return;
+        setTrackedActivityByEventId(
+          Object.fromEntries(candidateIds.map((eventId) => [eventId, 'error'])),
+        );
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [events, trackedEventCount, persistentEventIds, persistentCalendarEventIds]);
+
   const visibleEvents = useMemo(() => {
     if (!events) return null;
     return events.filter((event) =>
@@ -192,10 +238,17 @@ export default function HomeScreen() {
         event,
         statuses[event.event_id],
         persistentEventIds,
+        persistentCalendarEventIds,
         trackedActivityByEventId[event.event_id],
       ),
     );
-  }, [events, statuses, persistentEventIds, trackedActivityByEventId]);
+  }, [
+    events,
+    statuses,
+    persistentEventIds,
+    persistentCalendarEventIds,
+    trackedActivityByEventId,
+  ]);
 
   const expectationCalendarEventIds = useMemo(() => {
     const ids = new Set<string>();
