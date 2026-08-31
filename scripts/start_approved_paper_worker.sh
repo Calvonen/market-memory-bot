@@ -11,6 +11,7 @@ PREPARED_STATE_FILE="$STATE_DIR/approved-paper-prepared.sha"
 PREPARED_ENV_FILE="$STATE_DIR/approved-paper-prepared.env"
 PREPARED_ENV_DIGEST_FILE="$STATE_DIR/approved-paper-prepared.env.sha256"
 SERVICE="marketai-approved-paper.service"
+EXPECTED_FRAGMENT="/etc/systemd/system/marketai-approved-paper.service"
 
 # Use the same lock order as readiness/deploy: deployment lock first,
 # worker-control lock second. This keeps runtime movement, readiness mutation and
@@ -72,16 +73,39 @@ if [ "$ACTUAL_ENV_DIGEST" != "$EXPECTED_ENV_DIGEST" ]; then
   exit 1
 fi
 
-# The installed unit must consume the immutable readiness snapshot, never the
-# mutable general MarketAI .env file.
+# Require the exact effective systemd configuration that readiness installed.
+# Any drop-in could override EnvironmentFile/ExecStart or append later
+# EnvironmentFiles whose assignments take precedence over the prepared snapshot.
+FRAGMENT_PATH="$(/usr/bin/systemctl show "$SERVICE" --property=FragmentPath --value 2>&1)" || {
+  echo "Refusing PAPER start: could not inspect $SERVICE FragmentPath: ${FRAGMENT_PATH:-unknown error}." >&2
+  exit 1
+}
+if [ "$FRAGMENT_PATH" != "$EXPECTED_FRAGMENT" ]; then
+  echo "Refusing PAPER start: unexpected unit fragment '${FRAGMENT_PATH:-<empty>}' (expected $EXPECTED_FRAGMENT)." >&2
+  exit 1
+fi
+
+DROP_IN_PATHS="$(/usr/bin/systemctl show "$SERVICE" --property=DropInPaths --value 2>&1)" || {
+  echo "Refusing PAPER start: could not inspect $SERVICE DropInPaths: ${DROP_IN_PATHS:-unknown error}." >&2
+  exit 1
+}
+if [ -n "$(printf '%s' "$DROP_IN_PATHS" | tr -d '[:space:]')" ]; then
+  echo "Refusing PAPER start: unexpected systemd drop-ins are present: $DROP_IN_PATHS" >&2
+  exit 1
+fi
+
 ENVIRONMENT_FILES="$(/usr/bin/systemctl show "$SERVICE" --property=EnvironmentFiles --value 2>&1)" || {
   echo "Refusing PAPER start: could not inspect $SERVICE EnvironmentFiles: ${ENVIRONMENT_FILES:-unknown error}." >&2
   exit 1
 }
-if ! printf '%s\n' "$ENVIRONMENT_FILES" | grep -Fq "$PREPARED_ENV_FILE"; then
-  echo "Refusing PAPER start: $SERVICE is not bound to the prepared environment snapshot." >&2
-  exit 1
-fi
+case "$ENVIRONMENT_FILES" in
+  "$PREPARED_ENV_FILE"|"$PREPARED_ENV_FILE (ignore_errors=no)")
+    ;;
+  *)
+    echo "Refusing PAPER start: effective EnvironmentFiles must contain exactly the prepared snapshot; observed '${ENVIRONMENT_FILES:-<empty>}'." >&2
+    exit 1
+    ;;
+esac
 
 if /usr/bin/systemctl is-active --quiet "$SERVICE"; then
   echo "$SERVICE is already active on prepared SHA $PREPARED_SHA."
@@ -95,4 +119,4 @@ if ! /usr/bin/systemctl is-active --quiet "$SERVICE"; then
   exit 1
 fi
 
-echo "$SERVICE is active on prepared SHA $PREPARED_SHA with the readiness environment snapshot."
+echo "$SERVICE is active on prepared SHA $PREPARED_SHA with the exact readiness systemd/environment configuration."
