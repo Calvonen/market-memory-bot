@@ -71,6 +71,12 @@ export type TrackedEventReleaseSource = {
   source_title: string | null;
 };
 
+export type TrackedEventActivityResponse = {
+  event_id: string;
+  exists: boolean;
+  active: boolean;
+};
+
 export type PutTrackedEventReleaseSourceInput = {
   source_kind: 'direct_url' | 'results_page';
   source_url: string;
@@ -132,6 +138,12 @@ export function getTrackedEvents(
 ): Promise<TrackedMarketEvent[]> {
   return apiGet<TrackedMarketEvent[]>(
     `/api/v1/tracked-events?view=${encodeURIComponent(view)}&limit=${encodeURIComponent(String(limit))}`,
+  );
+}
+
+export function getTrackedEventActivity(eventId: string): Promise<TrackedEventActivityResponse> {
+  return apiGet<TrackedEventActivityResponse>(
+    `/api/v1/tracked-events/${encodeURIComponent(eventId)}/activity`,
   );
 }
 
