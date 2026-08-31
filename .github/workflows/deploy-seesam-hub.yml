@@ -56,13 +56,54 @@ jobs:
           DEPLOY_SHA: ${{ github.sha }}
         run: |
           LOCK_FILE="/tmp/marketai-deploy-ota.lock"
+          CONTROL_LOCK_FILE="/tmp/marketai-approved-paper-control.lock"
           LOCK_TIMEOUT_SECONDS=300
+          PAPER_SERVICE="marketai-approved-paper.service"
+          PAPER_STATE_DIR="/home/marko/marketai-deploy-state"
 
           exec 200>"$LOCK_FILE"
           if ! flock -w "$LOCK_TIMEOUT_SECONDS" 200; then
             echo "::error::Could not acquire the seesam-hub deploy/OTA lock (${LOCK_FILE}) within ${LOCK_TIMEOUT_SECONDS}s. Another deploy or OTA publish is holding it too long."
             exit 1
           fi
+
+          # A backend deploy invalidates any previously prepared execution
+          # runtime. Serialize against the canonical PAPER start/readiness path,
+          # stop and disable any loaded worker before the checkout can move, and
+          # remove prepared authority so it cannot restart on an unreviewed SHA.
+          exec 201>"$CONTROL_LOCK_FILE"
+          if ! flock -w "$LOCK_TIMEOUT_SECONDS" 201; then
+            echo "::error::Could not acquire approved PAPER worker control lock within ${LOCK_TIMEOUT_SECONDS}s."
+            exit 1
+          fi
+          if ! PAPER_LOAD_STATE="$(/usr/bin/systemctl show "$PAPER_SERVICE" --property=LoadState --value 2>&1)"; then
+            echo "::error::Could not inspect $PAPER_SERVICE before deploy: ${PAPER_LOAD_STATE:-unknown error}."
+            exit 1
+          fi
+          if [ "$PAPER_LOAD_STATE" != "not-found" ]; then
+            if [ "$PAPER_LOAD_STATE" != "loaded" ]; then
+              echo "::error::$PAPER_SERVICE has unexpected LoadState=${PAPER_LOAD_STATE:-unknown}; refusing deploy."
+              exit 1
+            fi
+            sudo /usr/bin/systemctl stop "$PAPER_SERVICE"
+            if ! sudo /usr/bin/systemctl disable "$PAPER_SERVICE"; then
+              PAPER_ENABLED_STATE="$(/usr/bin/systemctl is-enabled "$PAPER_SERVICE" 2>/dev/null || true)"
+              if [ "$PAPER_ENABLED_STATE" != "disabled" ]; then
+                echo "::error::Could not disable $PAPER_SERVICE before deploy (state: ${PAPER_ENABLED_STATE:-unknown})."
+                exit 1
+              fi
+            fi
+            PAPER_ACTIVE_STATE="$(/usr/bin/systemctl show "$PAPER_SERVICE" --property=ActiveState --value)"
+            PAPER_SUB_STATE="$(/usr/bin/systemctl show "$PAPER_SERVICE" --property=SubState --value)"
+            if [ "$PAPER_ACTIVE_STATE" != "inactive" ] || [ "$PAPER_SUB_STATE" != "dead" ]; then
+              echo "::error::$PAPER_SERVICE did not become inactive/dead before deploy (ActiveState=${PAPER_ACTIVE_STATE:-unknown}, SubState=${PAPER_SUB_STATE:-unknown})."
+              exit 1
+            fi
+          fi
+          rm -f \
+            "$PAPER_STATE_DIR/approved-paper-prepared.sha" \
+            "$PAPER_STATE_DIR/approved-paper-prepared.env" \
+            "$PAPER_STATE_DIR/approved-paper-prepared.env.sha256"
 
           cd /home/marko/marketai-repo || exit 1
           test "$(git branch --show-current)" = "feature/trading-system-foundation"

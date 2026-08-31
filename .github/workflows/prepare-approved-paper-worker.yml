@@ -1,0 +1,351 @@
+name: Prepare approved PAPER worker
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Verify and install approved PAPER worker
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    concurrency:
+      group: marketai-approved-paper-readiness
+      cancel-in-progress: false
+
+    steps:
+      - name: Restrict run to deployment branch
+        env:
+          RUN_REF: ${{ github.ref }}
+        run: |
+          if [ "$RUN_REF" != "refs/heads/feature/trading-system-foundation" ]; then
+            echo "::error::Run this workflow only from feature/trading-system-foundation."
+            exit 1
+          fi
+
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+
+      - name: Verify and install under deploy lock
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          LOCK_FILE="/tmp/marketai-deploy-ota.lock"
+          CONTROL_LOCK_FILE="/tmp/marketai-approved-paper-control.lock"
+          LOCK_TIMEOUT_SECONDS=300
+          RUNTIME_DIR="/home/marko/marketai-repo"
+          STATE_DIR="/home/marko/marketai-deploy-state"
+          STATE_FILE="$STATE_DIR/last-deployed-backend.sha"
+          PREPARED_STATE_FILE="$STATE_DIR/approved-paper-prepared.sha"
+          PREPARED_ENV_FILE="$STATE_DIR/approved-paper-prepared.env"
+          PREPARED_ENV_DIGEST_FILE="$STATE_DIR/approved-paper-prepared.env.sha256"
+          SOURCE_ENV_FILE="/home/marko/marketai/.env"
+          SERVICE="marketai-approved-paper.service"
+
+          exec 200>"$LOCK_FILE"
+          if ! flock -w "$LOCK_TIMEOUT_SECONDS" 200; then
+            echo "::error::Could not acquire the MarketAI deploy/OTA lock within ${LOCK_TIMEOUT_SECONDS}s."
+            exit 1
+          fi
+
+          verify_runtime_sha() {
+            test -f "$STATE_FILE" || {
+              echo "::error::No successfully deployed backend SHA has been recorded."
+              return 1
+            }
+            DEPLOYED_SHA="$(tr -d '[:space:]' < "$STATE_FILE")"
+            if [ "$DEPLOYED_SHA" != "$DEPLOY_SHA" ]; then
+              echo "::error::Readiness commit ${DEPLOY_SHA} does not match deployed backend ${DEPLOYED_SHA}."
+              return 1
+            fi
+
+            cd "$RUNTIME_DIR"
+            RUNTIME_SHA="$(git rev-parse HEAD)"
+            if [ "$RUNTIME_SHA" != "$DEPLOY_SHA" ]; then
+              echo "::error::Production runtime checkout ${RUNTIME_SHA} does not match readiness commit ${DEPLOY_SHA}."
+              return 1
+            fi
+            test "$(git branch --show-current)" = "feature/trading-system-foundation" || {
+              echo "::error::Production runtime is not on feature/trading-system-foundation."
+              return 1
+            }
+            test -z "$(git status --porcelain --untracked-files=no)" || {
+              echo "::error::Production runtime has tracked working-tree changes."
+              return 1
+            }
+          }
+
+          verify_worker_quiescent() {
+            if ! LOAD_STATE="$(/usr/bin/systemctl show "$SERVICE" --property=LoadState --value 2>&1)"; then
+              echo "::error::Could not inspect $SERVICE LoadState: ${LOAD_STATE:-unknown error}."
+              return 1
+            fi
+
+            if ! JOBS_OUTPUT="$(/usr/bin/systemctl list-jobs --no-legend --plain 2>&1)"; then
+              echo "::error::Could not inspect queued systemd jobs: ${JOBS_OUTPUT:-unknown error}."
+              return 1
+            fi
+            if printf '%s\n' "$JOBS_OUTPUT" \
+              | grep -Eq '^[[:space:]]*[0-9]+[[:space:]]+marketai-approved-paper\.service[[:space:]]'; then
+              echo "::error::$SERVICE has a queued systemd job; refusing readiness mutation."
+              return 1
+            fi
+
+            if [ "$LOAD_STATE" = "not-found" ]; then
+              return 0
+            fi
+            if [ "$LOAD_STATE" != "loaded" ]; then
+              echo "::error::$SERVICE has unexpected LoadState=${LOAD_STATE:-unknown}; refusing readiness mutation."
+              return 1
+            fi
+
+            if ! ACTIVE_STATE="$(/usr/bin/systemctl show "$SERVICE" --property=ActiveState --value 2>&1)"; then
+              echo "::error::Could not inspect $SERVICE ActiveState: ${ACTIVE_STATE:-unknown error}."
+              return 1
+            fi
+            if ! SUB_STATE="$(/usr/bin/systemctl show "$SERVICE" --property=SubState --value 2>&1)"; then
+              echo "::error::Could not inspect $SERVICE SubState: ${SUB_STATE:-unknown error}."
+              return 1
+            fi
+            if [ "$ACTIVE_STATE" != "inactive" ] || [ "$SUB_STATE" != "dead" ]; then
+              echo "::error::$SERVICE is not exactly inactive/dead (ActiveState=${ACTIVE_STATE:-unknown}, SubState=${SUB_STATE:-unknown}); refusing readiness mutation."
+              return 1
+            fi
+          }
+
+          verify_runtime_sha
+          verify_worker_quiescent
+
+          test -f "$SOURCE_ENV_FILE" || {
+            echo "::error::Production environment file is missing: $SOURCE_ENV_FILE"
+            exit 1
+          }
+          mkdir -p "$STATE_DIR"
+          PREPARED_ENV_TMP="${PREPARED_ENV_FILE}.tmp.$$"
+          PREPARED_ENV_DIGEST_TMP="${PREPARED_ENV_DIGEST_FILE}.tmp.$$"
+          PREPARED_SHA_TMP="${PREPARED_STATE_FILE}.tmp.$$"
+          trap 'rm -f "$PREPARED_ENV_TMP" "$PREPARED_ENV_DIGEST_TMP" "$PREPARED_SHA_TMP"' EXIT
+          cp "$SOURCE_ENV_FILE" "$PREPARED_ENV_TMP"
+          chmod 0600 "$PREPARED_ENV_TMP"
+
+          # Run the readiness-critical configuration and broker/schema preflight
+          # in an empty environment. Only HOME/PATH plus the snapshot/runtime
+          # locations are inherited; every MarketAI/eToro/Supabase value must be
+          # supplied by the exact snapshot that systemd will later consume.
+          env -i \
+            HOME="$HOME" \
+            PATH="$PATH" \
+            RUNTIME_DIR="$RUNTIME_DIR" \
+            PREPARED_ENV_TMP="$PREPARED_ENV_TMP" \
+            /bin/bash --noprofile --norc <<'PREFLIGHT'
+          set -euo pipefail
+          set -a
+          # shellcheck disable=SC1090
+          source "$PREPARED_ENV_TMP"
+          set +a
+
+          test "${MARKETAI_PAPER_BROKER:-}" = "etoro_demo" || {
+            echo "MARKETAI_PAPER_BROKER must be explicitly set to etoro_demo in the prepared snapshot." >&2
+            exit 1
+          }
+          test -n "${MARKETAI_ETORO_DEMO_MAX_AMOUNT_USD:-}" || {
+            echo "MARKETAI_ETORO_DEMO_MAX_AMOUNT_USD is required in the prepared snapshot." >&2
+            exit 1
+          }
+          test -n "${MARKETAI_PAPER_SPREAD_PCT:-}" || {
+            echo "MARKETAI_PAPER_SPREAD_PCT is required in the prepared snapshot." >&2
+            exit 1
+          }
+          test -n "${ETORO_API_KEY:-}" || { echo "ETORO_API_KEY is required in the prepared snapshot." >&2; exit 1; }
+          test -n "${ETORO_USER_KEY:-}" || { echo "ETORO_USER_KEY is required in the prepared snapshot." >&2; exit 1; }
+
+          cd "$RUNTIME_DIR"
+          "$RUNTIME_DIR/.venv/bin/python" - <<'PY'
+          import math
+          import os
+
+          from trading_system.brokers.etoro_demo import EtoroDemoBroker
+          from trading_system.paper_trade_repository import SupabasePaperTradeRepository
+          from trading_system.tracked_event_repository import SupabaseTrackedEventRepository
+          from trading_system.trading_task_repository import SupabaseTradingTaskRepository
+
+
+          def expect_rpc_error(client, name, payload, marker):
+              try:
+                  client.rpc(name, payload).execute()
+              except Exception as exc:
+                  if marker not in str(exc):
+                      raise RuntimeError(f"{name} exists but returned an unexpected readiness error: {exc}") from exc
+                  return
+              raise RuntimeError(f"{name} unexpectedly accepted an invalid readiness probe")
+
+
+          def expect_rpc_inaccessible(client, name, payload):
+              try:
+                  client.rpc(name, payload).execute()
+              except Exception as exc:
+                  text = str(exc).lower()
+                  if "permission denied" in text or "could not find the function" in text or "pgrst202" in text:
+                      return
+                  raise RuntimeError(f"{name} returned an unexpected privilege probe error: {exc}") from exc
+              raise RuntimeError(f"deprecated broker reservation RPC {name} is still callable by service_role")
+
+
+          cap = float(os.environ["MARKETAI_ETORO_DEMO_MAX_AMOUNT_USD"])
+          spread = float(os.environ["MARKETAI_PAPER_SPREAD_PCT"])
+          if not math.isfinite(cap) or cap <= 0:
+              raise SystemExit("MARKETAI_ETORO_DEMO_MAX_AMOUNT_USD must be finite and positive")
+          if not math.isfinite(spread) or spread < 0:
+              raise SystemExit("MARKETAI_PAPER_SPREAD_PCT must be finite and non-negative")
+
+          tasks = SupabaseTradingTaskRepository.from_env()
+          runs = SupabasePaperTradeRepository.from_env()
+          tracked = SupabaseTrackedEventRepository.from_env()
+          client = runs.client
+
+          tasks.client.table("trading_tasks").select("id,approved_expectation_version").limit(1).execute()
+          client.table("event_paper_trade_event_claims").select("event_id,task_id,claim_token,lease_expires_at").limit(1).execute()
+          client.table("event_paper_trade_runs").select("id,task_id,paper_order").limit(1).execute()
+          client.table("event_paper_broker_attempts").select(
+              "task_id,event_id,analysis_id,expectation_version,execution_token,status,strategy_payload,risk_payload,order_payload"
+          ).limit(1).execute()
+          client.table("paper_portfolio_execution_lease").select("singleton,lease_token,lease_expires_at").limit(1).execute()
+
+          expect_rpc_error(
+              client,
+              "claim_paper_portfolio_execution_lease",
+              {"input_lease_token": None, "input_lease_seconds": 1},
+              "paper_portfolio_lease_identity_invalid",
+          )
+          expect_rpc_error(
+              client,
+              "claim_event_paper_run_for_task_v2",
+              {
+                  "input_event_id": "readiness-invalid",
+                  "input_analysis_id": None,
+                  "input_task_id": None,
+                  "input_expectation_version": 1,
+                  "input_claim_token": None,
+                  "input_lease_seconds": 1,
+              },
+              "paper_run_task_missing",
+          )
+          expect_rpc_error(
+              client,
+              "begin_event_paper_broker_attempt_with_portfolio_lease",
+              {
+                  "input_event_id": "readiness-invalid",
+                  "input_analysis_id": None,
+                  "input_task_id": None,
+                  "input_expectation_version": 1,
+                  "input_claim_token": None,
+                  "input_execution_token": None,
+                  "input_lease_seconds": 1,
+                  "input_strategy_payload": {},
+                  "input_risk_payload": {},
+                  "input_portfolio_lease_token": None,
+                  "input_portfolio_lease_seconds": 1,
+              },
+              "paper_portfolio_execution_lease_identity_invalid",
+          )
+          expect_rpc_error(
+              client,
+              "complete_event_paper_broker_attempt",
+              {
+                  "input_task_id": None,
+                  "input_execution_token": None,
+                  "input_order_payload": None,
+              },
+              "paper_broker_attempt_completion_invalid",
+          )
+          expect_rpc_error(
+              client,
+              "release_paper_portfolio_execution_lease",
+              {"input_lease_token": None},
+              "paper_portfolio_lease_identity_invalid",
+          )
+
+          expect_rpc_inaccessible(
+              client,
+              "begin_event_paper_broker_attempt",
+              {
+                  "input_event_id": "readiness-invalid",
+                  "input_analysis_id": None,
+                  "input_task_id": None,
+                  "input_expectation_version": 1,
+                  "input_claim_token": None,
+                  "input_execution_token": None,
+                  "input_lease_seconds": 1,
+                  "input_strategy_payload": {},
+                  "input_risk_payload": {},
+              },
+          )
+
+          event = next(
+              (
+                  candidate
+                  for candidate in tracked.list_recent(limit=100)
+                  if candidate.resolved_etoro_instrument_id is not None
+                  and candidate.resolved_etoro_instrument_id > 0
+                  and candidate.resolved_etoro_symbol
+                  and candidate.resolved_etoro_symbol.strip().upper() == candidate.instrument.strip().upper()
+              ),
+              None,
+          )
+          if event is None:
+              raise RuntimeError("no tracked event has a canonical persisted eToro identity for readiness preflight")
+
+          broker = EtoroDemoBroker.from_env(
+              instrument_id=event.resolved_etoro_instrument_id,
+              amount_usd=cap,
+          )
+          portfolio = broker.risk_portfolio_state(spread_pct=spread)
+          if portfolio.equity <= 0 or portfolio.cash < 0 or portfolio.open_positions < 0:
+              raise RuntimeError("eToro demo portfolio readiness returned invalid authoritative state")
+
+          print(
+              "approved PAPER readiness checks passed for canonical eToro identity "
+              f"{event.instrument}/{event.resolved_etoro_instrument_id}"
+          )
+          PY
+          PREFLIGHT
+
+          verify_runtime_sha
+
+          exec 201>"$CONTROL_LOCK_FILE"
+          if ! flock -w "$LOCK_TIMEOUT_SECONDS" 201; then
+            echo "::error::Could not acquire approved PAPER worker control lock within ${LOCK_TIMEOUT_SECONDS}s."
+            exit 1
+          fi
+          verify_worker_quiescent
+
+          sudo /usr/bin/install -m 0644 \
+            "$RUNTIME_DIR/deploy/systemd/marketai-approved-paper.service" \
+            /etc/systemd/system/marketai-approved-paper.service
+          sudo /usr/bin/systemctl daemon-reload
+
+          if ! sudo /usr/bin/systemctl disable "$SERVICE"; then
+            echo "::error::Failed to disable $SERVICE."
+            exit 1
+          fi
+          ENABLED_STATE="$(/usr/bin/systemctl is-enabled "$SERVICE" 2>/dev/null || true)"
+          if [ "$ENABLED_STATE" != "disabled" ]; then
+            echo "::error::$SERVICE is not disabled (state: ${ENABLED_STATE:-unknown})."
+            exit 1
+          fi
+          verify_worker_quiescent
+          verify_runtime_sha
+
+          mv -f "$PREPARED_ENV_TMP" "$PREPARED_ENV_FILE"
+          chmod 0600 "$PREPARED_ENV_FILE"
+          sha256sum "$PREPARED_ENV_FILE" | awk '{print $1}' > "$PREPARED_ENV_DIGEST_TMP"
+          chmod 0644 "$PREPARED_ENV_DIGEST_TMP"
+          mv -f "$PREPARED_ENV_DIGEST_TMP" "$PREPARED_ENV_DIGEST_FILE"
+
+          printf '%s\n' "$DEPLOY_SHA" > "$PREPARED_SHA_TMP"
+          chmod 0644 "$PREPARED_SHA_TMP"
+          mv -f "$PREPARED_SHA_TMP" "$PREPARED_STATE_FILE"
+
+          echo "$SERVICE installed, disabled and quiescent; prepared SHA ${DEPLOY_SHA} and exact environment snapshot recorded"

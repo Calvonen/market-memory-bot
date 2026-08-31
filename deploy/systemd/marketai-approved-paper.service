@@ -7,10 +7,9 @@ After=network-online.target marketai-tracked-events.service
 [Service]
 Type=simple
 WorkingDirectory=/home/marko/marketai-repo
-EnvironmentFile=/home/marko/marketai/.env
+EnvironmentFile=/home/marko/marketai-deploy-state/approved-paper-prepared.env
 ExecStart=/home/marko/marketai-repo/.venv/bin/python -m trading_system.approved_tracked_paper_worker
-Restart=on-failure
-RestartSec=5
+Restart=no
 TimeoutStopSec=20
 
 [Install]
