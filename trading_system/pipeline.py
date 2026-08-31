@@ -59,13 +59,20 @@ class PaperTradingPipeline:
         risk_engine: RiskEngine | None = None,
         broker: PaperBroker | None = None,
         journal: DecisionJournal | None = None,
-        allow_fractional_sizing: bool = False,
+        allow_fractional_sizing: bool | None = None,
     ) -> None:
         self.strategy_engine = strategy_engine or StrategyEngine()
         self.risk_engine = risk_engine or RiskEngine()
         self.broker = broker or PaperBroker()
         self.journal = journal or InMemoryDecisionJournal()
-        self.allow_fractional_sizing = bool(allow_fractional_sizing)
+        broker_supports_fractional = bool(getattr(self.broker, "supports_fractional_sizing", False))
+        self.allow_fractional_sizing = (
+            broker_supports_fractional
+            if allow_fractional_sizing is None
+            else bool(allow_fractional_sizing)
+        )
+        if self.allow_fractional_sizing and not broker_supports_fractional:
+            raise ValueError("fractional sizing requires a broker that explicitly supports it")
 
     def run(
         self,
