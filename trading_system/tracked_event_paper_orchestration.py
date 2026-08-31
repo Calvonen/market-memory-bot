@@ -254,5 +254,6 @@ def run_approved_tracked_paper_once(
         analysis_id=analysis_id,
         result=result,
         claim_token=paper_runs.claim_token,
+        task_id=requested_task_id,
     )
     return _persisted_result(persisted)
