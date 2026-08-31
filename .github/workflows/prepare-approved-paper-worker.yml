@@ -1,0 +1,96 @@
+name: Prepare approved PAPER worker
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Verify and install approved PAPER worker
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    concurrency:
+      group: marketai-approved-paper-readiness
+      cancel-in-progress: false
+
+    steps:
+      - name: Restrict run to deployment branch
+        env:
+          RUN_REF: ${{ github.ref }}
+        run: |
+          if [ "$RUN_REF" != "refs/heads/feature/trading-system-foundation" ]; then
+            echo "::error::Run this workflow only from feature/trading-system-foundation."
+            exit 1
+          fi
+
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+
+      - name: Verify production configuration and schema
+        run: |
+          set -a
+          # shellcheck disable=SC1091
+          source /home/marko/marketai/.env
+          set +a
+
+          test "${MARKETAI_PAPER_BROKER:-}" = "etoro_demo" || {
+            echo "::error::MARKETAI_PAPER_BROKER must be explicitly set to etoro_demo before preparing the worker."
+            exit 1
+          }
+          test -n "${MARKETAI_ETORO_DEMO_MAX_AMOUNT_USD:-}" || {
+            echo "::error::MARKETAI_ETORO_DEMO_MAX_AMOUNT_USD is required."
+            exit 1
+          }
+          test -n "${MARKETAI_PAPER_SPREAD_PCT:-}" || {
+            echo "::error::MARKETAI_PAPER_SPREAD_PCT is required."
+            exit 1
+          }
+          test -n "${ETORO_API_KEY:-}" || { echo "::error::ETORO_API_KEY is required."; exit 1; }
+          test -n "${ETORO_USER_KEY:-}" || { echo "::error::ETORO_USER_KEY is required."; exit 1; }
+
+          /home/marko/marketai-repo/.venv/bin/python - <<'PY'
+          import math
+          import os
+
+          from trading_system.brokers.etoro_demo import EtoroDemoBroker
+          from trading_system.paper_trade_repository import SupabasePaperTradeRepository
+          from trading_system.trading_task_repository import SupabaseTradingTaskRepository
+
+          cap = float(os.environ["MARKETAI_ETORO_DEMO_MAX_AMOUNT_USD"])
+          spread = float(os.environ["MARKETAI_PAPER_SPREAD_PCT"])
+          if not math.isfinite(cap) or cap <= 0:
+              raise SystemExit("MARKETAI_ETORO_DEMO_MAX_AMOUNT_USD must be finite and positive")
+          if not math.isfinite(spread) or spread < 0:
+              raise SystemExit("MARKETAI_PAPER_SPREAD_PCT must be finite and non-negative")
+
+          tasks = SupabaseTradingTaskRepository.from_env()
+          runs = SupabasePaperTradeRepository.from_env()
+          tasks.client.table("trading_tasks").select("id").limit(1).execute()
+          runs.client.table("event_paper_broker_attempts").select("task_id").limit(1).execute()
+          runs.client.table("paper_portfolio_execution_lease").select("singleton").limit(1).execute()
+
+          # Access-only check: instrument identity is validated later from the
+          # exact tracked event before any broker submission.
+          EtoroDemoBroker.from_env(instrument_id=1, amount_usd=cap).verify_demo_access()
+          print("approved PAPER readiness checks passed")
+          PY
+
+      - name: Install worker unit without activating execution
+        run: |
+          sudo /usr/bin/install -m 0644 \
+            deploy/systemd/marketai-approved-paper.service \
+            /etc/systemd/system/marketai-approved-paper.service
+          sudo /usr/bin/systemctl daemon-reload
+
+          # This workflow deliberately does not enable or start the worker.
+          # Actual execution stays a separate explicit operator action after an
+          # exact canonical PAPER task has been reviewed and approved.
+          sudo /usr/bin/systemctl disable marketai-approved-paper.service >/dev/null 2>&1 || true
+          if /usr/bin/systemctl is-active --quiet marketai-approved-paper.service; then
+            echo "::error::marketai-approved-paper.service was already active; refusing readiness preparation."
+            exit 1
+          fi
+
+          echo "marketai-approved-paper.service installed but inactive"
