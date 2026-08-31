@@ -71,9 +71,17 @@ jobs:
             }
           }
 
-          verify_worker_inactive() {
-            if /usr/bin/systemctl is-active --quiet marketai-approved-paper.service; then
-              echo "::error::marketai-approved-paper.service is active; refusing to modify its unit or enablement state."
+          verify_worker_quiescent() {
+            ACTIVE_STATE="$(/usr/bin/systemctl show marketai-approved-paper.service --property=ActiveState --value 2>/dev/null || true)"
+            SUB_STATE="$(/usr/bin/systemctl show marketai-approved-paper.service --property=SubState --value 2>/dev/null || true)"
+            if [ "$ACTIVE_STATE" != "inactive" ] || [ "$SUB_STATE" != "dead" ]; then
+              echo "::error::marketai-approved-paper.service is not exactly inactive/dead (ActiveState=${ACTIVE_STATE:-unknown}, SubState=${SUB_STATE:-unknown}); refusing readiness mutation."
+              return 1
+            fi
+
+            if /usr/bin/systemctl list-jobs --no-legend --plain 2>/dev/null \
+              | grep -Eq '^[[:space:]]*[0-9]+[[:space:]]+marketai-approved-paper\.service[[:space:]]'; then
+              echo "::error::marketai-approved-paper.service has a queued systemd job; refusing readiness mutation."
               return 1
             fi
           }
@@ -83,7 +91,7 @@ jobs:
           # is owned. The separate control lock is taken later across the actual
           # systemd mutation block and is shared by the canonical operator start.
           verify_runtime_sha
-          verify_worker_inactive
+          verify_worker_quiescent
 
           set -a
           # shellcheck disable=SC1091
@@ -260,13 +268,14 @@ jobs:
           # Serialize the final check/mutate/check section with the documented
           # operator start command (scripts/start_approved_paper_worker.sh).
           # Whichever side acquires FD 201 first completes before the other can
-          # proceed, eliminating the remaining start-vs-install TOCTOU window.
+          # proceed. Exact inactive/dead state plus no queued systemd job also
+          # rejects systemd's internal auto-restart delay before any mutation.
           exec 201>"$CONTROL_LOCK_FILE"
           if ! flock -w "$LOCK_TIMEOUT_SECONDS" 201; then
             echo "::error::Could not acquire approved PAPER worker control lock within ${LOCK_TIMEOUT_SECONDS}s."
             exit 1
           fi
-          verify_worker_inactive
+          verify_worker_quiescent
 
           sudo /usr/bin/install -m 0644 \
             "$RUNTIME_DIR/deploy/systemd/marketai-approved-paper.service" \
@@ -282,7 +291,7 @@ jobs:
             echo "::error::marketai-approved-paper.service is not disabled (state: ${ENABLED_STATE:-unknown})."
             exit 1
           fi
-          verify_worker_inactive
+          verify_worker_quiescent
 
           verify_runtime_sha
-          echo "marketai-approved-paper.service installed, disabled and inactive for ${DEPLOY_SHA}"
+          echo "marketai-approved-paper.service installed, disabled and exactly inactive/dead with no queued job for ${DEPLOY_SHA}"
