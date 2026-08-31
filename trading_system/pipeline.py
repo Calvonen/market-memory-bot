@@ -59,11 +59,13 @@ class PaperTradingPipeline:
         risk_engine: RiskEngine | None = None,
         broker: PaperBroker | None = None,
         journal: DecisionJournal | None = None,
+        allow_fractional_sizing: bool = False,
     ) -> None:
         self.strategy_engine = strategy_engine or StrategyEngine()
         self.risk_engine = risk_engine or RiskEngine()
         self.broker = broker or PaperBroker()
         self.journal = journal or InMemoryDecisionJournal()
+        self.allow_fractional_sizing = bool(allow_fractional_sizing)
 
     def run(
         self,
@@ -91,9 +93,8 @@ class PaperTradingPipeline:
             candidate,
             portfolio,
             requested_mode=TradingMode.PAPER,
+            allow_fractional_sizing=self.allow_fractional_sizing,
         )
-        # Carry the exact Strategy decision into the immutable broker proposal so
-        # a durable broker-attempt can persist both Strategy and Risk before I/O.
         proposal = replace(proposal, strategy_decision=strategy)
         self.journal.record_proposal(proposal)
 
