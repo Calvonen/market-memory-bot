@@ -36,7 +36,10 @@ jobs:
           CONTROL_LOCK_FILE="/tmp/marketai-approved-paper-control.lock"
           LOCK_TIMEOUT_SECONDS=300
           RUNTIME_DIR="/home/marko/marketai-repo"
-          STATE_FILE="/home/marko/marketai-deploy-state/last-deployed-backend.sha"
+          STATE_DIR="/home/marko/marketai-deploy-state"
+          STATE_FILE="$STATE_DIR/last-deployed-backend.sha"
+          PREPARED_STATE_FILE="$STATE_DIR/approved-paper-prepared.sha"
+          SERVICE="marketai-approved-paper.service"
 
           exec 200>"$LOCK_FILE"
           if ! flock -w "$LOCK_TIMEOUT_SECONDS" 200; then
@@ -72,16 +75,11 @@ jobs:
           }
 
           verify_worker_quiescent() {
-            if ! ACTIVE_STATE="$(/usr/bin/systemctl show marketai-approved-paper.service --property=ActiveState --value 2>&1)"; then
-              echo "::error::Could not inspect marketai-approved-paper.service ActiveState: ${ACTIVE_STATE:-unknown error}."
-              return 1
-            fi
-            if ! SUB_STATE="$(/usr/bin/systemctl show marketai-approved-paper.service --property=SubState --value 2>&1)"; then
-              echo "::error::Could not inspect marketai-approved-paper.service SubState: ${SUB_STATE:-unknown error}."
-              return 1
-            fi
-            if [ "$ACTIVE_STATE" != "inactive" ] || [ "$SUB_STATE" != "dead" ]; then
-              echo "::error::marketai-approved-paper.service is not exactly inactive/dead (ActiveState=${ACTIVE_STATE:-unknown}, SubState=${SUB_STATE:-unknown}); refusing readiness mutation."
+            # list-unit-files gives us a fail-closed D-Bus/systemd inspection while
+            # also letting a genuinely not-yet-installed unit be distinguished
+            # from an inspection failure during first rollout.
+            if ! UNIT_FILES_OUTPUT="$(/usr/bin/systemctl list-unit-files "$SERVICE" --no-legend --plain 2>&1)"; then
+              echo "::error::Could not inspect $SERVICE unit-file state: ${UNIT_FILES_OUTPUT:-unknown error}."
               return 1
             fi
 
@@ -91,15 +89,30 @@ jobs:
             fi
             if printf '%s\n' "$JOBS_OUTPUT" \
               | grep -Eq '^[[:space:]]*[0-9]+[[:space:]]+marketai-approved-paper\.service[[:space:]]'; then
-              echo "::error::marketai-approved-paper.service has a queued systemd job; refusing readiness mutation."
+              echo "::error::$SERVICE has a queued systemd job; refusing readiness mutation."
+              return 1
+            fi
+
+            # Empty list-unit-files output is the verified bootstrap case: the
+            # service has never been installed and there is no queued job for it.
+            if [ -z "$(printf '%s' "$UNIT_FILES_OUTPUT" | tr -d '[:space:]')" ]; then
+              return 0
+            fi
+
+            if ! ACTIVE_STATE="$(/usr/bin/systemctl show "$SERVICE" --property=ActiveState --value 2>&1)"; then
+              echo "::error::Could not inspect $SERVICE ActiveState: ${ACTIVE_STATE:-unknown error}."
+              return 1
+            fi
+            if ! SUB_STATE="$(/usr/bin/systemctl show "$SERVICE" --property=SubState --value 2>&1)"; then
+              echo "::error::Could not inspect $SERVICE SubState: ${SUB_STATE:-unknown error}."
+              return 1
+            fi
+            if [ "$ACTIVE_STATE" != "inactive" ] || [ "$SUB_STATE" != "dead" ]; then
+              echo "::error::$SERVICE is not exactly inactive/dead (ActiveState=${ACTIVE_STATE:-unknown}, SubState=${SUB_STATE:-unknown}); refusing readiness mutation."
               return 1
             fi
           }
 
-          # Hold FD 200 for this entire shell: runtime verification, production
-          # preflight and unit installation all happen while the deploy/OTA lock
-          # is owned. The separate control lock is taken later across the actual
-          # systemd mutation block and is shared by the canonical operator start.
           verify_runtime_sha
           verify_worker_quiescent
 
@@ -275,11 +288,6 @@ jobs:
 
           verify_runtime_sha
 
-          # Serialize the final check/mutate/check section with the documented
-          # operator start command (scripts/start_approved_paper_worker.sh).
-          # Whichever side acquires FD 201 first completes before the other can
-          # proceed. Exact inactive/dead state plus no queued systemd job also
-          # rejects systemd's internal auto-restart delay before any mutation.
           exec 201>"$CONTROL_LOCK_FILE"
           if ! flock -w "$LOCK_TIMEOUT_SECONDS" 201; then
             echo "::error::Could not acquire approved PAPER worker control lock within ${LOCK_TIMEOUT_SECONDS}s."
@@ -292,16 +300,25 @@ jobs:
             /etc/systemd/system/marketai-approved-paper.service
           sudo /usr/bin/systemctl daemon-reload
 
-          if ! sudo /usr/bin/systemctl disable marketai-approved-paper.service; then
-            echo "::error::Failed to disable marketai-approved-paper.service."
+          if ! sudo /usr/bin/systemctl disable "$SERVICE"; then
+            echo "::error::Failed to disable $SERVICE."
             exit 1
           fi
-          ENABLED_STATE="$(/usr/bin/systemctl is-enabled marketai-approved-paper.service 2>/dev/null || true)"
+          ENABLED_STATE="$(/usr/bin/systemctl is-enabled "$SERVICE" 2>/dev/null || true)"
           if [ "$ENABLED_STATE" != "disabled" ]; then
-            echo "::error::marketai-approved-paper.service is not disabled (state: ${ENABLED_STATE:-unknown})."
+            echo "::error::$SERVICE is not disabled (state: ${ENABLED_STATE:-unknown})."
             exit 1
           fi
           verify_worker_quiescent
-
           verify_runtime_sha
-          echo "marketai-approved-paper.service installed, disabled and exactly inactive/dead with no queued job for ${DEPLOY_SHA}"
+
+          # Readiness authority is bound to this exact deployed SHA. The canonical
+          # start helper must prove the same SHA is still both deployed and checked
+          # out before it may activate the worker.
+          mkdir -p "$STATE_DIR"
+          PREPARED_TMP="${PREPARED_STATE_FILE}.tmp.$$"
+          printf '%s\n' "$DEPLOY_SHA" > "$PREPARED_TMP"
+          chmod 0644 "$PREPARED_TMP"
+          mv -f "$PREPARED_TMP" "$PREPARED_STATE_FILE"
+
+          echo "$SERVICE installed, disabled and exactly inactive/dead with no queued job; prepared SHA ${DEPLOY_SHA} recorded"
