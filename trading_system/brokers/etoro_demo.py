@@ -15,6 +15,11 @@ from trading_system.models import Direction, RiskStatus, TradeProposal, TradingM
 class EtoroDemoBroker(Broker):
     """Submit and reconcile risk-approved eToro Virtual Portfolio orders only."""
 
+    # Explicit capability used by the canonical pipeline and preserved through
+    # durable lease/idempotency wrappers. Avoid relying on class-name heuristics
+    # for a safety-critical sizing capability.
+    supports_fractional_sizing = True
+
     DEMO_PORTFOLIO_URL = "https://public-api.etoro.com/api/v1/trading/info/demo/portfolio"
     DEMO_ORDERS_URL = "https://public-api.etoro.com/api/v2/trading/execution/demo/orders"
 
