@@ -19,9 +19,10 @@ import {
   getUpcomingCalendarEvents,
   PaperRun,
 } from '@/services/api';
-import { TrackedMarketEvent } from '@/services/tracked-events';
+import { getTrackedEventActivity, TrackedMarketEvent } from '@/services/tracked-events';
 
 type EventStatus = { run: PaperRun | null; statusError: boolean };
+type TrackedActivityState = 'loading' | 'active' | 'inactive' | 'error';
 type TrackedEventSnapshot = {
   count: number;
   eventIds: string[];
@@ -49,34 +50,35 @@ function isHomeExpectationVisible(
   event: EventExpectation,
   status: EventStatus | undefined,
   loadedTrackedEventIds: ReadonlySet<string>,
+  trackedActivity: TrackedActivityState | undefined,
 ): boolean {
   if (event.event_id.startsWith('tracked:')) {
     const trackedEventId = event.event_id.slice('tracked:'.length);
-    // Loaded canonical tracked-event cards always win over their expectation
-    // shells. If a tracked shell was not loaded (for example because the
-    // active endpoint was truncated), it still has to pass the same stale
-    // filtering as every other expectation below; otherwise archived shells
-    // would stay on Home forever after their canonical card moves to History.
+    if (!trackedEventId) return false;
+
+    // A loaded canonical card always owns the occurrence. If it falls outside
+    // the bounded Home card list, exact activity for this canonical ID decides
+    // whether the expectation shell must remain as its lightweight fallback.
     if (loadedTrackedEventIds.has(trackedEventId)) return false;
+    if (trackedActivity !== 'inactive') return true;
   }
 
   const today = formatLocalDate(new Date());
   if (event.scheduled_date >= today) return true;
 
-  // A failed or still-pending status lookup is not evidence that the past
-  // event is stale. Keep it visible so Home can show the existing loading or
-  // error state instead of silently hiding a workflow whose true state is
-  // unknown.
+  // A failed or still-pending paper-status lookup is not evidence that the
+  // past event is stale. Keep it visible so Home can surface the uncertainty.
   if (!status || status.statusError) return true;
 
-  // Once status is known, a past expectation remains on Home only while the
-  // trading workflow genuinely waits for post-release confirmation.
   return status.run?.status === 'waiting_confirmation';
 }
 
 export default function HomeScreen() {
   const [events, setEvents] = useState<EventExpectation[] | null>(null);
   const [statuses, setStatuses] = useState<Record<string, EventStatus>>({});
+  const [trackedActivityByEventId, setTrackedActivityByEventId] = useState<
+    Record<string, TrackedActivityState>
+  >({});
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[] | null>(null);
   const [trackedEventCount, setTrackedEventCount] = useState<number | null>(null);
   const [persistentEventIds, setPersistentEventIds] = useState<Set<string>>(() => new Set());
@@ -108,6 +110,15 @@ export default function HomeScreen() {
         setEvents(list);
         setStatuses({});
 
+        const today = formatLocalDate(new Date());
+        const initialTrackedActivity: Record<string, TrackedActivityState> = {};
+        for (const event of list) {
+          if (event.event_id.startsWith('tracked:') && event.scheduled_date < today) {
+            initialTrackedActivity[event.event_id] = 'loading';
+          }
+        }
+        setTrackedActivityByEventId(initialTrackedActivity);
+
         list.forEach((event) => {
           getPaperStatus(event.event_id)
             .then((status) => {
@@ -122,6 +133,25 @@ export default function HomeScreen() {
               setStatuses((prev) => ({
                 ...prev,
                 [event.event_id]: { run: null, statusError: true },
+              }));
+            });
+
+          if (!event.event_id.startsWith('tracked:') || event.scheduled_date >= today) return;
+          const trackedEventId = event.event_id.slice('tracked:'.length);
+          if (!trackedEventId) return;
+          getTrackedEventActivity(trackedEventId)
+            .then((activity) => {
+              if (loadId !== latestLoadId.current) return;
+              setTrackedActivityByEventId((prev) => ({
+                ...prev,
+                [event.event_id]: activity.active ? 'active' : 'inactive',
+              }));
+            })
+            .catch(() => {
+              if (loadId !== latestLoadId.current) return;
+              setTrackedActivityByEventId((prev) => ({
+                ...prev,
+                [event.event_id]: 'error',
               }));
             });
         });
@@ -158,9 +188,14 @@ export default function HomeScreen() {
   const visibleEvents = useMemo(() => {
     if (!events) return null;
     return events.filter((event) =>
-      isHomeExpectationVisible(event, statuses[event.event_id], persistentEventIds),
+      isHomeExpectationVisible(
+        event,
+        statuses[event.event_id],
+        persistentEventIds,
+        trackedActivityByEventId[event.event_id],
+      ),
     );
-  }, [events, statuses, persistentEventIds]);
+  }, [events, statuses, persistentEventIds, trackedActivityByEventId]);
 
   const expectationCalendarEventIds = useMemo(() => {
     const ids = new Set<string>();
