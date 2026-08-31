@@ -50,11 +50,11 @@ export function TrackedEventsSection({
   const load = useCallback(() => {
     const loadId = ++latestLoadId.current;
     setError(null);
-    // Home needs the complete active snapshot up to the backend's explicit
-    // list cap, not the service helper's small display default. Otherwise an
-    // active workflow can lose both its canonical card and its shell simply
-    // because it happened to rank after the first 20 rows.
-    return getTrackedEvents('active', 100)
+    // Keep the visible canonical-card list bounded. Past tracked expectation
+    // shells that fall outside this display window are resolved independently
+    // by exact event-id activity reads on Home, so correctness never depends
+    // on mounting an arbitrarily large number of detailed cards here.
+    return getTrackedEvents()
       .then((list) => {
         if (loadId !== latestLoadId.current) return;
         setEvents(list);
