@@ -20,6 +20,11 @@ class BrokerOrder:
     reference_price: float
     status: str
     created_at: datetime = field(default_factory=utc_now)
+    # Amount-based brokers such as eToro may execute fractional units. Persist
+    # the broker-reconciled USD notional explicitly so portfolio accounting does
+    # not have to infer it from the integer RiskEngine quantity ceiling.
+    notional_usd: float | None = None
+    broker_position_id: str | None = None
 
 
 class Broker(ABC):
