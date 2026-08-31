@@ -33,6 +33,7 @@ jobs:
           DEPLOY_SHA: ${{ github.sha }}
         run: |
           LOCK_FILE="/tmp/marketai-deploy-ota.lock"
+          CONTROL_LOCK_FILE="/tmp/marketai-approved-paper-control.lock"
           LOCK_TIMEOUT_SECONDS=300
           RUNTIME_DIR="/home/marko/marketai-repo"
           STATE_FILE="/home/marko/marketai-deploy-state/last-deployed-backend.sha"
@@ -79,7 +80,8 @@ jobs:
 
           # Hold FD 200 for this entire shell: runtime verification, production
           # preflight and unit installation all happen while the deploy/OTA lock
-          # is owned. Re-check immediately before and after installation as well.
+          # is owned. The separate control lock is taken later across the actual
+          # systemd mutation block and is shared by the canonical operator start.
           verify_runtime_sha
           verify_worker_inactive
 
@@ -255,9 +257,15 @@ jobs:
 
           verify_runtime_sha
 
-          # The explicit operator start action is not serialized by the deploy
-          # lock. Recheck immediately before the first systemd mutation so a
-          # worker started during the preflight is left completely untouched.
+          # Serialize the final check/mutate/check section with the documented
+          # operator start command (scripts/start_approved_paper_worker.sh).
+          # Whichever side acquires FD 201 first completes before the other can
+          # proceed, eliminating the remaining start-vs-install TOCTOU window.
+          exec 201>"$CONTROL_LOCK_FILE"
+          if ! flock -w "$LOCK_TIMEOUT_SECONDS" 201; then
+            echo "::error::Could not acquire approved PAPER worker control lock within ${LOCK_TIMEOUT_SECONDS}s."
+            exit 1
+          fi
           verify_worker_inactive
 
           sudo /usr/bin/install -m 0644 \
