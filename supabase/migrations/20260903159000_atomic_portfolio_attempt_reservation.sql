@@ -35,10 +35,10 @@ begin
     raise exception 'paper_portfolio_execution_lease_identity_invalid';
   end if;
 
-  -- Serialize all snapshot->broker authority through the singleton account row.
+  -- Serialize all snapshot->broker authority through the actual singleton key.
   select * into portfolio_row
   from public.paper_portfolio_execution_lease
-  where id = 1
+  where singleton = true
   for update;
 
   if not found
@@ -51,8 +51,12 @@ begin
   update public.paper_portfolio_execution_lease
   set lease_expires_at = now_value + make_interval(secs => greatest(input_portfolio_lease_seconds, 1)),
       updated_at = now_value
-  where id = 1
+  where singleton = true
     and lease_token = input_portfolio_lease_token;
+
+  if not found then
+    raise exception 'paper_portfolio_execution_lease_not_owned';
+  end if;
 
   -- The delegated function runs inside this same transaction, while the locked
   -- singleton row prevents another worker from claiming the portfolio.
