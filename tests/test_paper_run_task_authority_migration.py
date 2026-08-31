@@ -25,15 +25,28 @@ class PaperRunTaskAuthorityMigrationTests(unittest.TestCase):
         self.assertIn("task_row.source_event_id <> input_event_id", self.sql)
         self.assertIn("for share", self.sql)
 
-    def test_terminal_owner_is_not_rebound_to_replacement_task(self) -> None:
-        terminal_guard = self.sql.index("if claimed.terminal_status is not null then")
-        task_update = self.sql.index("set task_id = input_task_id")
-        self.assertLess(terminal_guard, task_update)
+    def test_legacy_claim_cannot_reclaim_task_bound_authority(self) -> None:
+        self.assertIn("paper_run_task_bound_claim_requires_task", self.sql)
+        self.assertIn("existing_claim.task_id is not null", self.sql)
 
-    def test_run_trigger_binds_claim_task_and_rejects_replacement(self) -> None:
-        self.assertIn("bind_event_paper_run_task_from_claim", self.sql)
-        self.assertIn("new.task_id := claimed_task_id", self.sql)
+    def test_terminal_owner_is_not_rebound_to_replacement_task(self) -> None:
+        self.assertIn("status in ('expired_no_trade', 'paper_executed')", self.sql)
+        self.assertIn("terminal_run.task_id", self.sql)
+        self.assertIn("old.status in ('expired_no_trade', 'paper_executed')", self.sql)
         self.assertIn("paper_run_task_replacement_conflict", self.sql)
+
+    def test_cancelled_task_can_be_replaced_after_lease_expiry(self) -> None:
+        self.assertIn("existing_claim.lease_expires_at > now_value", self.sql)
+        self.assertIn("old_task_row.state <> 'cancelled'", self.sql)
+        self.assertIn("task_id = input_task_id", self.sql)
+        self.assertIn("previous_task.state <> 'cancelled'", self.sql)
+
+    def test_run_trigger_revalidates_current_task_before_persistence(self) -> None:
+        self.assertIn("bind_event_paper_run_task_from_claim", self.sql)
+        self.assertIn("claimed_task.state <> 'approved'", self.sql)
+        self.assertIn("claimed_task.mode <> 'paper'", self.sql)
+        self.assertIn("paper_run_task_authority_revoked", self.sql)
+        self.assertIn("new.task_id := claimed_task_id", self.sql)
 
 
 if __name__ == "__main__":
