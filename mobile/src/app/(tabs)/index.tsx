@@ -24,13 +24,13 @@ import { TrackedMarketEvent } from '@/services/tracked-events';
 type EventStatus = { run: PaperRun | null; statusError: boolean };
 type TrackedEventSnapshot = {
   count: number;
+  eventIds: string[];
   calendarEventIds: string[];
   statusByCalendarEventId: Record<string, string>;
   eventByCalendarEventId: Record<string, TrackedMarketEvent>;
 };
 
 const CALENDAR_WINDOW_DAYS = 30;
-const TRACKED_EVENT_LIST_LIMIT = 20;
 
 function formatLocalDate(date: Date): string {
   const yyyy = date.getFullYear();
@@ -48,14 +48,14 @@ function deviceLocalCalendarWindow(): { fromDate: string; toDate: string } {
 function isHomeExpectationVisible(
   event: EventExpectation,
   status: EventStatus | undefined,
-  suppressTrackedShells: boolean,
+  loadedTrackedEventIds: ReadonlySet<string>,
 ): boolean {
   if (event.event_id.startsWith('tracked:')) {
-    // Suppress calendar-less shells only when the tracked-event snapshot is
-    // known to be complete. At the API limit the response may be truncated;
-    // keeping shells visible is preferable to making an active workflow
-    // disappear from Home.
-    return !suppressTrackedShells;
+    const trackedEventId = event.event_id.slice('tracked:'.length);
+    // Loaded canonical tracked-event cards always win over their expectation
+    // shells. If the active list is truncated, shells for omitted rows stay
+    // visible because their IDs are not present in this loaded snapshot.
+    return !loadedTrackedEventIds.has(trackedEventId);
   }
 
   const today = formatLocalDate(new Date());
@@ -77,6 +77,7 @@ export default function HomeScreen() {
   const [statuses, setStatuses] = useState<Record<string, EventStatus>>({});
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[] | null>(null);
   const [trackedEventCount, setTrackedEventCount] = useState<number | null>(null);
+  const [persistentEventIds, setPersistentEventIds] = useState<Set<string>>(() => new Set());
   const [persistentCalendarEventIds, setPersistentCalendarEventIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -146,6 +147,7 @@ export default function HomeScreen() {
 
   const handleTrackedEventSnapshot = useCallback((snapshot: TrackedEventSnapshot) => {
     setTrackedEventCount(snapshot.count);
+    setPersistentEventIds(new Set(snapshot.eventIds));
     setPersistentCalendarEventIds(new Set(snapshot.calendarEventIds));
     setPersistentStatusByCalendarEventId(snapshot.statusByCalendarEventId);
     setPersistentEventByCalendarEventId(snapshot.eventByCalendarEventId);
@@ -153,15 +155,10 @@ export default function HomeScreen() {
 
   const visibleEvents = useMemo(() => {
     if (!events) return null;
-    // TrackedEventsSection currently reads at most 20 active rows. A count
-    // below that limit proves the snapshot is complete; a count at the limit
-    // may be truncated, so tracked shells must remain visible in that case.
-    const suppressTrackedShells =
-      trackedEventCount !== null && trackedEventCount < TRACKED_EVENT_LIST_LIMIT;
     return events.filter((event) =>
-      isHomeExpectationVisible(event, statuses[event.event_id], suppressTrackedShells),
+      isHomeExpectationVisible(event, statuses[event.event_id], persistentEventIds),
     );
-  }, [events, statuses, trackedEventCount]);
+  }, [events, statuses, persistentEventIds]);
 
   const expectationCalendarEventIds = useMemo(() => {
     const ids = new Set<string>();
