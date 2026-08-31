@@ -5,6 +5,7 @@ HOME_SOURCE = Path("mobile/src/app/(tabs)/index.tsx")
 TRACKED_SECTION_SOURCE = Path("mobile/src/components/TrackedEventsSection.tsx")
 TRACKED_SERVICE_SOURCE = Path("mobile/src/services/tracked-events.ts")
 TRACKED_RELEASE_API_SOURCE = Path("trading_system/tracked_event_release_source_api.py")
+TRACKED_REPOSITORY_SOURCE = Path("trading_system/tracked_event_repository.py")
 
 
 def test_loaded_tracked_event_ids_suppress_only_matching_shells():
@@ -31,6 +32,7 @@ def test_past_omitted_shells_use_batched_canonical_activity():
     home = HOME_SOURCE.read_text(encoding="utf-8")
     service = TRACKED_SERVICE_SOURCE.read_text(encoding="utf-8")
     backend = TRACKED_RELEASE_API_SOURCE.read_text(encoding="utf-8")
+    repository = TRACKED_REPOSITORY_SOURCE.read_text(encoding="utf-8")
 
     assert "getTrackedEventActivities" in home
     assert "event.scheduled_date < today" in home
@@ -46,8 +48,11 @@ def test_past_omitted_shells_use_batched_canonical_activity():
 
     assert 'router.get("/api/v1/tracked-events/activity")' in backend
     assert 'prefix not in {"tracked", "calendar"}' in backend
-    assert '.in_("id", tracked_ids)' in backend
-    assert '.in_("calendar_event_id", calendar_ids)' in backend
+    assert "get_tracked_event_repository().get_by_occurrences(" in backend
+    assert "repository.client" not in backend
+    assert ".client.table(" not in backend
+    assert "def get_by_occurrences(" in repository
+    assert 'self.client.table("tracked_market_events")' in repository
 
 
 def test_activity_batch_waits_for_snapshot_and_updates_state_by_batch():
@@ -69,11 +74,16 @@ def test_calendar_backed_loaded_event_stays_on_merged_expectation_card():
     assert "if (loadedCalendarEventIds.has(calendarEventId)) return true;" in source
 
 
-def test_tracked_activity_lookup_fails_open_for_active_workflow_safety():
+def test_tracked_activity_lookup_failure_is_visible_retryable_and_fail_open():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
     assert "Object.fromEntries(candidateIds.map((eventId) => [eventId, 'error']))" in source
     assert "trackedActivity !== 'inactive'" in source
+    assert "trackedActivityError" in source
+    assert "Seurantatilaa ei juuri nyt saatu varmistettua." in source
+    assert "activityRetryToken" in source
+    assert "setActivityRetryToken((value) => value + 1)" in source
+    assert "!trackedActivityError" in source
 
 
 def test_uncertain_past_expectations_remain_visible_until_status_is_known():
