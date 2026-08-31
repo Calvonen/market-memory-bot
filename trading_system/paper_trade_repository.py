@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+from trading_system.brokers.base import broker_order_payload
 from trading_system.post_release_paper import PostReleasePaperResult
 
 
@@ -154,16 +155,7 @@ class SupabasePaperTradeRepository:
                 "mode": proposal.mode.value,
             }
             if result.pipeline.order is not None:
-                order = result.pipeline.order
-                payload["paper_order"] = {
-                    "order_id": order.order_id,
-                    "instrument": order.instrument,
-                    "direction": order.direction.value,
-                    "quantity": order.quantity,
-                    "reference_price": order.reference_price,
-                    "status": order.status,
-                    "created_at": order.created_at.isoformat(),
-                }
+                payload["paper_order"] = broker_order_payload(result.pipeline.order)
 
         rpc_name = (
             "save_event_paper_trade_result_for_task"
