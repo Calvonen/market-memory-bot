@@ -116,6 +116,9 @@ export function TrackedEventsSection({
 
 export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
   const scheduleText = formatTrackedEventSchedule(event);
+  const expectationEventId = event.calendar_event_id
+    ? `calendar:${event.calendar_event_id}`
+    : `tracked:${event.event_id}`;
 
   return (
     <View style={styles.eventCard}>
@@ -132,7 +135,7 @@ export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
       <Link
         href={{
           pathname: '/events/[eventId]',
-          params: { eventId: `tracked:${event.event_id}` },
+          params: { eventId: expectationEventId },
         }}
         style={styles.expectationLink}
       >
