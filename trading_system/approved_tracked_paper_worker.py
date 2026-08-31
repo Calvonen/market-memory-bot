@@ -130,16 +130,17 @@ def _approved_task_rows(
         offset += page_size
 
 
-def _executed_paper_orders(
+def _authoritative_paper_orders(
     repository: SupabasePaperTradeRepository,
     page_size: int,
 ) -> list[dict[str, Any]]:
-    orders: list[dict[str, Any]] = []
+    """Return each durable PAPER order exactly once, including unreconciled completions."""
+    orders_by_task: dict[str, dict[str, Any]] = {}
     offset = 0
     while True:
         response = (
             repository.client.table("event_paper_trade_runs")
-            .select("id,paper_order")
+            .select("id,task_id,paper_order")
             .eq("status", "paper_executed")
             .order("updated_at")
             .order("id")
@@ -150,12 +151,45 @@ def _executed_paper_orders(
         if not isinstance(page, list):
             raise RuntimeError("PAPER portfolio read returned malformed data")
         for row in page:
-            if not isinstance(row, dict) or not isinstance(row.get("paper_order"), dict):
-                raise RuntimeError("executed PAPER run is missing a canonical paper_order")
-            orders.append(row["paper_order"])
+            task_id = str(row.get("task_id") or "").strip()
+            order = row.get("paper_order")
+            if not task_id or not isinstance(order, dict):
+                raise RuntimeError("executed PAPER run is missing canonical task/order identity")
+            orders_by_task[task_id] = order
         if len(page) < page_size:
-            return orders
+            break
         offset += page_size
+
+    # A completed broker attempt is already authoritative even if the worker died
+    # before terminal paper-run persistence. Fold those orders into risk state too.
+    offset = 0
+    while True:
+        response = (
+            repository.client.table("event_paper_broker_attempts")
+            .select("task_id,order_payload,completed_at")
+            .eq("status", "completed")
+            .order("completed_at")
+            .order("task_id")
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        page = response.data or []
+        if not isinstance(page, list):
+            raise RuntimeError("PAPER broker-attempt portfolio read returned malformed data")
+        for row in page:
+            task_id = str(row.get("task_id") or "").strip()
+            order = row.get("order_payload")
+            if not task_id or not isinstance(order, dict):
+                raise RuntimeError("completed PAPER broker attempt is missing canonical order identity")
+            existing = orders_by_task.get(task_id)
+            if existing is not None and existing != order:
+                raise RuntimeError("PAPER run and completed broker attempt disagree on order payload")
+            orders_by_task[task_id] = order
+        if len(page) < page_size:
+            break
+        offset += page_size
+
+    return list(orders_by_task.values())
 
 
 def _paper_portfolio_for_instrument(
@@ -169,7 +203,7 @@ def _paper_portfolio_for_instrument(
     if not target:
         raise RuntimeError("approved PAPER task has blank instrument")
 
-    orders = _executed_paper_orders(repository, page_size)
+    orders = _authoritative_paper_orders(repository, page_size)
     total_notional = 0.0
     instrument_notional = 0.0
     for order in orders:
@@ -212,20 +246,6 @@ def _claim_portfolio_lease(
     return response.data is True
 
 
-def _renew_portfolio_lease(
-    repository: SupabasePaperTradeRepository,
-    *,
-    token: str,
-    lease_seconds: int,
-) -> None:
-    response = repository.client.rpc(
-        "renew_paper_portfolio_execution_lease",
-        {"input_lease_token": token, "input_lease_seconds": lease_seconds},
-    ).execute()
-    if response.data is not True:
-        raise RuntimeError("PAPER portfolio execution lease is no longer owned")
-
-
 def _release_portfolio_lease(repository: SupabasePaperTradeRepository, *, token: str) -> None:
     repository.client.rpc(
         "release_paper_portfolio_execution_lease",
@@ -234,13 +254,7 @@ def _release_portfolio_lease(repository: SupabasePaperTradeRepository, *, token:
 
 
 class _PortfolioLeasePaperRuns:
-    """Renew account authority before the durable broker-attempt reservation.
-
-    The canonical orchestrator asks this object to begin the broker attempt. The
-    portfolio lease is renewed first; only after that succeeds is the durable
-    `started` attempt inserted. Therefore a known pre-submission lease failure is
-    retryable and can never strand the task as an uncertain broker outcome.
-    """
+    """Atomically renew account authority and reserve the broker attempt."""
 
     def __init__(
         self,
@@ -269,13 +283,8 @@ class _PortfolioLeasePaperRuns:
         strategy_payload: dict[str, Any],
         risk_payload: dict[str, Any],
     ) -> dict[str, Any]:
-        _renew_portfolio_lease(
-            self._repository,
-            token=self._portfolio_token,
-            lease_seconds=self._portfolio_lease_seconds,
-        )
         response = self._repository.client.rpc(
-            "begin_event_paper_broker_attempt",
+            "begin_event_paper_broker_attempt_with_portfolio_lease",
             {
                 "input_event_id": event_id,
                 "input_analysis_id": analysis_id,
@@ -286,11 +295,13 @@ class _PortfolioLeasePaperRuns:
                 "input_lease_seconds": max(1, lease_seconds),
                 "input_strategy_payload": strategy_payload,
                 "input_risk_payload": risk_payload,
+                "input_portfolio_lease_token": self._portfolio_token,
+                "input_portfolio_lease_seconds": self._portfolio_lease_seconds,
             },
         ).execute()
         rows = response.data or []
         if not rows:
-            raise RuntimeError("canonical broker execution attempt returned no state")
+            raise RuntimeError("atomic PAPER portfolio/broker attempt returned no state")
         return rows[0]
 
 
