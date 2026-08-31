@@ -64,6 +64,8 @@ class EtoroDemoBroker(Broker):
         self.last_response: dict | None = None
         self.last_request_id: str | None = None
         self.last_submitted_amount_usd: float | None = None
+        self.last_reconciled_notional_usd: float | None = None
+        self.last_reconciled_position_id: str | None = None
 
     @classmethod
     def from_env(cls, *, instrument_id: int, amount_usd: float = 500.0) -> "EtoroDemoBroker":
@@ -205,8 +207,6 @@ class EtoroDemoBroker(Broker):
                     if not math.isfinite(notional) or notional <= 0:
                         raise RuntimeError("reconciled eToro position has invalid notional")
 
-                # Never silently accept a fill larger than the risk-bounded order.
-                # A tiny tolerance covers broker-side decimal rounding only.
                 if notional > submitted_amount_usd * 1.001 + 0.01:
                     raise RuntimeError("reconciled eToro position exceeds submitted risk-bounded amount")
 
@@ -282,7 +282,7 @@ class EtoroDemoBroker(Broker):
             )
 
         position_id = str(raw_position_id)
-        reconciled_notional, reconciled_units = self._reconciled_position(
+        reconciled_notional, _reconciled_units = self._reconciled_position(
             position_id=position_id,
             submitted_amount_usd=amount_usd,
         )
@@ -290,6 +290,8 @@ class EtoroDemoBroker(Broker):
         self.last_response = body
         self.last_request_id = request_id
         self.last_submitted_amount_usd = amount_usd
+        self.last_reconciled_notional_usd = reconciled_notional
+        self.last_reconciled_position_id = position_id
         return BrokerOrder(
             order_id=str(raw_order_id or position_id),
             instrument=proposal.candidate.instrument,
