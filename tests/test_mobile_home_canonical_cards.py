@@ -27,26 +27,53 @@ def test_canonical_card_list_stays_bounded_to_service_default():
     assert "getTrackedEvents('active', 100)" not in tracked
 
 
-def test_past_unloaded_tracked_shell_uses_exact_canonical_activity():
+def test_past_omitted_shells_use_batched_canonical_activity():
     home = HOME_SOURCE.read_text(encoding="utf-8")
     service = TRACKED_SERVICE_SOURCE.read_text(encoding="utf-8")
     backend = TRACKED_RELEASE_API_SOURCE.read_text(encoding="utf-8")
 
-    assert "getTrackedEventActivity" in home
+    assert "getTrackedEventActivities" in home
     assert "event.scheduled_date < today" in home
-    assert "getTrackedEventActivity(trackedEventId)" in home
-    assert "activity.active ? 'active' : 'inactive'" in home
-    assert "if (trackedActivity !== 'inactive') return true;" in home
-    assert "export function getTrackedEventActivity(" in service
-    assert 'router.get("/api/v1/tracked-events/{event_id}/activity")' in backend
-    assert '"exists": False, "active": False' in backend
+    assert "isTrackedExpectation(event.event_id)" in home
+    assert "persistentCalendarEventIds" in home
+    assert "getTrackedEventActivities(candidateIds)" in home
+    assert "activityByOccurrenceId[eventId]?.active ? 'active' : 'inactive'" in home
+    assert "if (isTrackedExpectation(event.event_id) && trackedActivity !== 'inactive') return true;" in home
+
+    assert "export async function getTrackedEventActivities(" in service
+    assert "TRACKED_EVENT_ACTIVITY_BATCH_SIZE = 40" in service
+    assert "/api/v1/tracked-events/activity?occurrence_ids=" in service
+
+    assert 'router.get("/api/v1/tracked-events/activity")' in backend
+    assert 'prefix not in {"tracked", "calendar"}' in backend
+    assert '.in_("id", tracked_ids)' in backend
+    assert '.in_("calendar_event_id", calendar_ids)' in backend
+
+
+def test_activity_batch_waits_for_snapshot_and_updates_state_by_batch():
+    source = HOME_SOURCE.read_text(encoding="utf-8")
+
+    assert "if (!events || trackedEventCount === null) return;" in source
+    assert "!isExpectationBackedByLoadedTrackedEvent(" in source
+    assert "setTrackedActivityByEventId(loadingState);" in source
+    assert "Object.fromEntries(" in source
+    assert "candidateIds.map((eventId)" in source
+    assert "getTrackedEventActivity(trackedEventId)" not in source
+
+
+def test_calendar_backed_loaded_event_stays_on_merged_expectation_card():
+    source = HOME_SOURCE.read_text(encoding="utf-8")
+
+    assert "event.event_id.startsWith('calendar:')" in source
+    assert "loadedCalendarEventIds.has(calendarEventId)" in source
+    assert "if (loadedCalendarEventIds.has(calendarEventId)) return true;" in source
 
 
 def test_tracked_activity_lookup_fails_open_for_active_workflow_safety():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
-    assert "[event.event_id]: 'error'" in source
-    assert "if (trackedActivity !== 'inactive') return true;" in source
+    assert "Object.fromEntries(candidateIds.map((eventId) => [eventId, 'error']))" in source
+    assert "trackedActivity !== 'inactive'" in source
 
 
 def test_uncertain_past_expectations_remain_visible_until_status_is_known():
