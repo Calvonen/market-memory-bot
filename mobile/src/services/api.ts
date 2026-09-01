@@ -21,8 +21,14 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, { headers: { 'X-MarketAI-Key': READ_API_KEY } });
+export async function apiGet<T>(
+  path: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, {
+    headers: { 'X-MarketAI-Key': READ_API_KEY },
+    signal: options.signal,
+  });
   return parseJsonResponse<T>(response);
 }
 
