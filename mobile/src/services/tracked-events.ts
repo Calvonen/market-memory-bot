@@ -5,16 +5,21 @@ const TRACKED_EVENT_ACTIVITY_BATCH_SIZE = 40;
 const TRACKED_EVENT_ACTIVITY_CONCURRENCY = 3;
 const TRACKED_EVENT_CANONICAL_READ_TIMEOUT_MS = 10_000;
 
-function withCanonicalReadTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+function withCanonicalReadTimeout<T>(
+  request: (signal: AbortSignal) => Promise<T>,
+  label: string,
+): Promise<T> {
+  const controller = new AbortController();
   return new Promise<T>((resolve, reject) => {
     let settled = false;
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
+      controller.abort();
       reject(new Error(`${label} aikakatkaistiin. Yritä uudelleen.`));
     }, TRACKED_EVENT_CANONICAL_READ_TIMEOUT_MS);
 
-    void promise.then(
+    void request(controller.signal).then(
       (value) => {
         if (settled) return;
         settled = true;
@@ -170,9 +175,11 @@ export function getTrackedEvents(
   limit = 20,
 ): Promise<TrackedMarketEvent[]> {
   return withCanonicalReadTimeout(
-    apiGet<TrackedMarketEvent[]>(
-      `/api/v1/tracked-events?view=${encodeURIComponent(view)}&limit=${encodeURIComponent(String(limit))}`,
-    ),
+    (signal) =>
+      apiGet<TrackedMarketEvent[]>(
+        `/api/v1/tracked-events?view=${encodeURIComponent(view)}&limit=${encodeURIComponent(String(limit))}`,
+        { signal },
+      ),
     'Seurantatietojen päivitys',
   );
 }
@@ -198,9 +205,11 @@ export async function getTrackedEventActivities(
         if (batchIndex >= batches.length) return;
         const batch = batches[batchIndex];
         responses[batchIndex] = await withCanonicalReadTimeout(
-          apiGet<TrackedEventActivityBatchResponse>(
-            `/api/v1/tracked-events/activity?occurrence_ids=${encodeURIComponent(batch.join(','))}`,
-          ),
+          (signal) =>
+            apiGet<TrackedEventActivityBatchResponse>(
+              `/api/v1/tracked-events/activity?occurrence_ids=${encodeURIComponent(batch.join(','))}`,
+              { signal },
+            ),
           'Seurantatilan tarkistus',
         );
       }
