@@ -73,6 +73,7 @@ export function HomeTrackedCompaniesSection({ refreshToken = 0 }: Props) {
     () => (instruments ?? []).filter((item) => item.active).sort((a, b) => a.instrument.localeCompare(b.instrument)),
     [instruments],
   );
+  const trackedStateReady = instruments !== null && error === null;
 
   function isTickerTracked(ticker: string): boolean {
     const normalizedTicker = ticker.trim().toUpperCase();
@@ -110,7 +111,7 @@ export function HomeTrackedCompaniesSection({ refreshToken = 0 }: Props) {
   }
 
   async function addSearchResult(result: SymbolSearchResult) {
-    if (addingTicker || isTickerTracked(result.ticker)) return;
+    if (!trackedStateReady || addingTicker || isTickerTracked(result.ticker)) return;
     const ticker = result.ticker.trim().toUpperCase();
     setAddingTicker(ticker);
     setSearchError(null);
@@ -124,11 +125,10 @@ export function HomeTrackedCompaniesSection({ refreshToken = 0 }: Props) {
         },
         SEARCH_TRACKING_ACTOR,
       );
+      // Reconcile from the canonical registry instead of constructing a local
+      // list from a snapshot that may have been invalidated by a concurrent refresh.
       latestLoadId.current += 1;
-      setInstruments((current) => [
-        ...(current ?? []).filter((item) => item.id !== saved.id),
-        saved,
-      ]);
+      await load();
       setExpandedId(saved.id);
     } catch (err) {
       setSearchError(err instanceof Error ? err.message : 'Yhtiön lisääminen seurantaan epäonnistui.');
@@ -209,11 +209,11 @@ export function HomeTrackedCompaniesSection({ refreshToken = 0 }: Props) {
               </View>
               <Pressable
                 accessibilityRole="button"
-                disabled={adding || tracked}
+                disabled={!trackedStateReady || adding || tracked}
                 onPress={() => void addSearchResult(result)}
                 style={styles.addButton}>
                 <Text style={styles.addButtonText}>
-                  {adding ? 'Lisätään…' : tracked ? 'Seurannassa' : 'Lisää'}
+                  {!trackedStateReady ? 'Odotetaan…' : adding ? 'Lisätään…' : tracked ? 'Seurannassa' : 'Lisää'}
                 </Text>
               </Pressable>
             </View>
