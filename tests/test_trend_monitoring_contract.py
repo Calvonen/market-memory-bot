@@ -1,4 +1,5 @@
 import ast
+import importlib.util
 import unittest
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -12,6 +13,21 @@ from trading_system.trend_monitoring_contract import (
     apply_trend_confirmation,
     evaluate_trend,
 )
+
+
+def _imported_modules_from_source(module_source: str, package: str) -> set[str]:
+    tree = ast.parse(module_source)
+    imported_modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                relative_name = "." * node.level + (node.module or "")
+                imported_modules.add(importlib.util.resolve_name(relative_name, package))
+            elif node.module:
+                imported_modules.add(node.module)
+    return imported_modules
 
 
 class TrendMonitoringContractTests(unittest.TestCase):
@@ -198,16 +214,17 @@ class TrendMonitoringContractTests(unittest.TestCase):
         self.assertIsNone(transition.pending_candidate)
         self.assertEqual(transition.pending_count, 0)
 
+    def test_relative_execution_imports_resolve_to_canonical_package(self):
+        imported_modules = _imported_modules_from_source(
+            "from .brokers.paper import PaperBroker\n",
+            "trading_system",
+        )
+        self.assertIn("trading_system.brokers.paper", imported_modules)
+
     def test_contract_has_no_execution_dependencies(self):
         module = __import__("trading_system.trend_monitoring_contract", fromlist=["dummy"])
         module_source = open(module.__file__, encoding="utf-8").read()
-        tree = ast.parse(module_source)
-        imported_modules = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported_modules.update(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                imported_modules.add(node.module)
+        imported_modules = _imported_modules_from_source(module_source, module.__package__)
         forbidden_prefixes = (
             "requests",
             "websockets",
