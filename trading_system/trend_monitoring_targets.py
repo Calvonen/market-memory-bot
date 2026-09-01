@@ -14,6 +14,7 @@ from trading_system.tracking_profile_registry import TrackedInstrumentProfileRec
 
 
 PROFILE_BATCH_SIZE = 50
+_TREND_TARGET_SELECTION_PROOF = object()
 
 
 class ActiveTrackedInstrumentReader(Protocol):
@@ -26,10 +27,40 @@ class TrackingProfileBatchReader(Protocol):
     ) -> dict[str, list[TrackedInstrumentProfileRecord]]: ...
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class TrendMonitoringTargets:
+    """Provenance-bearing snapshot produced only by canonical target selection."""
+
     resolved: tuple[TrackedEtoroInstrument, ...]
     unresolved_tracked_instrument_ids: tuple[str, ...]
+
+    def __init__(
+        self,
+        resolved: tuple[TrackedEtoroInstrument, ...],
+        unresolved_tracked_instrument_ids: tuple[str, ...],
+        *,
+        _selection_proof: object,
+    ) -> None:
+        if _selection_proof is not _TREND_TARGET_SELECTION_PROOF:
+            raise ValueError("Trend monitoring targets require canonical selection proof")
+        object.__setattr__(self, "resolved", resolved)
+        object.__setattr__(
+            self,
+            "unresolved_tracked_instrument_ids",
+            unresolved_tracked_instrument_ids,
+        )
+
+
+def _selected_targets(
+    *,
+    resolved: tuple[TrackedEtoroInstrument, ...],
+    unresolved_tracked_instrument_ids: tuple[str, ...],
+) -> TrendMonitoringTargets:
+    return TrendMonitoringTargets(
+        resolved=resolved,
+        unresolved_tracked_instrument_ids=unresolved_tracked_instrument_ids,
+        _selection_proof=_TREND_TARGET_SELECTION_PROOF,
+    )
 
 
 def _domain_tracked(record: TrackedInstrumentRecord) -> TrackedInstrument:
@@ -89,7 +120,7 @@ def select_trend_monitoring_targets(
     """
     active_records = tracked_reader.list_active()
     if not active_records:
-        return TrendMonitoringTargets(resolved=(), unresolved_tracked_instrument_ids=())
+        return _selected_targets(resolved=(), unresolved_tracked_instrument_ids=())
 
     ids = [record.id.strip() for record in active_records]
     if any(not tracked_id for tracked_id in ids):
@@ -120,7 +151,7 @@ def select_trend_monitoring_targets(
         seen_etoro_ids.add(target.etoro_instrument_id)
         resolved.append(target)
 
-    return TrendMonitoringTargets(
+    return _selected_targets(
         resolved=tuple(resolved),
         unresolved_tracked_instrument_ids=tuple(unresolved),
     )
