@@ -215,7 +215,7 @@ as $$
     to_regprocedure('public.capture_tracked_market_event_pre_event_context_validated(uuid,jsonb,text,text,timestamptz,timestamptz)') is not null,
     to_regprocedure('public.validate_tracked_market_event_pre_event_context_if_current(uuid,timestamptz)') is not null,
     to_regprocedure('public.fail_tracked_market_event_pre_event_deadline_if_current(uuid,timestamptz,text,text)') is not null,
-    to_regprocedure('public.fail_tracked_event_stale_context_if_current(uuid,timestamptz,text,text)') is not null,
+    to_regprocedure('public.fail_tracked_market_event_stale_context_if_current(uuid,timestamptz,text,text)') is not null,
     to_regprocedure('public.promote_calendar_event_to_tracked_runtime(uuid,text,text,text,text,date,timestamptz,text,text)') is not null,
     public.calendar_runtime_untrack_guard_version() = 1,
     to_regprocedure('public.ensure_calendar_release_shell(uuid)') is not null,
