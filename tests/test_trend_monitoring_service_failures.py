@@ -30,10 +30,11 @@ def snapshot(*items: TrackedEtoroInstrument):
 
 
 class FailureStream:
-    def __init__(self, first_item: object) -> None:
+    def __init__(self, first_item: object, *, close_error: Exception | None = None) -> None:
         self.queue: asyncio.Queue[object] = asyncio.Queue()
         self.queue.put_nowait(first_item)
         self.closed = False
+        self.close_error = close_error
 
     def __aiter__(self):
         return self
@@ -48,6 +49,8 @@ class FailureStream:
 
     async def aclose(self) -> None:
         self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class ControlledSleep:
@@ -74,6 +77,43 @@ class TrendMonitoringServiceFailureTests(unittest.IsolatedAsyncioTestCase):
 
         def stream_factory(targets):
             stream = FailureStream(targets.resolved[0].tracked_instrument_id)
+            streams.append(stream)
+            return stream
+
+        service = stream_supervised_trend_monitoring(
+            supervisor=supervisor,
+            candle_pipeline=pipeline,
+            stream_factory=stream_factory,
+            refresh_interval_seconds=30,
+            sleep=sleep,
+        )
+
+        self.assertEqual(await anext(service), "a")
+        streams[0].queue.put_nowait(RuntimeError("provider failed"))
+        current[0] = snapshot(b)
+        sleep.trigger()
+        await asyncio.sleep(0)
+
+        with self.assertRaisesRegex(RuntimeError, "provider failed"):
+            await anext(service)
+        self.assertTrue(streams[0].closed)
+        self.assertEqual(len(streams), 1)
+
+    async def test_completed_provider_failure_wins_over_close_failure(self) -> None:
+        runtime = TrendMonitoringRuntime()
+        pipeline = TrackedCandlePipeline()
+        a = target("a", 101)
+        b = target("b", 202)
+        current = [snapshot(a)]
+        supervisor = TrendMonitoringSupervisor(select_targets=lambda: current[0], runtime=runtime)
+        sleep = ControlledSleep()
+        streams: list[FailureStream] = []
+
+        def stream_factory(targets):
+            stream = FailureStream(
+                targets.resolved[0].tracked_instrument_id,
+                close_error=RuntimeError("close failed"),
+            )
             streams.append(stream)
             return stream
 
