@@ -1,5 +1,5 @@
 import { Link, useFocusEffect, useRouter } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { getEvent } from '@/services/api';
@@ -134,36 +134,38 @@ export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
   );
   const [expectationRetryToken, setExpectationRetryToken] = useState(0);
 
-  useEffect(() => {
-    if (!expectationCandidateId) {
-      setExpectationLinkState({ status: 'none' });
-      return;
-    }
+  useFocusEffect(
+    useCallback(() => {
+      if (!expectationCandidateId) {
+        setExpectationLinkState({ status: 'none' });
+        return undefined;
+      }
 
-    setExpectationLinkState({ status: 'loading' });
-    let active = true;
-    void getEvent(expectationCandidateId)
-      .then((expectation) => {
-        if (!active) return;
-        if (expectation.event_id !== expectationCandidateId) {
+      setExpectationLinkState({ status: 'loading' });
+      let active = true;
+      void getEvent(expectationCandidateId)
+        .then((expectation) => {
+          if (!active) return;
+          if (expectation.event_id !== expectationCandidateId) {
+            setExpectationLinkState({ status: 'error' });
+            return;
+          }
+          setExpectationLinkState({ status: 'ready', eventId: expectationCandidateId });
+        })
+        .catch((err) => {
+          if (!active) return;
+          if (err instanceof Error && err.message === 'Event not found') {
+            setExpectationLinkState({ status: 'none' });
+            return;
+          }
           setExpectationLinkState({ status: 'error' });
-          return;
-        }
-        setExpectationLinkState({ status: 'ready', eventId: expectationCandidateId });
-      })
-      .catch((err) => {
-        if (!active) return;
-        if (err instanceof Error && err.message === 'Event not found') {
-          setExpectationLinkState({ status: 'none' });
-          return;
-        }
-        setExpectationLinkState({ status: 'error' });
-      });
+        });
 
-    return () => {
-      active = false;
-    };
-  }, [expectationCandidateId, expectationRetryToken]);
+      return () => {
+        active = false;
+      };
+    }, [expectationCandidateId, expectationRetryToken]),
+  );
 
   return (
     <View style={styles.eventCard}>
