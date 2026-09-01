@@ -19,6 +19,7 @@ export function HomeTrackedCompaniesSection({ refreshToken = 0 }: Props) {
   const load = useCallback(() => {
     const loadId = ++latestLoadId.current;
     setError(null);
+    setInstruments(null);
     return getTrackedInstruments()
       .then((list) => {
         if (loadId !== latestLoadId.current) return;
@@ -26,6 +27,7 @@ export function HomeTrackedCompaniesSection({ refreshToken = 0 }: Props) {
       })
       .catch((err) => {
         if (loadId !== latestLoadId.current) return;
+        setInstruments(null);
         setError(err instanceof Error ? err.message : 'Seurattuja yhtiöitä ei juuri nyt saatu haettua.');
       });
   }, []);
