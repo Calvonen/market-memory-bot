@@ -85,8 +85,16 @@ class TrendMonitoringSupervisor:
         resolved_ids = set(resolved_identities)
 
         discarded = set(self._runtime.retain_tracked_instruments(resolved_ids))
-        for tracked_id in set(self._resolved_identities).intersection(resolved_ids):
-            if self._resolved_identities[tracked_id] != resolved_identities[tracked_id]:
+        for tracked_id, target_identity in resolved_identities.items():
+            runtime_identity = self._runtime.tracked_instrument_identity(tracked_id)
+            if runtime_identity is None:
+                continue
+            target_runtime_identity = target_identity[:3]
+            if (
+                runtime_identity.instrument,
+                runtime_identity.market,
+                runtime_identity.etoro_instrument_id,
+            ) != target_runtime_identity:
                 if self._runtime.discard_tracked_instrument(tracked_id):
                     discarded.add(tracked_id)
 
