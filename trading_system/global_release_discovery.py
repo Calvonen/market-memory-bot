@@ -17,6 +17,7 @@ from trading_system.results_page_release_ingestion import ResultsPageOfficialRel
 
 
 _PROFILE_URL = "https://finnhub.io/api/v1/stock/profile2"
+_SEARCH_URL = "https://finnhub.io/api/v1/search"
 
 
 @dataclass(frozen=True)
@@ -109,15 +110,18 @@ def _select_unique_best(links: tuple[_Link, ...], *, stage: str) -> str | None:
     return winners[0] if len(winners) == 1 else None
 
 
+def _ticker_root(symbol: str) -> str:
+    return symbol.strip().upper().split(".", 1)[0]
+
+
 class FinnhubOfficialResultsProvider:
     """Discover an official results page globally from canonical instrument identity.
 
-    Finnhub is used only to resolve the company's own HTTPS website. From that
-    origin the provider performs a bounded, same-origin navigation: it first
-    looks for a unique results/reports link, otherwise a unique investor link
-    and then a unique results/reports link. Ambiguity fails closed. Once a
-    results page is found, the existing reviewed ResultsPageOfficialReleaseProvider
-    owns release-link selection and document ingestion.
+    Finnhub is used only to resolve the company's own HTTPS website. The
+    canonical broker ticker is tried first. If Finnhub uses a different exchange
+    suffix, its symbol search may substitute a symbol only when exactly one
+    returned symbol has the same ticker root; ambiguous symbol identity fails
+    closed. Website navigation then stays on that one official HTTPS origin.
     """
 
     name = "finnhub_official_results_discovery"
@@ -128,12 +132,14 @@ class FinnhubOfficialResultsProvider:
         event_id: str,
         ticker: str,
         scheduled_date: date,
+        company_name: str | None = None,
         api_key: str | None = None,
         timeout_seconds: float = 15.0,
         http_get: Callable[..., Any] | None = None,
     ) -> None:
         self.event_id = event_id.strip()
         self.ticker = ticker.strip().upper()
+        self.company_name = (company_name or "").strip()
         self.scheduled_date = scheduled_date
         self.api_key = (api_key or os.environ.get("FINNHUB_API_KEY") or "").strip()
         self.timeout_seconds = timeout_seconds
@@ -196,23 +202,60 @@ class FinnhubOfficialResultsProvider:
         return document
 
     def _company_homepage(self) -> str | None:
-        try:
-            response = self._http_get(
-                _PROFILE_URL,
-                params={"symbol": self.ticker, "token": self.api_key},
-                timeout=self.timeout_seconds,
-            )
-        except requests.RequestException as exc:
-            raise RuntimeError(f"Finnhub company profile request failed: {exc}") from exc
-        if not response.ok:
-            raise RuntimeError(f"Finnhub company profile HTTP {response.status_code}: {response.text[:500]}")
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise RuntimeError("Finnhub company profile returned invalid JSON") from exc
+        direct = self._profile_homepage(self.ticker)
+        if direct is not None:
+            return direct
+        alternate = self._unique_finnhub_symbol()
+        if alternate is None or alternate == self.ticker:
+            return None
+        return self._profile_homepage(alternate)
+
+    def _profile_homepage(self, symbol: str) -> str | None:
+        payload = self._get_json(
+            _PROFILE_URL,
+            params={"symbol": symbol, "token": self.api_key},
+            operation="company profile",
+        )
         if not isinstance(payload, dict):
             raise RuntimeError("Finnhub company profile returned unexpected shape")
         return _canonical_https_homepage(payload.get("weburl"))
+
+    def _unique_finnhub_symbol(self) -> str | None:
+        root = _ticker_root(self.ticker)
+        payload = self._get_json(
+            _SEARCH_URL,
+            params={"q": root, "token": self.api_key},
+            operation="symbol search",
+        )
+        if not isinstance(payload, dict):
+            raise RuntimeError("Finnhub symbol search returned unexpected shape")
+        rows = payload.get("result") or []
+        if not isinstance(rows, list):
+            raise RuntimeError("Finnhub symbol search returned unexpected result shape")
+        matches = {
+            str(row.get("symbol") or "").strip().upper()
+            for row in rows
+            if isinstance(row, dict)
+            and str(row.get("symbol") or "").strip()
+            and _ticker_root(str(row.get("symbol") or "")) == root
+        }
+        return next(iter(matches)) if len(matches) == 1 else None
+
+    def _get_json(self, url: str, *, params: dict[str, str], operation: str) -> Any:
+        try:
+            response = self._http_get(
+                url,
+                params=params,
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Finnhub {operation} request failed: {exc}") from exc
+        if not response.ok:
+            raise RuntimeError(f"Finnhub {operation} HTTP {response.status_code}: {response.text[:500]}")
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise RuntimeError(f"Finnhub {operation} returned invalid JSON") from exc
 
     def _fetch_html(self, homepage: str, url: str) -> tuple[str, str]:
         source = OfficialReleaseSource(
