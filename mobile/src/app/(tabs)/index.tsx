@@ -32,6 +32,7 @@ type TrackedEventSnapshot = {
 };
 
 const CALENDAR_WINDOW_DAYS = 30;
+const PARENT_REFRESH_TIMEOUT_MS = 10_000;
 
 function formatLocalDate(date: Date): string {
   const yyyy = date.getFullYear();
@@ -151,6 +152,7 @@ export default function HomeScreen() {
     const eventsPromise = getEvents()
       .then((list) => {
         if (loadId !== latestLoadId.current) return;
+        setError(null);
         setEvents(list);
         setStatuses({});
 
@@ -181,6 +183,7 @@ export default function HomeScreen() {
     const calendarPromise = getUpcomingCalendarEvents(fromDate, toDate)
       .then((list) => {
         if (loadId !== latestLoadId.current) return;
+        setCalendarError(null);
         setCalendarEvents(list);
       })
       .catch((err) => {
@@ -190,7 +193,45 @@ export default function HomeScreen() {
         );
       });
 
-    return Promise.allSettled([eventsPromise, calendarPromise]);
+    return new Promise<void>((resolve) => {
+      let eventsSettled = false;
+      let calendarSettled = false;
+      let completed = false;
+      let settledCount = 0;
+
+      const finish = () => {
+        if (completed) return;
+        completed = true;
+        clearTimeout(timeout);
+        resolve();
+      };
+      const markSettled = () => {
+        settledCount += 1;
+        if (settledCount === 2) finish();
+      };
+
+      void eventsPromise.finally(() => {
+        eventsSettled = true;
+        markSettled();
+      });
+      void calendarPromise.finally(() => {
+        calendarSettled = true;
+        markSettled();
+      });
+
+      const timeout = setTimeout(() => {
+        if (completed) return;
+        if (loadId === latestLoadId.current) {
+          if (!eventsSettled) {
+            setError('Tapahtumatietojen päivitys aikakatkaistiin. Yritä uudelleen.');
+          }
+          if (!calendarSettled) {
+            setCalendarError('Kalenteritietojen päivitys aikakatkaistiin. Yritä uudelleen.');
+          }
+        }
+        finish();
+      }, PARENT_REFRESH_TIMEOUT_MS);
+    });
   }, []);
 
   const handleTrackedEventSnapshot = useCallback((snapshot: TrackedEventSnapshot) => {
