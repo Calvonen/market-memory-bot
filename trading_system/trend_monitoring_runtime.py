@@ -58,6 +58,29 @@ class TrendMonitoringRuntime:
     def __init__(self) -> None:
         self._states: dict[str, _TrendIndicatorState] = {}
 
+    def discard_tracked_instrument(self, tracked_instrument_id: str) -> bool:
+        """Forget all Trend state for one canonical tracked instrument.
+
+        Lifecycle owners call this when an instrument leaves the prevalidated
+        Trend target snapshot. Re-enabling that instrument later must start from
+        fresh evidence rather than silently reusing EMA/confirmation state from
+        before the monitoring gap.
+        """
+        tracked_id = tracked_instrument_id.strip()
+        if not tracked_id:
+            raise ValueError("tracked_instrument_id is required")
+        return self._states.pop(tracked_id, None) is not None
+
+    def retain_tracked_instruments(self, tracked_instrument_ids: set[str]) -> tuple[str, ...]:
+        """Keep only state belonging to the current canonical Trend target set."""
+        normalized = {tracked_id.strip() for tracked_id in tracked_instrument_ids}
+        if "" in normalized:
+            raise ValueError("tracked_instrument_id is required")
+        discarded = tuple(sorted(set(self._states).difference(normalized)))
+        for tracked_id in discarded:
+            del self._states[tracked_id]
+        return discarded
+
     @staticmethod
     def _same_candle(left: TrackedMarketCandle, right: TrackedMarketCandle) -> bool:
         return (
