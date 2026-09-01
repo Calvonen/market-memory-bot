@@ -13,6 +13,9 @@ from trading_system.tracked_instruments import TrackedInstrument, TrackedInstrum
 from trading_system.tracking_profile_registry import TrackedInstrumentProfileRecord
 
 
+PROFILE_BATCH_SIZE = 50
+
+
 class ActiveTrackedInstrumentReader(Protocol):
     def list_active(self) -> list[TrackedInstrumentRecord]: ...
 
@@ -53,6 +56,25 @@ def _trend_enabled(profiles: list[TrackedInstrumentProfileRecord]) -> bool:
     return bool(trend_profiles and trend_profiles[0].enabled)
 
 
+def _read_profiles_in_batches(
+    profile_reader: TrackingProfileBatchReader,
+    ids: list[str],
+) -> dict[str, list[TrackedInstrumentProfileRecord]]:
+    profiles_by_id: dict[str, list[TrackedInstrumentProfileRecord]] = {}
+    for offset in range(0, len(ids), PROFILE_BATCH_SIZE):
+        batch_ids = ids[offset : offset + PROFILE_BATCH_SIZE]
+        batch_profiles = profile_reader.list_for_instruments(batch_ids)
+        if set(batch_profiles) != set(batch_ids):
+            raise RuntimeError("tracking profile batch did not match active instruments")
+        overlap = set(profiles_by_id).intersection(batch_profiles)
+        if overlap:
+            raise RuntimeError("tracking profile batches returned duplicate instrument ids")
+        profiles_by_id.update(batch_profiles)
+    if set(profiles_by_id) != set(ids):
+        raise RuntimeError("tracking profile batch did not match active instruments")
+    return profiles_by_id
+
+
 def select_trend_monitoring_targets(
     tracked_reader: ActiveTrackedInstrumentReader,
     profile_reader: TrackingProfileBatchReader,
@@ -74,10 +96,10 @@ def select_trend_monitoring_targets(
         raise RuntimeError("active tracked instrument has blank id")
     if len(set(ids)) != len(ids):
         raise RuntimeError("duplicate active tracked instrument id")
+    if any(not record.active for record in active_records):
+        raise RuntimeError("active tracked reader returned inactive instrument")
 
-    profiles_by_id = profile_reader.list_for_instruments(ids)
-    if set(profiles_by_id) != set(ids):
-        raise RuntimeError("tracking profile batch did not match active instruments")
+    profiles_by_id = _read_profiles_in_batches(profile_reader, ids)
 
     resolved: list[TrackedEtoroInstrument] = []
     unresolved: list[str] = []
@@ -89,8 +111,6 @@ def select_trend_monitoring_targets(
             continue
 
         tracked = _domain_tracked(record)
-        if not tracked.active:
-            raise RuntimeError("active tracked reader returned inactive instrument")
         target = resolve_tracked_instrument(tracked, resolver)
         if target is None:
             unresolved.append(record.id)
