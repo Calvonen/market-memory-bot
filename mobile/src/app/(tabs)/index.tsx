@@ -390,6 +390,7 @@ export default function HomeScreen() {
         </View>
       ) : null}
 
+      {/* /api/v1/events used to render directly as events?.map; canonical Home now renders the filtered list below. */}
       {visibleEvents?.map((event) => {
         const calendarEventId = event.event_id.startsWith('calendar:')
           ? event.event_id.slice('calendar:'.length)
