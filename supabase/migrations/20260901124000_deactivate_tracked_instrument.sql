@@ -47,3 +47,36 @@ revoke all on function public.deactivate_tracked_instrument(text, text)
   from public, anon, authenticated;
 grant execute on function public.deactivate_tracked_instrument(text, text)
   to service_role;
+
+-- Registry schema v2 requires canonical deactivation in addition to the v1
+-- table/upsert contract. The deploy verifier must fail closed if this migration
+-- has not been applied before the backend exposes the deactivate endpoint.
+create or replace function public.tracked_instrument_registry_schema_version()
+returns integer
+language sql
+immutable
+security invoker
+as $$
+  select 2;
+$$;
+
+create or replace function public.verify_tracked_instrument_registry_schema()
+returns table (
+  tracked_instruments_table_exists boolean,
+  upsert_tracked_instrument_function_exists boolean,
+  deactivate_tracked_instrument_function_exists boolean,
+  tracked_instrument_registry_schema_version integer
+)
+language sql
+stable
+security invoker
+as $$
+  select
+    to_regclass('public.tracked_instruments') is not null,
+    to_regprocedure('public.upsert_tracked_instrument(text,text,text,text,text)') is not null,
+    to_regprocedure('public.deactivate_tracked_instrument(text,text)') is not null,
+    public.tracked_instrument_registry_schema_version();
+$$;
+
+revoke all on function public.verify_tracked_instrument_registry_schema from public;
+grant execute on function public.verify_tracked_instrument_registry_schema to service_role;
