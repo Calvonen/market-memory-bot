@@ -79,7 +79,7 @@ TRACKED_PRESENT_ROW = {
     "calendarless_release_shell_trigger_exists": True,
     "tracked_event_release_skip_audit_table_exists": True,
     "record_tracked_event_release_skip_function_exists": True,
-    "runtime_schema_version": 16,
+    "runtime_schema_version": 15,
 }
 
 TRACKED_INSTRUMENT_PRESENT_ROW = {
@@ -158,12 +158,12 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertIn("deployed: 7", err)
 
     def test_fails_closed_on_old_runtime_schema_version(self) -> None:
-        row = dict(TRACKED_PRESENT_ROW, runtime_schema_version=15)
+        row = dict(TRACKED_PRESENT_ROW, runtime_schema_version=14)
         exit_code, _out, err = self._run_with_client(
             _FakeClient(_responses(tracked_row=row))
         )
         self.assertEqual(exit_code, 1)
-        self.assertIn("tracked-event runtime schema version 16", err)
+        self.assertIn("tracked-event runtime schema version 15", err)
 
     def test_fails_closed_when_tracked_instrument_registry_rpc_is_missing(self) -> None:
         responses = _responses()

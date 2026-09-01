@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 MIGRATION_PATH = Path(
-    "supabase/migrations/20260903130000_tracked_instrument_profiles.sql"
+    "supabase/migrations/20260901123000_tracked_instrument_profiles.sql"
 )
 
 

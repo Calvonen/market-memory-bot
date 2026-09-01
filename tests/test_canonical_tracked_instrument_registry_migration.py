@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 MIGRATION_PATH = Path(
-    "supabase/migrations/20260903120000_canonical_tracked_instruments.sql"
+    "supabase/migrations/20260901122000_canonical_tracked_instruments.sql"
 )
 
 
@@ -97,10 +97,11 @@ class CanonicalTrackedInstrumentRegistryMigrationTests(unittest.TestCase):
         self.assertIn("'scanner', 'calendar', 'manual'", self.lower_sql)
         self.assertIn("tracked_instrument_invalid_source", self.lower_sql)
 
-    def test_schema_gate_advances_runtime_to_16_and_exposes_registry_verifier(self) -> None:
+    def test_registry_exposes_its_own_schema_verifier_without_mutating_event_runtime_version(self) -> None:
         self.assertIn("verify_tracked_instrument_registry_schema", self.lower_sql)
         self.assertIn("tracked_instrument_registry_schema_version", self.lower_sql)
-        self.assertIn("select 16;", self.lower_sql)
+        self.assertIn("select 1;", self.lower_sql)
+        self.assertNotIn("tracked_event_runtime_schema_version", self.lower_sql)
 
 
 if __name__ == "__main__":

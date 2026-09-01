@@ -147,18 +147,3 @@ $$;
 
 revoke all on function public.verify_tracked_instrument_registry_schema from public;
 grant execute on function public.verify_tracked_instrument_registry_schema to service_role;
-
--- This registry becomes part of the deploy-required tracked runtime schema.
--- The existing verify_tracked_event_runtime_schema() resolves this function at
--- execution time, so its runtime_schema_version column advances automatically.
-create or replace function public.tracked_event_runtime_schema_version()
-returns integer
-language sql
-immutable
-security invoker
-as $$
-  select 16;
-$$;
-
-revoke all on function public.tracked_event_runtime_schema_version from public;
-grant execute on function public.tracked_event_runtime_schema_version to service_role;
