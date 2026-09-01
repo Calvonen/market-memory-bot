@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from typing import Protocol
 
 from trading_system.tracked_candle_pipeline import TrackedCandlePipeline
 from trading_system.trend_monitoring_live import TrendRuntimeMarketBatch
@@ -10,7 +11,13 @@ from trading_system.trend_monitoring_supervisor import TrendMonitoringSupervisor
 from trading_system.trend_monitoring_targets import TrendMonitoringTargets
 
 
-TrendStreamFactory = Callable[[TrendMonitoringTargets], AsyncIterator[TrendRuntimeMarketBatch]]
+class ClosableTrendStream(Protocol):
+    def __aiter__(self) -> ClosableTrendStream: ...
+    async def __anext__(self) -> TrendRuntimeMarketBatch: ...
+    async def aclose(self) -> None: ...
+
+
+TrendStreamFactory = Callable[[TrendMonitoringTargets], ClosableTrendStream]
 SleepFunction = Callable[[float], Awaitable[None]]
 
 
@@ -38,13 +45,19 @@ def _align_candle_pipeline(
 
 
 async def _close_stream(
-    stream: AsyncIterator[TrendRuntimeMarketBatch] | None,
+    stream: ClosableTrendStream | None,
     next_batch_task: asyncio.Task[TrendRuntimeMarketBatch] | None,
 ) -> None:
-    if next_batch_task is not None and not next_batch_task.done():
-        next_batch_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await next_batch_task
+    if next_batch_task is not None:
+        if not next_batch_task.done():
+            next_batch_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await next_batch_task
+        else:
+            # Consume a completed result/exception when a canonical refresh wins
+            # the race, so no abandoned task warning leaks from the old stream.
+            with suppress(asyncio.CancelledError, StopAsyncIteration, Exception):
+                next_batch_task.result()
     if stream is not None:
         await stream.aclose()
 
@@ -56,7 +69,7 @@ async def stream_supervised_trend_monitoring(
     stream_factory: TrendStreamFactory,
     refresh_interval_seconds: float = 60.0,
     sleep: SleepFunction = asyncio.sleep,
-) -> AsyncIterator[TrendRuntimeMarketBatch]:
+):
     """Continuously refresh canonical Trend targets and restart the live stream safely.
 
     The supervisor owns canonical target selection and Trend-runtime pruning. This
@@ -76,7 +89,7 @@ async def stream_supervised_trend_monitoring(
     if refresh_interval_seconds <= 0:
         raise ValueError("refresh_interval_seconds must be positive")
 
-    stream: AsyncIterator[TrendRuntimeMarketBatch] | None = None
+    stream: ClosableTrendStream | None = None
     next_batch_task: asyncio.Task[TrendRuntimeMarketBatch] | None = None
     refresh_task: asyncio.Task[None] | None = None
 
@@ -96,7 +109,7 @@ async def stream_supervised_trend_monitoring(
         refresh_task = asyncio.create_task(sleep(refresh_interval_seconds))
 
         while True:
-            wait_for: set[asyncio.Task[object]] = {refresh_task}
+            wait_for = {refresh_task}
             if next_batch_task is not None:
                 wait_for.add(next_batch_task)
             done, _ = await asyncio.wait(wait_for, return_when=asyncio.FIRST_COMPLETED)
