@@ -75,36 +75,53 @@ def test_tracked_expectations_wait_for_canonical_snapshot_and_activity():
 def test_current_home_refresh_gets_a_new_canonical_generation():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
-    assert "const loadEvents = useCallback((resetCanonical = false) => {" in source
-    load_start = source.index("const loadEvents = useCallback((resetCanonical = false) => {")
+    assert "const resetCanonicalState = useCallback(() => {" in source
+    reset_start = source.index("const resetCanonicalState = useCallback(() => {")
+    load_start = source.index("const loadEvents = useCallback(() => {", reset_start)
+    reset_block = source[reset_start:load_start]
+    assert "setTrackedActivityByEventId({});" in reset_block
+    assert "setTrackedEventCount(null);" in reset_block
+    assert "setPersistentEventIds(new Set());" in reset_block
+    assert "setPersistentCalendarEventIds(new Set());" in reset_block
+    assert "setPersistentStatusByCalendarEventId({});" in reset_block
+    assert "setPersistentEventByCalendarEventId({});" in reset_block
+
     get_events_start = source.index("const eventsPromise = getEvents()", load_start)
     load_preamble = source[load_start:get_events_start]
     assert "setCalendarEvents(null);" in load_preamble
-    assert "if (resetCanonical) {" in load_preamble
-    assert "setTrackedActivityByEventId({});" in load_preamble
-    assert "setTrackedEventCount(null);" in load_preamble
-    assert "setPersistentEventIds(new Set());" in load_preamble
-    assert "setPersistentCalendarEventIds(new Set());" in load_preamble
-    assert "setPersistentStatusByCalendarEventId({});" in load_preamble
-    assert "setPersistentEventByCalendarEventId({});" in load_preamble
+    assert "setTrackedEventCount(null);" not in load_preamble
 
     assert "const token = ++nextTrackedRefreshToken.current;" in source
-    assert "setTrackedRefreshToken(token);" in source
-    assert "void loadEvents(true);" in source
-    assert "await loadEvents(true);" in source
+    assert "currentTrackedRefreshToken.current = token;" in source
+    assert source.count("resetCanonicalState();") >= 2
+    assert "void loadEvents();" in source
+    assert "await loadEvents();" in source
     assert "key={`tracked-events:${trackedRefreshToken}`}" in source
+    assert "onSnapshot={handleCurrentTrackedEventSnapshot}" in source
     assert "canonicalLoadingSection" not in source
+
+
+def test_canonical_snapshot_generation_guard_is_stable_within_refresh():
+    source = HOME_SOURCE.read_text(encoding="utf-8")
+
+    assert "const handleCurrentTrackedEventSnapshot = useCallback(" in source
+    assert "trackedRefreshToken !== currentTrackedRefreshToken.current" in source
+    assert "[handleTrackedEventSnapshot, trackedRefreshToken]" in source
+    assert "onSnapshot={handleCurrentTrackedEventSnapshot}" in source
+    assert "onSnapshot={(snapshot) =>" not in source
 
 
 def test_calendar_retry_keeps_the_ready_canonical_snapshot():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
     assert "<Pressable style={styles.retryButton} onPress={() => void loadEvents()}>" in source
-    assert "const loadEvents = useCallback((resetCanonical = false) => {" in source
-    canonical_reset = source.index("if (resetCanonical) {")
-    tracked_count_reset = source.index("setTrackedEventCount(null);", canonical_reset)
-    get_events_start = source.index("const eventsPromise = getEvents()", canonical_reset)
-    assert canonical_reset < tracked_count_reset < get_events_start
+    reset_start = source.index("const resetCanonicalState = useCallback(() => {")
+    load_start = source.index("const loadEvents = useCallback(() => {", reset_start)
+    reset_block = source[reset_start:load_start]
+    get_events_start = source.index("const eventsPromise = getEvents()", load_start)
+    load_preamble = source[load_start:get_events_start]
+    assert "setTrackedEventCount(null);" in reset_block
+    assert "setTrackedEventCount(null);" not in load_preamble
 
 
 def test_canonical_load_error_remains_visible_and_retryable():
@@ -140,7 +157,7 @@ def test_inactive_calendar_occurrence_cannot_reappear_as_fallback_card():
 def test_calendar_fallback_waits_for_current_calendar_and_canonical_snapshots():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
-    load_start = source.index("const loadEvents = useCallback((resetCanonical = false) => {")
+    load_start = source.index("const loadEvents = useCallback(() => {")
     calendar_fetch = source.index("const calendarPromise = getUpcomingCalendarEvents", load_start)
     assert source.index("setCalendarEvents(null);", load_start) < calendar_fetch
 
