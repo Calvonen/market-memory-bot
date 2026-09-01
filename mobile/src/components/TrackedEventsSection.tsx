@@ -1,7 +1,8 @@
-import { useFocusEffect, useRouter } from 'expo-router';
+import { Link, useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
+import { getEvent } from '@/services/api';
 import {
   getTrackedEventLatestReaction,
   getTrackedEvents,
@@ -14,6 +15,7 @@ import {
 
 type Snapshot = {
   count: number;
+  eventIds: string[];
   calendarEventIds: string[];
   statusByCalendarEventId: Record<string, string>;
   eventByCalendarEventId: Record<string, TrackedMarketEvent>;
@@ -36,6 +38,12 @@ type WorkflowState =
   | { status: 'ready'; workflow: TrackedEventWorkflowResponse }
   | { status: 'error' };
 
+type ExpectationLinkState =
+  | { status: 'none' }
+  | { status: 'loading' }
+  | { status: 'ready'; eventId: string }
+  | { status: 'error' };
+
 export function TrackedEventsSection({
   onSnapshot,
   excludeCalendarEventIds,
@@ -55,6 +63,7 @@ export function TrackedEventsSection({
         setEvents(list);
         onSnapshot?.({
           count: list.length,
+          eventIds: list.map((event) => event.event_id),
           calendarEventIds: list
             .map((event) => event.calendar_event_id)
             .filter((value): value is string => Boolean(value)),
@@ -114,6 +123,49 @@ export function TrackedEventsSection({
 
 export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
   const scheduleText = formatTrackedEventSchedule(event);
+  const expectationCandidateId =
+    event.kind === 'earnings'
+      ? event.calendar_event_id
+        ? `calendar:${event.calendar_event_id}`
+        : `tracked:${event.event_id}`
+      : null;
+  const [expectationLinkState, setExpectationLinkState] = useState<ExpectationLinkState>(
+    expectationCandidateId ? { status: 'loading' } : { status: 'none' },
+  );
+  const [expectationRetryToken, setExpectationRetryToken] = useState(0);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!expectationCandidateId) {
+        setExpectationLinkState({ status: 'none' });
+        return undefined;
+      }
+
+      setExpectationLinkState({ status: 'loading' });
+      let active = true;
+      void getEvent(expectationCandidateId)
+        .then((expectation) => {
+          if (!active) return;
+          if (expectation.event_id !== expectationCandidateId) {
+            setExpectationLinkState({ status: 'error' });
+            return;
+          }
+          setExpectationLinkState({ status: 'ready', eventId: expectationCandidateId });
+        })
+        .catch((err) => {
+          if (!active) return;
+          if (err instanceof Error && err.message === 'Event not found') {
+            setExpectationLinkState({ status: 'none' });
+            return;
+          }
+          setExpectationLinkState({ status: 'error' });
+        });
+
+      return () => {
+        active = false;
+      };
+    }, [expectationCandidateId, expectationRetryToken]),
+  );
 
   return (
     <View style={styles.eventCard}>
@@ -126,6 +178,30 @@ export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
         </View>
         <Text style={styles.dateText}>{scheduleText}</Text>
       </View>
+
+      {expectationLinkState.status === 'ready' ? (
+        <Link
+          href={{
+            pathname: '/events/[eventId]',
+            params: { eventId: expectationLinkState.eventId },
+          }}
+          style={styles.expectationLink}
+        >
+          Odotukset ja strategia →
+        </Link>
+      ) : null}
+
+      {expectationLinkState.status === 'error' ? (
+        <View style={styles.expectationErrorBlock}>
+          <Text style={styles.errorText}>Odotus- ja strategiatietoa ei juuri nyt saatu varmistettua.</Text>
+          <Pressable
+            style={styles.retryButton}
+            onPress={() => setExpectationRetryToken((value) => value + 1)}
+          >
+            <Text style={styles.retryText}>Yritä uudelleen</Text>
+          </Pressable>
+        </View>
+      ) : null}
 
       <TrackedEventDetails event={event} />
     </View>
@@ -343,9 +419,6 @@ function TrackedEventResult({ state }: { state: LatestReactionState }) {
   );
 }
 
-// Only schema_version 1 is understood - an unrecognized/future version falls
-// back to the "not recorded" copy rather than rendering fields that may no
-// longer mean what their names say.
 function formatTrackingConfigSnapshot(
   snapshot: TrackedMarketEvent['tracking_config_snapshot'],
 ): string {
@@ -368,18 +441,12 @@ function formatPersistedNumber(value: number): string {
   return String(value);
 }
 
-// event_time_status is descriptive event metadata, not a trading threshold
-// (see docs/tracked_event_runtime.md) - the label must never read as more
-// certain than the backend actually knows the timing to be.
 const EVENT_TIME_STATUS_LABELS: Record<TrackedMarketEvent['event_time_status'], string> = {
   confirmed: 'vahvistettu',
   estimated: 'arvioitu',
   unknown: 'aika epävarma',
 };
 
-// Local device time, not the backend host's - same principle as Home's own
-// date formatting (see app/(tabs)/index.tsx). Falls back to the raw
-// event_at string rather than crashing or hiding the row on an invalid date.
 function formatTrackedEventSchedule(event: TrackedMarketEvent): string {
   const timeStatusLabel = EVENT_TIME_STATUS_LABELS[event.event_time_status] ?? 'aika epävarma';
   const eventAt = new Date(event.event_at);
@@ -394,8 +461,6 @@ function formatTrackedEventSchedule(event: TrackedMarketEvent): string {
 
 const MAX_FAILURE_REASON_LENGTH = 180;
 
-// last_error is a raw backend/worker error string - never render it
-// unbounded, and never outside the 'failed' status it actually describes.
 function formatFailureReason(lastError: string | null): string {
   const trimmed = (lastError ?? '').trim();
   if (!trimmed) return 'Syytä ei ole tiedossa.';
@@ -465,6 +530,15 @@ const styles = StyleSheet.create({
     color: '#aab3c2',
     fontSize: 13,
     fontWeight: '600',
+  },
+  expectationLink: {
+    color: '#72b8db',
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: 10,
+  },
+  expectationErrorBlock: {
+    marginTop: 10,
   },
   statusBlock: {
     marginTop: 12,

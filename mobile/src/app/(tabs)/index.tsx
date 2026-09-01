@@ -1,5 +1,5 @@
 import { Link, router, useFocusEffect } from 'expo-router';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -19,27 +19,20 @@ import {
   getUpcomingCalendarEvents,
   PaperRun,
 } from '@/services/api';
-import { TrackedMarketEvent } from '@/services/tracked-events';
+import { getTrackedEventActivities, TrackedMarketEvent } from '@/services/tracked-events';
 
 type EventStatus = { run: PaperRun | null; statusError: boolean };
+type TrackedActivityState = 'loading' | 'active' | 'inactive' | 'error';
 type TrackedEventSnapshot = {
   count: number;
+  eventIds: string[];
   calendarEventIds: string[];
   statusByCalendarEventId: Record<string, string>;
   eventByCalendarEventId: Record<string, TrackedMarketEvent>;
 };
 
-// Mirrors MAX_CALENDAR_LOOKAHEAD_DAYS in trading_system/api.py - the widest
-// window the backend accepts, and what an omitted from_date/to_date used to
-// resolve to server-side. Sending it explicitly (below) keeps that window
-// anchored to the device's own local day instead of the backend host's.
 const CALENDAR_WINDOW_DAYS = 30;
 
-// Same principle as events/upcoming.tsx's deviceLocalDateWindow(): "today"
-// must come from the device's own local calendar day (getFullYear/
-// getMonth/getDate), never toISOString() (UTC) - a device whose local day
-// has already rolled over relative to UTC would otherwise get a window
-// computed against the wrong day.
 function formatLocalDate(date: Date): string {
   const yyyy = date.getFullYear();
   const mm = String(date.getMonth() + 1).padStart(2, '0');
@@ -53,17 +46,68 @@ function deviceLocalCalendarWindow(): { fromDate: string; toDate: string } {
   return { fromDate: formatLocalDate(now), toDate: formatLocalDate(to) };
 }
 
+function isTrackedExpectation(eventId: string): boolean {
+  return eventId.startsWith('tracked:') || eventId.startsWith('calendar:');
+}
+
+function isExpectationBackedByLoadedTrackedEvent(
+  eventId: string,
+  loadedTrackedEventIds: ReadonlySet<string>,
+  loadedCalendarEventIds: ReadonlySet<string>,
+): boolean {
+  if (eventId.startsWith('tracked:')) {
+    const trackedEventId = eventId.slice('tracked:'.length);
+    return Boolean(trackedEventId) && loadedTrackedEventIds.has(trackedEventId);
+  }
+  if (eventId.startsWith('calendar:')) {
+    const calendarEventId = eventId.slice('calendar:'.length);
+    return Boolean(calendarEventId) && loadedCalendarEventIds.has(calendarEventId);
+  }
+  return false;
+}
+
+function isHomeExpectationVisible(
+  event: EventExpectation,
+  status: EventStatus | undefined,
+  loadedTrackedEventIds: ReadonlySet<string>,
+  loadedCalendarEventIds: ReadonlySet<string>,
+  trackedActivity: TrackedActivityState | undefined,
+): boolean {
+  if (event.event_id.startsWith('tracked:')) {
+    const trackedEventId = event.event_id.slice('tracked:'.length);
+    if (!trackedEventId) return false;
+    if (loadedTrackedEventIds.has(trackedEventId)) return false;
+  }
+
+  if (event.event_id.startsWith('calendar:')) {
+    const calendarEventId = event.event_id.slice('calendar:'.length);
+    if (!calendarEventId) return false;
+    if (loadedCalendarEventIds.has(calendarEventId)) return true;
+  }
+
+  if (isTrackedExpectation(event.event_id) && trackedActivity === 'inactive') return false;
+
+  const today = formatLocalDate(new Date());
+  if (event.scheduled_date >= today) return true;
+
+  if (isTrackedExpectation(event.event_id)) return true;
+
+  if (!status || status.statusError) return true;
+
+  return status.run?.status === 'waiting_confirmation';
+}
+
 export default function HomeScreen() {
   const [events, setEvents] = useState<EventExpectation[] | null>(null);
   const [statuses, setStatuses] = useState<Record<string, EventStatus>>({});
-  // Raw tracked-or-not calendar_events rows for the current window - a
-  // separate store from EventExpectation, see
-  // trading_system/calendar_repository.py. Filtered/deduped for display via
-  // the trackedCalendarEvents memo below, not here, since that filtering
-  // depends on `events` too and the two fetches now resolve independently
-  // of each other (see loadEvents()).
+  const [trackedActivityByEventId, setTrackedActivityByEventId] = useState<
+    Record<string, TrackedActivityState>
+  >({});
+  const [trackedActivityError, setTrackedActivityError] = useState<string | null>(null);
+  const [activityRetryToken, setActivityRetryToken] = useState(0);
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[] | null>(null);
   const [trackedEventCount, setTrackedEventCount] = useState<number | null>(null);
+  const [persistentEventIds, setPersistentEventIds] = useState<Set<string>>(() => new Set());
   const [persistentCalendarEventIds, setPersistentCalendarEventIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -76,23 +120,11 @@ export default function HomeScreen() {
   const [trackedRefreshToken, setTrackedRefreshToken] = useState(0);
   const nextTrackedRefreshToken = useRef(0);
   const trackedRefreshWaiters = useRef(new Map<number, () => void>());
-  // Separate from `error` (EventExpectation-only) - a calendar failure must
-  // never be conflated with an EventExpectation failure, or silently
-  // swallowed. calendarEvents itself is left untouched on failure (see the
-  // calendar .catch below), so any previously loaded tracked calendar cards
-  // stay on screen (stale-but-real data) while this drives the visible
-  // error/retry UI instead. Same split as events/upcoming.tsx's
-  // error/calendarError.
   const [calendarError, setCalendarError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const latestLoadId = useRef(0);
 
-  // Not async/await - both requests are started here, before either is
-  // awaited, and each is its own independent .then/.catch chain (never a
-  // sequential await), same as events/upcoming.tsx's load(). A slow or
-  // failing getEvents() must never delay getUpcomingCalendarEvents() from
-  // even starting, and vice versa.
   const loadEvents = useCallback(() => {
     const loadId = ++latestLoadId.current;
     setError(null);
@@ -103,12 +135,8 @@ export default function HomeScreen() {
         if (loadId !== latestLoadId.current) return;
         setEvents(list);
         setStatuses({});
+        setTrackedActivityByEventId({});
 
-        // The card list renders immediately from `list` above. Each event's
-        // paper-status is then fetched independently, not combined into one
-        // batched wait, so one slow or failing request can't hold up every
-        // other card - each card updates for itself as its own status
-        // arrives, instead of the whole screen waiting on the slowest of N.
         list.forEach((event) => {
           getPaperStatus(event.event_id)
             .then((status) => {
@@ -140,65 +168,127 @@ export default function HomeScreen() {
       })
       .catch((err) => {
         if (loadId !== latestLoadId.current) return;
-        // calendarEvents is deliberately left untouched here - a failed
-        // fetch must not render identically to "no tracked calendar
-        // events"; whatever was last successfully loaded (or `null`, if
-        // this is the very first attempt) stays exactly as it was.
         setCalendarError(
           err instanceof Error ? err.message : 'Kalenteritietoja ei juuri nyt saatu haettua.',
         );
       });
 
-    // onRefresh() below awaits this to know when to stop spinning. The
-    // "first source to settle wins" policy matches events/upcoming.tsx's
-    // load(): if one request hangs, the refresh indicator must still clear
-    // as soon as the *other* one settles rather than waiting indefinitely -
-    // the hung source's own .then()/.catch() above still updates its state
-    // normally whenever (if ever) it does settle.
     return Promise.race([eventsPromise, calendarPromise]);
   }, []);
 
   const handleTrackedEventSnapshot = useCallback((snapshot: TrackedEventSnapshot) => {
     setTrackedEventCount(snapshot.count);
+    setPersistentEventIds(new Set(snapshot.eventIds));
     setPersistentCalendarEventIds(new Set(snapshot.calendarEventIds));
     setPersistentStatusByCalendarEventId(snapshot.statusByCalendarEventId);
     setPersistentEventByCalendarEventId(snapshot.eventByCalendarEventId);
   }, []);
 
+  useEffect(() => {
+    if (!events || trackedEventCount === null) return;
+
+    setTrackedActivityError(null);
+    const candidates = events.filter(
+      (event) =>
+        isTrackedExpectation(event.event_id) &&
+        !isExpectationBackedByLoadedTrackedEvent(
+          event.event_id,
+          persistentEventIds,
+          persistentCalendarEventIds,
+        ),
+    );
+    const candidateIds = candidates.map((event) => event.event_id);
+    const loadingState = Object.fromEntries(
+      candidateIds.map((eventId) => [eventId, 'loading' as TrackedActivityState]),
+    );
+    setTrackedActivityByEventId(loadingState);
+    if (candidateIds.length === 0) return;
+
+    let active = true;
+    void getTrackedEventActivities(candidateIds)
+      .then((activityByOccurrenceId) => {
+        if (!active) return;
+        setTrackedActivityError(null);
+        setTrackedActivityByEventId(
+          Object.fromEntries(
+            candidateIds.map((eventId) => [
+              eventId,
+              activityByOccurrenceId[eventId]?.active ? 'active' : 'inactive',
+            ]),
+          ),
+        );
+      })
+      .catch(() => {
+        if (!active) return;
+        setTrackedActivityError(
+          'Seurantatilaa ei juuri nyt saatu varmistettua. Mahdolliset aktiiviset seurannat pidetään näkyvissä.',
+        );
+        setTrackedActivityByEventId(
+          Object.fromEntries(candidateIds.map((eventId) => [eventId, 'error'])),
+        );
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [
+    events,
+    trackedEventCount,
+    persistentEventIds,
+    persistentCalendarEventIds,
+    activityRetryToken,
+  ]);
+
+  const visibleEvents = useMemo(() => {
+    if (!events) return null;
+    return events.filter((event) =>
+      isHomeExpectationVisible(
+        event,
+        statuses[event.event_id],
+        persistentEventIds,
+        persistentCalendarEventIds,
+        trackedActivityByEventId[event.event_id],
+      ),
+    );
+  }, [
+    events,
+    statuses,
+    persistentEventIds,
+    persistentCalendarEventIds,
+    trackedActivityByEventId,
+  ]);
+
   const expectationCalendarEventIds = useMemo(() => {
     const ids = new Set<string>();
-    for (const event of events ?? []) {
+    for (const event of visibleEvents ?? []) {
       if (!event.event_id.startsWith('calendar:')) continue;
       const calendarEventId = event.event_id.slice('calendar:'.length);
       if (calendarEventId) ids.add(calendarEventId);
     }
     return ids;
-  }, [events]);
+  }, [visibleEvents]);
 
-  // Tracked calendar rows for display: status = 'tracked' only, and never
-  // an occurrence already tracked through the real trading system - same
-  // de-dupe as events/upcoming.tsx's mergeUpcomingRows(), keyed on
-  // instrument + scheduled_date and scoped to 'earnings' calendar rows only
-  // (EventExpectation has no explicit event_type of its own, so a
-  // non-earnings candidate for the same instrument/date is a different
-  // occurrence and must never be dropped by this).
   const trackedCalendarEvents = useMemo(() => {
     if (!calendarEvents) return null;
     const trackedEarningsOccurrences = new Set(
-      (events ?? []).map((event) => `${event.instrument.toUpperCase()}|${event.scheduled_date}`),
+      (visibleEvents ?? []).map((event) => `${event.instrument.toUpperCase()}|${event.scheduled_date}`),
     );
     return calendarEvents.filter((event) => {
       if (event.status !== 'tracked') return false;
       if (persistentCalendarEventIds.has(event.calendar_event_id)) return false;
+      const canonicalOccurrenceId = `calendar:${event.calendar_event_id}`;
+      if (trackedActivityByEventId[canonicalOccurrenceId] === 'inactive') return false;
       if (event.event_type !== 'earnings') return true;
       const key = `${event.instrument.toUpperCase()}|${event.scheduled_date}`;
       return !trackedEarningsOccurrences.has(key);
     });
-  }, [calendarEvents, events, persistentCalendarEventIds]);
+  }, [
+    calendarEvents,
+    visibleEvents,
+    persistentCalendarEventIds,
+    trackedActivityByEventId,
+  ]);
 
-  // Refires on every focus, not just mount - so returning to Home after
-  // tracking a candidate on /events/upcoming picks up the newly tracked
-  // calendar row without needing an explicit pull-to-refresh.
   useFocusEffect(
     useCallback(() => {
       const timer = setTimeout(() => {
@@ -273,23 +363,34 @@ export default function HomeScreen() {
         </View>
       ) : null}
 
-      {/* Must never show while a calendar fetch has actually failed
-          (calendarError) - "Ei vielä..." reads as a successful, genuinely
-          empty response, which a failed request is not. */}
-      {events &&
-      events.length === 0 &&
-      trackedEventCount === 0 &&
-      trackedCalendarEvents &&
-      trackedCalendarEvents.length === 0 &&
-      !calendarError ? (
-        <View style={styles.emptyCard}>
-          <Text style={styles.emptyText}>
-            Ei vielä seurattavia tulosjulkaisuja.
+      {trackedActivityError ? (
+        <View style={styles.calendarErrorCard}>
+          <Text style={styles.errorText}>{trackedActivityError}</Text>
+          <Text style={styles.calendarErrorHint}>
+            Kortteja ei piiloteta ennen kuin canonical-seurannan tila voidaan varmistaa.
           </Text>
+          <Pressable
+            style={styles.retryButton}
+            onPress={() => setActivityRetryToken((value) => value + 1)}
+          >
+            <Text style={styles.retryButtonText}>Yritä uudelleen</Text>
+          </Pressable>
         </View>
       ) : null}
 
-      {events?.map((event) => {
+      {visibleEvents &&
+      visibleEvents.length === 0 &&
+      trackedEventCount === 0 &&
+      trackedCalendarEvents &&
+      trackedCalendarEvents.length === 0 &&
+      !calendarError &&
+      !trackedActivityError ? (
+        <View style={styles.emptyCard}>
+          <Text style={styles.emptyText}>Ei vielä seurattavia tulosjulkaisuja.</Text>
+        </View>
+      ) : null}
+
+      {visibleEvents?.map((event) => {
         const calendarEventId = event.event_id.startsWith('calendar:')
           ? event.event_id.slice('calendar:'.length)
           : null;
@@ -355,10 +456,6 @@ function EventCard({
   refreshToken?: number;
 }) {
   const run = status?.run ?? null;
-  // A run computed against an older expectation version (the event was
-  // edited afterwards) must not present its status/direction/confidence as
-  // current here either - the detail screen already warns about this once
-  // opened, but the card is what the user sees first.
   const isStale =
     run?.expectation_version !== undefined && run.expectation_version !== event.version;
   const statusText = isStale
@@ -407,12 +504,6 @@ function EventCard({
   );
 }
 
-// Tracked calendar_events row - a separate store from EventExpectation (see
-// trading_system/calendar_repository.py). This card is deliberately
-// read-only and only ever shows the fixed "Seurannassa" status text, never
-// an EventExpectation-style status (e.g. "Analysoitu", "Odottaa
-// vahvistusta") - a calendar_events row has no paper-run/strategy state of
-// its own to describe.
 function CalendarEventCard({ event }: { event: CalendarEvent }) {
   const scheduled = new Date(`${event.scheduled_date}T12:00:00`);
   const dateText = Number.isNaN(scheduled.getTime())

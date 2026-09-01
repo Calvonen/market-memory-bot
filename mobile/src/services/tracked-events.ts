@@ -1,6 +1,8 @@
 import { apiControlPost, apiGet, apiPut } from '@/services/api';
 
 export const TRACKED_EVENT_RELEASE_SKIP_REASON_MAX_LENGTH = 1000;
+const TRACKED_EVENT_ACTIVITY_BATCH_SIZE = 40;
+const TRACKED_EVENT_ACTIVITY_CONCURRENCY = 3;
 
 export type TrackedEventMonitoringStageSnapshot = {
   start_after_minutes: number;
@@ -71,6 +73,16 @@ export type TrackedEventReleaseSource = {
   source_title: string | null;
 };
 
+export type TrackedEventActivityResponse = {
+  occurrence_id: string;
+  exists: boolean;
+  active: boolean;
+};
+
+type TrackedEventActivityBatchResponse = {
+  items: TrackedEventActivityResponse[];
+};
+
 export type PutTrackedEventReleaseSourceInput = {
   source_kind: 'direct_url' | 'results_page';
   source_url: string;
@@ -132,6 +144,38 @@ export function getTrackedEvents(
 ): Promise<TrackedMarketEvent[]> {
   return apiGet<TrackedMarketEvent[]>(
     `/api/v1/tracked-events?view=${encodeURIComponent(view)}&limit=${encodeURIComponent(String(limit))}`,
+  );
+}
+
+export async function getTrackedEventActivities(
+  occurrenceIds: readonly string[],
+): Promise<Record<string, TrackedEventActivityResponse>> {
+  const uniqueIds = Array.from(new Set(occurrenceIds.filter(Boolean)));
+  if (uniqueIds.length === 0) return {};
+
+  const batches: string[][] = [];
+  for (let index = 0; index < uniqueIds.length; index += TRACKED_EVENT_ACTIVITY_BATCH_SIZE) {
+    batches.push(uniqueIds.slice(index, index + TRACKED_EVENT_ACTIVITY_BATCH_SIZE));
+  }
+
+  const responses: TrackedEventActivityBatchResponse[] = new Array(batches.length);
+  let nextBatchIndex = 0;
+  const workerCount = Math.min(TRACKED_EVENT_ACTIVITY_CONCURRENCY, batches.length);
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const batchIndex = nextBatchIndex++;
+        if (batchIndex >= batches.length) return;
+        const batch = batches[batchIndex];
+        responses[batchIndex] = await apiGet<TrackedEventActivityBatchResponse>(
+          `/api/v1/tracked-events/activity?occurrence_ids=${encodeURIComponent(batch.join(','))}`,
+        );
+      }
+    }),
+  );
+
+  return Object.fromEntries(
+    responses.flatMap((response) => response.items).map((item) => [item.occurrence_id, item]),
   );
 }
 
