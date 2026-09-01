@@ -49,7 +49,6 @@ jobs:
           SERVICE="marketai-trend-monitoring.service"
           UNIT_FILE="/etc/systemd/system/marketai-trend-monitoring.service"
           EXPECTED_UNIT_FILE="$RUNTIME_DIR/deploy/systemd/marketai-trend-monitoring.service"
-          EXPECTED_EXEC="/home/marko/marketai-repo/.venv/bin/python -m trading_system.trend_monitoring_worker"
           EXPECTED_ENV_FILE="/home/marko/marketai/.env"
 
           case "$DURATION_MINUTES" in
@@ -164,22 +163,38 @@ jobs:
               echo "::error::$SERVICE has unexpected drop-ins: $DROP_INS"
               return 1
             fi
-            if ! EXEC_START="$(/usr/bin/systemctl show "$SERVICE" --property=ExecStart --value 2>&1)"; then
-              echo "::error::Could not inspect $SERVICE ExecStart: ${EXEC_START:-unknown error}."
+            if ! NEED_RELOAD="$(/usr/bin/systemctl show "$SERVICE" --property=NeedDaemonReload --value 2>&1)"; then
+              echo "::error::Could not inspect $SERVICE NeedDaemonReload: ${NEED_RELOAD:-unknown error}."
               return 1
             fi
-            if ! printf '%s\n' "$EXEC_START" | grep -Fq "$EXPECTED_EXEC"; then
-              echo "::error::$SERVICE effective ExecStart does not match the observation-only worker."
+            if [ "$NEED_RELOAD" != "no" ]; then
+              echo "::error::$SERVICE has stale loaded configuration (NeedDaemonReload=${NEED_RELOAD:-unknown})."
               return 1
             fi
+
+            for PROPERTY in ExecStartPre ExecStartPost ExecStop ExecStopPost; do
+              if ! COMMANDS="$(/usr/bin/systemctl show "$SERVICE" --property="$PROPERTY" --value 2>&1)"; then
+                echo "::error::Could not inspect $SERVICE $PROPERTY: ${COMMANDS:-unknown error}."
+                return 1
+              fi
+              if [ -n "$COMMANDS" ]; then
+                echo "::error::$SERVICE has unexpected effective $PROPERTY commands: $COMMANDS"
+                return 1
+              fi
+            done
+
             if ! ENV_FILES="$(/usr/bin/systemctl show "$SERVICE" --property=EnvironmentFiles --value 2>&1)"; then
               echo "::error::Could not inspect $SERVICE EnvironmentFiles: ${ENV_FILES:-unknown error}."
               return 1
             fi
-            if ! printf '%s\n' "$ENV_FILES" | grep -Fq "$EXPECTED_ENV_FILE"; then
-              echo "::error::$SERVICE effective EnvironmentFile is unexpected."
-              return 1
-            fi
+            case "$ENV_FILES" in
+              "$EXPECTED_ENV_FILE"|"$EXPECTED_ENV_FILE (ignore_errors=no)")
+                ;;
+              *)
+                echo "::error::$SERVICE effective EnvironmentFiles are unexpected: ${ENV_FILES:-none}."
+                return 1
+                ;;
+            esac
           }
 
           cleanup() {
@@ -220,6 +235,10 @@ jobs:
             echo "::error::$SERVICE has no InvocationID after start."
             exit 1
           fi
+          if ! RESTART_COUNT="$(/usr/bin/systemctl show "$SERVICE" --property=NRestarts --value 2>&1)"; then
+            echo "::error::Could not inspect $SERVICE NRestarts: ${RESTART_COUNT:-unknown error}."
+            exit 1
+          fi
 
           echo "Running observation-only Trend smoke test for ${DURATION_MINUTES} minute(s)."
           sleep "$((DURATION_MINUTES * 60))"
@@ -227,6 +246,22 @@ jobs:
           if [ "$(/usr/bin/systemctl is-active "$SERVICE" 2>/dev/null || true)" != "active" ]; then
             sudo /usr/bin/journalctl _SYSTEMD_INVOCATION_ID="$INVOCATION_ID" --no-pager -o cat || true
             echo "::error::$SERVICE stopped unexpectedly during the smoke test."
+            exit 1
+          fi
+          if ! CURRENT_INVOCATION_ID="$(/usr/bin/systemctl show "$SERVICE" --property=InvocationID --value 2>&1)"; then
+            echo "::error::Could not re-check $SERVICE InvocationID: ${CURRENT_INVOCATION_ID:-unknown error}."
+            exit 1
+          fi
+          if [ "$CURRENT_INVOCATION_ID" != "$INVOCATION_ID" ]; then
+            echo "::error::$SERVICE restarted during the smoke test (invocation ${INVOCATION_ID} -> ${CURRENT_INVOCATION_ID:-missing})."
+            exit 1
+          fi
+          if ! CURRENT_RESTART_COUNT="$(/usr/bin/systemctl show "$SERVICE" --property=NRestarts --value 2>&1)"; then
+            echo "::error::Could not re-check $SERVICE NRestarts: ${CURRENT_RESTART_COUNT:-unknown error}."
+            exit 1
+          fi
+          if [ "$CURRENT_RESTART_COUNT" != "$RESTART_COUNT" ]; then
+            echo "::error::$SERVICE restart count changed during the smoke test (${RESTART_COUNT} -> ${CURRENT_RESTART_COUNT})."
             exit 1
           fi
 
@@ -238,4 +273,4 @@ jobs:
           fi
 
           verify_exact_runtime
-          echo "Trend observation smoke test produced at least one observation; cleanup will stop the worker and keep it disabled."
+          echo "Trend observation smoke test produced at least one observation without restart; cleanup will stop the worker and keep it disabled."
