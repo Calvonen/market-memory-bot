@@ -1,7 +1,8 @@
 import { Link, useFocusEffect, useRouter } from 'expo-router';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
+import { getEvent } from '@/services/api';
 import {
   getTrackedEventLatestReaction,
   getTrackedEvents,
@@ -120,16 +121,33 @@ export function TrackedEventsSection({
 
 export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
   const scheduleText = formatTrackedEventSchedule(event);
-  // Release-shell expectations are currently created only for earnings.
-  // Calendar-backed earnings keep the calendar identity; calendar-less
-  // earnings use the tracked identity. Other tracked kinds own no expectation
-  // and therefore must not get a fabricated /events/... link that 404s.
-  const expectationEventId =
+  const expectationCandidateId =
     event.kind === 'earnings'
       ? event.calendar_event_id
         ? `calendar:${event.calendar_event_id}`
         : `tracked:${event.event_id}`
       : null;
+  const [expectationEventId, setExpectationEventId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setExpectationEventId(null);
+    if (!expectationCandidateId) return;
+
+    let active = true;
+    void getEvent(expectationCandidateId)
+      .then((expectation) => {
+        if (!active || expectation.event_id !== expectationCandidateId) return;
+        setExpectationEventId(expectationCandidateId);
+      })
+      .catch(() => {
+        if (!active) return;
+        setExpectationEventId(null);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [expectationCandidateId]);
 
   return (
     <View style={styles.eventCard}>
