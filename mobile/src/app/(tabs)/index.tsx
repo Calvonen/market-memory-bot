@@ -129,6 +129,7 @@ export default function HomeScreen() {
     const loadId = ++latestLoadId.current;
     setError(null);
     setCalendarError(null);
+    setTrackedActivityError(null);
 
     const eventsPromise = getEvents()
       .then((list) => {
@@ -187,7 +188,6 @@ export default function HomeScreen() {
   useEffect(() => {
     if (!events || trackedEventCount === null) return;
 
-    setTrackedActivityError(null);
     const candidates = events.filter(
       (event) =>
         isTrackedExpectation(event.event_id) &&
@@ -201,13 +201,27 @@ export default function HomeScreen() {
     const loadingState = Object.fromEntries(
       candidateIds.map((eventId) => [eventId, 'loading' as TrackedActivityState]),
     );
-    setTrackedActivityByEventId(loadingState);
-    if (candidateIds.length === 0) return;
-
     let active = true;
-    void getTrackedEventActivities(candidateIds)
-      .then((activityByOccurrenceId) => {
+    if (candidateIds.length === 0) {
+      void Promise.resolve().then(() => {
         if (!active) return;
+        setTrackedActivityError(null);
+        setTrackedActivityByEventId({});
+      });
+      return () => {
+        active = false;
+      };
+    }
+
+    void Promise.resolve()
+      .then(() => {
+        if (!active) return null;
+        setTrackedActivityError(null);
+        setTrackedActivityByEventId(loadingState);
+        return getTrackedEventActivities(candidateIds);
+      })
+      .then((activityByOccurrenceId) => {
+        if (!active || !activityByOccurrenceId) return;
         setTrackedActivityError(null);
         setTrackedActivityByEventId(
           Object.fromEntries(
@@ -371,7 +385,10 @@ export default function HomeScreen() {
           </Text>
           <Pressable
             style={styles.retryButton}
-            onPress={() => setActivityRetryToken((value) => value + 1)}
+            onPress={() => {
+              setTrackedActivityError(null);
+              setActivityRetryToken((value) => value + 1);
+            }}
           >
             <Text style={styles.retryButtonText}>Yritä uudelleen</Text>
           </Pressable>
