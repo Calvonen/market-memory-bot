@@ -47,6 +47,10 @@ jobs:
           STATE_FILE="$STATE_DIR/last-deployed-backend.sha"
           PREPARED_STATE_FILE="$STATE_DIR/trend-monitoring-prepared.sha"
           SERVICE="marketai-trend-monitoring.service"
+          UNIT_FILE="/etc/systemd/system/marketai-trend-monitoring.service"
+          EXPECTED_UNIT_FILE="$RUNTIME_DIR/deploy/systemd/marketai-trend-monitoring.service"
+          EXPECTED_EXEC="/home/marko/marketai-repo/.venv/bin/python -m trading_system.trend_monitoring_worker"
+          EXPECTED_ENV_FILE="/home/marko/marketai/.env"
 
           case "$DURATION_MINUTES" in
             ''|*[!0-9]*)
@@ -112,15 +116,68 @@ jobs:
               echo "::error::$SERVICE has a queued systemd job."
               return 1
             fi
-            ENABLED_STATE="$(/usr/bin/systemctl is-enabled "$SERVICE" 2>/dev/null || true)"
+            if ! ENABLED_STATE="$(/usr/bin/systemctl is-enabled "$SERVICE" 2>&1)"; then
+              if [ "$ENABLED_STATE" != "disabled" ]; then
+                echo "::error::Could not establish that $SERVICE is disabled (state: ${ENABLED_STATE:-unknown})."
+                return 1
+              fi
+            fi
             if [ "$ENABLED_STATE" != "disabled" ]; then
               echo "::error::$SERVICE must remain disabled (state: ${ENABLED_STATE:-unknown})."
               return 1
             fi
-            ACTIVE_STATE="$(/usr/bin/systemctl show "$SERVICE" --property=ActiveState --value)"
-            SUB_STATE="$(/usr/bin/systemctl show "$SERVICE" --property=SubState --value)"
+            if ! ACTIVE_STATE="$(/usr/bin/systemctl show "$SERVICE" --property=ActiveState --value 2>&1)"; then
+              echo "::error::Could not inspect $SERVICE ActiveState: ${ACTIVE_STATE:-unknown error}."
+              return 1
+            fi
+            if ! SUB_STATE="$(/usr/bin/systemctl show "$SERVICE" --property=SubState --value 2>&1)"; then
+              echo "::error::Could not inspect $SERVICE SubState: ${SUB_STATE:-unknown error}."
+              return 1
+            fi
             if [ "$ACTIVE_STATE" != "inactive" ] || [ "$SUB_STATE" != "dead" ]; then
               echo "::error::$SERVICE must start from inactive/dead (ActiveState=${ACTIVE_STATE}, SubState=${SUB_STATE})."
+              return 1
+            fi
+          }
+
+          verify_effective_unit() {
+            test -f "$UNIT_FILE" || { echo "::error::Installed Trend unit is missing: $UNIT_FILE"; return 1; }
+            test -f "$EXPECTED_UNIT_FILE" || { echo "::error::Expected Trend unit is missing from runtime: $EXPECTED_UNIT_FILE"; return 1; }
+            if ! cmp -s "$UNIT_FILE" "$EXPECTED_UNIT_FILE"; then
+              echo "::error::Installed Trend unit differs from the exact deployed runtime unit."
+              return 1
+            fi
+
+            if ! FRAGMENT_PATH="$(/usr/bin/systemctl show "$SERVICE" --property=FragmentPath --value 2>&1)"; then
+              echo "::error::Could not inspect $SERVICE FragmentPath: ${FRAGMENT_PATH:-unknown error}."
+              return 1
+            fi
+            if [ "$FRAGMENT_PATH" != "$UNIT_FILE" ]; then
+              echo "::error::$SERVICE effective fragment is unexpected: ${FRAGMENT_PATH:-unknown}."
+              return 1
+            fi
+            if ! DROP_INS="$(/usr/bin/systemctl show "$SERVICE" --property=DropInPaths --value 2>&1)"; then
+              echo "::error::Could not inspect $SERVICE DropInPaths: ${DROP_INS:-unknown error}."
+              return 1
+            fi
+            if [ -n "$DROP_INS" ]; then
+              echo "::error::$SERVICE has unexpected drop-ins: $DROP_INS"
+              return 1
+            fi
+            if ! EXEC_START="$(/usr/bin/systemctl show "$SERVICE" --property=ExecStart --value 2>&1)"; then
+              echo "::error::Could not inspect $SERVICE ExecStart: ${EXEC_START:-unknown error}."
+              return 1
+            fi
+            if ! printf '%s\n' "$EXEC_START" | grep -Fq "$EXPECTED_EXEC"; then
+              echo "::error::$SERVICE effective ExecStart does not match the observation-only worker."
+              return 1
+            fi
+            if ! ENV_FILES="$(/usr/bin/systemctl show "$SERVICE" --property=EnvironmentFiles --value 2>&1)"; then
+              echo "::error::Could not inspect $SERVICE EnvironmentFiles: ${ENV_FILES:-unknown error}."
+              return 1
+            fi
+            if ! printf '%s\n' "$ENV_FILES" | grep -Fq "$EXPECTED_ENV_FILE"; then
+              echo "::error::$SERVICE effective EnvironmentFile is unexpected."
               return 1
             fi
           }
@@ -138,16 +195,29 @@ jobs:
               return 1
             fi
           }
-          trap cleanup EXIT
 
           verify_exact_runtime
           verify_disabled_quiescent
+          verify_effective_unit
 
-          START_EPOCH="$(date +%s)"
+          # Only after every precondition is accepted do we take ownership of
+          # this invocation and arm cleanup. A rejected smoke test must never
+          # stop/disable a service or queued job that it did not create.
+          trap cleanup EXIT
+
           sudo /usr/bin/systemctl start "$SERVICE"
           if [ "$(/usr/bin/systemctl is-active "$SERVICE" 2>/dev/null || true)" != "active" ]; then
-            sudo /usr/bin/journalctl -u "$SERVICE" --since "@${START_EPOCH}" --no-pager -o cat || true
+            sudo /usr/bin/journalctl -u "$SERVICE" --no-pager -o cat -n 100 || true
             echo "::error::$SERVICE failed to become active."
+            exit 1
+          fi
+
+          if ! INVOCATION_ID="$(/usr/bin/systemctl show "$SERVICE" --property=InvocationID --value 2>&1)"; then
+            echo "::error::Could not inspect $SERVICE InvocationID: ${INVOCATION_ID:-unknown error}."
+            exit 1
+          fi
+          if [ -z "$INVOCATION_ID" ]; then
+            echo "::error::$SERVICE has no InvocationID after start."
             exit 1
           fi
 
@@ -155,15 +225,15 @@ jobs:
           sleep "$((DURATION_MINUTES * 60))"
 
           if [ "$(/usr/bin/systemctl is-active "$SERVICE" 2>/dev/null || true)" != "active" ]; then
-            sudo /usr/bin/journalctl -u "$SERVICE" --since "@${START_EPOCH}" --no-pager -o cat || true
+            sudo /usr/bin/journalctl _SYSTEMD_INVOCATION_ID="$INVOCATION_ID" --no-pager -o cat || true
             echo "::error::$SERVICE stopped unexpectedly during the smoke test."
             exit 1
           fi
 
-          JOURNAL_OUTPUT="$(sudo /usr/bin/journalctl -u "$SERVICE" --since "@${START_EPOCH}" --no-pager -o cat)"
+          JOURNAL_OUTPUT="$(sudo /usr/bin/journalctl _SYSTEMD_INVOCATION_ID="$INVOCATION_ID" --no-pager -o cat)"
           printf '%s\n' "$JOURNAL_OUTPUT"
           if ! printf '%s\n' "$JOURNAL_OUTPUT" | grep -q '"type": "trend_observation"'; then
-            echo "::error::No Trend observation JSON was emitted during the smoke-test window."
+            echo "::error::No Trend observation JSON was emitted by this service invocation during the smoke-test window."
             exit 1
           fi
 
