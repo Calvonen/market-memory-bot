@@ -3,6 +3,7 @@ import unittest
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from trading_system.trend_monitoring_contract import TrendState
 from trading_system.trend_monitoring_worker import _result_payload, run_trend_monitoring_worker
@@ -80,6 +81,19 @@ class TrendMonitoringWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(service.closed)
         self.assertEqual(len(emitted), 1)
         self.assertEqual(json.loads(emitted[0])["confirmed_state"], "bullish")
+
+    async def test_default_stdout_emitter_flushes_each_observation(self):
+        service = FakeService([SimpleNamespace(trend_results=(fake_result(),))])
+
+        with patch("builtins.print") as mocked_print:
+            result = await run_trend_monitoring_worker(service=service)
+
+        self.assertEqual(result, 0)
+        self.assertTrue(service.closed)
+        mocked_print.assert_called_once()
+        line = mocked_print.call_args.args[0]
+        self.assertEqual(json.loads(line)["confirmed_state"], "bullish")
+        self.assertEqual(mocked_print.call_args.kwargs, {"flush": True})
 
 
 if __name__ == "__main__":
