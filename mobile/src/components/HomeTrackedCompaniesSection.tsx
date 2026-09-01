@@ -57,6 +57,10 @@ export function HomeTrackedCompaniesSection({ refreshToken = 0 }: Props) {
     try {
       const saved = await deactivateTrackedInstrument(instrument.id, MANAGEMENT_ACTOR);
       if (saved.active) throw new Error('Seurannan poistaminen ei vahvistunut palvelimelta.');
+      // Invalidate any GET that started before the canonical mutation completed.
+      // Otherwise a stale active snapshot could arrive after this response and
+      // resurrect the removed card until the next refresh.
+      latestLoadId.current += 1;
       setInstruments((current) => (current ?? []).map((item) => item.id === saved.id ? saved : item));
       setExpandedId(null);
     } catch (err) {
