@@ -73,7 +73,11 @@ class _Client:
                 {"event_id": RELEASE_ID, "version": 2}
             ],
             "event_source_documents": [
-                {"id": "doc-1", "event_id": RELEASE_ID}
+                {
+                    "id": "doc-1",
+                    "event_id": RELEASE_ID,
+                    "fetched_at": "2026-08-28T06:09:00+00:00",
+                }
             ],
             "event_ai_analyses": [
                 {
@@ -88,7 +92,7 @@ class _Client:
                     "provider": "canonical_release_worker",
                     "status": "error",
                     "error_message": "action_required: release-shell identity mismatch",
-                    "created_at": "2026-08-28T06:10:00+00:00",
+                    "checked_at": "2026-08-28T06:10:00+00:00",
                 },
                 *(
                     [
@@ -97,7 +101,7 @@ class _Client:
                             "provider": "canonical_release_worker",
                             "status": "validated",
                             "error_message": None,
-                            "created_at": "2026-08-28T06:11:00+00:00",
+                            "checked_at": "2026-08-28T06:11:00+00:00",
                         }
                     ]
                     if latest_status == "validated"
