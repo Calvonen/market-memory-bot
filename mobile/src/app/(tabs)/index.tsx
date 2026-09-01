@@ -85,10 +85,12 @@ function isHomeExpectationVisible(
     if (loadedCalendarEventIds.has(calendarEventId)) return true;
   }
 
+  if (isTrackedExpectation(event.event_id) && trackedActivity === 'inactive') return false;
+
   const today = formatLocalDate(new Date());
   if (event.scheduled_date >= today) return true;
 
-  if (isTrackedExpectation(event.event_id) && trackedActivity !== 'inactive') return true;
+  if (isTrackedExpectation(event.event_id)) return true;
 
   if (!status || status.statusError) return true;
 
@@ -186,10 +188,8 @@ export default function HomeScreen() {
     if (!events || trackedEventCount === null) return;
 
     setTrackedActivityError(null);
-    const today = formatLocalDate(new Date());
     const candidates = events.filter(
       (event) =>
-        event.scheduled_date < today &&
         isTrackedExpectation(event.event_id) &&
         !isExpectationBackedByLoadedTrackedEvent(
           event.event_id,
