@@ -27,6 +27,14 @@ type TrackedInstrumentPost = <T>(
   headers?: Record<string, string>,
 ) => Promise<T>;
 
+function normalizeActor(actor: string): string {
+  const normalizedActor = actor.trim();
+  if (!normalizedActor || normalizedActor.length > 200) {
+    throw new Error('Tracking actor must be nonblank and at most 200 characters');
+  }
+  return normalizedActor;
+}
+
 export function getTrackedInstruments(
   get: TrackedInstrumentGet = apiGet,
 ): Promise<TrackedInstrument[]> {
@@ -38,11 +46,11 @@ export function trackInstrument(
   actor: string,
   post: TrackedInstrumentPost = apiControlPost,
 ): Promise<TrackedInstrument> {
-  const normalizedActor = actor.trim();
-  if (!normalizedActor || normalizedActor.length > 200) {
-    return Promise.reject(
-      new Error('Tracking actor must be nonblank and at most 200 characters'),
-    );
+  let normalizedActor: string;
+  try {
+    normalizedActor = normalizeActor(actor);
+  } catch (error) {
+    return Promise.reject(error);
   }
 
   const normalizedInstrument = input.instrument.trim();
@@ -58,6 +66,30 @@ export function trackInstrument(
       market: input.market?.trim() ?? '',
       source: input.source,
     },
+    { 'X-MarketAI-Actor': normalizedActor },
+  );
+}
+
+export function deactivateTrackedInstrument(
+  trackedInstrumentId: string,
+  actor: string,
+  post: TrackedInstrumentPost = apiControlPost,
+): Promise<TrackedInstrument> {
+  const normalizedId = trackedInstrumentId.trim();
+  if (!normalizedId) {
+    return Promise.reject(new Error('Tracked instrument id must be nonblank'));
+  }
+
+  let normalizedActor: string;
+  try {
+    normalizedActor = normalizeActor(actor);
+  } catch (error) {
+    return Promise.reject(error);
+  }
+
+  return post<TrackedInstrument>(
+    `/api/v1/tracked-instruments/${encodeURIComponent(normalizedId)}/deactivate`,
+    {},
     { 'X-MarketAI-Actor': normalizedActor },
   );
 }
