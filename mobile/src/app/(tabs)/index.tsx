@@ -72,7 +72,11 @@ function isHomeExpectationVisible(
   loadedTrackedEventIds: ReadonlySet<string>,
   loadedCalendarEventIds: ReadonlySet<string>,
   trackedActivity: TrackedActivityState | undefined,
+  canonicalSnapshotReady: boolean,
 ): boolean {
+  const trackedExpectation = isTrackedExpectation(event.event_id);
+  if (trackedExpectation && !canonicalSnapshotReady) return false;
+
   if (event.event_id.startsWith('tracked:')) {
     const trackedEventId = event.event_id.slice('tracked:'.length);
     if (!trackedEventId) return false;
@@ -85,12 +89,15 @@ function isHomeExpectationVisible(
     if (loadedCalendarEventIds.has(calendarEventId)) return true;
   }
 
-  if (isTrackedExpectation(event.event_id) && trackedActivity === 'inactive') return false;
+  if (trackedExpectation) {
+    if (!trackedActivity || trackedActivity === 'loading') return false;
+    if (trackedActivity === 'inactive') return false;
+  }
 
   const today = formatLocalDate(new Date());
   if (event.scheduled_date >= today) return true;
 
-  if (isTrackedExpectation(event.event_id)) return true;
+  if (trackedExpectation) return true;
 
   if (!status || status.statusError) return true;
 
@@ -262,6 +269,7 @@ export default function HomeScreen() {
         persistentEventIds,
         persistentCalendarEventIds,
         trackedActivityByEventId[event.event_id],
+        trackedEventCount !== null,
       ),
     );
   }, [
@@ -270,6 +278,7 @@ export default function HomeScreen() {
     persistentEventIds,
     persistentCalendarEventIds,
     trackedActivityByEventId,
+    trackedEventCount,
   ]);
 
   const expectationCalendarEventIds = useMemo(() => {
@@ -283,24 +292,31 @@ export default function HomeScreen() {
   }, [visibleEvents]);
 
   const trackedCalendarEvents = useMemo(() => {
-    if (!calendarEvents) return null;
+    if (!calendarEvents || trackedEventCount === null) return null;
     const trackedEarningsOccurrences = new Set(
       (visibleEvents ?? []).map((event) => `${event.instrument.toUpperCase()}|${event.scheduled_date}`),
     );
+    const expectationIds = new Set((events ?? []).map((event) => event.event_id));
     return calendarEvents.filter((event) => {
       if (event.status !== 'tracked') return false;
       if (persistentCalendarEventIds.has(event.calendar_event_id)) return false;
       const canonicalOccurrenceId = `calendar:${event.calendar_event_id}`;
-      if (trackedActivityByEventId[canonicalOccurrenceId] === 'inactive') return false;
+      const canonicalActivity = trackedActivityByEventId[canonicalOccurrenceId];
+      if (expectationIds.has(canonicalOccurrenceId) && (!canonicalActivity || canonicalActivity === 'loading')) {
+        return false;
+      }
+      if (canonicalActivity === 'inactive') return false;
       if (event.event_type !== 'earnings') return true;
       const key = `${event.instrument.toUpperCase()}|${event.scheduled_date}`;
       return !trackedEarningsOccurrences.has(key);
     });
   }, [
     calendarEvents,
+    events,
     visibleEvents,
     persistentCalendarEventIds,
     trackedActivityByEventId,
+    trackedEventCount,
   ]);
 
   useFocusEffect(
