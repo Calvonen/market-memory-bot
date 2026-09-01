@@ -141,13 +141,18 @@ async def stream_supervised_trend_monitoring(
                 _align_candle_pipeline(candle_pipeline, refreshed.targets)
 
                 if refreshed.restart_required:
-                    await _close_stream(
-                        stream,
-                        next_batch_task,
-                        propagate_completed_failure=True,
-                    )
+                    old_stream = stream
+                    old_next_batch_task = next_batch_task
+                    # Transfer ownership before cleanup so an error from the old
+                    # stream cannot make the generator finalizer close it again
+                    # and mask the original provider/stream failure.
                     stream = None
                     next_batch_task = None
+                    await _close_stream(
+                        old_stream,
+                        old_next_batch_task,
+                        propagate_completed_failure=True,
+                    )
                     await start_stream(refreshed.targets)
 
                 refresh_task = asyncio.create_task(sleep(refresh_interval_seconds))
