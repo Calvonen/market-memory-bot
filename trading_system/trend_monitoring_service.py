@@ -47,6 +47,8 @@ def _align_candle_pipeline(
 async def _close_stream(
     stream: ClosableTrendStream | None,
     next_batch_task: asyncio.Task[TrendRuntimeMarketBatch] | None,
+    *,
+    propagate_completed_failure: bool = False,
 ) -> None:
     if next_batch_task is not None:
         if not next_batch_task.done():
@@ -54,10 +56,16 @@ async def _close_stream(
             with suppress(asyncio.CancelledError):
                 await next_batch_task
         else:
-            # Consume a completed result/exception when a canonical refresh wins
-            # the race, so no abandoned task warning leaks from the old stream.
-            with suppress(asyncio.CancelledError, StopAsyncIteration, Exception):
+            try:
                 next_batch_task.result()
+            except asyncio.CancelledError:
+                pass
+            except StopAsyncIteration as exc:
+                if propagate_completed_failure:
+                    raise RuntimeError("Trend live stream ended unexpectedly") from exc
+            except Exception:
+                if propagate_completed_failure:
+                    raise
     if stream is not None:
         await stream.aclose()
 
@@ -120,7 +128,11 @@ async def stream_supervised_trend_monitoring(
                 _align_candle_pipeline(candle_pipeline, refreshed.targets)
 
                 if refreshed.restart_required:
-                    await _close_stream(stream, next_batch_task)
+                    await _close_stream(
+                        stream,
+                        next_batch_task,
+                        propagate_completed_failure=True,
+                    )
                     stream = None
                     next_batch_task = None
                     await start_stream(refreshed.targets)
@@ -128,8 +140,8 @@ async def stream_supervised_trend_monitoring(
                 refresh_task = asyncio.create_task(sleep(refresh_interval_seconds))
 
                 # When refresh and an old-stream batch complete simultaneously,
-                # a changed snapshot wins: the old batch is intentionally dropped
-                # by _close_stream above and must never be emitted afterward.
+                # a changed snapshot wins only over a successful obsolete batch.
+                # Stream termination/provider failures must still propagate.
                 if refreshed.restart_required:
                     continue
 
