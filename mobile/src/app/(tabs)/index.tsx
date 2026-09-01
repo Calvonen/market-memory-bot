@@ -201,9 +201,18 @@ export default function HomeScreen() {
     const loadingState = Object.fromEntries(
       candidateIds.map((eventId) => [eventId, 'loading' as TrackedActivityState]),
     );
-    if (candidateIds.length === 0) return;
-
     let active = true;
+    if (candidateIds.length === 0) {
+      void Promise.resolve().then(() => {
+        if (!active) return;
+        setTrackedActivityError(null);
+        setTrackedActivityByEventId({});
+      });
+      return () => {
+        active = false;
+      };
+    }
+
     void Promise.resolve()
       .then(() => {
         if (!active) return null;
