@@ -44,6 +44,7 @@ export function HomeTrackedCompaniesSection({ refreshToken = 0 }: Props) {
   const [addingTicker, setAddingTicker] = useState<string | null>(null);
   const latestLoadId = useRef(0);
   const latestSearchId = useRef(0);
+  const addInFlight = useRef(false);
 
   const load = useCallback(() => {
     const loadId = ++latestLoadId.current;
@@ -111,8 +112,9 @@ export function HomeTrackedCompaniesSection({ refreshToken = 0 }: Props) {
   }
 
   async function addSearchResult(result: SymbolSearchResult) {
-    if (!trackedStateReady || addingTicker || isTickerTracked(result.ticker)) return;
+    if (!trackedStateReady || addInFlight.current || isTickerTracked(result.ticker)) return;
     const ticker = result.ticker.trim().toUpperCase();
+    addInFlight.current = true;
     setAddingTicker(ticker);
     setSearchError(null);
     try {
@@ -133,6 +135,7 @@ export function HomeTrackedCompaniesSection({ refreshToken = 0 }: Props) {
     } catch (err) {
       setSearchError(err instanceof Error ? err.message : 'Yhtiön lisääminen seurantaan epäonnistui.');
     } finally {
+      addInFlight.current = false;
       setAddingTicker(null);
     }
   }
