@@ -28,19 +28,20 @@ def test_canonical_card_list_stays_bounded_to_service_default():
     assert "getTrackedEvents('active', 100)" not in tracked
 
 
-def test_past_omitted_shells_use_batched_canonical_activity():
+def test_omitted_shells_use_batched_canonical_activity_regardless_of_date():
     home = HOME_SOURCE.read_text(encoding="utf-8")
     service = TRACKED_SERVICE_SOURCE.read_text(encoding="utf-8")
     backend = TRACKED_RELEASE_API_SOURCE.read_text(encoding="utf-8")
     repository = TRACKED_REPOSITORY_SOURCE.read_text(encoding="utf-8")
 
     assert "getTrackedEventActivities" in home
-    assert "event.scheduled_date < today" in home
+    assert "event.scheduled_date < today" not in home
     assert "isTrackedExpectation(event.event_id)" in home
     assert "persistentCalendarEventIds" in home
     assert "getTrackedEventActivities(candidateIds)" in home
     assert "activityByOccurrenceId[eventId]?.active ? 'active' : 'inactive'" in home
-    assert "if (isTrackedExpectation(event.event_id) && trackedActivity !== 'inactive') return true;" in home
+    assert "if (isTrackedExpectation(event.event_id) && trackedActivity === 'inactive') return false;" in home
+    assert "if (isTrackedExpectation(event.event_id)) return true;" in home
 
     assert "export async function getTrackedEventActivities(" in service
     assert "TRACKED_EVENT_ACTIVITY_BATCH_SIZE = 40" in service
@@ -56,6 +57,16 @@ def test_past_omitted_shells_use_batched_canonical_activity():
     assert ".client.table(" not in backend
     assert "def get_by_occurrences(" in repository
     assert 'self.client.table("tracked_market_events")' in repository
+
+
+def test_future_tracked_shell_checks_activity_before_date_visibility():
+    source = HOME_SOURCE.read_text(encoding="utf-8")
+
+    inactive_guard = source.index(
+        "if (isTrackedExpectation(event.event_id) && trackedActivity === 'inactive') return false;"
+    )
+    future_guard = source.index("if (event.scheduled_date >= today) return true;")
+    assert inactive_guard < future_guard
 
 
 def test_activity_batch_waits_for_snapshot_and_updates_state_by_batch():
@@ -81,7 +92,8 @@ def test_tracked_activity_lookup_failure_is_visible_retryable_and_fail_open():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
     assert "Object.fromEntries(candidateIds.map((eventId) => [eventId, 'error']))" in source
-    assert "trackedActivity !== 'inactive'" in source
+    assert "trackedActivity === 'inactive'" in source
+    assert "if (isTrackedExpectation(event.event_id)) return true;" in source
     assert "trackedActivityError" in source
     assert "Seurantatilaa ei juuri nyt saatu varmistettua." in source
     assert "activityRetryToken" in source
