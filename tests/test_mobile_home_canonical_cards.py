@@ -36,12 +36,12 @@ def test_omitted_shells_use_batched_canonical_activity_regardless_of_date():
 
     assert "getTrackedEventActivities" in home
     assert "event.scheduled_date < today" not in home
-    assert "isTrackedExpectation(event.event_id)" in home
+    assert "const trackedExpectation = isTrackedExpectation(event.event_id);" in home
     assert "persistentCalendarEventIds" in home
     assert "getTrackedEventActivities(candidateIds)" in home
     assert "activityByOccurrenceId[eventId]?.active ? 'active' : 'inactive'" in home
-    assert "if (isTrackedExpectation(event.event_id) && trackedActivity === 'inactive') return false;" in home
-    assert "if (isTrackedExpectation(event.event_id)) return true;" in home
+    assert "if (trackedActivity === 'inactive') return false;" in home
+    assert "if (trackedExpectation) return true;" in home
 
     assert "export async function getTrackedEventActivities(" in service
     assert "TRACKED_EVENT_ACTIVITY_BATCH_SIZE = 40" in service
@@ -59,25 +59,50 @@ def test_omitted_shells_use_batched_canonical_activity_regardless_of_date():
     assert 'self.client.table("tracked_market_events")' in repository
 
 
+def test_tracked_expectations_wait_for_canonical_snapshot_and_activity():
+    source = HOME_SOURCE.read_text(encoding="utf-8")
+
+    assert "canonicalSnapshotReady: boolean" in source
+    assert "if (trackedExpectation && !canonicalSnapshotReady) return false;" in source
+    assert "if (!trackedActivity || trackedActivity === 'loading') return false;" in source
+    assert "trackedEventCount !== null" in source
+
+    snapshot_guard = source.index("if (trackedExpectation && !canonicalSnapshotReady) return false;")
+    date_guard = source.index("if (event.scheduled_date >= today) return true;")
+    assert snapshot_guard < date_guard
+
+
 def test_future_tracked_shell_checks_activity_before_date_visibility():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
-    inactive_guard = source.index(
-        "if (isTrackedExpectation(event.event_id) && trackedActivity === 'inactive') return false;"
-    )
+    unresolved_guard = source.index("if (!trackedActivity || trackedActivity === 'loading') return false;")
+    inactive_guard = source.index("if (trackedActivity === 'inactive') return false;")
     future_guard = source.index("if (event.scheduled_date >= today) return true;")
-    assert inactive_guard < future_guard
+    assert unresolved_guard < inactive_guard < future_guard
 
 
 def test_inactive_calendar_occurrence_cannot_reappear_as_fallback_card():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
     assert "const canonicalOccurrenceId = `calendar:${event.calendar_event_id}`;" in source
-    assert "trackedActivityByEventId[canonicalOccurrenceId] === 'inactive'" in source
+    assert "if (canonicalActivity === 'inactive') return false;" in source
     tracked_calendar_start = source.index("const trackedCalendarEvents = useMemo")
     focus_start = source.index("useFocusEffect(", tracked_calendar_start)
     tracked_calendar_source = source[tracked_calendar_start:focus_start]
     assert "trackedActivityByEventId" in tracked_calendar_source
+
+
+def test_calendar_fallback_waits_for_snapshot_and_matching_activity():
+    source = HOME_SOURCE.read_text(encoding="utf-8")
+
+    tracked_calendar_start = source.index("const trackedCalendarEvents = useMemo")
+    focus_start = source.index("useFocusEffect(", tracked_calendar_start)
+    tracked_calendar_source = source[tracked_calendar_start:focus_start]
+
+    assert "if (!calendarEvents || trackedEventCount === null) return null;" in tracked_calendar_source
+    assert "const expectationIds = new Set((events ?? []).map((event) => event.event_id));" in tracked_calendar_source
+    assert "expectationIds.has(canonicalOccurrenceId)" in tracked_calendar_source
+    assert "!canonicalActivity || canonicalActivity === 'loading'" in tracked_calendar_source
 
 
 def test_activity_batch_waits_for_snapshot_and_updates_state_by_batch():
@@ -95,7 +120,7 @@ def test_activity_error_clears_when_snapshot_leaves_no_candidates():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
     zero_candidate_start = source.index("if (candidateIds.length === 0) {")
-    lookup_start = source.index("\n    let active = true;", zero_candidate_start)
+    lookup_start = source.index("\n    void Promise.resolve()", zero_candidate_start + 1)
     zero_candidate_block = source[zero_candidate_start:lookup_start]
     assert "setTrackedActivityError(null);" in zero_candidate_block
     assert "setTrackedActivityByEventId({});" in zero_candidate_block
@@ -113,8 +138,8 @@ def test_tracked_activity_lookup_failure_is_visible_retryable_and_fail_open():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
     assert "Object.fromEntries(candidateIds.map((eventId) => [eventId, 'error']))" in source
-    assert "trackedActivity === 'inactive'" in source
-    assert "if (isTrackedExpectation(event.event_id)) return true;" in source
+    assert "if (trackedActivity === 'inactive') return false;" in source
+    assert "if (trackedExpectation) return true;" in source
     assert "trackedActivityError" in source
     assert "Seurantatilaa ei juuri nyt saatu varmistettua." in source
     assert "activityRetryToken" in source
