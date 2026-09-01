@@ -61,3 +61,27 @@ export function trackInstrument(
     { 'X-MarketAI-Actor': normalizedActor },
   );
 }
+
+export function deactivateTrackedInstrument(
+  trackedInstrumentId: string,
+  actor: string,
+  post: TrackedInstrumentPost = apiControlPost,
+): Promise<TrackedInstrument> {
+  const normalizedId = trackedInstrumentId.trim();
+  if (!normalizedId) {
+    return Promise.reject(new Error('Tracked instrument id must be nonblank'));
+  }
+
+  const normalizedActor = actor.trim();
+  if (!normalizedActor || normalizedActor.length > 200) {
+    return Promise.reject(
+      new Error('Tracking actor must be nonblank and at most 200 characters'),
+    );
+  }
+
+  return post<TrackedInstrument>(
+    `/api/v1/tracked-instruments/${encodeURIComponent(normalizedId)}/deactivate`,
+    {},
+    { 'X-MarketAI-Actor': normalizedActor },
+  );
+}

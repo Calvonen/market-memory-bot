@@ -86,3 +86,17 @@ class SupabaseTrackedInstrumentRegistry:
         if not isinstance(row, dict):
             raise RuntimeError("upsert_tracked_instrument returned no row")
         return _record_from_row(row)
+
+    def deactivate(self, *, tracked_instrument_id: str, actor: str) -> TrackedInstrumentRecord:
+        response = self.client.rpc(
+            "deactivate_tracked_instrument",
+            {
+                "input_tracked_instrument_id": tracked_instrument_id,
+                "input_actor": actor,
+            },
+        ).execute()
+        data = response.data
+        row = data[0] if isinstance(data, list) and data else data
+        if not isinstance(row, dict):
+            raise RuntimeError("deactivate_tracked_instrument returned no row")
+        return _record_from_row(row)

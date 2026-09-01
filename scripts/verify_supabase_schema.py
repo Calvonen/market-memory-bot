@@ -165,12 +165,16 @@ REQUIRED_TRACKED_INSTRUMENT_CHECKS: tuple[tuple[str, str], ...] = (
         "upsert_tracked_instrument_function_exists",
         "upsert_tracked_instrument(text,text,text,text,text) function",
     ),
+    (
+        "deactivate_tracked_instrument_function_exists",
+        "deactivate_tracked_instrument(text,text) function",
+    ),
 )
 
 REQUIRED_CALENDAR_CANDIDATE_UPSERT_VERSION = 3
 REQUIRED_OFFICIAL_RELEASE_SOURCE_SCHEMA_VERSION = 8
 REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION = 15
-REQUIRED_TRACKED_INSTRUMENT_REGISTRY_SCHEMA_VERSION = 1
+REQUIRED_TRACKED_INSTRUMENT_REGISTRY_SCHEMA_VERSION = 2
 POSTGRES_IDENTIFIER_MAX_BYTES = 63
 
 
