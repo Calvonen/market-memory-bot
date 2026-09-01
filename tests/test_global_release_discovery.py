@@ -48,8 +48,8 @@ class GlobalReleaseDiscoveryTests(unittest.TestCase):
             "https://www.example.com/",
             "https://www.example.com/investors",
             """
-            <a href='/investors/results'>Results</a>
-            <a href='/investors/financial-results'>Financial results</a>
+            <a href='/investors/half-year-financial-results'>Financial results</a>
+            <a href='/investors/full-year-financial-results'>Financial results</a>
             """,
         )
 
