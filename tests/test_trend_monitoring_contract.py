@@ -1,6 +1,9 @@
+import ast
 import unittest
+from datetime import UTC, datetime, timedelta
 
 from trading_system.trend_monitoring_contract import (
+    TREND_CANDLE_INTERVAL,
     TREND_CONFIRMATION_BARS,
     TREND_MIN_COMPLETED_BARS,
     TrendEvaluationInput,
@@ -18,6 +21,11 @@ class TrendMonitoringContractTests(unittest.TestCase):
             "ema_slow": 100.0,
             "ema_fast_lookback": 108.0,
             "completed_bars": TREND_MIN_COMPLETED_BARS,
+            "candle_closed_at": datetime(2026, 9, 1, 12, 0, tzinfo=UTC),
+            "candle_closed": True,
+            "instrument_active": True,
+            "trend_profile_enabled": True,
+            "etoro_identity_resolved": True,
         }
         values.update(overrides)
         return TrendEvaluationInput(**values)
@@ -30,11 +38,23 @@ class TrendMonitoringContractTests(unittest.TestCase):
             self.ready_snapshot(candle_closed=False),
             self.ready_snapshot(completed_bars=TREND_MIN_COMPLETED_BARS - 1),
             self.ready_snapshot(close=0.0),
+            self.ready_snapshot(candle_closed_at=datetime(2026, 9, 1, 12, 0)),
         ):
             observation = evaluate_trend(snapshot)
             self.assertFalse(observation.ready)
             self.assertEqual(observation.candidate_state, TrendState.UNKNOWN)
             self.assertEqual(observation.reason, "trend_prerequisites_not_ready")
+
+    def test_prerequisite_evidence_is_explicit(self):
+        with self.assertRaises(TypeError):
+            TrendEvaluationInput(
+                close=120.0,
+                ema_fast=110.0,
+                ema_slow=100.0,
+                ema_fast_lookback=108.0,
+                completed_bars=TREND_MIN_COMPLETED_BARS,
+                candle_closed_at=datetime(2026, 9, 1, 12, 0, tzinfo=UTC),
+            )
 
     def test_bullish_requires_price_above_rising_ema50_above_ema200(self):
         observation = evaluate_trend(self.ready_snapshot())
@@ -59,66 +79,118 @@ class TrendMonitoringContractTests(unittest.TestCase):
         self.assertTrue(observation.ready)
         self.assertEqual(observation.candidate_state, TrendState.NEUTRAL)
 
-    def test_state_changes_only_after_three_consecutive_completed_candle_candidates(self):
-        bullish = evaluate_trend(self.ready_snapshot())
+    def test_state_changes_only_after_three_distinct_consecutive_completed_candles(self):
         state = TrendState.NEUTRAL
         pending_candidate = None
         pending_count = 0
+        pending_last_candle_at = None
+        last_processed_candle_at = None
+        base = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
 
-        for expected_count in range(1, TREND_CONFIRMATION_BARS):
+        for index in range(TREND_CONFIRMATION_BARS):
+            bullish = evaluate_trend(
+                self.ready_snapshot(candle_closed_at=base + index * TREND_CANDLE_INTERVAL)
+            )
             transition = apply_trend_confirmation(
                 current_state=state,
                 observation=bullish,
                 pending_candidate=pending_candidate,
                 pending_count=pending_count,
+                pending_last_candle_at=pending_last_candle_at,
+                last_processed_candle_at=last_processed_candle_at,
             )
-            self.assertFalse(transition.changed)
-            self.assertEqual(transition.state, TrendState.NEUTRAL)
-            self.assertEqual(transition.pending_candidate, TrendState.BULLISH)
-            self.assertEqual(transition.pending_count, expected_count)
+            if index < TREND_CONFIRMATION_BARS - 1:
+                self.assertFalse(transition.changed)
+                self.assertEqual(transition.pending_count, index + 1)
+            else:
+                self.assertTrue(transition.changed)
+                self.assertEqual(transition.state, TrendState.BULLISH)
             pending_candidate = transition.pending_candidate
             pending_count = transition.pending_count
+            pending_last_candle_at = transition.pending_last_candle_at
+            last_processed_candle_at = transition.last_processed_candle_at
 
-        transition = apply_trend_confirmation(
-            current_state=state,
+    def test_duplicate_completed_candle_does_not_advance_confirmation(self):
+        candle_at = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+        bullish = evaluate_trend(self.ready_snapshot(candle_closed_at=candle_at))
+        first = apply_trend_confirmation(
+            current_state=TrendState.NEUTRAL,
             observation=bullish,
-            pending_candidate=pending_candidate,
-            pending_count=pending_count,
         )
-        self.assertTrue(transition.changed)
-        self.assertEqual(transition.state, TrendState.BULLISH)
-        self.assertIsNone(transition.pending_candidate)
-        self.assertEqual(transition.pending_count, 0)
+        duplicate = apply_trend_confirmation(
+            current_state=first.state,
+            observation=bullish,
+            pending_candidate=first.pending_candidate,
+            pending_count=first.pending_count,
+            pending_last_candle_at=first.pending_last_candle_at,
+            last_processed_candle_at=first.last_processed_candle_at,
+        )
+        self.assertFalse(duplicate.changed)
+        self.assertEqual(duplicate.pending_count, 1)
+        self.assertEqual(duplicate.last_processed_candle_at, candle_at)
+
+    def test_gap_breaks_consecutive_confirmation_chain(self):
+        first_at = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+        first = apply_trend_confirmation(
+            current_state=TrendState.NEUTRAL,
+            observation=evaluate_trend(self.ready_snapshot(candle_closed_at=first_at)),
+        )
+        gap_observation = evaluate_trend(
+            self.ready_snapshot(candle_closed_at=first_at + 2 * TREND_CANDLE_INTERVAL)
+        )
+        after_gap = apply_trend_confirmation(
+            current_state=first.state,
+            observation=gap_observation,
+            pending_candidate=first.pending_candidate,
+            pending_count=first.pending_count,
+            pending_last_candle_at=first.pending_last_candle_at,
+            last_processed_candle_at=first.last_processed_candle_at,
+        )
+        self.assertEqual(after_gap.pending_count, 1)
+        self.assertFalse(after_gap.changed)
 
     def test_unknown_breaks_pending_confirmation_without_erasing_known_state(self):
-        unknown = evaluate_trend(self.ready_snapshot(candle_closed=False))
+        candle_at = datetime(2026, 9, 1, 12, 30, tzinfo=UTC)
+        unknown = evaluate_trend(self.ready_snapshot(candle_closed=False, candle_closed_at=candle_at))
         transition = apply_trend_confirmation(
             current_state=TrendState.BULLISH,
             observation=unknown,
             pending_candidate=TrendState.BEARISH,
             pending_count=2,
+            pending_last_candle_at=candle_at - TREND_CANDLE_INTERVAL,
+            last_processed_candle_at=candle_at - TREND_CANDLE_INTERVAL,
         )
         self.assertFalse(transition.changed)
         self.assertEqual(transition.state, TrendState.BULLISH)
         self.assertIsNone(transition.pending_candidate)
         self.assertEqual(transition.pending_count, 0)
 
-    def test_contract_has_no_execution_side_effects(self):
-        source = __import__(
-            "trading_system.trend_monitoring_contract",
-            fromlist=["dummy"],
-        )
-        module_source = open(source.__file__, encoding="utf-8").read()
-        for forbidden in (
-            "PaperBroker",
-            "LiveBroker",
-            "RiskEngine",
-            "Strategy",
-            "tracked_event",
-            "requests.",
+    def test_contract_has_no_execution_dependencies(self):
+        module = __import__("trading_system.trend_monitoring_contract", fromlist=["dummy"])
+        module_source = open(module.__file__, encoding="utf-8").read()
+        tree = ast.parse(module_source)
+        imported_modules = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported_modules.add(node.module)
+        forbidden_prefixes = (
+            "requests",
             "websockets",
-        ):
-            self.assertNotIn(forbidden, module_source)
+            "trading_system.strategy",
+            "trading_system.risk",
+            "trading_system.paper",
+            "trading_system.broker",
+            "trading_system.tracked_event",
+        )
+        self.assertFalse(
+            any(
+                imported == prefix or imported.startswith(prefix + ".")
+                for imported in imported_modules
+                for prefix in forbidden_prefixes
+            )
+        )
 
 
 if __name__ == "__main__":
