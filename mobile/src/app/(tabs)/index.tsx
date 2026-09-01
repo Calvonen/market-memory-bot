@@ -133,21 +133,20 @@ export default function HomeScreen() {
   const [error, setError] = useState<string | null>(null);
   const latestLoadId = useRef(0);
 
-  const resetCanonicalState = useCallback(() => {
-    setTrackedActivityError(null);
-    setTrackedActivityByEventId({});
-    setTrackedEventCount(null);
-    setPersistentEventIds(new Set());
-    setPersistentCalendarEventIds(new Set());
-    setPersistentStatusByCalendarEventId({});
-    setPersistentEventByCalendarEventId({});
-  }, []);
-
-  const loadEvents = useCallback(() => {
+  const loadEvents = useCallback((resetCanonical = false) => {
     const loadId = ++latestLoadId.current;
     setError(null);
     setCalendarError(null);
     setCalendarEvents(null);
+    if (resetCanonical) {
+      setTrackedActivityError(null);
+      setTrackedActivityByEventId({});
+      setTrackedEventCount(null);
+      setPersistentEventIds(new Set());
+      setPersistentCalendarEventIds(new Set());
+      setPersistentStatusByCalendarEventId({});
+      setPersistentEventByCalendarEventId({});
+    }
 
     const eventsPromise = getEvents()
       .then((list) => {
@@ -345,13 +344,12 @@ export default function HomeScreen() {
       const timer = setTimeout(() => {
         const token = ++nextTrackedRefreshToken.current;
         currentTrackedRefreshToken.current = token;
-        resetCanonicalState();
         setTrackedRefreshToken(token);
-        void loadEvents();
+        void loadEvents(true);
       }, 0);
 
       return () => clearTimeout(timer);
-    }, [loadEvents, resetCanonicalState]),
+    }, [loadEvents]),
   );
 
   const handleTrackedRefreshSettled = useCallback((token: number) => {
@@ -365,7 +363,13 @@ export default function HomeScreen() {
     setRefreshing(true);
     const token = ++nextTrackedRefreshToken.current;
     currentTrackedRefreshToken.current = token;
-    resetCanonicalState();
+    setTrackedActivityError(null);
+    setTrackedActivityByEventId({});
+    setTrackedEventCount(null);
+    setPersistentEventIds(new Set());
+    setPersistentCalendarEventIds(new Set());
+    setPersistentStatusByCalendarEventId({});
+    setPersistentEventByCalendarEventId({});
     const trackedRefresh = new Promise<void>((resolve) => {
       trackedRefreshWaiters.current.set(token, resolve);
     });
@@ -373,7 +377,7 @@ export default function HomeScreen() {
     await loadEvents();
     await trackedRefresh;
     setRefreshing(false);
-  }, [loadEvents, resetCanonicalState]);
+  }, [loadEvents]);
 
   return (
     <ScrollView
