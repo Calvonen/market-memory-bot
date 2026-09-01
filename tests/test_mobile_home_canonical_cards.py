@@ -72,20 +72,49 @@ def test_tracked_expectations_wait_for_canonical_snapshot_and_activity():
     assert snapshot_guard < date_guard
 
 
-def test_refresh_resets_canonical_readiness_and_hides_retained_section():
+def test_current_home_refresh_gets_a_new_canonical_generation():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
-    load_start = source.index("const loadEvents = useCallback(() => {")
+    assert "const loadEvents = useCallback((resetCanonical = false) => {" in source
+    load_start = source.index("const loadEvents = useCallback((resetCanonical = false) => {")
     get_events_start = source.index("const eventsPromise = getEvents()", load_start)
     load_preamble = source[load_start:get_events_start]
+    assert "setCalendarEvents(null);" in load_preamble
+    assert "if (resetCanonical) {" in load_preamble
     assert "setTrackedActivityByEventId({});" in load_preamble
     assert "setTrackedEventCount(null);" in load_preamble
     assert "setPersistentEventIds(new Set());" in load_preamble
     assert "setPersistentCalendarEventIds(new Set());" in load_preamble
     assert "setPersistentStatusByCalendarEventId({});" in load_preamble
     assert "setPersistentEventByCalendarEventId({});" in load_preamble
-    assert "style={trackedEventCount === null ? styles.canonicalLoadingSection : undefined}" in source
-    assert "canonicalLoadingSection: {\n    display: 'none',\n  }," in source
+
+    assert "const token = ++nextTrackedRefreshToken.current;" in source
+    assert "setTrackedRefreshToken(token);" in source
+    assert "void loadEvents(true);" in source
+    assert "await loadEvents(true);" in source
+    assert "key={`tracked-events:${trackedRefreshToken}`}" in source
+    assert "canonicalLoadingSection" not in source
+
+
+def test_calendar_retry_keeps_the_ready_canonical_snapshot():
+    source = HOME_SOURCE.read_text(encoding="utf-8")
+
+    assert "<Pressable style={styles.retryButton} onPress={() => void loadEvents()}>" in source
+    assert "const loadEvents = useCallback((resetCanonical = false) => {" in source
+    canonical_reset = source.index("if (resetCanonical) {")
+    tracked_count_reset = source.index("setTrackedEventCount(null);", canonical_reset)
+    get_events_start = source.index("const eventsPromise = getEvents()", canonical_reset)
+    assert canonical_reset < tracked_count_reset < get_events_start
+
+
+def test_canonical_load_error_remains_visible_and_retryable():
+    source = HOME_SOURCE.read_text(encoding="utf-8")
+    tracked = TRACKED_SECTION_SOURCE.read_text(encoding="utf-8")
+
+    assert "canonicalLoadingSection" not in source
+    assert "<TrackedEventsSection" in source
+    assert "{error ? (" in tracked
+    assert "<Pressable style={styles.retryButton} onPress={() => void load()}>" in tracked
 
 
 def test_future_tracked_shell_checks_activity_before_date_visibility():
@@ -108,13 +137,16 @@ def test_inactive_calendar_occurrence_cannot_reappear_as_fallback_card():
     assert "trackedActivityByEventId" in tracked_calendar_source
 
 
-def test_calendar_fallback_waits_for_snapshot_and_matching_activity():
+def test_calendar_fallback_waits_for_current_calendar_and_canonical_snapshots():
     source = HOME_SOURCE.read_text(encoding="utf-8")
+
+    load_start = source.index("const loadEvents = useCallback((resetCanonical = false) => {")
+    calendar_fetch = source.index("const calendarPromise = getUpcomingCalendarEvents", load_start)
+    assert source.index("setCalendarEvents(null);", load_start) < calendar_fetch
 
     tracked_calendar_start = source.index("const trackedCalendarEvents = useMemo")
     focus_start = source.index("useFocusEffect(", tracked_calendar_start)
     tracked_calendar_source = source[tracked_calendar_start:focus_start]
-
     assert "if (!calendarEvents || trackedEventCount === null) return null;" in tracked_calendar_source
     assert "const expectationIds = new Set((events ?? []).map((event) => event.event_id));" in tracked_calendar_source
     assert "expectationIds.has(canonicalOccurrenceId)" in tracked_calendar_source
