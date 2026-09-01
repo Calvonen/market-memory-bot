@@ -138,14 +138,20 @@ class SupabaseReleaseRepository:
     def latest_run(self, *, event_id: str) -> dict[str, Any] | None:
         response = (
             self.client.table("event_ingestion_runs")
-            .select("provider,status,error_message,created_at")
+            .select("provider,status,error_message,checked_at")
             .eq("event_id", event_id)
-            .order("created_at", desc=True)
+            .order("checked_at", desc=True)
             .limit(1)
             .execute()
         )
         rows = response.data or []
-        return rows[0] if rows else None
+        if not rows:
+            return None
+        row = dict(rows[0])
+        # Calendar release-worker helpers use one internal timestamp key while
+        # the persisted ingestion-run schema owns checked_at.
+        row["created_at"] = row.get("checked_at")
+        return row
 
     def save_analysis(
         self,
