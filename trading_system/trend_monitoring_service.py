@@ -50,6 +50,8 @@ async def _close_stream(
     *,
     propagate_completed_failure: bool = False,
 ) -> None:
+    completed_failure: BaseException | None = None
+
     if next_batch_task is not None:
         if not next_batch_task.done():
             next_batch_task.cancel()
@@ -62,12 +64,23 @@ async def _close_stream(
                 pass
             except StopAsyncIteration as exc:
                 if propagate_completed_failure:
-                    raise RuntimeError("Trend live stream ended unexpectedly") from exc
-            except Exception:
+                    completed_failure = RuntimeError("Trend live stream ended unexpectedly")
+                    completed_failure.__cause__ = exc
+            except Exception as exc:
                 if propagate_completed_failure:
-                    raise
+                    completed_failure = exc
+
     if stream is not None:
-        await stream.aclose()
+        if completed_failure is None:
+            await stream.aclose()
+        else:
+            # Cleanup must still be attempted, but a close failure must never mask
+            # the already-completed provider/stream failure that caused shutdown.
+            with suppress(Exception):
+                await stream.aclose()
+
+    if completed_failure is not None:
+        raise completed_failure
 
 
 async def stream_supervised_trend_monitoring(
