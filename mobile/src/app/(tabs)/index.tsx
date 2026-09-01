@@ -190,7 +190,7 @@ export default function HomeScreen() {
         );
       });
 
-    return Promise.race([eventsPromise, calendarPromise]);
+    return Promise.allSettled([eventsPromise, calendarPromise]);
   }, []);
 
   const handleTrackedEventSnapshot = useCallback((snapshot: TrackedEventSnapshot) => {
