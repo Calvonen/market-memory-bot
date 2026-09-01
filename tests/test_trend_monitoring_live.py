@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from trading_system.trend_monitoring_live import stream_trend_monitoring_runtime
+from trading_system.trend_monitoring_targets import _selected_targets
 
 
 class _Upstream:
@@ -47,6 +48,13 @@ class _Runtime:
         return self.results_by_candle.get(candle)
 
 
+def selected_targets(*targets):
+    return _selected_targets(
+        resolved=tuple(targets),
+        unresolved_tracked_instrument_ids=(),
+    )
+
+
 class TrendMonitoringLiveTests(unittest.IsolatedAsyncioTestCase):
     async def test_existing_stream_and_candle_pipeline_feed_runtime_once(self):
         target = SimpleNamespace(tracked_instrument_id="tracked-1", etoro_instrument_id=101)
@@ -65,7 +73,7 @@ class TrendMonitoringLiveTests(unittest.IsolatedAsyncioTestCase):
             batches = [
                 batch
                 async for batch in stream_trend_monitoring_runtime(
-                    [target],
+                    selected_targets(target),
                     object(),
                     pipeline,
                     runtime,
@@ -95,6 +103,14 @@ class TrendMonitoringLiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stream.call_args.kwargs, {"reconnect": False, "queue_maxsize": 7})
         self.assertTrue(upstream.closed)
 
+    async def test_arbitrary_resolved_instrument_iterable_is_rejected(self):
+        target = SimpleNamespace(tracked_instrument_id="tracked-1", etoro_instrument_id=101)
+        with self.assertRaisesRegex(TypeError, "canonical TrendMonitoringTargets"):
+            async for _ in stream_trend_monitoring_runtime(
+                [target], object(), _Pipeline({}), _Runtime({})
+            ):
+                pass
+
     async def test_empty_target_snapshot_does_not_open_upstream(self):
         with patch(
             "trading_system.trend_monitoring_live.stream_tracked_etoro_instruments"
@@ -102,7 +118,7 @@ class TrendMonitoringLiveTests(unittest.IsolatedAsyncioTestCase):
             batches = [
                 batch
                 async for batch in stream_trend_monitoring_runtime(
-                    [], object(), _Pipeline({}), _Runtime({})
+                    selected_targets(), object(), _Pipeline({}), _Runtime({})
                 )
             ]
         self.assertEqual(batches, [])
@@ -120,7 +136,7 @@ class TrendMonitoringLiveTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "candle failure"):
                 async for _ in stream_trend_monitoring_runtime(
-                    [target], object(), pipeline, _Runtime({})
+                    selected_targets(target), object(), pipeline, _Runtime({})
                 ):
                     pass
 
@@ -138,7 +154,7 @@ class TrendMonitoringLiveTests(unittest.IsolatedAsyncioTestCase):
             return_value=upstream,
         ):
             generator = stream_trend_monitoring_runtime(
-                [target], object(), pipeline, _Runtime({})
+                selected_targets(target), object(), pipeline, _Runtime({})
             )
             first = await anext(generator)
             self.assertIs(first.update, first_update)
