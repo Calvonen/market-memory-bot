@@ -79,6 +79,14 @@ export function HomeTrackedCompaniesSection({ refreshToken = 0 }: Props) {
     return activeInstruments.some((item) => item.instrument.trim().toUpperCase() === normalizedTicker);
   }
 
+  function changeSearchQuery(value: string) {
+    latestSearchId.current += 1;
+    setSearchQuery(value);
+    setSearchResults([]);
+    setSearchError(null);
+    setSearching(false);
+  }
+
   async function searchCompanies() {
     const query = searchQuery.trim();
     const searchId = ++latestSearchId.current;
@@ -168,7 +176,7 @@ export function HomeTrackedCompaniesSection({ refreshToken = 0 }: Props) {
         <Text style={styles.searchHeading}>Lisää yhtiö</Text>
         <TextInput
           value={searchQuery}
-          onChangeText={setSearchQuery}
+          onChangeText={changeSearchQuery}
           onSubmitEditing={() => void searchCompanies()}
           placeholder="Hae nimellä tai tickerillä"
           placeholderTextColor="#687386"
