@@ -69,6 +69,17 @@ def test_future_tracked_shell_checks_activity_before_date_visibility():
     assert inactive_guard < future_guard
 
 
+def test_inactive_calendar_occurrence_cannot_reappear_as_fallback_card():
+    source = HOME_SOURCE.read_text(encoding="utf-8")
+
+    assert "const canonicalOccurrenceId = `calendar:${event.calendar_event_id}`;" in source
+    assert "trackedActivityByEventId[canonicalOccurrenceId] === 'inactive'" in source
+    tracked_calendar_start = source.index("const trackedCalendarEvents = useMemo")
+    focus_start = source.index("useFocusEffect(", tracked_calendar_start)
+    tracked_calendar_source = source[tracked_calendar_start:focus_start]
+    assert "trackedActivityByEventId" in tracked_calendar_source
+
+
 def test_activity_batch_waits_for_snapshot_and_updates_state_by_batch():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
