@@ -95,13 +95,26 @@ def test_uncertain_past_expectations_remain_visible_until_status_is_known():
     assert "for (const event of visibleEvents ?? [])" in source
 
 
-def test_canonical_tracked_card_preserves_expectation_navigation_only_for_earnings():
+def test_canonical_tracked_card_confirms_expectation_before_navigation():
     tracked = TRACKED_SECTION_SOURCE.read_text(encoding="utf-8")
 
     assert "pathname: '/events/[eventId]'" in tracked
     assert "event.kind === 'earnings'" in tracked
     assert "? `calendar:${event.calendar_event_id}`" in tracked
     assert ": `tracked:${event.event_id}`" in tracked
-    assert "{expectationEventId ? (" in tracked
-    assert "params: { eventId: expectationEventId }" in tracked
+    assert "getEvent(expectationCandidateId)" in tracked
+    assert "expectation.event_id !== expectationCandidateId" in tracked
+    assert "expectationLinkState.status === 'ready'" in tracked
+    assert "params: { eventId: expectationLinkState.eventId }" in tracked
     assert "Odotukset ja strategia →" in tracked
+
+
+def test_expectation_lookup_failure_is_distinct_from_confirmed_absence_and_retryable():
+    tracked = TRACKED_SECTION_SOURCE.read_text(encoding="utf-8")
+
+    assert "err instanceof Error && err.message === 'Event not found'" in tracked
+    assert "setExpectationLinkState({ status: 'none' });" in tracked
+    assert "setExpectationLinkState({ status: 'error' });" in tracked
+    assert "expectationLinkState.status === 'error'" in tracked
+    assert "Odotus- ja strategiatietoa ei juuri nyt saatu varmistettua." in tracked
+    assert "setExpectationRetryToken((value) => value + 1)" in tracked
