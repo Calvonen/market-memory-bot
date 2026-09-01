@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import UTC, timedelta
 from decimal import Decimal
 
 from trading_system.tracked_candle_pipeline import TrackedMarketCandle
@@ -149,16 +149,21 @@ class TrendMonitoringRuntime:
         if candle.interval_minutes != 15:
             return None
 
+        if candle.start.tzinfo is None or candle.start.utcoffset() is None:
+            raise ValueError("trend candle start must be timezone-aware")
+        candle_start = candle.start.astimezone(UTC)
+
         state = self._state_for(candle)
         if state.last_candle is not None:
-            if candle.start < state.last_candle.start:
+            last_start = state.last_candle.start.astimezone(UTC)
+            if candle_start < last_start:
                 raise ValueError("trend candle arrived out of order")
-            if candle.start == state.last_candle.start:
+            if candle_start == last_start:
                 if self._same_candle(candle, state.last_candle):
                     return None
                 raise ValueError("conflicting duplicate trend candle")
 
-        candle_closed_at = candle.start + timedelta(minutes=15)
+        candle_closed_at = candle_start + timedelta(minutes=15)
         complete_window = candle.source_minutes == 15
         if complete_window:
             self._update_indicators(state, candle.close)
