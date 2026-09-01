@@ -172,7 +172,7 @@ jobs:
               return 1
             fi
 
-            for PROPERTY in ExecStartPre ExecStartPost ExecStop ExecStopPost; do
+            for PROPERTY in ExecCondition ExecStartPre ExecStartPost ExecReload ExecStop ExecStopPost; do
               if ! COMMANDS="$(/usr/bin/systemctl show "$SERVICE" --property="$PROPERTY" --value 2>&1)"; then
                 echo "::error::Could not inspect $SERVICE $PROPERTY: ${COMMANDS:-unknown error}."
                 return 1
