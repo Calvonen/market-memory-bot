@@ -41,8 +41,9 @@ class TrackedCandlePipeline:
 
     State is isolated by ``tracked_instrument_id``. The first valid update for a
     tracked identity fixes its instrument/market/eToro identity for the lifetime
-    of this pipeline instance; later attempts to reuse that tracked ID with a
-    different identity raise instead of silently mixing candle histories.
+    of this pipeline state; lifecycle owners may explicitly discard state when a
+    target leaves monitoring so a later re-enable starts from fresh candle
+    evidence rather than carrying partial builders across a monitoring gap.
 
     Only closed candles are emitted. The pipeline never calls builder ``flush``
     methods during normal operation, so partial candles are not exposed as if
@@ -51,6 +52,33 @@ class TrackedCandlePipeline:
 
     def __init__(self) -> None:
         self._states: dict[str, _TrackedCandleState] = {}
+
+    def discard_tracked_instrument(self, tracked_instrument_id: str) -> bool:
+        """Forget all partial candle-builder state for one tracked instrument."""
+        tracked_id = tracked_instrument_id.strip()
+        if not tracked_id:
+            raise ValueError("tracked_instrument_id is required")
+        return self._states.pop(tracked_id, None) is not None
+
+    def retain_tracked_instruments(self, tracked_instrument_ids: set[str]) -> tuple[str, ...]:
+        """Keep only candle state belonging to the current canonical target set."""
+        normalized = {tracked_id.strip() for tracked_id in tracked_instrument_ids}
+        if "" in normalized:
+            raise ValueError("tracked_instrument_id is required")
+        discarded = tuple(sorted(set(self._states).difference(normalized)))
+        for tracked_id in discarded:
+            del self._states[tracked_id]
+        return discarded
+
+    def tracked_identity(self, tracked_instrument_id: str) -> tuple[str, str, int] | None:
+        """Return the current immutable candle-state identity without mutating it."""
+        tracked_id = tracked_instrument_id.strip()
+        if not tracked_id:
+            raise ValueError("tracked_instrument_id is required")
+        state = self._states.get(tracked_id)
+        if state is None:
+            return None
+        return (state.instrument, state.market, state.etoro_instrument_id)
 
     @staticmethod
     def _from_one_minute(item: TrackedEtoroMarketUpdate, candle: OneMinuteCandle) -> TrackedMarketCandle:

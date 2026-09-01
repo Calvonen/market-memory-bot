@@ -131,6 +131,46 @@ class TrackedCandlePipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "tracked instrument identity changed"):
             pipeline.add(_tracked_update(tracked_id="same", instrument="BBB", etoro_id=2, minute=1))
 
+    def test_discarded_target_restarts_without_partial_candle_state(self) -> None:
+        pipeline = TrackedCandlePipeline()
+        pipeline.add(_tracked_update(tracked_id="a", instrument="AAA", etoro_id=1, minute=0, price="10"))
+
+        self.assertTrue(pipeline.discard_tracked_instrument(" a "))
+        self.assertIsNone(pipeline.tracked_identity("a"))
+        self.assertFalse(pipeline.discard_tracked_instrument("a"))
+
+        # Re-enabled monitoring starts fresh: minute 1 becomes the new open rather
+        # than closing the partial minute-0 builder that existed before the gap.
+        self.assertEqual(
+            pipeline.add(_tracked_update(tracked_id="a", instrument="AAA", etoro_id=1, minute=1, price="11")),
+            (),
+        )
+        candles = pipeline.add(
+            _tracked_update(tracked_id="a", instrument="AAA", etoro_id=1, minute=2, price="12")
+        )
+        self.assertEqual(len(candles), 1)
+        self.assertEqual(candles[0].open, Decimal("11"))
+
+    def test_retain_keeps_current_targets_and_drops_removed_state(self) -> None:
+        pipeline = TrackedCandlePipeline()
+        pipeline.add(_tracked_update(tracked_id="a", instrument="AAA", etoro_id=1, minute=0))
+        pipeline.add(_tracked_update(tracked_id="b", instrument="BBB", etoro_id=2, minute=0))
+
+        discarded = pipeline.retain_tracked_instruments({" a "})
+
+        self.assertEqual(discarded, ("b",))
+        self.assertEqual(pipeline.tracked_identity("a"), ("AAA", "Helsinki", 1))
+        self.assertIsNone(pipeline.tracked_identity("b"))
+
+    def test_lifecycle_identity_operations_reject_blank_ids(self) -> None:
+        pipeline = TrackedCandlePipeline()
+        with self.assertRaisesRegex(ValueError, "tracked_instrument_id is required"):
+            pipeline.discard_tracked_instrument("   ")
+        with self.assertRaisesRegex(ValueError, "tracked_instrument_id is required"):
+            pipeline.retain_tracked_instruments({""})
+        with self.assertRaisesRegex(ValueError, "tracked_instrument_id is required"):
+            pipeline.tracked_identity(" ")
+
 
 if __name__ == "__main__":
     unittest.main()
