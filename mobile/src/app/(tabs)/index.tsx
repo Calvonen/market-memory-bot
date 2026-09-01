@@ -276,11 +276,18 @@ export default function HomeScreen() {
     return calendarEvents.filter((event) => {
       if (event.status !== 'tracked') return false;
       if (persistentCalendarEventIds.has(event.calendar_event_id)) return false;
+      const canonicalOccurrenceId = `calendar:${event.calendar_event_id}`;
+      if (trackedActivityByEventId[canonicalOccurrenceId] === 'inactive') return false;
       if (event.event_type !== 'earnings') return true;
       const key = `${event.instrument.toUpperCase()}|${event.scheduled_date}`;
       return !trackedEarningsOccurrences.has(key);
     });
-  }, [calendarEvents, visibleEvents, persistentCalendarEventIds]);
+  }, [
+    calendarEvents,
+    visibleEvents,
+    persistentCalendarEventIds,
+    trackedActivityByEventId,
+  ]);
 
   useFocusEffect(
     useCallback(() => {
