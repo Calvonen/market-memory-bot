@@ -125,6 +125,7 @@ export default function HomeScreen() {
     Record<string, TrackedMarketEvent>
   >({});
   const [trackedRefreshToken, setTrackedRefreshToken] = useState(0);
+  const currentTrackedRefreshToken = useRef(0);
   const nextTrackedRefreshToken = useRef(0);
   const trackedRefreshWaiters = useRef(new Map<number, () => void>());
   const [calendarError, setCalendarError] = useState<string | null>(null);
@@ -334,6 +335,7 @@ export default function HomeScreen() {
     useCallback(() => {
       const timer = setTimeout(() => {
         const token = ++nextTrackedRefreshToken.current;
+        currentTrackedRefreshToken.current = token;
         setTrackedRefreshToken(token);
         void loadEvents(true);
       }, 0);
@@ -352,6 +354,7 @@ export default function HomeScreen() {
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     const token = ++nextTrackedRefreshToken.current;
+    currentTrackedRefreshToken.current = token;
     const trackedRefresh = new Promise<void>((resolve) => {
       trackedRefreshWaiters.current.set(token, resolve);
     });
@@ -459,7 +462,10 @@ export default function HomeScreen() {
 
       <TrackedEventsSection
         key={`tracked-events:${trackedRefreshToken}`}
-        onSnapshot={handleTrackedEventSnapshot}
+        onSnapshot={(snapshot) => {
+          if (trackedRefreshToken !== currentTrackedRefreshToken.current) return;
+          handleTrackedEventSnapshot(snapshot);
+        }}
         excludeCalendarEventIds={expectationCalendarEventIds}
         refreshToken={trackedRefreshToken}
         onRefreshSettled={handleTrackedRefreshSettled}
