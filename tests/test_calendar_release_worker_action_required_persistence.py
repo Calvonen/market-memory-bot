@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from trading_system.calendar_release_worker import (
     ACTION_REQUIRED_PROVIDER,
+    MISSING_OFFICIAL_SOURCE_BLOCKER,
     CalendarReleaseTarget,
     run_calendar_release_ingestion_once,
 )
@@ -292,14 +293,12 @@ class CalendarReleaseWorkerActionRequiredPersistenceTests(unittest.TestCase):
             )
 
         self.assertEqual(results[0].status, "missing_official_source")
+        self.assertEqual(results[0].message, MISSING_OFFICIAL_SOURCE_BLOCKER)
         releases.record_run.assert_called_once_with(
             event_id=EVENT_ID,
             provider=ACTION_REQUIRED_PROVIDER,
             status="error",
-            error_message=(
-                "action_required: earnings target outside approved US market labels "
-                "requires an approved official release source"
-            ),
+            error_message=f"action_required: {MISSING_OFFICIAL_SOURCE_BLOCKER}",
         )
         monitor.assert_not_called()
 
