@@ -85,7 +85,8 @@ TRACKED_PRESENT_ROW = {
 TRACKED_INSTRUMENT_PRESENT_ROW = {
     "tracked_instruments_table_exists": True,
     "upsert_tracked_instrument_function_exists": True,
-    "tracked_instrument_registry_schema_version": 1,
+    "deactivate_tracked_instrument_function_exists": True,
+    "tracked_instrument_registry_schema_version": 2,
 }
 
 
@@ -193,16 +194,27 @@ class VerifySupabaseSchemaGateTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("upsert_tracked_instrument", err)
 
-    def test_fails_closed_on_old_tracked_instrument_registry_version(self) -> None:
+    def test_fails_closed_when_tracked_instrument_deactivate_is_missing(self) -> None:
         row = dict(
             TRACKED_INSTRUMENT_PRESENT_ROW,
-            tracked_instrument_registry_schema_version=0,
+            deactivate_tracked_instrument_function_exists=False,
         )
         exit_code, _out, err = self._run_with_client(
             _FakeClient(_responses(tracked_instrument_row=row))
         )
         self.assertEqual(exit_code, 1)
-        self.assertIn("tracked-instrument registry schema version 1", err)
+        self.assertIn("deactivate_tracked_instrument", err)
+
+    def test_fails_closed_on_old_tracked_instrument_registry_version(self) -> None:
+        row = dict(
+            TRACKED_INSTRUMENT_PRESENT_ROW,
+            tracked_instrument_registry_schema_version=1,
+        )
+        exit_code, _out, err = self._run_with_client(
+            _FakeClient(_responses(tracked_instrument_row=row))
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("tracked-instrument registry schema version 2", err)
 
     def test_fails_closed_when_ingestion_audit_table_is_missing(self) -> None:
         row = dict(
