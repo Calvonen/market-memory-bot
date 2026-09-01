@@ -150,16 +150,14 @@ grant execute on function public.record_tracked_event_release_skip(uuid, text, t
 
 -- The release-skip audit is a production dependency of the explicit skip endpoint. Extend
 -- the existing deploy gate so the application cannot start against a database
--- where this out-of-band migration has not yet been applied. Runtime version 16
--- is already introduced by the canonical tracked-instrument registry and must
--- remain monotonic on fresh databases that later apply this migration.
+-- where this out-of-band migration has not yet been applied.
 create or replace function public.tracked_event_runtime_schema_version()
 returns integer
 language sql
 immutable
 security invoker
 as $$
-  select 16;
+  select 15;
 $$;
 
 revoke all on function public.tracked_event_runtime_schema_version from public;
