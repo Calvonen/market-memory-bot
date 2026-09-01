@@ -310,8 +310,8 @@ def main() -> int:
         or deployed_runtime_version < REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION
     ):
         missing.append(
-            "tracked-event runtime schema version at least "
-            f"{REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION} "
+            "tracked-event runtime schema version "
+            f"{REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION} or newer "
             f"(deployed: {deployed_runtime_version!r})"
         )
 
