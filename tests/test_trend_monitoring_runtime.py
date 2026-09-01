@@ -130,6 +130,41 @@ class TrendMonitoringRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(self.add_ready(runtime, valid))
         self.assertEqual(runtime._states["tracked-1"].completed_bars, 1)
 
+    def test_discard_forgets_gap_sensitive_state_before_reenable(self):
+        runtime = TrendMonitoringRuntime()
+        self.add_ready(runtime, self.candle(0, close=100))
+        self.assertTrue(runtime.discard_tracked_instrument(" tracked-1 "))
+        self.assertFalse(runtime.discard_tracked_instrument("tracked-1"))
+
+        replacement = self.candle(0, close=200, instrument="NEW", etoro_instrument_id=456)
+        self.assertIsNotNone(self.add_ready(runtime, replacement))
+        self.assertEqual(runtime._states["tracked-1"].completed_bars, 1)
+        self.assertEqual(runtime._states["tracked-1"].instrument, "NEW")
+
+    def test_retain_preserves_current_targets_and_discards_removed_targets(self):
+        runtime = TrendMonitoringRuntime()
+        first = self.candle(0, close=100)
+        second = replace(
+            self.candle(0, close=200, instrument="SECOND", etoro_instrument_id=456),
+            tracked_instrument_id="tracked-2",
+        )
+        self.add_ready(runtime, first)
+        self.add_ready(runtime, second)
+
+        discarded = runtime.retain_tracked_instruments({" tracked-1 "})
+
+        self.assertEqual(discarded, ("tracked-2",))
+        self.assertIn("tracked-1", runtime._states)
+        self.assertNotIn("tracked-2", runtime._states)
+        self.assertEqual(runtime._states["tracked-1"].completed_bars, 1)
+
+    def test_state_pruning_rejects_blank_identity(self):
+        runtime = TrendMonitoringRuntime()
+        with self.assertRaisesRegex(ValueError, "tracked_instrument_id"):
+            runtime.discard_tracked_instrument("   ")
+        with self.assertRaisesRegex(ValueError, "tracked_instrument_id"):
+            runtime.retain_tracked_instruments({"tracked-1", "   "})
+
     def test_disabled_profile_cannot_emit_directional_ready_state(self):
         runtime = TrendMonitoringRuntime()
         for index in range(204):
