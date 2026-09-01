@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -103,6 +104,18 @@ class TrendMonitoringRuntimeTests(unittest.TestCase):
         self.add_ready(runtime, self.candle(0))
         with self.assertRaisesRegex(ValueError, "identity changed"):
             self.add_ready(runtime, self.candle(1, instrument="OTHER"))
+
+    def test_naive_timestamp_is_rejected_before_indicator_state_mutates(self):
+        runtime = TrendMonitoringRuntime()
+        valid = self.candle(0, close=100)
+        naive = replace(valid, start=valid.start.replace(tzinfo=None))
+
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            self.add_ready(runtime, naive)
+
+        self.assertNotIn("tracked-1", runtime._states)
+        self.assertIsNotNone(self.add_ready(runtime, valid))
+        self.assertEqual(runtime._states["tracked-1"].completed_bars, 1)
 
     def test_disabled_profile_cannot_emit_directional_ready_state(self):
         runtime = TrendMonitoringRuntime()
