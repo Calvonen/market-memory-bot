@@ -121,3 +121,17 @@ def test_expectation_lookup_failure_is_distinct_from_confirmed_absence_and_retry
     assert "expectationLinkState.status === 'error'" in tracked
     assert "Odotus- ja strategiatietoa ei juuri nyt saatu varmistettua." in tracked
     assert "setExpectationRetryToken((value) => value + 1)" in tracked
+
+
+def test_confirmed_missing_expectation_is_rechecked_when_home_regains_focus():
+    tracked = TRACKED_SECTION_SOURCE.read_text(encoding="utf-8")
+
+    card_start = tracked.index("export function TrackedEventCard")
+    details_start = tracked.index("export function TrackedEventDetails", card_start)
+    card_source = tracked[card_start:details_start]
+
+    assert "useFocusEffect(" in card_source
+    assert "useCallback(() =>" in card_source
+    assert "getEvent(expectationCandidateId)" in card_source
+    assert "[expectationCandidateId, expectationRetryToken]" in card_source
+    assert "useEffect(() =>" not in card_source
