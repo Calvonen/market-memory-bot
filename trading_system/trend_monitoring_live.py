@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from trading_system.tracked_candle_pipeline import TrackedCandlePipeline, TrackedMarketCandle
@@ -9,8 +9,8 @@ from trading_system.tracked_etoro_orchestrator import (
     DEFAULT_QUEUE_MAXSIZE,
     stream_tracked_etoro_instruments,
 )
-from trading_system.tracked_instrument_etoro import TrackedEtoroInstrument
 from trading_system.trend_monitoring_runtime import TrendMonitoringRuntime, TrendRuntimeResult
+from trading_system.trend_monitoring_targets import TrendMonitoringTargets
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,7 @@ class TrendRuntimeMarketBatch:
 
 
 async def stream_trend_monitoring_runtime(
-    tracked_instruments: Iterable[TrackedEtoroInstrument],
+    targets: TrendMonitoringTargets,
     provider: EtoroInstrumentStream,
     candle_pipeline: TrackedCandlePipeline,
     runtime: TrendMonitoringRuntime,
@@ -31,12 +31,12 @@ async def stream_trend_monitoring_runtime(
     reconnect: bool = True,
     queue_maxsize: int = DEFAULT_QUEUE_MAXSIZE,
 ) -> AsyncIterator[TrendRuntimeMarketBatch]:
-    """Feed one prevalidated Trend target snapshot into the existing live path.
+    """Feed one canonical, provenance-bearing Trend target snapshot into the live path.
 
-    ``tracked_instruments`` must be the resolved, active, enabled-Trend target
-    snapshot produced by the canonical target-selection boundary. This adapter
-    deliberately does not re-read persistence or refresh that snapshot; the
-    service lifecycle that owns target refresh/restart is a separate concern.
+    ``targets`` must be the snapshot returned by
+    ``select_trend_monitoring_targets(...)``. The target type itself carries the
+    canonical-selection boundary, so this adapter never accepts an arbitrary
+    iterable of broker-resolved instruments and then invents prerequisite truth.
 
     Every upstream tracked market update is fed exactly once to the existing
     ``TrackedCandlePipeline``. Every newly closed candle is then offered exactly
@@ -45,14 +45,17 @@ async def stream_trend_monitoring_runtime(
     or re-aggregate market data.
 
     The three prerequisite flags are true because entry into this adapter is
-    restricted to that prevalidated target snapshot: canonical instrument active,
-    Trend profile enabled, and eToro identity resolved. A caller must rebuild the
-    stream when that snapshot changes rather than mutating these facts in place.
+    restricted to the canonical snapshot: canonical instrument active, Trend
+    profile enabled, and eToro identity resolved. A caller must rebuild the stream
+    when that snapshot changes rather than mutating these facts in place.
 
     No observations are persisted and no event, Strategy, Risk, Broker, PAPER, or
     LIVE trading path is invoked here.
     """
-    instruments = tuple(tracked_instruments)
+    if not isinstance(targets, TrendMonitoringTargets):
+        raise TypeError("targets must be canonical TrendMonitoringTargets")
+
+    instruments = targets.resolved
     if not instruments:
         return
 
