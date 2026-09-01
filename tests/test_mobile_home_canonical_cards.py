@@ -95,7 +95,7 @@ def test_activity_error_clears_when_snapshot_leaves_no_candidates():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
     zero_candidate_start = source.index("if (candidateIds.length === 0) {")
-    lookup_start = source.index("void Promise.resolve()", zero_candidate_start + 1)
+    lookup_start = source.index("\n    let active = true;", zero_candidate_start)
     zero_candidate_block = source[zero_candidate_start:lookup_start]
     assert "setTrackedActivityError(null);" in zero_candidate_block
     assert "setTrackedActivityByEventId({});" in zero_candidate_block
