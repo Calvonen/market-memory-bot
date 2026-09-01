@@ -1,0 +1,17 @@
+[Unit]
+Description=MarketAI observation-only Trend monitoring worker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/marko/marketai-repo
+EnvironmentFile=/home/marko/marketai/.env
+ExecStart=/home/marko/marketai-repo/.venv/bin/python -m trading_system.trend_monitoring_worker
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
