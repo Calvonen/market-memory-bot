@@ -10,20 +10,32 @@ from trading_system.trend_monitoring_targets import TrendMonitoringTargets
 TrendTargetSelector = Callable[[], TrendMonitoringTargets]
 
 
+def _target_identity(item) -> tuple[object, ...]:
+    return (
+        item.instrument,
+        item.market,
+        item.etoro_instrument_id,
+        item.etoro_symbol,
+        item.etoro_display_name,
+        item.etoro_market,
+    )
+
+
+def _resolved_identity_by_id(targets: TrendMonitoringTargets) -> dict[str, tuple[object, ...]]:
+    identities: dict[str, tuple[object, ...]] = {}
+    for item in targets.resolved:
+        tracked_id = item.tracked_instrument_id.strip()
+        if not tracked_id:
+            raise RuntimeError("resolved Trend target has blank tracked instrument id")
+        if tracked_id in identities:
+            raise RuntimeError("duplicate resolved Trend tracked instrument id")
+        identities[tracked_id] = _target_identity(item)
+    return identities
+
+
 def _snapshot_identity(targets: TrendMonitoringTargets) -> tuple[tuple[object, ...], ...]:
     resolved = tuple(
-        sorted(
-            (
-                item.tracked_instrument_id,
-                item.instrument,
-                item.market,
-                item.etoro_instrument_id,
-                item.etoro_symbol,
-                item.etoro_display_name,
-                item.etoro_market,
-            )
-            for item in targets.resolved
-        )
+        sorted((tracked_id, *identity) for tracked_id, identity in _resolved_identity_by_id(targets).items())
     )
     unresolved = tuple(sorted(targets.unresolved_tracked_instrument_ids))
     return (*resolved, ("__unresolved__", *unresolved))
@@ -42,9 +54,9 @@ class TrendMonitoringSupervisor:
     The supervisor deliberately does not open streams or schedule polling itself.
     A service loop can call ``refresh()`` at its chosen cadence and restart the
     existing live adapter only when ``restart_required`` is true. Runtime state for
-    targets that remain selected is preserved; state for targets that leave the
-    resolved canonical target set is discarded before a replacement stream may
-    start.
+    unchanged targets is preserved. State is discarded when a target leaves the
+    resolved canonical set or when its resolved instrument/broker identity changes,
+    so a replacement stream can never inherit incompatible EMA/confirmation state.
     """
 
     def __init__(
@@ -57,6 +69,7 @@ class TrendMonitoringSupervisor:
         self._runtime = runtime
         self._targets: TrendMonitoringTargets | None = None
         self._identity: tuple[tuple[object, ...], ...] | None = None
+        self._resolved_identities: dict[str, tuple[object, ...]] = {}
 
     @property
     def targets(self) -> TrendMonitoringTargets | None:
@@ -67,19 +80,22 @@ class TrendMonitoringSupervisor:
         if not isinstance(targets, TrendMonitoringTargets):
             raise TypeError("selector must return canonical TrendMonitoringTargets")
 
+        resolved_identities = _resolved_identity_by_id(targets)
         identity = _snapshot_identity(targets)
-        resolved_ids = {item.tracked_instrument_id.strip() for item in targets.resolved}
-        if "" in resolved_ids:
-            raise RuntimeError("resolved Trend target has blank tracked instrument id")
-        if len(resolved_ids) != len(targets.resolved):
-            raise RuntimeError("duplicate resolved Trend tracked instrument id")
+        resolved_ids = set(resolved_identities)
 
-        discarded = self._runtime.retain_tracked_instruments(resolved_ids)
+        discarded = set(self._runtime.retain_tracked_instruments(resolved_ids))
+        for tracked_id in set(self._resolved_identities).intersection(resolved_ids):
+            if self._resolved_identities[tracked_id] != resolved_identities[tracked_id]:
+                if self._runtime.discard_tracked_instrument(tracked_id):
+                    discarded.add(tracked_id)
+
         restart_required = self._identity is None or identity != self._identity
         self._targets = targets
         self._identity = identity
+        self._resolved_identities = resolved_identities
         return TrendTargetRefresh(
             targets=targets,
             restart_required=restart_required,
-            discarded_runtime_state_ids=discarded,
+            discarded_runtime_state_ids=tuple(sorted(discarded)),
         )
