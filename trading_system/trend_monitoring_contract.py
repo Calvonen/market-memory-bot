@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from math import isfinite
 
@@ -76,6 +76,12 @@ class TrendTransition:
     changed: bool
 
 
+def _utc_candle_identity(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("candle identity must be timezone-aware")
+    return value.astimezone(UTC)
+
+
 def evaluate_trend(snapshot: TrendEvaluationInput) -> TrendObservation:
     """Classify trend only when the canonical data prerequisites are satisfied."""
 
@@ -87,6 +93,7 @@ def evaluate_trend(snapshot: TrendEvaluationInput) -> TrendObservation:
             candle_closed_at=snapshot.candle_closed_at,
         )
 
+    candle_at = _utc_candle_identity(snapshot.candle_closed_at)
     fast_rising = snapshot.ema_fast > snapshot.ema_fast_lookback
     fast_falling = snapshot.ema_fast < snapshot.ema_fast_lookback
 
@@ -95,7 +102,7 @@ def evaluate_trend(snapshot: TrendEvaluationInput) -> TrendObservation:
             candidate_state=TrendState.BULLISH,
             ready=True,
             reason="price_above_rising_ema50_above_ema200",
-            candle_closed_at=snapshot.candle_closed_at,
+            candle_closed_at=candle_at,
         )
 
     if snapshot.close < snapshot.ema_fast < snapshot.ema_slow and fast_falling:
@@ -103,14 +110,14 @@ def evaluate_trend(snapshot: TrendEvaluationInput) -> TrendObservation:
             candidate_state=TrendState.BEARISH,
             ready=True,
             reason="price_below_falling_ema50_below_ema200",
-            candle_closed_at=snapshot.candle_closed_at,
+            candle_closed_at=candle_at,
         )
 
     return TrendObservation(
         candidate_state=TrendState.NEUTRAL,
         ready=True,
         reason="trend_alignment_not_confirmed",
-        candle_closed_at=snapshot.candle_closed_at,
+        candle_closed_at=candle_at,
     )
 
 
@@ -136,9 +143,11 @@ def apply_trend_confirmation(
     if pending_count < 0:
         raise ValueError("pending_count must be non-negative")
 
-    candle_at = observation.candle_closed_at
-    if candle_at.tzinfo is None or candle_at.utcoffset() is None:
-        raise ValueError("observation candle_closed_at must be timezone-aware")
+    candle_at = _utc_candle_identity(observation.candle_closed_at)
+    if pending_last_candle_at is not None:
+        pending_last_candle_at = _utc_candle_identity(pending_last_candle_at)
+    if last_processed_candle_at is not None:
+        last_processed_candle_at = _utc_candle_identity(last_processed_candle_at)
     if last_processed_candle_at is not None and candle_at <= last_processed_candle_at:
         return TrendTransition(
             state=current_state,
