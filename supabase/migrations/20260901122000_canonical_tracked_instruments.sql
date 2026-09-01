@@ -3,8 +3,13 @@
 -- This is deliberately separate from tracked_market_events: adding an instrument
 -- to the registry must not fabricate a market event, expectation, strategy
 -- decision, risk decision, broker action, or trading task.
+--
+-- The table creation is intentionally replay-safe because some production
+-- environments may already contain this canonical registry from an earlier
+-- audited migration application while this repository migration version is
+-- still pending in the Supabase migration ledger.
 
-create table public.tracked_instruments (
+create table if not exists public.tracked_instruments (
   id text primary key default replace(gen_random_uuid()::text, '-', ''),
   instrument text not null check (btrim(instrument) <> ''),
   market text not null default '' check (market = btrim(market)),
