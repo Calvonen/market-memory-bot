@@ -41,7 +41,7 @@ def _result_payload(result: TrendRuntimeResult) -> dict[str, Any]:
 async def run_trend_monitoring_worker(
     *,
     service=None,
-    emit: Callable[[str], None] = print,
+    emit: Callable[[str], None] | None = None,
 ) -> int:
     """Consume the production Trend stream and expose observations via stdout only.
 
@@ -53,7 +53,14 @@ async def run_trend_monitoring_worker(
     try:
         async for batch in stream:
             for result in batch.trend_results:
-                emit(json.dumps(_result_payload(result), sort_keys=True))
+                line = json.dumps(_result_payload(result), sort_keys=True)
+                if emit is None:
+                    # systemd captures stdout through a non-TTY journal stream.
+                    # Flush each sparse 15-minute observation immediately so the
+                    # live test surface never waits for Python's block buffer.
+                    print(line, flush=True)
+                else:
+                    emit(line)
     finally:
         await stream.aclose()
     return 0
