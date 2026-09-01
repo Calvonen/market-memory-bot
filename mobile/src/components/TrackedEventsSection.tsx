@@ -38,6 +38,12 @@ type WorkflowState =
   | { status: 'ready'; workflow: TrackedEventWorkflowResponse }
   | { status: 'error' };
 
+type ExpectationLinkState =
+  | { status: 'none' }
+  | { status: 'loading' }
+  | { status: 'ready'; eventId: string }
+  | { status: 'error' };
+
 export function TrackedEventsSection({
   onSnapshot,
   excludeCalendarEventIds,
@@ -51,10 +57,6 @@ export function TrackedEventsSection({
   const load = useCallback(() => {
     const loadId = ++latestLoadId.current;
     setError(null);
-    // Keep the visible canonical-card list bounded. Past tracked expectation
-    // shells that fall outside this display window are resolved independently
-    // by exact event-id activity reads on Home, so correctness never depends
-    // on mounting an arbitrarily large number of detailed cards here.
     return getTrackedEvents()
       .then((list) => {
         if (loadId !== latestLoadId.current) return;
@@ -127,27 +129,41 @@ export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
         ? `calendar:${event.calendar_event_id}`
         : `tracked:${event.event_id}`
       : null;
-  const [expectationEventId, setExpectationEventId] = useState<string | null>(null);
+  const [expectationLinkState, setExpectationLinkState] = useState<ExpectationLinkState>(
+    expectationCandidateId ? { status: 'loading' } : { status: 'none' },
+  );
+  const [expectationRetryToken, setExpectationRetryToken] = useState(0);
 
   useEffect(() => {
-    setExpectationEventId(null);
-    if (!expectationCandidateId) return;
+    if (!expectationCandidateId) {
+      setExpectationLinkState({ status: 'none' });
+      return;
+    }
 
+    setExpectationLinkState({ status: 'loading' });
     let active = true;
     void getEvent(expectationCandidateId)
       .then((expectation) => {
-        if (!active || expectation.event_id !== expectationCandidateId) return;
-        setExpectationEventId(expectationCandidateId);
-      })
-      .catch(() => {
         if (!active) return;
-        setExpectationEventId(null);
+        if (expectation.event_id !== expectationCandidateId) {
+          setExpectationLinkState({ status: 'error' });
+          return;
+        }
+        setExpectationLinkState({ status: 'ready', eventId: expectationCandidateId });
+      })
+      .catch((err) => {
+        if (!active) return;
+        if (err instanceof Error && err.message === 'Event not found') {
+          setExpectationLinkState({ status: 'none' });
+          return;
+        }
+        setExpectationLinkState({ status: 'error' });
       });
 
     return () => {
       active = false;
     };
-  }, [expectationCandidateId]);
+  }, [expectationCandidateId, expectationRetryToken]);
 
   return (
     <View style={styles.eventCard}>
@@ -161,16 +177,28 @@ export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
         <Text style={styles.dateText}>{scheduleText}</Text>
       </View>
 
-      {expectationEventId ? (
+      {expectationLinkState.status === 'ready' ? (
         <Link
           href={{
             pathname: '/events/[eventId]',
-            params: { eventId: expectationEventId },
+            params: { eventId: expectationLinkState.eventId },
           }}
           style={styles.expectationLink}
         >
           Odotukset ja strategia →
         </Link>
+      ) : null}
+
+      {expectationLinkState.status === 'error' ? (
+        <View style={styles.expectationErrorBlock}>
+          <Text style={styles.errorText}>Odotus- ja strategiatietoa ei juuri nyt saatu varmistettua.</Text>
+          <Pressable
+            style={styles.retryButton}
+            onPress={() => setExpectationRetryToken((value) => value + 1)}
+          >
+            <Text style={styles.retryText}>Yritä uudelleen</Text>
+          </Pressable>
+        </View>
       ) : null}
 
       <TrackedEventDetails event={event} />
@@ -505,6 +533,9 @@ const styles = StyleSheet.create({
     color: '#72b8db',
     fontSize: 12,
     fontWeight: '700',
+    marginTop: 10,
+  },
+  expectationErrorBlock: {
     marginTop: 10,
   },
   statusBlock: {
