@@ -27,14 +27,6 @@ type TrackedInstrumentPost = <T>(
   headers?: Record<string, string>,
 ) => Promise<T>;
 
-function normalizeActor(actor: string): string {
-  const normalizedActor = actor.trim();
-  if (!normalizedActor || normalizedActor.length > 200) {
-    throw new Error('Tracking actor must be nonblank and at most 200 characters');
-  }
-  return normalizedActor;
-}
-
 export function getTrackedInstruments(
   get: TrackedInstrumentGet = apiGet,
 ): Promise<TrackedInstrument[]> {
@@ -46,11 +38,11 @@ export function trackInstrument(
   actor: string,
   post: TrackedInstrumentPost = apiControlPost,
 ): Promise<TrackedInstrument> {
-  let normalizedActor: string;
-  try {
-    normalizedActor = normalizeActor(actor);
-  } catch (error) {
-    return Promise.reject(error);
+  const normalizedActor = actor.trim();
+  if (!normalizedActor || normalizedActor.length > 200) {
+    return Promise.reject(
+      new Error('Tracking actor must be nonblank and at most 200 characters'),
+    );
   }
 
   const normalizedInstrument = input.instrument.trim();
@@ -80,11 +72,11 @@ export function deactivateTrackedInstrument(
     return Promise.reject(new Error('Tracked instrument id must be nonblank'));
   }
 
-  let normalizedActor: string;
-  try {
-    normalizedActor = normalizeActor(actor);
-  } catch (error) {
-    return Promise.reject(error);
+  const normalizedActor = actor.trim();
+  if (!normalizedActor || normalizedActor.length > 200) {
+    return Promise.reject(
+      new Error('Tracking actor must be nonblank and at most 200 characters'),
+    );
   }
 
   return post<TrackedInstrument>(
