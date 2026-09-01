@@ -3,6 +3,38 @@ import { apiControlPost, apiGet, apiPut } from '@/services/api';
 export const TRACKED_EVENT_RELEASE_SKIP_REASON_MAX_LENGTH = 1000;
 const TRACKED_EVENT_ACTIVITY_BATCH_SIZE = 40;
 const TRACKED_EVENT_ACTIVITY_CONCURRENCY = 3;
+const TRACKED_EVENT_CANONICAL_READ_TIMEOUT_MS = 10_000;
+
+function withCanonicalReadTimeout<T>(
+  request: (signal: AbortSignal) => Promise<T>,
+  label: string,
+): Promise<T> {
+  const controller = new AbortController();
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      controller.abort();
+      reject(new Error(`${label} aikakatkaistiin. Yritä uudelleen.`));
+    }, TRACKED_EVENT_CANONICAL_READ_TIMEOUT_MS);
+
+    void request(controller.signal).then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
+}
 
 export type TrackedEventMonitoringStageSnapshot = {
   start_after_minutes: number;
@@ -142,8 +174,13 @@ export function getTrackedEvents(
   view: TrackedEventView = 'active',
   limit = 20,
 ): Promise<TrackedMarketEvent[]> {
-  return apiGet<TrackedMarketEvent[]>(
-    `/api/v1/tracked-events?view=${encodeURIComponent(view)}&limit=${encodeURIComponent(String(limit))}`,
+  return withCanonicalReadTimeout(
+    (signal) =>
+      apiGet<TrackedMarketEvent[]>(
+        `/api/v1/tracked-events?view=${encodeURIComponent(view)}&limit=${encodeURIComponent(String(limit))}`,
+        { signal },
+      ),
+    'Seurantatietojen päivitys',
   );
 }
 
@@ -167,8 +204,13 @@ export async function getTrackedEventActivities(
         const batchIndex = nextBatchIndex++;
         if (batchIndex >= batches.length) return;
         const batch = batches[batchIndex];
-        responses[batchIndex] = await apiGet<TrackedEventActivityBatchResponse>(
-          `/api/v1/tracked-events/activity?occurrence_ids=${encodeURIComponent(batch.join(','))}`,
+        responses[batchIndex] = await withCanonicalReadTimeout(
+          (signal) =>
+            apiGet<TrackedEventActivityBatchResponse>(
+              `/api/v1/tracked-events/activity?occurrence_ids=${encodeURIComponent(batch.join(','))}`,
+              { signal },
+            ),
+          'Seurantatilan tarkistus',
         );
       }
     }),

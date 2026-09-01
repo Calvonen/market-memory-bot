@@ -32,6 +32,7 @@ type TrackedEventSnapshot = {
 };
 
 const CALENDAR_WINDOW_DAYS = 30;
+const PARENT_REFRESH_TIMEOUT_MS = 10_000;
 
 function formatLocalDate(date: Date): string {
   const yyyy = date.getFullYear();
@@ -72,7 +73,11 @@ function isHomeExpectationVisible(
   loadedTrackedEventIds: ReadonlySet<string>,
   loadedCalendarEventIds: ReadonlySet<string>,
   trackedActivity: TrackedActivityState | undefined,
+  canonicalSnapshotReady: boolean,
 ): boolean {
+  const trackedExpectation = isTrackedExpectation(event.event_id);
+  if (trackedExpectation && !canonicalSnapshotReady) return false;
+
   if (event.event_id.startsWith('tracked:')) {
     const trackedEventId = event.event_id.slice('tracked:'.length);
     if (!trackedEventId) return false;
@@ -85,12 +90,15 @@ function isHomeExpectationVisible(
     if (loadedCalendarEventIds.has(calendarEventId)) return true;
   }
 
-  if (isTrackedExpectation(event.event_id) && trackedActivity === 'inactive') return false;
+  if (trackedExpectation) {
+    if (!trackedActivity || trackedActivity === 'loading') return false;
+    if (trackedActivity === 'inactive') return false;
+  }
 
   const today = formatLocalDate(new Date());
   if (event.scheduled_date >= today) return true;
 
-  if (isTrackedExpectation(event.event_id)) return true;
+  if (trackedExpectation) return true;
 
   if (!status || status.statusError) return true;
 
@@ -118,6 +126,7 @@ export default function HomeScreen() {
     Record<string, TrackedMarketEvent>
   >({});
   const [trackedRefreshToken, setTrackedRefreshToken] = useState(0);
+  const currentTrackedRefreshToken = useRef(0);
   const nextTrackedRefreshToken = useRef(0);
   const trackedRefreshWaiters = useRef(new Map<number, () => void>());
   const [calendarError, setCalendarError] = useState<string | null>(null);
@@ -125,18 +134,27 @@ export default function HomeScreen() {
   const [error, setError] = useState<string | null>(null);
   const latestLoadId = useRef(0);
 
-  const loadEvents = useCallback(() => {
+  const loadEvents = useCallback((resetCanonical = false) => {
     const loadId = ++latestLoadId.current;
     setError(null);
     setCalendarError(null);
-    setTrackedActivityError(null);
+    setCalendarEvents(null);
+    if (resetCanonical) {
+      setTrackedActivityError(null);
+      setTrackedActivityByEventId({});
+      setTrackedEventCount(null);
+      setPersistentEventIds(new Set());
+      setPersistentCalendarEventIds(new Set());
+      setPersistentStatusByCalendarEventId({});
+      setPersistentEventByCalendarEventId({});
+    }
 
     const eventsPromise = getEvents()
       .then((list) => {
         if (loadId !== latestLoadId.current) return;
+        setError(null);
         setEvents(list);
         setStatuses({});
-        setTrackedActivityByEventId({});
 
         list.forEach((event) => {
           getPaperStatus(event.event_id)
@@ -165,6 +183,7 @@ export default function HomeScreen() {
     const calendarPromise = getUpcomingCalendarEvents(fromDate, toDate)
       .then((list) => {
         if (loadId !== latestLoadId.current) return;
+        setCalendarError(null);
         setCalendarEvents(list);
       })
       .catch((err) => {
@@ -174,7 +193,45 @@ export default function HomeScreen() {
         );
       });
 
-    return Promise.race([eventsPromise, calendarPromise]);
+    return new Promise<void>((resolve) => {
+      let eventsSettled = false;
+      let calendarSettled = false;
+      let completed = false;
+      let settledCount = 0;
+
+      const finish = () => {
+        if (completed) return;
+        completed = true;
+        clearTimeout(timeout);
+        resolve();
+      };
+      const markSettled = () => {
+        settledCount += 1;
+        if (settledCount === 2) finish();
+      };
+
+      void eventsPromise.finally(() => {
+        eventsSettled = true;
+        markSettled();
+      });
+      void calendarPromise.finally(() => {
+        calendarSettled = true;
+        markSettled();
+      });
+
+      const timeout = setTimeout(() => {
+        if (completed) return;
+        if (loadId === latestLoadId.current) {
+          if (!eventsSettled) {
+            setError('Tapahtumatietojen päivitys aikakatkaistiin. Yritä uudelleen.');
+          }
+          if (!calendarSettled) {
+            setCalendarError('Kalenteritietojen päivitys aikakatkaistiin. Yritä uudelleen.');
+          }
+        }
+        finish();
+      }, PARENT_REFRESH_TIMEOUT_MS);
+    });
   }, []);
 
   const handleTrackedEventSnapshot = useCallback((snapshot: TrackedEventSnapshot) => {
@@ -184,6 +241,14 @@ export default function HomeScreen() {
     setPersistentStatusByCalendarEventId(snapshot.statusByCalendarEventId);
     setPersistentEventByCalendarEventId(snapshot.eventByCalendarEventId);
   }, []);
+
+  const handleCurrentTrackedEventSnapshot = useCallback(
+    (snapshot: TrackedEventSnapshot) => {
+      if (trackedRefreshToken !== currentTrackedRefreshToken.current) return;
+      handleTrackedEventSnapshot(snapshot);
+    },
+    [handleTrackedEventSnapshot, trackedRefreshToken],
+  );
 
   useEffect(() => {
     if (!events || trackedEventCount === null) return;
@@ -262,6 +327,7 @@ export default function HomeScreen() {
         persistentEventIds,
         persistentCalendarEventIds,
         trackedActivityByEventId[event.event_id],
+        trackedEventCount !== null,
       ),
     );
   }, [
@@ -270,6 +336,7 @@ export default function HomeScreen() {
     persistentEventIds,
     persistentCalendarEventIds,
     trackedActivityByEventId,
+    trackedEventCount,
   ]);
 
   const expectationCalendarEventIds = useMemo(() => {
@@ -283,30 +350,51 @@ export default function HomeScreen() {
   }, [visibleEvents]);
 
   const trackedCalendarEvents = useMemo(() => {
-    if (!calendarEvents) return null;
+    if (!calendarEvents || trackedEventCount === null) return null;
     const trackedEarningsOccurrences = new Set(
       (visibleEvents ?? []).map((event) => `${event.instrument.toUpperCase()}|${event.scheduled_date}`),
     );
+    const expectationIds = new Set((events ?? []).map((event) => event.event_id));
     return calendarEvents.filter((event) => {
       if (event.status !== 'tracked') return false;
       if (persistentCalendarEventIds.has(event.calendar_event_id)) return false;
       const canonicalOccurrenceId = `calendar:${event.calendar_event_id}`;
-      if (trackedActivityByEventId[canonicalOccurrenceId] === 'inactive') return false;
+      const canonicalActivity = trackedActivityByEventId[canonicalOccurrenceId];
+      if (
+        expectationIds.has(canonicalOccurrenceId) &&
+        (!canonicalActivity || canonicalActivity === 'loading')
+      ) {
+        return false;
+      }
+      if (canonicalActivity === 'inactive') return false;
       if (event.event_type !== 'earnings') return true;
       const key = `${event.instrument.toUpperCase()}|${event.scheduled_date}`;
       return !trackedEarningsOccurrences.has(key);
     });
   }, [
     calendarEvents,
+    events,
     visibleEvents,
     persistentCalendarEventIds,
     trackedActivityByEventId,
+    trackedEventCount,
   ]);
 
   useFocusEffect(
     useCallback(() => {
+      const token = ++nextTrackedRefreshToken.current;
+      currentTrackedRefreshToken.current = token;
+      setTrackedActivityError(null);
+      setTrackedActivityByEventId({});
+      setTrackedEventCount(null);
+      setPersistentEventIds(new Set());
+      setPersistentCalendarEventIds(new Set());
+      setPersistentStatusByCalendarEventId({});
+      setPersistentEventByCalendarEventId({});
+      setTrackedRefreshToken(token);
+
       const timer = setTimeout(() => {
-        void loadEvents();
+        void loadEvents(true);
       }, 0);
 
       return () => clearTimeout(timer);
@@ -323,6 +411,14 @@ export default function HomeScreen() {
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     const token = ++nextTrackedRefreshToken.current;
+    currentTrackedRefreshToken.current = token;
+    setTrackedActivityError(null);
+    setTrackedActivityByEventId({});
+    setTrackedEventCount(null);
+    setPersistentEventIds(new Set());
+    setPersistentCalendarEventIds(new Set());
+    setPersistentStatusByCalendarEventId({});
+    setPersistentEventByCalendarEventId({});
     const trackedRefresh = new Promise<void>((resolve) => {
       trackedRefreshWaiters.current.set(token, resolve);
     });
@@ -429,7 +525,8 @@ export default function HomeScreen() {
       })}
 
       <TrackedEventsSection
-        onSnapshot={handleTrackedEventSnapshot}
+        key={`tracked-events:${trackedRefreshToken}`}
+        onSnapshot={handleCurrentTrackedEventSnapshot}
         excludeCalendarEventIds={expectationCalendarEventIds}
         refreshToken={trackedRefreshToken}
         onRefreshSettled={handleTrackedRefreshSettled}

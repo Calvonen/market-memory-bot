@@ -6,6 +6,7 @@ const READ_API_KEY = process.env.EXPO_PUBLIC_MARKETAI_READ_API_KEY ?? '';
 // same caveat as READ_API_KEY: it must never be the backend's admin token or
 // any Supabase service-role secret - this file must never reference either.
 const CONTROL_API_KEY = process.env.EXPO_PUBLIC_MARKETAI_CONTROL_API_KEY ?? '';
+const HOME_PARENT_READ_TIMEOUT_MS = 9_500;
 
 async function parseJsonResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -21,9 +22,35 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, { headers: { 'X-MarketAI-Key': READ_API_KEY } });
+export async function apiGet<T>(
+  path: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, {
+    headers: { 'X-MarketAI-Key': READ_API_KEY },
+    signal: options.signal,
+  });
   return parseJsonResponse<T>(response);
+}
+
+async function apiGetWithTimeout<T>(path: string, label: string): Promise<T> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, HOME_PARENT_READ_TIMEOUT_MS);
+
+  try {
+    return await apiGet<T>(path, { signal: controller.signal });
+  } catch (error) {
+    if (timedOut) {
+      throw new Error(`${label} aikakatkaistiin. Yritä uudelleen.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function apiPost<T>(path: string, body: unknown, authHeader: Record<string, string>): Promise<T> {
@@ -158,7 +185,7 @@ export type PaperStatus = {
 };
 
 export function getEvents(): Promise<EventExpectation[]> {
-  return apiGet<EventExpectation[]>('/api/v1/events');
+  return apiGetWithTimeout<EventExpectation[]>('/api/v1/events', 'Tapahtumatietojen päivitys');
 }
 
 export function getEvent(eventId: string): Promise<EventExpectation> {
@@ -237,7 +264,10 @@ export function getUpcomingCalendarEvents(fromDate?: string, toDate?: string): P
   if (fromDate) params.set('from_date', fromDate);
   if (toDate) params.set('to_date', toDate);
   const query = params.toString();
-  return apiGet<CalendarEvent[]>(`/api/v1/calendar/upcoming${query ? `?${query}` : ''}`);
+  return apiGetWithTimeout<CalendarEvent[]>(
+    `/api/v1/calendar/upcoming${query ? `?${query}` : ''}`,
+    'Kalenteritietojen päivitys',
+  );
 }
 
 // Write auth for these two actions deliberately reuses the existing control
