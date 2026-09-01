@@ -29,8 +29,24 @@ class MobileHomeCompanySearchTests(unittest.TestCase):
             self.assertNotIn(forbidden, self.source)
 
     def test_successful_add_opens_existing_profile_management(self) -> None:
+        self.assertIn("await load();", self.source)
         self.assertIn("setExpandedId(saved.id);", self.source)
         self.assertIn("<TrackingProfileEditor trackedInstrumentId={instrument.id} />", self.source)
+
+    def test_add_is_fail_closed_until_canonical_tracked_state_is_loaded(self) -> None:
+        self.assertIn(
+            "const trackedStateReady = instruments !== null && error === null;",
+            self.source,
+        )
+        self.assertIn(
+            "if (!trackedStateReady || addingTicker || isTickerTracked(result.ticker)) return;",
+            self.source,
+        )
+        self.assertIn(
+            "disabled={!trackedStateReady || adding || tracked}",
+            self.source,
+        )
+        self.assertNotIn("...(current ?? []).filter", self.source)
 
     def test_search_market_mapping_matches_existing_scanner_countries(self) -> None:
         self.assertIn("if (ticker.endsWith('.HE')) return 'Finland';", self.source)
