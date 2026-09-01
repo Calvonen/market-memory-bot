@@ -121,6 +121,31 @@ class TrackedEventActivityApiTests(unittest.TestCase):
             ],
         )
 
+    def test_batch_canonicalizes_dashless_uuid_but_preserves_response_key(self) -> None:
+        client, repo = _client(
+            _event(status=TrackedEventStatus.MONITORING, updated_at=datetime.now(UTC))
+        )
+        requested_id = TRACKED_ID.replace("-", "")
+
+        response = client.get(
+            "/api/v1/tracked-events/activity",
+            params={"occurrence_ids": f"tracked:{requested_id}"},
+            headers={"X-MarketAI-Key": "read-key"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(repo.batch_calls, [((TRACKED_ID,), ())])
+        self.assertEqual(
+            response.json()["items"],
+            [
+                {
+                    "occurrence_id": f"tracked:{requested_id}",
+                    "exists": True,
+                    "active": True,
+                }
+            ],
+        )
+
     def test_old_terminal_row_is_inactive(self) -> None:
         client, _ = _client(
             _event(
