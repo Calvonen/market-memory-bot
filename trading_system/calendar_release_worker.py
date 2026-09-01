@@ -25,6 +25,7 @@ DEFAULT_LOOKBACK_DAYS = 1
 DEFAULT_LOOKAHEAD_DAYS = 0
 TARGET_PAGE_SIZE = 1000
 US_MARKET_LABELS = ("US", "USA", "NASDAQ", "NYSE", "AMEX")
+UNRESOLVED_MARKET_LABELS = ("", "UNKNOWN", "UNRESOLVED", "N/A", "NA")
 DATE_ONLY_OVERDUE_GRACE_HOURS = 24.0
 RELEASE_ELIGIBLE_TRACKED_STATUSES = ("tracked", "monitoring", "completed", "failed")
 ACTION_REQUIRED_PROVIDER = "canonical_release_worker"
@@ -52,6 +53,7 @@ class CalendarReleaseTarget:
     scheduled_date: date
     market: str = ""
     tracked_event_id: str = ""
+    company_name: str = ""
 
 
 AutomaticReleaseProviderFactory = Callable[[CalendarReleaseTarget], Any | None]
@@ -91,7 +93,7 @@ class SupabaseCalendarReleaseTargetRepository:
         while True:
             query = (
                 self.client.table("tracked_market_events")
-                .select("id,calendar_event_id,instrument,event_date,market")
+                .select("id,calendar_event_id,instrument,event_date,market,company")
                 .eq("kind", "earnings")
                 .in_("status", RELEASE_ELIGIBLE_TRACKED_STATUSES)
                 .lte("event_date", end_date.isoformat())
@@ -111,6 +113,7 @@ class SupabaseCalendarReleaseTargetRepository:
                 calendar_id = str(calendar_id_raw).strip() if calendar_id_raw else None
                 ticker = str(row.get("instrument") or "").strip().upper()
                 market = str(row.get("market") or "").strip().upper()
+                company_name = str(row.get("company") or "").strip()
                 scheduled = row.get("event_date")
                 if not tracked_id or not ticker or not market or not scheduled:
                     row_identity = tracked_id or "<missing-id>"
@@ -140,6 +143,7 @@ class SupabaseCalendarReleaseTargetRepository:
                         scheduled_date=parsed_date,
                         market=market,
                         tracked_event_id=tracked_id,
+                        company_name=company_name,
                     )
                 )
 
@@ -291,10 +295,11 @@ def _default_automatic_release_provider(
 ) -> Any | None:
     """Return the best built-in automatic provider for this target.
 
-    SEC remains the authoritative built-in adapter for US markets. Other
-    markets use Finnhub only to resolve the company's own website; discovery
-    then remains on that HTTPS origin and delegates release selection to the
-    existing fail-closed results-page provider.
+    SEC remains the authoritative built-in adapter for US markets. A target
+    whose market identity is missing or unresolved fails closed instead of
+    being routed to a generic fallback. Known non-US markets may use Finnhub to
+    resolve the issuer's verified public website, after which navigation stays
+    on that origin and final release selection remains fail-closed.
     """
     normalized_market = target.market.strip().upper()
     if normalized_market in US_MARKET_LABELS:
@@ -302,6 +307,8 @@ def _default_automatic_release_provider(
             ticker=target.ticker,
             scheduled_date=target.scheduled_date,
         )
+    if normalized_market in UNRESOLVED_MARKET_LABELS:
+        return None
     finnhub_api_key = os.environ.get("FINNHUB_API_KEY", "").strip()
     if not finnhub_api_key:
         return None
@@ -309,6 +316,8 @@ def _default_automatic_release_provider(
         event_id=target.event_id,
         ticker=target.ticker,
         scheduled_date=target.scheduled_date,
+        market=normalized_market,
+        company_name=target.company_name,
         api_key=finnhub_api_key,
     )
 
