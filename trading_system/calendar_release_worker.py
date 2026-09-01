@@ -35,6 +35,9 @@ RELEASE_SHELL_IDENTITY_CONFLICTS = frozenset(
 )
 ACTION_REQUIRED_PREFIX = "action_required:"
 MISSING_OFFICIAL_SOURCE_BLOCKER = (
+    "no approved official release source and no automatic release provider resolved"
+)
+LEGACY_MISSING_OFFICIAL_SOURCE_BLOCKER = (
     "earnings target outside approved us market labels requires "
     "an approved official release source"
 )
@@ -248,7 +251,15 @@ def _is_release_shell_blocker(run: dict[str, Any] | None) -> bool:
 
 def _is_missing_official_source_blocker(run: dict[str, Any] | None) -> bool:
     message = _canonical_blocker_message(run)
-    return message is not None and MISSING_OFFICIAL_SOURCE_BLOCKER in message
+    if message is None:
+        return False
+    return any(
+        marker in message
+        for marker in (
+            MISSING_OFFICIAL_SOURCE_BLOCKER,
+            LEGACY_MISSING_OFFICIAL_SOURCE_BLOCKER,
+        )
+    )
 
 
 def _persist_canonical_validation_if_needed(
@@ -417,10 +428,7 @@ def run_calendar_release_ingestion_once(
             else:
                 provider = automatic_provider_factory(target)
                 if provider is None:
-                    message = (
-                        "earnings target outside approved US market labels requires "
-                        "an approved official release source"
-                    )
+                    message = MISSING_OFFICIAL_SOURCE_BLOCKER
                     _persist_action_required(
                         releases,
                         event_id=target.event_id,
