@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ipaddress
 import os
+import socket
 from dataclasses import dataclass
 from datetime import date
 from html.parser import HTMLParser
@@ -18,6 +20,66 @@ from trading_system.results_page_release_ingestion import ResultsPageOfficialRel
 
 _PROFILE_URL = "https://finnhub.io/api/v1/stock/profile2"
 _SEARCH_URL = "https://finnhub.io/api/v1/search"
+
+_MARKET_SUFFIXES: dict[str, frozenset[str]] = {
+    "SWITZERLAND": frozenset({".SW"}),
+    "SIX": frozenset({".SW"}),
+    "ZURICH": frozenset({".SW"}),
+    "UNITED KINGDOM": frozenset({".L"}),
+    "UK": frozenset({".L"}),
+    "LONDON": frozenset({".L"}),
+    "LSE": frozenset({".L"}),
+    "FINLAND": frozenset({".HE"}),
+    "HELSINKI": frozenset({".HE"}),
+    "SWEDEN": frozenset({".ST"}),
+    "STOCKHOLM": frozenset({".ST"}),
+    "NORWAY": frozenset({".OL"}),
+    "OSLO": frozenset({".OL"}),
+    "DENMARK": frozenset({".CO"}),
+    "COPENHAGEN": frozenset({".CO"}),
+    "GERMANY": frozenset({".DE"}),
+    "XETRA": frozenset({".DE"}),
+    "FRANCE": frozenset({".PA"}),
+    "PARIS": frozenset({".PA"}),
+    "NETHERLANDS": frozenset({".AS"}),
+    "AMSTERDAM": frozenset({".AS"}),
+    "ITALY": frozenset({".MI"}),
+    "MILAN": frozenset({".MI"}),
+    "SPAIN": frozenset({".MC"}),
+    "MADRID": frozenset({".MC"}),
+    "AUSTRALIA": frozenset({".AX"}),
+    "ASX": frozenset({".AX"}),
+    "SYDNEY": frozenset({".AX"}),
+    "JAPAN": frozenset({".T"}),
+    "TOKYO": frozenset({".T"}),
+    "HONG KONG": frozenset({".HK"}),
+    "HKEX": frozenset({".HK"}),
+}
+
+_LEGAL_NAME_WORDS = frozenset(
+    {
+        "ag",
+        "asa",
+        "as",
+        "ab",
+        "oyj",
+        "oy",
+        "plc",
+        "ltd",
+        "limited",
+        "inc",
+        "incorporated",
+        "corp",
+        "corporation",
+        "sa",
+        "nv",
+        "se",
+        "spa",
+        "group",
+        "holding",
+        "holdings",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -61,6 +123,32 @@ def _canonical_https_homepage(value: Any) -> str | None:
     if parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username or parsed.password:
         return None
     return parsed._replace(fragment="").geturl()
+
+
+def _default_host_resolver(hostname: str) -> tuple[str, ...]:
+    try:
+        literal = ipaddress.ip_address(hostname)
+    except ValueError:
+        try:
+            rows = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
+        except socket.gaierror:
+            return ()
+        return tuple(sorted({str(row[4][0]) for row in rows if row and row[4]}))
+    return (str(literal),)
+
+
+def _host_resolves_publicly(hostname: str, resolver: Callable[[str], tuple[str, ...]]) -> bool:
+    normalized = hostname.strip().rstrip(".").lower()
+    if not normalized or normalized == "localhost" or normalized.endswith(".local"):
+        return False
+    addresses = resolver(normalized)
+    if not addresses:
+        return False
+    try:
+        parsed = tuple(ipaddress.ip_address(value) for value in addresses)
+    except ValueError:
+        return False
+    return all(address.is_global for address in parsed)
 
 
 def _same_origin_links(homepage: str, page_url: str, html_text: str) -> tuple[_Link, ...]:
@@ -114,14 +202,45 @@ def _ticker_root(symbol: str) -> str:
     return symbol.strip().upper().split(".", 1)[0]
 
 
-class FinnhubOfficialResultsProvider:
-    """Discover an official results page globally from canonical instrument identity.
+def _issuer_tokens(value: str) -> tuple[str, ...]:
+    cleaned = "".join(ch.lower() if ch.isalnum() else " " for ch in value)
+    return tuple(
+        token
+        for token in cleaned.split()
+        if token and token not in _LEGAL_NAME_WORDS
+    )
 
-    Finnhub is used only to resolve the company's own HTTPS website. The
-    canonical broker ticker is tried first. If Finnhub uses a different exchange
-    suffix, its symbol search may substitute a symbol only when exactly one
-    returned symbol has the same ticker root; ambiguous symbol identity fails
-    closed. Website navigation then stays on that one official HTTPS origin.
+
+def _issuer_matches(canonical_name: str, candidate_name: str) -> bool:
+    expected = _issuer_tokens(canonical_name)
+    candidate = _issuer_tokens(candidate_name)
+    if not expected or not candidate:
+        return False
+    expected_set = set(expected)
+    candidate_set = set(candidate)
+    common = expected_set & candidate_set
+    required = min(2, len(expected_set))
+    return len(common) >= required and (
+        expected_set <= candidate_set or candidate_set <= expected_set or len(common) >= 2
+    )
+
+
+def _symbol_matches_market(symbol: str, market: str) -> bool:
+    suffixes = _MARKET_SUFFIXES.get(market.strip().upper())
+    if not suffixes:
+        return False
+    normalized = symbol.strip().upper()
+    return any(normalized.endswith(suffix) for suffix in suffixes)
+
+
+class FinnhubOfficialResultsProvider:
+    """Discover an official results page without guessing issuer or network origin.
+
+    Finnhub is used only to resolve the issuer's own public HTTPS website. A
+    broker ticker may be translated to a Finnhub exchange suffix only when the
+    canonical market has a known suffix mapping and both Finnhub search and
+    profile issuer names match the canonical company name. Every website fetch
+    is preceded by a public-IP check and subsequent navigation stays same-origin.
     """
 
     name = "finnhub_official_results_discovery"
@@ -132,21 +251,25 @@ class FinnhubOfficialResultsProvider:
         event_id: str,
         ticker: str,
         scheduled_date: date,
+        market: str,
         company_name: str | None = None,
         api_key: str | None = None,
         timeout_seconds: float = 15.0,
         http_get: Callable[..., Any] | None = None,
+        host_resolver: Callable[[str], tuple[str, ...]] | None = None,
     ) -> None:
         self.event_id = event_id.strip()
         self.ticker = ticker.strip().upper()
+        self.market = market.strip().upper()
         self.company_name = (company_name or "").strip()
         self.scheduled_date = scheduled_date
         self.api_key = (api_key or os.environ.get("FINNHUB_API_KEY") or "").strip()
         self.timeout_seconds = timeout_seconds
         self._http_get = http_get or requests.get
+        self._host_resolver = host_resolver or _default_host_resolver
         self._no_release_reason: str | None = None
-        if not self.event_id or not self.ticker:
-            raise ValueError("global release discovery requires event_id and ticker")
+        if not self.event_id or not self.ticker or not self.market:
+            raise ValueError("global release discovery requires event_id, ticker and market")
         if not self.api_key:
             raise ValueError("FINNHUB_API_KEY is required for global release discovery")
 
@@ -160,7 +283,7 @@ class FinnhubOfficialResultsProvider:
 
         homepage = self._company_homepage()
         if homepage is None:
-            self._no_release_reason = "global discovery could not resolve a unique official HTTPS company website"
+            self._no_release_reason = "global discovery could not resolve a verified public HTTPS company website"
             return None
 
         homepage_html, served_homepage = self._fetch_html(homepage, homepage)
@@ -202,15 +325,15 @@ class FinnhubOfficialResultsProvider:
         return document
 
     def _company_homepage(self) -> str | None:
-        direct = self._profile_homepage(self.ticker)
+        direct = self._profile_homepage(self.ticker, require_issuer_match=bool(self.company_name))
         if direct is not None:
             return direct
-        alternate = self._unique_finnhub_symbol()
+        alternate = self._unique_verified_finnhub_symbol()
         if alternate is None or alternate == self.ticker:
             return None
-        return self._profile_homepage(alternate)
+        return self._profile_homepage(alternate, require_issuer_match=True)
 
-    def _profile_homepage(self, symbol: str) -> str | None:
+    def _profile_homepage(self, symbol: str, *, require_issuer_match: bool) -> str | None:
         payload = self._get_json(
             _PROFILE_URL,
             params={"symbol": symbol, "token": self.api_key},
@@ -218,9 +341,20 @@ class FinnhubOfficialResultsProvider:
         )
         if not isinstance(payload, dict):
             raise RuntimeError("Finnhub company profile returned unexpected shape")
-        return _canonical_https_homepage(payload.get("weburl"))
+        if require_issuer_match and not _issuer_matches(
+            self.company_name,
+            str(payload.get("name") or ""),
+        ):
+            return None
+        homepage = _canonical_https_homepage(payload.get("weburl"))
+        if homepage is None:
+            return None
+        hostname = urlparse(homepage).hostname or ""
+        return homepage if _host_resolves_publicly(hostname, self._host_resolver) else None
 
-    def _unique_finnhub_symbol(self) -> str | None:
+    def _unique_verified_finnhub_symbol(self) -> str | None:
+        if not self.company_name or self.market not in _MARKET_SUFFIXES:
+            return None
         root = _ticker_root(self.ticker)
         payload = self._get_json(
             _SEARCH_URL,
@@ -238,6 +372,10 @@ class FinnhubOfficialResultsProvider:
             if isinstance(row, dict)
             and str(row.get("symbol") or "").strip()
             and _ticker_root(str(row.get("symbol") or "")) == root
+            and _symbol_matches_market(str(row.get("symbol") or ""), self.market)
+            and _issuer_matches(self.company_name, str(row.get("description") or ""))
+            and str(row.get("type") or "").strip().lower()
+            in {"common stock", "equity", "stock"}
         }
         return next(iter(matches)) if len(matches) == 1 else None
 
@@ -258,6 +396,9 @@ class FinnhubOfficialResultsProvider:
             raise RuntimeError(f"Finnhub {operation} returned invalid JSON") from exc
 
     def _fetch_html(self, homepage: str, url: str) -> tuple[str, str]:
+        hostname = urlparse(url).hostname or ""
+        if not _host_resolves_publicly(hostname, self._host_resolver):
+            raise RuntimeError("global release discovery refused a non-public HTTPS origin")
         source = OfficialReleaseSource(
             event_id=self.event_id,
             source_kind="results_page",
@@ -266,6 +407,9 @@ class FinnhubOfficialResultsProvider:
         )
         fetcher = ApprovedOriginDocumentFetcher(source, timeout_seconds=self.timeout_seconds)
         data, content_type, http_charset, served_url = fetcher._fetch_resource(url)
+        served_hostname = urlparse(served_url).hostname or ""
+        if not _host_resolves_publicly(served_hostname, self._host_resolver):
+            raise RuntimeError("global release discovery redirect resolved to a non-public origin")
         media_type = fetcher._media_type(content_type)
         if media_type not in {"", "text/html", "application/xhtml+xml"} or not fetcher._looks_like_html_or_text(
             content_type, data
