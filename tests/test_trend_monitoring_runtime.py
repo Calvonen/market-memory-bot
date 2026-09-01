@@ -117,6 +117,19 @@ class TrendMonitoringRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(self.add_ready(runtime, valid))
         self.assertEqual(runtime._states["tracked-1"].completed_bars, 1)
 
+    def test_non_finite_float_close_is_rejected_before_state_mutates(self):
+        runtime = TrendMonitoringRuntime()
+        valid = self.candle(0, close=100)
+        huge = Decimal("1e10000")
+        invalid = replace(valid, open=huge, high=huge, low=huge, close=huge)
+
+        with self.assertRaisesRegex(ValueError, "finite and positive"):
+            self.add_ready(runtime, invalid)
+
+        self.assertNotIn("tracked-1", runtime._states)
+        self.assertIsNotNone(self.add_ready(runtime, valid))
+        self.assertEqual(runtime._states["tracked-1"].completed_bars, 1)
+
     def test_disabled_profile_cannot_emit_directional_ready_state(self):
         runtime = TrendMonitoringRuntime()
         for index in range(204):
