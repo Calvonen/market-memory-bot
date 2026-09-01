@@ -198,12 +198,21 @@ export default function HomeScreen() {
         ),
     );
     const candidateIds = candidates.map((event) => event.event_id);
+    const loadingState = Object.fromEntries(
+      candidateIds.map((eventId) => [eventId, 'loading' as TrackedActivityState]),
+    );
     if (candidateIds.length === 0) return;
 
     let active = true;
-    void getTrackedEventActivities(candidateIds)
+    void Promise.resolve()
+      .then(() => {
+        if (!active) return null;
+        setTrackedActivityError(null);
+        setTrackedActivityByEventId(loadingState);
+        return getTrackedEventActivities(candidateIds);
+      })
       .then((activityByOccurrenceId) => {
-        if (!active) return;
+        if (!active || !activityByOccurrenceId) return;
         setTrackedActivityError(null);
         setTrackedActivityByEventId(
           Object.fromEntries(
