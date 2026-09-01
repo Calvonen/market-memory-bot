@@ -39,7 +39,7 @@ class MobileHomeCompanySearchTests(unittest.TestCase):
             self.source,
         )
         self.assertIn(
-            "if (!trackedStateReady || addingTicker || isTickerTracked(result.ticker)) return;",
+            "if (!trackedStateReady || addInFlight.current || isTickerTracked(result.ticker)) return;",
             self.source,
         )
         self.assertIn(
@@ -47,6 +47,16 @@ class MobileHomeCompanySearchTests(unittest.TestCase):
             self.source,
         )
         self.assertNotIn("...(current ?? []).filter", self.source)
+
+    def test_add_uses_synchronous_in_flight_mutex_before_post(self) -> None:
+        self.assertIn("const addInFlight = useRef(false);", self.source)
+        guard = self.source.index("if (!trackedStateReady || addInFlight.current")
+        lock = self.source.index("addInFlight.current = true;", guard)
+        post = self.source.index("const saved = await trackInstrument(", lock)
+        unlock = self.source.index("addInFlight.current = false;", post)
+        self.assertLess(guard, lock)
+        self.assertLess(lock, post)
+        self.assertLess(post, unlock)
 
     def test_search_market_mapping_matches_existing_scanner_countries(self) -> None:
         self.assertIn("if (ticker.endsWith('.HE')) return 'Finland';", self.source)
