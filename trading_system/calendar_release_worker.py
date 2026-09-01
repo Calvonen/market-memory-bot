@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any, Callable
 
 from trading_system.ai_event_analyzer import EventAnalyzer, build_default_event_analyzer
+from trading_system.global_release_discovery import FinnhubOfficialResultsProvider
 from trading_system.manual_release_ingestion import ManualOfficialReleaseProvider
 from trading_system.models import EventExpectation
 from trading_system.official_release_source_repository import (
@@ -290,17 +291,25 @@ def _default_automatic_release_provider(
 ) -> Any | None:
     """Return the best built-in automatic provider for this target.
 
-    The calendar worker itself is deliberately market-neutral. SEC is only one
-    automatic adapter and is selected here for the markets it can authoritatively
-    cover. Other automatic discovery adapters can be composed behind the same
-    factory without changing canonical workflow orchestration.
+    SEC remains the authoritative built-in adapter for US markets. Other
+    markets use Finnhub only to resolve the company's own website; discovery
+    then remains on that HTTPS origin and delegates release selection to the
+    existing fail-closed results-page provider.
     """
     normalized_market = target.market.strip().upper()
-    if normalized_market not in US_MARKET_LABELS:
+    if normalized_market in US_MARKET_LABELS:
+        return SecEdgarResultsProvider(
+            ticker=target.ticker,
+            scheduled_date=target.scheduled_date,
+        )
+    finnhub_api_key = os.environ.get("FINNHUB_API_KEY", "").strip()
+    if not finnhub_api_key:
         return None
-    return SecEdgarResultsProvider(
+    return FinnhubOfficialResultsProvider(
+        event_id=target.event_id,
         ticker=target.ticker,
         scheduled_date=target.scheduled_date,
+        api_key=finnhub_api_key,
     )
 
 
