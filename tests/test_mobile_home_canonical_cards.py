@@ -91,6 +91,16 @@ def test_activity_batch_waits_for_snapshot_and_updates_state_by_batch():
     assert "getTrackedEventActivity(trackedEventId)" not in source
 
 
+def test_activity_error_clears_when_snapshot_leaves_no_candidates():
+    source = HOME_SOURCE.read_text(encoding="utf-8")
+
+    zero_candidate_start = source.index("if (candidateIds.length === 0) {")
+    lookup_start = source.index("void Promise.resolve()", zero_candidate_start + 1)
+    zero_candidate_block = source[zero_candidate_start:lookup_start]
+    assert "setTrackedActivityError(null);" in zero_candidate_block
+    assert "setTrackedActivityByEventId({});" in zero_candidate_block
+
+
 def test_calendar_backed_loaded_event_stays_on_merged_expectation_card():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
