@@ -1,6 +1,7 @@
 import ast
 import unittest
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from trading_system.trend_monitoring_contract import (
     TREND_CANDLE_INTERVAL,
@@ -149,6 +150,38 @@ class TrendMonitoringContractTests(unittest.TestCase):
         self.assertEqual(after_gap.pending_count, 1)
         self.assertFalse(after_gap.changed)
 
+    def test_dst_wall_clock_sequence_is_checked_in_utc(self):
+        helsinki = ZoneInfo("Europe/Helsinki")
+        first_at = datetime(2026, 10, 25, 2, 45, tzinfo=helsinki)
+        second_at = datetime(2026, 10, 25, 3, 0, tzinfo=helsinki, fold=0)
+        third_at = datetime(2026, 10, 25, 3, 15, tzinfo=helsinki, fold=1)
+
+        first = apply_trend_confirmation(
+            current_state=TrendState.NEUTRAL,
+            observation=evaluate_trend(self.ready_snapshot(candle_closed_at=first_at)),
+        )
+        second = apply_trend_confirmation(
+            current_state=first.state,
+            observation=evaluate_trend(self.ready_snapshot(candle_closed_at=second_at)),
+            pending_candidate=first.pending_candidate,
+            pending_count=first.pending_count,
+            pending_last_candle_at=first.pending_last_candle_at,
+            last_processed_candle_at=first.last_processed_candle_at,
+        )
+        third = apply_trend_confirmation(
+            current_state=second.state,
+            observation=evaluate_trend(self.ready_snapshot(candle_closed_at=third_at)),
+            pending_candidate=second.pending_candidate,
+            pending_count=second.pending_count,
+            pending_last_candle_at=second.pending_last_candle_at,
+            last_processed_candle_at=second.last_processed_candle_at,
+        )
+
+        self.assertFalse(third.changed)
+        self.assertEqual(third.state, TrendState.NEUTRAL)
+        self.assertEqual(third.pending_count, 1)
+        self.assertEqual(third.pending_last_candle_at.tzinfo, UTC)
+
     def test_unknown_breaks_pending_confirmation_without_erasing_known_state(self):
         candle_at = datetime(2026, 9, 1, 12, 30, tzinfo=UTC)
         unknown = evaluate_trend(self.ready_snapshot(candle_closed=False, candle_closed_at=candle_at))
@@ -182,6 +215,7 @@ class TrendMonitoringContractTests(unittest.TestCase):
             "trading_system.risk",
             "trading_system.paper",
             "trading_system.broker",
+            "trading_system.brokers",
             "trading_system.tracked_event",
         )
         self.assertFalse(
