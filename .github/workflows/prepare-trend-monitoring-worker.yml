@@ -76,18 +76,39 @@ jobs:
           }
 
           verify_worker_quiescent() {
-            LOAD_STATE="$(/usr/bin/systemctl show "$SERVICE" --property=LoadState --value 2>/dev/null || true)"
-            if [ -z "$LOAD_STATE" ] || [ "$LOAD_STATE" = "not-found" ]; then
+            if ! LOAD_STATE="$(/usr/bin/systemctl show "$SERVICE" --property=LoadState --value 2>&1)"; then
+              echo "::error::Could not inspect $SERVICE LoadState: ${LOAD_STATE:-unknown error}."
+              return 1
+            fi
+
+            if ! JOBS_OUTPUT="$(/usr/bin/systemctl list-jobs --no-legend --plain 2>&1)"; then
+              echo "::error::Could not inspect queued systemd jobs: ${JOBS_OUTPUT:-unknown error}."
+              return 1
+            fi
+            if printf '%s\n' "$JOBS_OUTPUT" \
+              | grep -Eq '^[[:space:]]*[0-9]+[[:space:]]+marketai-trend-monitoring\.service[[:space:]]'; then
+              echo "::error::$SERVICE has a queued systemd job; refusing readiness mutation."
+              return 1
+            fi
+
+            if [ "$LOAD_STATE" = "not-found" ]; then
               return 0
             fi
             if [ "$LOAD_STATE" != "loaded" ]; then
-              echo "::error::$SERVICE has unexpected LoadState=${LOAD_STATE}."
+              echo "::error::$SERVICE has unexpected LoadState=${LOAD_STATE:-unknown}."
               return 1
             fi
-            ACTIVE_STATE="$(/usr/bin/systemctl show "$SERVICE" --property=ActiveState --value)"
-            SUB_STATE="$(/usr/bin/systemctl show "$SERVICE" --property=SubState --value)"
+
+            if ! ACTIVE_STATE="$(/usr/bin/systemctl show "$SERVICE" --property=ActiveState --value 2>&1)"; then
+              echo "::error::Could not inspect $SERVICE ActiveState: ${ACTIVE_STATE:-unknown error}."
+              return 1
+            fi
+            if ! SUB_STATE="$(/usr/bin/systemctl show "$SERVICE" --property=SubState --value 2>&1)"; then
+              echo "::error::Could not inspect $SERVICE SubState: ${SUB_STATE:-unknown error}."
+              return 1
+            fi
             if [ "$ACTIVE_STATE" != "inactive" ] || [ "$SUB_STATE" != "dead" ]; then
-              echo "::error::$SERVICE is not inactive/dead (ActiveState=${ACTIVE_STATE}, SubState=${SUB_STATE})."
+              echo "::error::$SERVICE is not inactive/dead (ActiveState=${ACTIVE_STATE:-unknown}, SubState=${SUB_STATE:-unknown})."
               return 1
             fi
           }
@@ -124,10 +145,21 @@ jobs:
           tracked = SupabaseTrackedInstrumentRegistry.from_env()
           profiles = SupabaseTrackedInstrumentProfileRegistry.from_env()
 
-          # Read-only schema/credential probes. No stream is opened and no observation,
-          # event, strategy, risk, broker or trade state is written.
-          tracked.client.table("tracked_instruments").select("id").limit(1).execute()
-          profiles.client.table("tracked_instrument_profiles").select("id").limit(1).execute()
+          # Exercise the same read-only runtime interfaces used by canonical Trend
+          # target selection so missing/inaccessible runtime-required columns fail here.
+          active_records = tracked.list_active()
+          active_ids = [record.id for record in active_records]
+          for offset in range(0, len(active_ids), 50):
+              profiles.list_for_instruments(active_ids[offset : offset + 50])
+
+          # If production currently has no active instruments, there is no ID with
+          # which to call the profile batch interface. Still validate all fields the
+          # runtime profile reader requires without writing any state.
+          if not active_ids:
+              profiles.client.table("tracked_instrument_profiles").select(
+                  "id,tracked_instrument_id,profile_type,specs,enabled,created_by,updated_by,created_at,updated_at"
+              ).limit(1).execute()
+
           print("Trend monitoring readiness checks passed")
           PY
           PREFLIGHT
@@ -139,7 +171,10 @@ jobs:
             "$RUNTIME_DIR/deploy/systemd/marketai-trend-monitoring.service" \
             /etc/systemd/system/marketai-trend-monitoring.service
           sudo /usr/bin/systemctl daemon-reload
-          sudo /usr/bin/systemctl disable "$SERVICE"
+          if ! sudo /usr/bin/systemctl disable "$SERVICE"; then
+            echo "::error::Failed to disable $SERVICE."
+            exit 1
+          fi
 
           ENABLED_STATE="$(/usr/bin/systemctl is-enabled "$SERVICE" 2>/dev/null || true)"
           if [ "$ENABLED_STATE" != "disabled" ]; then
