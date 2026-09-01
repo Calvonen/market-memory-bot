@@ -4,6 +4,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, timedelta
 from decimal import Decimal
+from math import isfinite
 
 from trading_system.tracked_candle_pipeline import TrackedMarketCandle
 from trading_system.trend_monitoring_contract import (
@@ -97,8 +98,8 @@ class TrendMonitoringRuntime:
     @staticmethod
     def _update_indicators(state: _TrendIndicatorState, close: Decimal) -> None:
         value = float(close)
-        if value <= 0:
-            raise ValueError("trend candle close must be positive")
+        if not isfinite(value) or value <= 0:
+            raise ValueError("trend candle close must be finite and positive")
 
         state.completed_bars += 1
         if state.completed_bars <= TREND_SLOW_EMA_PERIOD:
@@ -152,6 +153,9 @@ class TrendMonitoringRuntime:
         if candle.start.tzinfo is None or candle.start.utcoffset() is None:
             raise ValueError("trend candle start must be timezone-aware")
         candle_start = candle.start.astimezone(UTC)
+        close = float(candle.close)
+        if not isfinite(close) or close <= 0:
+            raise ValueError("trend candle close must be finite and positive")
 
         state = self._state_for(candle)
         if state.last_candle is not None:
@@ -175,7 +179,6 @@ class TrendMonitoringRuntime:
             and state.ema_slow is not None
             and len(state.ema_fast_history) == 5
         )
-        close = float(candle.close)
         observation = evaluate_trend(
             TrendEvaluationInput(
                 close=close,
