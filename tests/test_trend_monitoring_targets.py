@@ -18,10 +18,13 @@ class _ProfileReader:
     def __init__(self, profiles):
         self.profiles = profiles
         self.requested_ids = None
+        self.requested_batches = []
 
     def list_for_instruments(self, tracked_instrument_ids):
-        self.requested_ids = list(tracked_instrument_ids)
-        return self.profiles
+        batch = list(tracked_instrument_ids)
+        self.requested_ids = batch
+        self.requested_batches.append(batch)
+        return {identifier: self.profiles[identifier] for identifier in batch if identifier in self.profiles}
 
 
 class _Resolver:
@@ -108,13 +111,37 @@ class TrendMonitoringTargetsTests(unittest.TestCase):
                 _Resolver({}),
             )
 
-    def test_inactive_record_from_active_reader_fails_closed_before_monitoring(self):
+    def test_profile_reads_are_chunked_to_registry_limit(self):
+        records = [record(f"id-{index}", f"S{index}") for index in range(51)]
+        profiles = {
+            item.id: [profile(item.id, enabled=False)]
+            for item in records
+        }
+        profile_reader = _ProfileReader(profiles)
+
+        selected = select_trend_monitoring_targets(
+            _TrackedReader(records), profile_reader, _Resolver({})
+        )
+
+        self.assertEqual(selected.resolved, ())
+        self.assertEqual(selected.unresolved_tracked_instrument_ids, ())
+        self.assertEqual([len(batch) for batch in profile_reader.requested_batches], [50, 1])
+        self.assertEqual(
+            [identifier for batch in profile_reader.requested_batches for identifier in batch],
+            [item.id for item in records],
+        )
+
+    def test_inactive_record_from_active_reader_fails_before_profile_filtering(self):
+        profile_reader = _ProfileReader({"a": [profile("a", enabled=False)]})
+        resolver = _Resolver({})
         with self.assertRaisesRegex(RuntimeError, "inactive"):
             select_trend_monitoring_targets(
                 _TrackedReader([record("a", "AAA", active=False)]),
-                _ProfileReader({"a": [profile("a", enabled=True)]}),
-                _Resolver({}),
+                profile_reader,
+                resolver,
             )
+        self.assertEqual(profile_reader.requested_batches, [])
+        self.assertEqual(resolver.requests, [])
 
     def test_duplicate_resolved_etoro_identity_fails_closed(self):
         records = [record("a", "AAA"), record("b", "BBB")]
