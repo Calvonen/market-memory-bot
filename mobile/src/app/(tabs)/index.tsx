@@ -10,6 +10,7 @@ import {
   View,
 } from 'react-native';
 
+import { HomeTrackedCompaniesSection } from '@/components/HomeTrackedCompaniesSection';
 import { TrackedEventDetails, TrackedEventsSection } from '@/components/TrackedEventsSection';
 import {
   CalendarEvent,
@@ -452,6 +453,8 @@ export default function HomeScreen() {
           <Text style={styles.paperText}>PAPER</Text>
         </View>
       </View>
+
+      <HomeTrackedCompaniesSection refreshToken={trackedRefreshToken} />
 
       <Text style={styles.sectionTitle}>SEURANNASSA</Text>
 
