@@ -121,6 +121,19 @@ def test_pull_refresh_resets_canonical_state_before_loading():
     assert "setPersistentCalendarEventIds(new Set());" in refresh_body
 
 
+def test_parent_refresh_wait_is_bounded_and_reports_timeout():
+    source = HOME_SOURCE.read_text(encoding="utf-8")
+
+    assert "const PARENT_REFRESH_TIMEOUT_MS = 10_000;" in source
+    assert "return new Promise<void>((resolve) => {" in source
+    assert "const timeout = setTimeout(() => {" in source
+    assert "if (!eventsSettled)" in source
+    assert "if (!calendarSettled)" in source
+    assert "Tapahtumatietojen päivitys aikakatkaistiin. Yritä uudelleen." in source
+    assert "Kalenteritietojen päivitys aikakatkaistiin. Yritä uudelleen." in source
+    assert "Promise.all" not in source
+
+
 def test_calendar_retry_keeps_the_ready_canonical_snapshot():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
