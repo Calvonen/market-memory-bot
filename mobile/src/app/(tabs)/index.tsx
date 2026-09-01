@@ -382,10 +382,18 @@ export default function HomeScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      const token = ++nextTrackedRefreshToken.current;
+      currentTrackedRefreshToken.current = token;
+      setTrackedActivityError(null);
+      setTrackedActivityByEventId({});
+      setTrackedEventCount(null);
+      setPersistentEventIds(new Set());
+      setPersistentCalendarEventIds(new Set());
+      setPersistentStatusByCalendarEventId({});
+      setPersistentEventByCalendarEventId({});
+      setTrackedRefreshToken(token);
+
       const timer = setTimeout(() => {
-        const token = ++nextTrackedRefreshToken.current;
-        currentTrackedRefreshToken.current = token;
-        setTrackedRefreshToken(token);
         void loadEvents(true);
       }, 0);
 
