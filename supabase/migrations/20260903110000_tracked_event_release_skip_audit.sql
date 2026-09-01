@@ -150,14 +150,16 @@ grant execute on function public.record_tracked_event_release_skip(uuid, text, t
 
 -- The release-skip audit is a production dependency of the explicit skip endpoint. Extend
 -- the existing deploy gate so the application cannot start against a database
--- where this out-of-band migration has not yet been applied.
+-- where this out-of-band migration has not yet been applied. Runtime version 16
+-- is already introduced by the canonical tracked-instrument registry and must
+-- remain monotonic on fresh databases that later apply this migration.
 create or replace function public.tracked_event_runtime_schema_version()
 returns integer
 language sql
 immutable
 security invoker
 as $$
-  select 15;
+  select 16;
 $$;
 
 revoke all on function public.tracked_event_runtime_schema_version from public;
@@ -213,7 +215,7 @@ as $$
     to_regprocedure('public.capture_tracked_market_event_pre_event_context_validated(uuid,jsonb,text,text,timestamptz,timestamptz)') is not null,
     to_regprocedure('public.validate_tracked_market_event_pre_event_context_if_current(uuid,timestamptz)') is not null,
     to_regprocedure('public.fail_tracked_market_event_pre_event_deadline_if_current(uuid,timestamptz,text,text)') is not null,
-    to_regprocedure('public.fail_tracked_market_event_stale_context_if_current(uuid,timestamptz,text,text)') is not null,
+    to_regprocedure('public.fail_tracked_event_stale_context_if_current(uuid,timestamptz,text,text)') is not null,
     to_regprocedure('public.promote_calendar_event_to_tracked_runtime(uuid,text,text,text,text,date,timestamptz,text,text)') is not null,
     public.calendar_runtime_untrack_guard_version() = 1,
     to_regprocedure('public.ensure_calendar_release_shell(uuid)') is not null,
