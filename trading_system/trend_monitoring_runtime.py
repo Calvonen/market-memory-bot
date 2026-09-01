@@ -28,6 +28,13 @@ class TrendRuntimeResult:
     transition: TrendTransition
 
 
+@dataclass(frozen=True)
+class TrendRuntimeIdentity:
+    instrument: str
+    market: str
+    etoro_instrument_id: int
+
+
 @dataclass
 class _TrendIndicatorState:
     instrument: str
@@ -57,6 +64,20 @@ class TrendMonitoringRuntime:
 
     def __init__(self) -> None:
         self._states: dict[str, _TrendIndicatorState] = {}
+
+    def tracked_instrument_identity(self, tracked_instrument_id: str) -> TrendRuntimeIdentity | None:
+        """Return the immutable identity attached to existing in-memory Trend state."""
+        tracked_id = tracked_instrument_id.strip()
+        if not tracked_id:
+            raise ValueError("tracked_instrument_id is required")
+        state = self._states.get(tracked_id)
+        if state is None:
+            return None
+        return TrendRuntimeIdentity(
+            instrument=state.instrument,
+            market=state.market,
+            etoro_instrument_id=state.etoro_instrument_id,
+        )
 
     def discard_tracked_instrument(self, tracked_instrument_id: str) -> bool:
         """Forget all Trend state for one canonical tracked instrument.
