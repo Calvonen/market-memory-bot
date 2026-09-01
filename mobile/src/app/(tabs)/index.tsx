@@ -132,17 +132,20 @@ export default function HomeScreen() {
   const [error, setError] = useState<string | null>(null);
   const latestLoadId = useRef(0);
 
-  const loadEvents = useCallback(() => {
+  const loadEvents = useCallback((resetCanonical = false) => {
     const loadId = ++latestLoadId.current;
     setError(null);
     setCalendarError(null);
-    setTrackedActivityError(null);
-    setTrackedActivityByEventId({});
-    setTrackedEventCount(null);
-    setPersistentEventIds(new Set());
-    setPersistentCalendarEventIds(new Set());
-    setPersistentStatusByCalendarEventId({});
-    setPersistentEventByCalendarEventId({});
+    setCalendarEvents(null);
+    if (resetCanonical) {
+      setTrackedActivityError(null);
+      setTrackedActivityByEventId({});
+      setTrackedEventCount(null);
+      setPersistentEventIds(new Set());
+      setPersistentCalendarEventIds(new Set());
+      setPersistentStatusByCalendarEventId({});
+      setPersistentEventByCalendarEventId({});
+    }
 
     const eventsPromise = getEvents()
       .then((list) => {
@@ -330,7 +333,9 @@ export default function HomeScreen() {
   useFocusEffect(
     useCallback(() => {
       const timer = setTimeout(() => {
-        void loadEvents();
+        const token = ++nextTrackedRefreshToken.current;
+        setTrackedRefreshToken(token);
+        void loadEvents(true);
       }, 0);
 
       return () => clearTimeout(timer);
@@ -351,7 +356,7 @@ export default function HomeScreen() {
       trackedRefreshWaiters.current.set(token, resolve);
     });
     setTrackedRefreshToken(token);
-    await loadEvents();
+    await loadEvents(true);
     await trackedRefresh;
     setRefreshing(false);
   }, [loadEvents]);
@@ -452,14 +457,13 @@ export default function HomeScreen() {
         );
       })}
 
-      <View style={trackedEventCount === null ? styles.canonicalLoadingSection : undefined}>
-        <TrackedEventsSection
-          onSnapshot={handleTrackedEventSnapshot}
-          excludeCalendarEventIds={expectationCalendarEventIds}
-          refreshToken={trackedRefreshToken}
-          onRefreshSettled={handleTrackedRefreshSettled}
-        />
-      </View>
+      <TrackedEventsSection
+        key={`tracked-events:${trackedRefreshToken}`}
+        onSnapshot={handleTrackedEventSnapshot}
+        excludeCalendarEventIds={expectationCalendarEventIds}
+        refreshToken={trackedRefreshToken}
+        onRefreshSettled={handleTrackedRefreshSettled}
+      />
 
       {trackedCalendarEvents?.map((event) => (
         <CalendarEventCard key={event.calendar_event_id} event={event} />
@@ -700,9 +704,6 @@ const styles = StyleSheet.create({
   emptyText: {
     color: '#8994a6',
     fontSize: 14,
-  },
-  canonicalLoadingSection: {
-    display: 'none',
   },
   eventCard: {
     backgroundColor: '#131821',
