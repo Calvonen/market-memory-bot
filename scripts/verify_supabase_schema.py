@@ -305,10 +305,13 @@ def main() -> int:
         if not _check_value(tracked_row, key_name)
     )
     deployed_runtime_version = _check_value(tracked_row, "runtime_schema_version")
-    if deployed_runtime_version != REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION:
+    if (
+        type(deployed_runtime_version) is not int
+        or deployed_runtime_version < REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION
+    ):
         missing.append(
             "tracked-event runtime schema version "
-            f"{REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION} "
+            f"{REQUIRED_TRACKED_EVENT_RUNTIME_SCHEMA_VERSION} or newer "
             f"(deployed: {deployed_runtime_version!r})"
         )
 
