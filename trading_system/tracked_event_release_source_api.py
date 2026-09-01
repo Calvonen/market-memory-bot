@@ -4,6 +4,7 @@ import re
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Callable, Literal, Protocol
+from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -94,7 +95,7 @@ def _parse_occurrence_id(value: str) -> tuple[str, str]:
             status_code=422,
             detail="occurrence_ids must contain tracked:<uuid> or calendar:<uuid>",
         )
-    return prefix, raw_id
+    return prefix, str(UUID(raw_id))
 
 
 def build_tracked_event_release_source_router(
@@ -131,10 +132,10 @@ def build_tracked_event_release_source_router(
             for occurrence_id in canonical_ids
         }
         tracked_ids = tuple(
-            raw_id for prefix, raw_id in parsed.values() if prefix == "tracked"
+            canonical_uuid for prefix, canonical_uuid in parsed.values() if prefix == "tracked"
         )
         calendar_ids = tuple(
-            raw_id for prefix, raw_id in parsed.values() if prefix == "calendar"
+            canonical_uuid for prefix, canonical_uuid in parsed.values() if prefix == "calendar"
         )
 
         try:
@@ -158,11 +159,11 @@ def build_tracked_event_release_source_router(
         now = datetime.now(UTC)
         items: list[dict[str, object]] = []
         for occurrence_id in canonical_ids:
-            prefix, raw_id = parsed[occurrence_id]
+            prefix, canonical_uuid = parsed[occurrence_id]
             event = (
-                by_tracked_id.get(raw_id)
+                by_tracked_id.get(canonical_uuid)
                 if prefix == "tracked"
-                else by_calendar_id.get(raw_id)
+                else by_calendar_id.get(canonical_uuid)
             )
             items.append(
                 {
