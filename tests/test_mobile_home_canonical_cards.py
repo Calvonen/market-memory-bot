@@ -44,6 +44,9 @@ def test_past_omitted_shells_use_batched_canonical_activity():
 
     assert "export async function getTrackedEventActivities(" in service
     assert "TRACKED_EVENT_ACTIVITY_BATCH_SIZE = 40" in service
+    assert "TRACKED_EVENT_ACTIVITY_CONCURRENCY = 3" in service
+    assert "Math.min(TRACKED_EVENT_ACTIVITY_CONCURRENCY, batches.length)" in service
+    assert "const batchIndex = nextBatchIndex++;" in service
     assert "/api/v1/tracked-events/activity?occurrence_ids=" in service
 
     assert 'router.get("/api/v1/tracked-events/activity")' in backend
