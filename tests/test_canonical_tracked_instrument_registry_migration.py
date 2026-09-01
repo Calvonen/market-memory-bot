@@ -22,7 +22,7 @@ class CanonicalTrackedInstrumentRegistryMigrationTests(unittest.TestCase):
         cls.lower_sql = cls.sql.lower()
 
     def test_registry_has_stable_normalized_instrument_market_identity(self) -> None:
-        self.assertIn("create table public.tracked_instruments", self.lower_sql)
+        self.assertIn("create table if not exists public.tracked_instruments", self.lower_sql)
         self.assertIn("instrument_key text generated always as", self.lower_sql)
         self.assertIn("market_key text generated always as", self.lower_sql)
         self.assertIn("unique (instrument_key, market_key)", self.lower_sql)
