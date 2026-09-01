@@ -1,17 +1,35 @@
 import { useFocusEffect } from 'expo-router';
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { TrackingProfileEditor } from '@/components/tracking-profile-editor';
+import { apiGet } from '@/services/api';
 import {
   deactivateTrackedInstrument,
   getTrackedInstruments,
+  trackInstrument,
   TrackedInstrument,
 } from '@/services/tracked-instruments';
 
 const MANAGEMENT_ACTOR = 'mobile-home-tracking-management';
+const SEARCH_TRACKING_ACTOR = 'mobile-home-company-search';
+
+type SymbolSearchResult = {
+  ticker: string;
+  name: string;
+  exchange: string;
+};
 
 type Props = { refreshToken?: number };
+
+function canonicalMarketForSearchResult(result: SymbolSearchResult): string {
+  const ticker = result.ticker.trim().toUpperCase();
+  if (ticker.endsWith('.HE')) return 'Finland';
+  if (ticker.endsWith('.ST')) return 'Sweden';
+  if (ticker.endsWith('.DE')) return 'Germany';
+  if (!ticker.includes('.')) return 'USA';
+  return result.exchange.trim();
+}
 
 export function HomeTrackedCompaniesSection({ refreshToken = 0 }: Props) {
   const [instruments, setInstruments] = useState<TrackedInstrument[] | null>(null);
@@ -19,7 +37,14 @@ export function HomeTrackedCompaniesSection({ refreshToken = 0 }: Props) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [managementError, setManagementError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SymbolSearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [addingTicker, setAddingTicker] = useState<string | null>(null);
   const latestLoadId = useRef(0);
+  const latestSearchId = useRef(0);
+  const addInFlight = useRef(false);
 
   const load = useCallback(() => {
     const loadId = ++latestLoadId.current;
@@ -49,6 +74,71 @@ export function HomeTrackedCompaniesSection({ refreshToken = 0 }: Props) {
     () => (instruments ?? []).filter((item) => item.active).sort((a, b) => a.instrument.localeCompare(b.instrument)),
     [instruments],
   );
+  const trackedStateReady = instruments !== null && error === null;
+
+  function isTickerTracked(ticker: string): boolean {
+    const normalizedTicker = ticker.trim().toUpperCase();
+    return activeInstruments.some((item) => item.instrument.trim().toUpperCase() === normalizedTicker);
+  }
+
+  function changeSearchQuery(value: string) {
+    latestSearchId.current += 1;
+    setSearchQuery(value);
+    setSearchResults([]);
+    setSearchError(null);
+    setSearching(false);
+  }
+
+  async function searchCompanies() {
+    const query = searchQuery.trim();
+    const searchId = ++latestSearchId.current;
+    setSearchError(null);
+    setSearchResults([]);
+    if (!query) return;
+
+    setSearching(true);
+    try {
+      const results = await apiGet<SymbolSearchResult[]>(
+        `/api/v1/symbols?q=${encodeURIComponent(query)}&limit=8`,
+      );
+      if (searchId !== latestSearchId.current) return;
+      setSearchResults(results);
+    } catch (err) {
+      if (searchId !== latestSearchId.current) return;
+      setSearchError(err instanceof Error ? err.message : 'Yhtiöhaku epäonnistui.');
+    } finally {
+      if (searchId === latestSearchId.current) setSearching(false);
+    }
+  }
+
+  async function addSearchResult(result: SymbolSearchResult) {
+    if (!trackedStateReady || addInFlight.current || isTickerTracked(result.ticker)) return;
+    const ticker = result.ticker.trim().toUpperCase();
+    addInFlight.current = true;
+    setAddingTicker(ticker);
+    setSearchError(null);
+    try {
+      const saved = await trackInstrument(
+        {
+          instrument: ticker,
+          company_name: result.name,
+          market: canonicalMarketForSearchResult(result),
+          source: 'manual',
+        },
+        SEARCH_TRACKING_ACTOR,
+      );
+      // Reconcile from the canonical registry instead of constructing a local
+      // list from a snapshot that may have been invalidated by a concurrent refresh.
+      latestLoadId.current += 1;
+      await load();
+      setExpandedId(saved.id);
+    } catch (err) {
+      setSearchError(err instanceof Error ? err.message : 'Yhtiön lisääminen seurantaan epäonnistui.');
+    } finally {
+      addInFlight.current = false;
+      setAddingTicker(null);
+    }
+  }
 
   async function remove(instrument: TrackedInstrument) {
     if (removingId) return;
@@ -84,6 +174,56 @@ export function HomeTrackedCompaniesSection({ refreshToken = 0 }: Props) {
   return (
     <View style={styles.section}>
       <Text style={styles.sectionTitle}>SEURATUT YHTIÖT</Text>
+
+      <View style={styles.searchCard}>
+        <Text style={styles.searchHeading}>Lisää yhtiö</Text>
+        <TextInput
+          value={searchQuery}
+          onChangeText={changeSearchQuery}
+          onSubmitEditing={() => void searchCompanies()}
+          placeholder="Hae nimellä tai tickerillä"
+          placeholderTextColor="#687386"
+          autoCapitalize="none"
+          returnKeyType="search"
+          style={styles.searchInput}
+        />
+        <Pressable
+          accessibilityRole="button"
+          disabled={searching || !searchQuery.trim()}
+          onPress={() => void searchCompanies()}
+          style={styles.searchButton}>
+          <Text style={styles.searchButtonText}>{searching ? 'Haetaan…' : 'Hae yhtiö'}</Text>
+        </Pressable>
+        {searching ? <ActivityIndicator color="#8a96a8" style={styles.searchLoader} /> : null}
+        {searchError ? <Text style={styles.errorText}>{searchError}</Text> : null}
+        {!searching && !searchError && searchResults.length === 0 && searchQuery.trim() ? (
+          <Text style={styles.searchHint}>Kirjoita nimi tai ticker ja paina Hae yhtiö.</Text>
+        ) : null}
+        {searchResults.map((result) => {
+          const tracked = isTickerTracked(result.ticker);
+          const adding = addingTicker === result.ticker.trim().toUpperCase();
+          return (
+            <View key={`${result.ticker}:${result.exchange}`} style={styles.searchResult}>
+              <View style={styles.titleBlock}>
+                <Text style={styles.company} numberOfLines={1}>{result.name || result.ticker}</Text>
+                <Text style={styles.symbol}>
+                  {result.ticker}{result.exchange ? ` · ${result.exchange}` : ''}
+                </Text>
+              </View>
+              <Pressable
+                accessibilityRole="button"
+                disabled={!trackedStateReady || adding || tracked}
+                onPress={() => void addSearchResult(result)}
+                style={styles.addButton}>
+                <Text style={styles.addButtonText}>
+                  {!trackedStateReady ? 'Odotetaan…' : adding ? 'Lisätään…' : tracked ? 'Seurannassa' : 'Lisää'}
+                </Text>
+              </Pressable>
+            </View>
+          );
+        })}
+      </View>
+
       {!instruments && !error ? <ActivityIndicator color="#8a96a8" style={styles.loader} /> : null}
       {error ? (
         <View style={styles.errorCard}>
@@ -130,6 +270,16 @@ const styles = StyleSheet.create({
   section: { marginBottom: 24 },
   sectionTitle: { color: '#687386', fontSize: 11, fontWeight: '800', letterSpacing: 1.4, marginBottom: 11, marginLeft: 3 },
   loader: { marginVertical: 16 },
+  searchCard: { backgroundColor: '#10151d', borderWidth: 1, borderColor: '#202734', borderRadius: 16, padding: 14, marginBottom: 12 },
+  searchHeading: { color: '#f4f7fb', fontSize: 15, fontWeight: '700', marginBottom: 9 },
+  searchInput: { color: '#f4f7fb', backgroundColor: '#131821', borderWidth: 1, borderColor: '#293140', borderRadius: 12, paddingHorizontal: 13, paddingVertical: 11, fontSize: 15 },
+  searchButton: { backgroundColor: '#1e5f86', borderRadius: 12, paddingVertical: 10, alignItems: 'center', marginTop: 9 },
+  searchButtonText: { color: '#eef8ff', fontSize: 13, fontWeight: '800' },
+  searchLoader: { marginTop: 10 },
+  searchHint: { color: '#687386', fontSize: 12, marginTop: 10 },
+  searchResult: { flexDirection: 'row', alignItems: 'center', gap: 10, borderTopWidth: 1, borderTopColor: '#202734', paddingTop: 11, marginTop: 11 },
+  addButton: { backgroundColor: '#172a36', borderWidth: 1, borderColor: '#28546b', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 },
+  addButtonText: { color: '#72b8db', fontSize: 12, fontWeight: '800' },
   companyCard: { backgroundColor: '#131821', borderWidth: 1, borderColor: '#202734', borderRadius: 16, padding: 16, marginBottom: 10 },
   companyHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   titleBlock: { flex: 1, paddingRight: 12 },
@@ -144,7 +294,7 @@ const styles = StyleSheet.create({
   emptyCard: { backgroundColor: '#131821', borderWidth: 1, borderColor: '#202734', borderRadius: 16, padding: 18 },
   emptyText: { color: '#8994a6', fontSize: 14 },
   errorCard: { backgroundColor: '#1c1417', borderWidth: 1, borderColor: '#3a2226', borderRadius: 16, padding: 16 },
-  errorText: { color: '#e17878', fontSize: 13, marginBottom: 10 },
+  errorText: { color: '#e17878', fontSize: 13, marginTop: 10 },
   retryButton: { alignSelf: 'flex-start', backgroundColor: '#2a1b1e', borderWidth: 1, borderColor: '#4a2b30', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 8, marginTop: 12 },
   retryButtonText: { color: '#e17878', fontSize: 12, fontWeight: '800' },
 });
