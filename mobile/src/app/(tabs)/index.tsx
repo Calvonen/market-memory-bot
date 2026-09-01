@@ -137,13 +137,18 @@ export default function HomeScreen() {
     setError(null);
     setCalendarError(null);
     setTrackedActivityError(null);
+    setTrackedActivityByEventId({});
+    setTrackedEventCount(null);
+    setPersistentEventIds(new Set());
+    setPersistentCalendarEventIds(new Set());
+    setPersistentStatusByCalendarEventId({});
+    setPersistentEventByCalendarEventId({});
 
     const eventsPromise = getEvents()
       .then((list) => {
         if (loadId !== latestLoadId.current) return;
         setEvents(list);
         setStatuses({});
-        setTrackedActivityByEventId({});
 
         list.forEach((event) => {
           getPaperStatus(event.event_id)
@@ -302,7 +307,10 @@ export default function HomeScreen() {
       if (persistentCalendarEventIds.has(event.calendar_event_id)) return false;
       const canonicalOccurrenceId = `calendar:${event.calendar_event_id}`;
       const canonicalActivity = trackedActivityByEventId[canonicalOccurrenceId];
-      if (expectationIds.has(canonicalOccurrenceId) && (!canonicalActivity || canonicalActivity === 'loading')) {
+      if (
+        expectationIds.has(canonicalOccurrenceId) &&
+        (!canonicalActivity || canonicalActivity === 'loading')
+      ) {
         return false;
       }
       if (canonicalActivity === 'inactive') return false;
@@ -444,12 +452,14 @@ export default function HomeScreen() {
         );
       })}
 
-      <TrackedEventsSection
-        onSnapshot={handleTrackedEventSnapshot}
-        excludeCalendarEventIds={expectationCalendarEventIds}
-        refreshToken={trackedRefreshToken}
-        onRefreshSettled={handleTrackedRefreshSettled}
-      />
+      <View style={trackedEventCount === null ? styles.canonicalLoadingSection : undefined}>
+        <TrackedEventsSection
+          onSnapshot={handleTrackedEventSnapshot}
+          excludeCalendarEventIds={expectationCalendarEventIds}
+          refreshToken={trackedRefreshToken}
+          onRefreshSettled={handleTrackedRefreshSettled}
+        />
+      </View>
 
       {trackedCalendarEvents?.map((event) => (
         <CalendarEventCard key={event.calendar_event_id} event={event} />
@@ -690,6 +700,9 @@ const styles = StyleSheet.create({
   emptyText: {
     color: '#8994a6',
     fontSize: 14,
+  },
+  canonicalLoadingSection: {
+    display: 'none',
   },
   eventCard: {
     backgroundColor: '#131821',
