@@ -63,7 +63,6 @@ class CalendarReleaseWorkerProviderRoutingTests(unittest.TestCase):
 
         with patch("trading_system.calendar_release_worker.EventReleaseMonitor") as monitor_type:
             monitor_type.return_value.run_once.return_value = IngestionResult(
-                event_id=EVENT_ID,
                 status="no_release",
                 message=None,
             )
@@ -86,7 +85,7 @@ class CalendarReleaseWorkerProviderRoutingTests(unittest.TestCase):
         self.assertIs(monitor_type.call_args.kwargs["provider"], provider)
         releases.record_run.assert_not_called()
 
-    def test_missing_provider_still_fails_closed(self):
+    def test_missing_provider_still_fails_closed_with_market_neutral_reason(self):
         releases = MagicMock()
         releases.has_analysis_for_event_version.return_value = False
         releases.latest_run.return_value = None
@@ -105,8 +104,20 @@ class CalendarReleaseWorkerProviderRoutingTests(unittest.TestCase):
             )
 
         self.assertEqual(results[0].status, "missing_official_source")
+        self.assertEqual(
+            results[0].message,
+            "no approved official release source and no automatic release provider resolved",
+        )
         monitor_type.assert_not_called()
-        releases.record_run.assert_called_once()
+        releases.record_run.assert_called_once_with(
+            event_id=EVENT_ID,
+            provider="canonical_release_worker",
+            status="error",
+            error_message=(
+                "action_required: no approved official release source and no automatic "
+                "release provider resolved"
+            ),
+        )
 
 
 if __name__ == "__main__":
