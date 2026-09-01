@@ -60,7 +60,12 @@ as $$
   select 2;
 $$;
 
-create or replace function public.verify_tracked_instrument_registry_schema()
+-- The verifier gains one output column in v2. PostgreSQL cannot change a
+-- function's TABLE return shape with CREATE OR REPLACE, so replace the verifier
+-- explicitly inside this migration transaction.
+drop function if exists public.verify_tracked_instrument_registry_schema();
+
+create function public.verify_tracked_instrument_registry_schema()
 returns table (
   tracked_instruments_table_exists boolean,
   upsert_tracked_instrument_function_exists boolean,
