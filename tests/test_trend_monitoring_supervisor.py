@@ -66,6 +66,24 @@ class TrendMonitoringSupervisorTests(unittest.TestCase):
         self.assertEqual(second.discarded_runtime_state_ids, ())
         self.assertIs(supervisor.targets, current)
 
+    def test_first_refresh_discards_preexisting_incompatible_runtime_state(self):
+        runtime = TrendMonitoringRuntime()
+        stale = target("a", 101)
+        current = replace(stale, etoro_instrument_id=999, etoro_symbol="AAA.NEW")
+        seed_runtime(runtime, stale)
+        supervisor = TrendMonitoringSupervisor(
+            select_targets=lambda: snapshot(current),
+            runtime=runtime,
+        )
+
+        refreshed = supervisor.refresh()
+
+        self.assertTrue(refreshed.restart_required)
+        self.assertEqual(refreshed.discarded_runtime_state_ids, ("a",))
+        self.assertIsNone(runtime.tracked_instrument_identity("a"))
+        seed_runtime(runtime, current)
+        self.assertEqual(runtime.tracked_instrument_identity("a").etoro_instrument_id, 999)
+
     def test_order_only_change_does_not_restart(self):
         runtime = TrendMonitoringRuntime()
         a = target("a", 101)
