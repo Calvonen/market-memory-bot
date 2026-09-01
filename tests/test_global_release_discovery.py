@@ -6,12 +6,14 @@ from unittest.mock import MagicMock, patch
 
 from trading_system.global_release_discovery import (
     FinnhubOfficialResultsProvider,
+    _host_resolves_publicly,
     _same_origin_links,
     _select_unique_best,
 )
 
 
 EVENT_ID = "tracked:633c9941-8426-4dda-93b8-d829d0d68605"
+PUBLIC_RESOLVER = lambda _host: ("93.184.216.34",)
 
 
 class _Response:
@@ -59,16 +61,34 @@ class GlobalReleaseDiscoveryTests(unittest.TestCase):
         http_get = MagicMock(
             side_effect=[
                 _Response({}),
-                _Response({"result": [{"symbol": "SLHN.SW", "description": "Swiss Life Holding AG"}]}),
-                _Response({"weburl": "https://www.swisslife.com/"}),
+                _Response(
+                    {
+                        "result": [
+                            {
+                                "symbol": "SLHN.SW",
+                                "description": "Swiss Life Holding AG",
+                                "type": "Common Stock",
+                            }
+                        ]
+                    }
+                ),
+                _Response(
+                    {
+                        "name": "Swiss Life Holding AG",
+                        "weburl": "https://www.swisslife.com/",
+                    }
+                ),
             ]
         )
         provider = FinnhubOfficialResultsProvider(
             event_id=EVENT_ID,
             ticker="SLHN.ZU",
             scheduled_date=date(2026, 9, 1),
+            market="SWITZERLAND",
+            company_name="Swiss Life Holding AG",
             api_key="test-key",
             http_get=http_get,
+            host_resolver=PUBLIC_RESOLVER,
         )
         provider._fetch_html = MagicMock(
             side_effect=[
@@ -105,22 +125,98 @@ class GlobalReleaseDiscoveryTests(unittest.TestCase):
         )
         delegated.discover.assert_called_once_with(EVENT_ID)
 
-    def test_ambiguous_symbol_suffixes_fail_closed_before_navigation(self):
+    def test_same_root_wrong_issuer_fails_closed(self):
         provider = FinnhubOfficialResultsProvider(
             event_id=EVENT_ID,
             ticker="ABC.ZU",
             scheduled_date=date(2026, 9, 1),
+            market="SWITZERLAND",
+            company_name="Alpha Beta Corporation",
             api_key="test-key",
             http_get=MagicMock(
                 side_effect=[
                     _Response({}),
-                    _Response({"result": [{"symbol": "ABC.SW"}, {"symbol": "ABC.L"}]}),
+                    _Response(
+                        {
+                            "result": [
+                                {
+                                    "symbol": "ABC.SW",
+                                    "description": "Another Business Company AG",
+                                    "type": "Common Stock",
+                                }
+                            ]
+                        }
+                    ),
                 ]
             ),
+            host_resolver=PUBLIC_RESOLVER,
         )
         provider._fetch_html = MagicMock()
 
         self.assertIsNone(provider.discover(EVENT_ID))
+        provider._fetch_html.assert_not_called()
+
+    def test_wrong_exchange_suffix_fails_closed_even_for_matching_issuer(self):
+        provider = FinnhubOfficialResultsProvider(
+            event_id=EVENT_ID,
+            ticker="SLHN.ZU",
+            scheduled_date=date(2026, 9, 1),
+            market="SWITZERLAND",
+            company_name="Swiss Life Holding AG",
+            api_key="test-key",
+            http_get=MagicMock(
+                side_effect=[
+                    _Response({}),
+                    _Response(
+                        {
+                            "result": [
+                                {
+                                    "symbol": "SLHN.L",
+                                    "description": "Swiss Life Holding AG",
+                                    "type": "Common Stock",
+                                }
+                            ]
+                        }
+                    ),
+                ]
+            ),
+            host_resolver=PUBLIC_RESOLVER,
+        )
+        provider._fetch_html = MagicMock()
+
+        self.assertIsNone(provider.discover(EVENT_ID))
+        provider._fetch_html.assert_not_called()
+
+    def test_private_literal_and_private_dns_resolution_are_rejected(self):
+        self.assertFalse(_host_resolves_publicly("127.0.0.1", lambda _host: ("127.0.0.1",)))
+        self.assertFalse(_host_resolves_publicly("internal.example", lambda _host: ("10.1.2.3",)))
+        self.assertTrue(_host_resolves_publicly("public.example", PUBLIC_RESOLVER))
+
+    def test_private_profile_website_fails_closed_before_navigation(self):
+        provider = FinnhubOfficialResultsProvider(
+            event_id=EVENT_ID,
+            ticker="SLHN.ZU",
+            scheduled_date=date(2026, 9, 1),
+            market="SWITZERLAND",
+            company_name="Swiss Life Holding AG",
+            api_key="test-key",
+            http_get=MagicMock(
+                side_effect=[
+                    _Response(
+                        {
+                            "name": "Swiss Life Holding AG",
+                            "weburl": "https://internal.example/",
+                        }
+                    ),
+                    _Response({"result": []}),
+                ]
+            ),
+            host_resolver=lambda _host: ("10.0.0.5",),
+        )
+        provider._fetch_html = MagicMock()
+
+        self.assertIsNone(provider.discover(EVENT_ID))
+        self.assertIn("public HTTPS", provider.describe_no_release() or "")
         provider._fetch_html.assert_not_called()
 
     def test_non_https_profile_website_fails_closed_without_navigation(self):
@@ -128,18 +224,26 @@ class GlobalReleaseDiscoveryTests(unittest.TestCase):
             event_id=EVENT_ID,
             ticker="SLHN.ZU",
             scheduled_date=date(2026, 9, 1),
+            market="SWITZERLAND",
+            company_name="Swiss Life Holding AG",
             api_key="test-key",
             http_get=MagicMock(
                 side_effect=[
-                    _Response({"weburl": "http://www.swisslife.com/"}),
+                    _Response(
+                        {
+                            "name": "Swiss Life Holding AG",
+                            "weburl": "http://www.swisslife.com/",
+                        }
+                    ),
                     _Response({"result": []}),
                 ]
             ),
+            host_resolver=PUBLIC_RESOLVER,
         )
         provider._fetch_html = MagicMock()
 
         self.assertIsNone(provider.discover(EVENT_ID))
-        self.assertIn("official HTTPS company website", provider.describe_no_release() or "")
+        self.assertIn("public HTTPS", provider.describe_no_release() or "")
         provider._fetch_html.assert_not_called()
 
 
