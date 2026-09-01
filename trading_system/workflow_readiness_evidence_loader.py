@@ -148,14 +148,20 @@ class SupabaseWorkflowReadinessEvidenceLoader:
     def _latest_release_document(self, release_event_id: str) -> dict[str, Any] | None:
         response = (
             self.client.table("event_source_documents")
-            .select("id,created_at")
+            .select("id,fetched_at")
             .eq("event_id", release_event_id)
-            .order("created_at", desc=True)
+            .order("fetched_at", desc=True)
             .limit(1)
             .execute()
         )
         rows = response.data or []
-        return rows[0] if rows else None
+        if not rows:
+            return None
+        row = dict(rows[0])
+        # Keep one internal timestamp vocabulary for the comparison helpers.
+        # Production event_source_documents owns fetched_at, not created_at.
+        row["created_at"] = row.get("fetched_at") or row.get("created_at")
+        return row
 
     def _current_expectation_version(self, event_id: str) -> int | None:
         response = (
@@ -195,14 +201,20 @@ class SupabaseWorkflowReadinessEvidenceLoader:
     def _latest_release_run(self, event_id: str) -> dict[str, Any] | None:
         response = (
             self.client.table("event_ingestion_runs")
-            .select("provider,status,error_message,created_at")
+            .select("provider,status,error_message,checked_at")
             .eq("event_id", event_id)
-            .order("created_at", desc=True)
+            .order("checked_at", desc=True)
             .limit(1)
             .execute()
         )
         rows = response.data or []
-        return rows[0] if rows else None
+        if not rows:
+            return None
+        row = dict(rows[0])
+        # Keep one internal timestamp vocabulary for the comparison helpers.
+        # Production event_ingestion_runs owns checked_at, not created_at.
+        row["created_at"] = row.get("checked_at") or row.get("created_at")
+        return row
 
     def _tracked_release_blocker(self, tracked_event_id: str) -> bool:
         return self._tracked_release_blocker_metadata(tracked_event_id) is not None
