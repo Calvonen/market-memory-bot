@@ -72,6 +72,22 @@ def test_tracked_expectations_wait_for_canonical_snapshot_and_activity():
     assert snapshot_guard < date_guard
 
 
+def test_refresh_resets_canonical_readiness_and_hides_retained_section():
+    source = HOME_SOURCE.read_text(encoding="utf-8")
+
+    load_start = source.index("const loadEvents = useCallback(() => {")
+    get_events_start = source.index("const eventsPromise = getEvents()", load_start)
+    load_preamble = source[load_start:get_events_start]
+    assert "setTrackedActivityByEventId({});" in load_preamble
+    assert "setTrackedEventCount(null);" in load_preamble
+    assert "setPersistentEventIds(new Set());" in load_preamble
+    assert "setPersistentCalendarEventIds(new Set());" in load_preamble
+    assert "setPersistentStatusByCalendarEventId({});" in load_preamble
+    assert "setPersistentEventByCalendarEventId({});" in load_preamble
+    assert "style={trackedEventCount === null ? styles.canonicalLoadingSection : undefined}" in source
+    assert "canonicalLoadingSection: {\n    display: 'none',\n  }," in source
+
+
 def test_future_tracked_shell_checks_activity_before_date_visibility():
     source = HOME_SOURCE.read_text(encoding="utf-8")
 
