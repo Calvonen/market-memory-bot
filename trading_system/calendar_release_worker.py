@@ -35,6 +35,9 @@ RELEASE_SHELL_IDENTITY_CONFLICTS = frozenset(
 )
 ACTION_REQUIRED_PREFIX = "action_required:"
 MISSING_OFFICIAL_SOURCE_BLOCKER = (
+    "no approved official release source and no automatic release provider resolved"
+)
+LEGACY_MISSING_OFFICIAL_SOURCE_BLOCKER = (
     "earnings target outside approved us market labels requires "
     "an approved official release source"
 )
@@ -48,6 +51,9 @@ class CalendarReleaseTarget:
     scheduled_date: date
     market: str = ""
     tracked_event_id: str = ""
+
+
+AutomaticReleaseProviderFactory = Callable[[CalendarReleaseTarget], Any | None]
 
 
 class SupabaseCalendarReleaseTargetRepository:
@@ -245,7 +251,15 @@ def _is_release_shell_blocker(run: dict[str, Any] | None) -> bool:
 
 def _is_missing_official_source_blocker(run: dict[str, Any] | None) -> bool:
     message = _canonical_blocker_message(run)
-    return message is not None and MISSING_OFFICIAL_SOURCE_BLOCKER in message
+    if message is None:
+        return False
+    return any(
+        marker in message
+        for marker in (
+            MISSING_OFFICIAL_SOURCE_BLOCKER,
+            LEGACY_MISSING_OFFICIAL_SOURCE_BLOCKER,
+        )
+    )
 
 
 def _persist_canonical_validation_if_needed(
@@ -271,6 +285,25 @@ def _persist_canonical_validation_if_needed(
     )
 
 
+def _default_automatic_release_provider(
+    target: CalendarReleaseTarget,
+) -> Any | None:
+    """Return the best built-in automatic provider for this target.
+
+    The calendar worker itself is deliberately market-neutral. SEC is only one
+    automatic adapter and is selected here for the markets it can authoritatively
+    cover. Other automatic discovery adapters can be composed behind the same
+    factory without changing canonical workflow orchestration.
+    """
+    normalized_market = target.market.strip().upper()
+    if normalized_market not in US_MARKET_LABELS:
+        return None
+    return SecEdgarResultsProvider(
+        ticker=target.ticker,
+        scheduled_date=target.scheduled_date,
+    )
+
+
 def run_calendar_release_ingestion_once(
     *,
     targets: SupabaseCalendarReleaseTargetRepository,
@@ -278,6 +311,7 @@ def run_calendar_release_ingestion_once(
     releases: SupabaseReleaseRepository,
     analyzer: EventAnalyzer,
     official_sources: SupabaseOfficialReleaseSourceRepository | None = None,
+    automatic_provider_factory: AutomaticReleaseProviderFactory | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     lookahead_days: int = DEFAULT_LOOKAHEAD_DAYS,
@@ -285,6 +319,9 @@ def run_calendar_release_ingestion_once(
     today = clock().astimezone(UTC).date()
     start_date = today - timedelta(days=max(0, lookback_days))
     end_date = today + timedelta(days=max(0, lookahead_days))
+    automatic_provider_factory = (
+        automatic_provider_factory or _default_automatic_release_provider
+    )
 
     results: list[CalendarReleaseWorkerResult] = []
     for target in targets.list_targets(start_date=start_date, end_date=end_date):
@@ -389,12 +426,9 @@ def run_calendar_release_ingestion_once(
                 else:
                     provider = ManualOfficialReleaseProvider(approved_source)
             else:
-                normalized_market = target.market.strip().upper()
-                if normalized_market not in US_MARKET_LABELS:
-                    message = (
-                        "earnings target outside approved US market labels requires "
-                        "an approved official release source"
-                    )
+                provider = automatic_provider_factory(target)
+                if provider is None:
+                    message = MISSING_OFFICIAL_SOURCE_BLOCKER
                     _persist_action_required(
                         releases,
                         event_id=target.event_id,
@@ -408,10 +442,6 @@ def run_calendar_release_ingestion_once(
                         )
                     )
                     continue
-                provider = SecEdgarResultsProvider(
-                    ticker=target.ticker,
-                    scheduled_date=target.scheduled_date,
-                )
             monitor = EventReleaseMonitor(
                 expectation_repository=_PinnedExpectationRepository(
                     event_id=target.event_id,
