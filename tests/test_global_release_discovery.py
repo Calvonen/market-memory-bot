@@ -55,8 +55,14 @@ class GlobalReleaseDiscoveryTests(unittest.TestCase):
 
         self.assertIsNone(_select_unique_best(links, stage="results"))
 
-    def test_swiss_life_shaped_two_hop_discovery_delegates_to_results_provider(self):
-        http_get = MagicMock(return_value=_Response({"weburl": "https://www.swisslife.com/"}))
+    def test_swiss_life_shaped_suffix_resolution_and_two_hop_discovery(self):
+        http_get = MagicMock(
+            side_effect=[
+                _Response({}),
+                _Response({"result": [{"symbol": "SLHN.SW", "description": "Swiss Life Holding AG"}]}),
+                _Response({"weburl": "https://www.swisslife.com/"}),
+            ]
+        )
         provider = FinnhubOfficialResultsProvider(
             event_id=EVENT_ID,
             ticker="SLHN.ZU",
@@ -87,8 +93,10 @@ class GlobalReleaseDiscoveryTests(unittest.TestCase):
             result = provider.discover(EVENT_ID)
 
         self.assertIs(result, document)
-        http_get.assert_called_once()
-        self.assertEqual(http_get.call_args.kwargs["params"]["symbol"], "SLHN.ZU")
+        self.assertEqual(http_get.call_count, 3)
+        self.assertEqual(http_get.call_args_list[0].kwargs["params"]["symbol"], "SLHN.ZU")
+        self.assertEqual(http_get.call_args_list[1].kwargs["params"]["q"], "SLHN")
+        self.assertEqual(http_get.call_args_list[2].kwargs["params"]["symbol"], "SLHN.SW")
         source = for_event.call_args.args[0]
         self.assertEqual(source.source_kind, "results_page")
         self.assertEqual(
@@ -97,13 +105,36 @@ class GlobalReleaseDiscoveryTests(unittest.TestCase):
         )
         delegated.discover.assert_called_once_with(EVENT_ID)
 
+    def test_ambiguous_symbol_suffixes_fail_closed_before_navigation(self):
+        provider = FinnhubOfficialResultsProvider(
+            event_id=EVENT_ID,
+            ticker="ABC.ZU",
+            scheduled_date=date(2026, 9, 1),
+            api_key="test-key",
+            http_get=MagicMock(
+                side_effect=[
+                    _Response({}),
+                    _Response({"result": [{"symbol": "ABC.SW"}, {"symbol": "ABC.L"}]}),
+                ]
+            ),
+        )
+        provider._fetch_html = MagicMock()
+
+        self.assertIsNone(provider.discover(EVENT_ID))
+        provider._fetch_html.assert_not_called()
+
     def test_non_https_profile_website_fails_closed_without_navigation(self):
         provider = FinnhubOfficialResultsProvider(
             event_id=EVENT_ID,
             ticker="SLHN.ZU",
             scheduled_date=date(2026, 9, 1),
             api_key="test-key",
-            http_get=MagicMock(return_value=_Response({"weburl": "http://www.swisslife.com/"})),
+            http_get=MagicMock(
+                side_effect=[
+                    _Response({"weburl": "http://www.swisslife.com/"}),
+                    _Response({"result": []}),
+                ]
+            ),
         )
         provider._fetch_html = MagicMock()
 
