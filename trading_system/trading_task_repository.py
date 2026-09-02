@@ -139,6 +139,7 @@ class SupabaseTradingTaskRepository:
             source_event_id=task.source_event_id,
             instrument=task.instrument,
             mode=task.mode,
+            max_position_value_usd=task.max_position_value_usd,
         )
 
     @classmethod
