@@ -9,6 +9,12 @@ SERVICE_PATH = Path("mobile/src/services/tracked-events.ts")
 SCREEN_PATH = Path("mobile/src/app/tracked-events/[eventId]/release.tsx")
 
 
+def _function_body(source: str, signature: str) -> str:
+    start = source.index(signature)
+    end = source.index("\n  }\n", start)
+    return source[start:end]
+
+
 class MobileTrackedEventReleaseSourceSubmitTests(unittest.TestCase):
     def test_mobile_reuses_existing_control_auth_for_put(self) -> None:
         api_source = API_PATH.read_text(encoding="utf-8")
@@ -52,6 +58,30 @@ class MobileTrackedEventReleaseSourceSubmitTests(unittest.TestCase):
         self.assertLess(clear_success, url_validation)
         self.assertLess(clear_success, actor_validation)
 
+    def test_submit_is_serialized_with_paper_permission_approval(self) -> None:
+        screen_source = SCREEN_PATH.read_text(encoding="utf-8")
+        submit_body = _function_body(screen_source, "  async function submitReleaseSource() {")
+        source_card_start = screen_source.index(
+            '<Text style={styles.label}>Muuta julkaisulähdettä</Text>'
+        )
+        source_card_end = screen_source.index(
+            '<Text style={styles.label}>Julkaisun käsittely</Text>', source_card_start
+        )
+        source_card = screen_source[source_card_start:source_card_end]
+
+        self.assertIn(
+            "if (!eventId || !releaseSource || submitting || processing || skipping || approvingPermission) return;",
+            submit_body,
+        )
+        self.assertIn(
+            "disabled={!releaseSource || !sourceUrl.trim() || !actor.trim() || submitting || processing || skipping || approvingPermission}",
+            source_card,
+        )
+        self.assertIn(
+            "(!releaseSource || !sourceUrl.trim() || !actor.trim() || submitting || processing || skipping || approvingPermission) && styles.buttonDisabled",
+            source_card,
+        )
+
     def test_submit_records_explicit_actor_in_actor_header(self) -> None:
         service_source = SERVICE_PATH.read_text(encoding="utf-8")
         screen_source = SCREEN_PATH.read_text(encoding="utf-8")
@@ -67,6 +97,21 @@ class MobileTrackedEventReleaseSourceSubmitTests(unittest.TestCase):
         )
         self.assertIn("const normalizedActor = actor.trim();", screen_source)
         self.assertIn("normalizedActor,", screen_source)
+
+    def test_paper_approval_uses_shared_audited_actor_input(self) -> None:
+        screen_source = SCREEN_PATH.read_text(encoding="utf-8")
+        approval_body = _function_body(
+            screen_source,
+            "  async function approvePaperPermission(expectedVersion: number, positionCapUsd: number) {",
+        )
+
+        self.assertIn("const normalizedActor = actor.trim();", approval_body)
+        self.assertIn(
+            "const approved = await approveTrackedEventPaperPermission(\n"
+            "        submittedEventId,\n"
+            "        normalizedActor,",
+            approval_body,
+        )
 
     def test_submit_does_not_start_ingestion_or_create_trading_task(self) -> None:
         source = SCREEN_PATH.read_text(encoding="utf-8") + SERVICE_PATH.read_text(encoding="utf-8")
