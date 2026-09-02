@@ -18,6 +18,15 @@ type Props = {
   expectationEventId: string | null;
 };
 
+type BrokerOutcome =
+  | { tone: 'approved'; headline: string }
+  | { tone: 'warning'; headline: string }
+  | { tone: 'meta'; headline: string };
+
+const FILLED_BROKER_STATUSES = new Set(['FILLED_SIMULATED', 'ETORO_DEMO_FILLED']);
+const PENDING_BROKER_STATUSES = new Set(['ACCEPTED', 'PENDING']);
+const FAILED_BROKER_STATUSES = new Set(['REJECTED', 'FAILED']);
+
 export function TrackedEventPaperSummary({ eventId, expectationEventId }: Props) {
   const router = useRouter();
   const [permissionState, setPermissionState] = useState<LoadState<TrackedEventPaperPermission>>({
@@ -114,6 +123,23 @@ function PermissionSummary({ state }: { state: LoadState<TrackedEventPaperPermis
   );
 }
 
+function brokerOutcome(rawStatus: string | undefined): BrokerOutcome {
+  const status = (rawStatus ?? '').trim().toUpperCase();
+  if (FILLED_BROKER_STATUSES.has(status)) {
+    return { tone: 'approved', headline: 'Kauppa: PAPER-kauppa toteutettu' };
+  }
+  if (PENDING_BROKER_STATUSES.has(status)) {
+    return { tone: 'warning', headline: 'Kauppa: PAPER-toimeksianto odottaa toteutusta' };
+  }
+  if (FAILED_BROKER_STATUSES.has(status)) {
+    return { tone: 'warning', headline: 'Kauppa: PAPER-toimeksianto epäonnistui' };
+  }
+  if (!status) {
+    return { tone: 'warning', headline: 'Kauppa: brokerin toteutustila puuttuu' };
+  }
+  return { tone: 'warning', headline: `Kauppa: brokerin tila varmistamatta (${status})` };
+}
+
 function ExecutionSummary({ state }: { state: LoadState<PaperStatus | null> }) {
   if (state.status === 'loading') {
     return <Text style={styles.meta}>Kauppa: tarkistetaan…</Text>;
@@ -140,12 +166,13 @@ function ExecutionSummary({ state }: { state: LoadState<PaperStatus | null> }) {
 
   if (run.status === 'paper_executed') {
     const order = run.paper_order;
+    const outcome = brokerOutcome(order?.status);
     const details = [order?.direction, order?.quantity, order?.status]
       .filter((value) => value !== undefined && value !== null && String(value).trim() !== '')
       .join(' · ');
     return (
       <>
-        <Text style={styles.approved}>Kauppa: PAPER-kauppa toteutettu</Text>
+        <Text style={styles[outcome.tone]}>{outcome.headline}</Text>
         {details ? <Text style={styles.meta}>{details}</Text> : null}
       </>
     );
