@@ -799,6 +799,7 @@ def _parse_html5_page(html_text: str):
         for parent in fragment.iter()
         for child in list(parent)
     }
+    row_evidence_cache: dict[object, tuple[str, ...]] = {}
 
     links: list[tuple[str, str | None, tuple[str, ...]]] = []
     for anchor in _iter_visible_html_anchors(fragment):
@@ -814,7 +815,13 @@ def _parse_html5_page(html_text: str):
             value for value in (aria_label, title_attr, *visible_text_fields) if value
         )
         row = _nearest_html_table_row(anchor, parents)
-        row_evidence_fields = _visible_anchor_text_fields(row) if row is not None else ()
+        if row is None:
+            row_evidence_fields = ()
+        else:
+            row_evidence_fields = row_evidence_cache.get(row)
+            if row_evidence_fields is None:
+                row_evidence_fields = _visible_anchor_text_fields(row)
+                row_evidence_cache[row] = row_evidence_fields
         evidence_fields = tuple(dict.fromkeys((*anchor_evidence_fields, *row_evidence_fields)))
         title = " ".join(anchor_evidence_fields) or None
         links.append((href, title, evidence_fields))
