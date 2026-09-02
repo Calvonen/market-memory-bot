@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import unittest
 from datetime import UTC, date, datetime
-from types import SimpleNamespace
 
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -15,11 +14,15 @@ from trading_system.tracked_event_repository import (
     TrackedEventStatus,
     TrackedEventTimeStatus,
 )
-from trading_system.trading_task import CanonicalTradingTask, TradingTaskState
 
 
 EVENT_ID = "11111111-1111-1111-1111-111111111111"
 SOURCE_EVENT_ID = f"tracked:{EVENT_ID}"
+TASK_ID = "33333333-3333-3333-3333-333333333333"
+APPROVAL_BODY = {
+    "expected_expectation_version": 2,
+    "max_position_value_usd": 500.0,
+}
 
 
 def _event() -> PersistentTrackedEvent:
@@ -82,69 +85,54 @@ class _ExpectationRepo:
 class _TaskRepo:
     def __init__(self, row: dict[str, object] | None = None) -> None:
         self.row = row
-        self.create_calls = 0
-        self.approve_calls = 0
-        self.cancel_calls = 0
+        self.approve_permission_calls: list[dict[str, object]] = []
 
     def get_active_row_for_event_mode(self, *, tracked_event_id: str, mode: TradingMode):
         self._assert_identity(tracked_event_id, mode)
         return dict(self.row) if self.row is not None else None
 
-    def create_pending(self, *, tracked_event_id: str, source_event_id: str, instrument: str, mode: TradingMode, actor: str):
-        self._assert_identity(tracked_event_id, mode)
+    def approve_paper_permission(
+        self,
+        *,
+        tracked_event_id: str,
+        source_event_id: str,
+        instrument: str,
+        actor: str,
+        expected_expectation_version: int,
+        max_position_value_usd: float,
+    ) -> dict[str, object]:
+        self._assert_identity(tracked_event_id, TradingMode.PAPER)
         assert source_event_id == SOURCE_EVENT_ID
         assert instrument == "DAKT"
-        self.create_calls += 1
-        now = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
+        call = {
+            "actor": actor,
+            "expected_expectation_version": expected_expectation_version,
+            "max_position_value_usd": max_position_value_usd,
+        }
+        self.approve_permission_calls.append(call)
+        if self.row is not None:
+            if (
+                self.row.get("state") == "approved"
+                and self.row.get("approved_expectation_version") == expected_expectation_version
+                and float(self.row.get("max_position_value_usd") or 0) == max_position_value_usd
+            ):
+                return dict(self.row)
+        now = datetime(2026, 9, 2, 12, 1, tzinfo=UTC)
         self.row = {
-            "id": "33333333-3333-3333-3333-333333333333",
+            "id": TASK_ID,
             "tracked_event_id": EVENT_ID,
             "source_event_id": SOURCE_EVENT_ID,
             "instrument": "DAKT",
             "mode": "PAPER",
-            "state": "pending",
+            "state": "approved",
             "created_by": actor,
             "created_at": now.isoformat(),
-            "approved_by": None,
-            "approved_at": None,
-            "approved_expectation_version": None,
+            "approved_by": actor,
+            "approved_at": now.isoformat(),
+            "approved_expectation_version": expected_expectation_version,
+            "max_position_value_usd": max_position_value_usd,
         }
-        return self.get(str(self.row["id"]))
-
-    def approve(self, *, task_id: str, actor: str):
-        self.approve_calls += 1
-        assert self.row is not None and task_id == self.row["id"]
-        self.row.update(
-            state="approved",
-            approved_by=actor,
-            approved_at=datetime(2026, 9, 2, 12, 1, tzinfo=UTC).isoformat(),
-            approved_expectation_version=2,
-        )
-        return self.get(task_id)
-
-    def cancel(self, *, task_id: str, actor: str):
-        self.cancel_calls += 1
-        assert self.row is not None and task_id == self.row["id"]
-        old = self.get(task_id)
-        self.row = None
-        return old
-
-    def get(self, task_id: str):
-        if self.row is None or task_id != self.row["id"]:
-            return None
-        row = self.row
-        return CanonicalTradingTask(
-            task_id=str(row["id"]),
-            tracked_event_id=EVENT_ID,
-            source_event_id=SOURCE_EVENT_ID,
-            instrument="DAKT",
-            mode=TradingMode.PAPER,
-            state=TradingTaskState(str(row["state"])),
-            created_by=str(row["created_by"]),
-            created_at=datetime.fromisoformat(str(row["created_at"])),
-            approved_by=str(row["approved_by"]) if row.get("approved_by") else None,
-            approved_at=datetime.fromisoformat(str(row["approved_at"])) if row.get("approved_at") else None,
-        )
+        return dict(self.row)
 
     @staticmethod
     def _assert_identity(tracked_event_id: str, mode: TradingMode) -> None:
@@ -152,9 +140,9 @@ class _TaskRepo:
         assert mode is TradingMode.PAPER
 
 
-def _approved_row(version: int = 2) -> dict[str, object]:
+def _approved_row(version: int = 2, cap: float = 500.0) -> dict[str, object]:
     return {
-        "id": "33333333-3333-3333-3333-333333333333",
+        "id": TASK_ID,
         "tracked_event_id": EVENT_ID,
         "source_event_id": SOURCE_EVENT_ID,
         "instrument": "DAKT",
@@ -165,6 +153,7 @@ def _approved_row(version: int = 2) -> dict[str, object]:
         "approved_by": "Marko",
         "approved_at": datetime(2026, 9, 2, 12, 1, tzinfo=UTC).isoformat(),
         "approved_expectation_version": version,
+        "max_position_value_usd": cap,
     }
 
 
@@ -204,9 +193,10 @@ class TrackedEventPaperPermissionApiTests(unittest.TestCase):
         self.assertFalse(payload["approval_current"])
         self.assertEqual(payload["mode"], "PAPER")
         self.assertEqual(payload["current_expectation_version"], 2)
-        self.assertEqual(task_repo.create_calls, 0)
+        self.assertIsNone(payload["max_position_value_usd"])
+        self.assertEqual(task_repo.approve_permission_calls, [])
 
-    def test_approve_creates_and_approves_exactly_one_paper_task(self) -> None:
+    def test_approve_binds_confirmed_version_and_position_cap(self) -> None:
         task_repo = _TaskRepo()
         response = _client(task_repo).post(
             f"/api/v1/tracked-events/{EVENT_ID}/paper-permission/approve",
@@ -214,15 +204,41 @@ class TrackedEventPaperPermissionApiTests(unittest.TestCase):
                 "X-MarketAI-Control-Key": "control-key",
                 "X-MarketAI-Actor": " Marko ",
             },
+            json=APPROVAL_BODY,
         )
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["state"], "approved")
         self.assertTrue(payload["approval_current"])
         self.assertEqual(payload["approved_expectation_version"], 2)
-        self.assertEqual((task_repo.create_calls, task_repo.approve_calls), (1, 1))
+        self.assertEqual(payload["max_position_value_usd"], 500.0)
+        self.assertEqual(
+            task_repo.approve_permission_calls,
+            [{
+                "actor": "Marko",
+                "expected_expectation_version": 2,
+                "max_position_value_usd": 500.0,
+            }],
+        )
 
-    def test_repeated_current_approval_is_idempotent(self) -> None:
+    def test_stale_displayed_version_is_rejected_before_any_task_mutation(self) -> None:
+        task_repo = _TaskRepo(_approved_row(version=1, cap=250.0))
+        response = _client(task_repo, _ExpectationRepo(version=2)).post(
+            f"/api/v1/tracked-events/{EVENT_ID}/paper-permission/approve",
+            headers={
+                "X-MarketAI-Control-Key": "control-key",
+                "X-MarketAI-Actor": "Marko",
+            },
+            json={
+                "expected_expectation_version": 1,
+                "max_position_value_usd": 500.0,
+            },
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(task_repo.approve_permission_calls, [])
+        self.assertEqual(task_repo.row, _approved_row(version=1, cap=250.0))
+
+    def test_repeated_identical_current_approval_is_idempotent(self) -> None:
         task_repo = _TaskRepo(_approved_row())
         response = _client(task_repo).post(
             f"/api/v1/tracked-events/{EVENT_ID}/paper-permission/approve",
@@ -230,38 +246,53 @@ class TrackedEventPaperPermissionApiTests(unittest.TestCase):
                 "X-MarketAI-Control-Key": "control-key",
                 "X-MarketAI-Actor": "Marko",
             },
+            json=APPROVAL_BODY,
         )
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["approval_current"])
-        self.assertEqual((task_repo.create_calls, task_repo.approve_calls, task_repo.cancel_calls), (0, 0, 0))
+        self.assertEqual(response.json()["max_position_value_usd"], 500.0)
+        self.assertEqual(len(task_repo.approve_permission_calls), 1)
+        self.assertEqual(task_repo.row, _approved_row())
 
-    def test_stale_approval_is_replaced_by_explicit_current_version_approval(self) -> None:
-        task_repo = _TaskRepo(_approved_row(version=1))
+    def test_explicit_new_cap_replaces_authority_for_same_version(self) -> None:
+        task_repo = _TaskRepo(_approved_row(cap=250.0))
         response = _client(task_repo).post(
             f"/api/v1/tracked-events/{EVENT_ID}/paper-permission/approve",
             headers={
                 "X-MarketAI-Control-Key": "control-key",
                 "X-MarketAI-Actor": "Marko",
             },
+            json=APPROVAL_BODY,
         )
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json()["approval_current"])
-        self.assertEqual((task_repo.cancel_calls, task_repo.create_calls, task_repo.approve_calls), (1, 1, 1))
+        self.assertEqual(response.json()["max_position_value_usd"], 500.0)
+        self.assertEqual(task_repo.row["max_position_value_usd"], 500.0)
 
-    def test_approve_requires_control_key_and_actor_before_mutation(self) -> None:
+    def test_approve_requires_control_key_actor_and_valid_cap_before_mutation(self) -> None:
         task_repo = _TaskRepo()
         client = _client(task_repo)
         no_key = client.post(
             f"/api/v1/tracked-events/{EVENT_ID}/paper-permission/approve",
             headers={"X-MarketAI-Actor": "Marko"},
+            json=APPROVAL_BODY,
         )
         no_actor = client.post(
             f"/api/v1/tracked-events/{EVENT_ID}/paper-permission/approve",
             headers={"X-MarketAI-Control-Key": "control-key"},
+            json=APPROVAL_BODY,
+        )
+        invalid_cap = client.post(
+            f"/api/v1/tracked-events/{EVENT_ID}/paper-permission/approve",
+            headers={
+                "X-MarketAI-Control-Key": "control-key",
+                "X-MarketAI-Actor": "Marko",
+            },
+            json={"expected_expectation_version": 2, "max_position_value_usd": 0},
         )
         self.assertEqual(no_key.status_code, 401)
         self.assertEqual(no_actor.status_code, 422)
-        self.assertEqual((task_repo.create_calls, task_repo.approve_calls, task_repo.cancel_calls), (0, 0, 0))
+        self.assertEqual(invalid_cap.status_code, 422)
+        self.assertEqual(task_repo.approve_permission_calls, [])
 
 
 if __name__ == "__main__":
