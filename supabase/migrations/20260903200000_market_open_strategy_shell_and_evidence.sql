@@ -253,7 +253,10 @@ begin
     raise exception 'market_open_evidence_payload_invalid';
   end if;
 
-  content_hash := encode(digest(convert_to(input_raw_text, 'UTF8'), 'sha256'), 'hex');
+  content_hash := encode(
+    extensions.digest(convert_to(input_raw_text, 'UTF8'), 'sha256'),
+    'hex'
+  );
 
   insert into public.event_source_documents (
     event_id,
