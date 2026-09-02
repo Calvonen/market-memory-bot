@@ -55,6 +55,43 @@ class ResultsPageReleaseSelectionTests(unittest.TestCase):
         )
         self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
 
+    def test_results_table_title_can_supply_english_human_date(self):
+        for title in (
+            "Half Year Results 26 Aug 2026",
+            "Half Year Results 26 August 2026",
+        ):
+            with self.subTest(title=title):
+                selection = select_results_page_release_candidate(
+                    self._event(),
+                    (self._candidate("https://investor.example.com/release.pdf", title),),
+                )
+                self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
+
+    def test_human_date_rejects_combining_marks_and_format_controls_as_boundaries(self):
+        for title in (
+            "A\u030126 Aug 2026",
+            "26 Aug 2026\u200dA",
+            "A\u200c26 August 2026",
+        ):
+            with self.subTest(title=title):
+                selection = select_results_page_release_candidate(
+                    self._event(),
+                    (self._candidate("https://investor.example.com/release.pdf", title),),
+                )
+                self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
+
+    def test_human_date_uses_ascii_only_case_folding_for_english_months(self):
+        for title in (
+            "26 Auguſt 2026",
+            "26 AUGUſT 2026",
+        ):
+            with self.subTest(title=title):
+                selection = select_results_page_release_candidate(
+                    self._event(),
+                    (self._candidate("https://investor.example.com/release.pdf", title),),
+                )
+                self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
+
     def test_rejects_date_tokens_embedded_in_longer_numeric_values(self):
         for url in (
             "https://investor.example.com/id/20260826001.pdf",

@@ -57,6 +57,34 @@ class ResultsPageSelection:
 _PERIOD_LABEL_RE = re.compile(r"^(Q[1-4]|H[12]|FY) ([0-9]{4})$", re.IGNORECASE)
 _PERCENT_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}")
 _ZERO_WIDTH_SPACE = "\u200b"
+_ENGLISH_MONTH_ABBREVIATIONS = (
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+)
+_ENGLISH_MONTH_NAMES = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
 
 
 def _scheduled_date_patterns(event: ResultsPageSelectionTarget) -> tuple[re.Pattern[str], ...]:
@@ -67,7 +95,29 @@ def _scheduled_date_patterns(event: ResultsPageSelectionTarget) -> tuple[re.Patt
         value.strftime("%Y/%m/%d"),
         value.strftime("%Y_%m_%d"),
     )
-    return tuple(re.compile(rf"(?<!\d){re.escape(token)}(?!\d)", re.IGNORECASE) for token in tokens)
+    return tuple(
+        re.compile(rf"(?<!\d){re.escape(token)}(?!\d)", re.IGNORECASE)
+        for token in tokens
+    )
+
+
+def _human_scheduled_date_patterns(
+    event: ResultsPageSelectionTarget,
+) -> tuple[re.Pattern[str], ...]:
+    value = event.scheduled_date
+    month_tokens = (
+        _ENGLISH_MONTH_ABBREVIATIONS[value.month - 1],
+        _ENGLISH_MONTH_NAMES[value.month - 1],
+    )
+    patterns: list[re.Pattern[str]] = []
+    for month in month_tokens:
+        for day in (str(value.day), f"{value.day:02d}"):
+            token = f"{day} {month} {value.year}"
+            # These are deliberately English ASCII month names. ASCII case
+            # folding avoids Unicode lookalikes such as dotless-i/long-s being
+            # accepted as if they were one of the enumerated spellings.
+            patterns.append(re.compile(re.escape(token), re.IGNORECASE | re.ASCII))
+    return tuple(patterns)
 
 
 def _period_patterns(release_period: str | None) -> tuple[re.Pattern[str], ...]:
@@ -172,6 +222,23 @@ def _matching_candidates(
     )
 
 
+def _scheduled_date_matches(
+    event: ResultsPageSelectionTarget,
+    candidates: tuple[ResultsPageReleaseCandidate, ...],
+) -> tuple[ResultsPageReleaseCandidate, ...]:
+    numeric_matches = _matching_candidates(event, candidates, _scheduled_date_patterns(event))
+    human_matches = _matching_candidates(
+        event,
+        candidates,
+        _human_scheduled_date_patterns(event),
+        standalone_token=True,
+    )
+    matched_ids = {id(candidate) for candidate in numeric_matches}
+    return numeric_matches + tuple(
+        candidate for candidate in human_matches if id(candidate) not in matched_ids
+    )
+
+
 def select_results_page_release_candidate(
     event: ResultsPageSelectionTarget,
     candidates: tuple[ResultsPageReleaseCandidate, ...],
@@ -181,7 +248,7 @@ def select_results_page_release_candidate(
     """Select a unique release candidate using explicit evidence only."""
     period_patterns = _period_patterns(release_period)
 
-    date_matches = _matching_candidates(event, candidates, _scheduled_date_patterns(event))
+    date_matches = _scheduled_date_matches(event, candidates)
     if len(date_matches) == 1:
         return ResultsPageSelection(
             status=ResultsPageSelectionStatus.SELECTED,
