@@ -55,6 +55,7 @@ class ResultsPageSelection:
 
 
 _PERIOD_LABEL_RE = re.compile(r"^(Q[1-4]|H[12]|FY) ([0-9]{4})$", re.IGNORECASE)
+_PDF_LABEL_RE = re.compile(r"pdf", re.IGNORECASE | re.ASCII)
 _PERCENT_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}")
 _ZERO_WIDTH_SPACE = "\u200b"
 _ENGLISH_MONTH_ABBREVIATIONS = (
@@ -239,6 +240,18 @@ def _scheduled_date_matches(
     )
 
 
+def _unique_explicit_pdf_candidate(
+    candidates: tuple[ResultsPageReleaseCandidate, ...],
+) -> ResultsPageReleaseCandidate | None:
+    explicit_pdf = tuple(
+        candidate
+        for candidate in candidates
+        if candidate.source_title
+        and _pattern_has_standalone_match(candidate.source_title, _PDF_LABEL_RE)
+    )
+    return explicit_pdf[0] if len(explicit_pdf) == 1 else None
+
+
 def select_results_page_release_candidate(
     event: ResultsPageSelectionTarget,
     candidates: tuple[ResultsPageReleaseCandidate, ...],
@@ -255,6 +268,12 @@ def select_results_page_release_candidate(
             candidate=date_matches[0],
         )
     if len(date_matches) > 1:
+        explicit_pdf = _unique_explicit_pdf_candidate(date_matches)
+        if explicit_pdf is not None:
+            return ResultsPageSelection(
+                status=ResultsPageSelectionStatus.SELECTED,
+                candidate=explicit_pdf,
+            )
         return ResultsPageSelection(status=ResultsPageSelectionStatus.AMBIGUOUS)
 
     if not period_patterns:
@@ -269,6 +288,12 @@ def select_results_page_release_candidate(
     if not period_matches:
         return ResultsPageSelection(status=ResultsPageSelectionStatus.NO_MATCH)
     if len(period_matches) != 1:
+        explicit_pdf = _unique_explicit_pdf_candidate(period_matches)
+        if explicit_pdf is not None:
+            return ResultsPageSelection(
+                status=ResultsPageSelectionStatus.SELECTED,
+                candidate=explicit_pdf,
+            )
         return ResultsPageSelection(status=ResultsPageSelectionStatus.AMBIGUOUS)
     return ResultsPageSelection(
         status=ResultsPageSelectionStatus.SELECTED,
