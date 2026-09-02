@@ -15,6 +15,11 @@ from trading_system.market_memory_bridge import (
     build_technical_assessment,
 )
 from trading_system.market_reaction import DEFAULT_FLAT_THRESHOLD_PCT
+from trading_system.market_session_profile import (
+    GROUNDED_MARKET_SESSION_PROFILES,
+    resolve_market_session_profile,
+    resolve_provider_symbol,
+)
 from trading_system.models import (
     ComponentAssessment,
     Direction,
@@ -32,6 +37,7 @@ from trading_system.tracked_event_repository import (
 
 
 _OPENING_WINDOW = timedelta(minutes=30)
+_CANONICAL_REFERENCE_KIND = "etoro_last_execution_pre_event_snapshot"
 
 
 @dataclass(frozen=True)
@@ -54,6 +60,17 @@ def _direction(value: Decimal) -> str:
     return "flat"
 
 
+def _validate_reference_provenance(event: PersistentTrackedEvent) -> None:
+    if event.reference_price is None or not event.reference_price.is_finite() or event.reference_price <= 0:
+        raise ValueError("market-open reference price is invalid")
+    if event.reference_captured_at is None or not _is_aware(event.reference_captured_at):
+        raise ValueError("market-open reference capture timestamp is missing or naive")
+    if event.reference_captured_at.astimezone(UTC) > event.event_at.astimezone(UTC):
+        raise ValueError("market-open reference was captured after market open")
+    if event.reference_kind != _CANONICAL_REFERENCE_KIND:
+        raise ValueError("market-open reference kind is not canonical pre-event snapshot")
+
+
 def _validated_opening_reactions(
     *,
     event: PersistentTrackedEvent,
@@ -63,12 +80,13 @@ def _validated_opening_reactions(
         raise ValueError("tracked event is not a market-open event")
     if not _is_aware(event.event_at):
         raise ValueError("market-open event time must be timezone-aware")
+    _validate_reference_provenance(event)
     if event.reaction_anchor_at is None:
         return ()
     if not _is_aware(event.reaction_anchor_at):
         raise ValueError("market-open reaction anchor must be timezone-aware")
-    if event.reference_price is None or not event.reference_price.is_finite() or event.reference_price <= 0:
-        raise ValueError("market-open reference price is invalid")
+    if event.reaction_anchor_at.astimezone(UTC) < event.event_at.astimezone(UTC):
+        raise ValueError("market-open reaction anchor precedes market open")
 
     anchor = event.reaction_anchor_at.astimezone(UTC)
     end = anchor + _OPENING_WINDOW
@@ -138,13 +156,14 @@ def detect_market_open_pattern(
     if _direction(first.return_pct) != "negative":
         return None
 
-    # LONG reversal: opening weakness crosses through flat into positive territory,
-    # then a later completed 1m observation remains positive and extends the reclaim.
     positives = [row for row in rows[1:] if _direction(row.return_pct) == "positive"]
     if len(positives) >= 2:
         first_positive = positives[0]
         latest_positive = positives[-1]
-        if latest_positive.candle_start > first_positive.candle_start and latest_positive.return_pct >= first_positive.return_pct:
+        if (
+            latest_positive.candle_start > first_positive.candle_start
+            and latest_positive.return_pct >= first_positive.return_pct
+        ):
             return MarketOpenPattern(
                 direction=Direction.LONG,
                 setup=ComponentAssessment(
@@ -164,8 +183,6 @@ def detect_market_open_pattern(
                 reaction_pct=latest_positive.return_pct,
             )
 
-    # SHORT continuation: after opening weakness, at least one completed 1m bounce
-    # improves the return, but a later observation rolls back below that bounce.
     for bounce_index in range(1, len(rows) - 1):
         bounce = rows[bounce_index]
         if bounce.return_pct <= first.return_pct:
@@ -210,6 +227,18 @@ def _levels_from_market(df: pd.DataFrame, direction: Direction) -> TradeLevels:
     return TradeLevels(entry=entry, stop=entry + risk_distance, target_1=entry - 2.0 * risk_distance)
 
 
+def _provider_symbol(event: PersistentTrackedEvent) -> str:
+    if not event.resolved_etoro_market:
+        raise ValueError("market-open resolved eToro market is missing")
+    if not event.resolved_etoro_symbol:
+        raise ValueError("market-open resolved eToro symbol is missing")
+    profile = resolve_market_session_profile(
+        event.resolved_etoro_market,
+        profiles=GROUNDED_MARKET_SESSION_PROFILES,
+    )
+    return resolve_provider_symbol(event.resolved_etoro_symbol, profile=profile)
+
+
 def run_market_open_paper(
     *,
     event: PersistentTrackedEvent,
@@ -230,7 +259,7 @@ def run_market_open_paper(
         )
 
     if market_df is None:
-        market_df = add_indicators(fetch_ohlcv(expectation.instrument, period="5y", interval="1d"))
+        market_df = add_indicators(fetch_ohlcv(_provider_symbol(event), period="5y", interval="1d"))
     if market_df.empty:
         return PostReleasePaperResult("waiting_confirmation", "no market data")
     if portfolio.spread_pct is None:
