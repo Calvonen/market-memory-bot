@@ -66,7 +66,7 @@ class SupabaseTradingTaskRepository:
         actor: str,
         expected_expectation_version: int,
         max_position_value_usd: float,
-    ) -> CanonicalTradingTask:
+    ) -> dict[str, Any]:
         response = self.client.rpc(
             "approve_paper_trading_task_for_event",
             {
@@ -78,7 +78,7 @@ class SupabaseTradingTaskRepository:
                 "input_max_position_value_usd": max_position_value_usd,
             },
         ).execute()
-        return self._one(response.data, "approve_paper_trading_task_for_event")
+        return self._one_row(response.data, "approve_paper_trading_task_for_event")
 
     def cancel(self, *, task_id: str, actor: str) -> CanonicalTradingTask:
         response = self.client.rpc(
@@ -143,13 +143,17 @@ class SupabaseTradingTaskRepository:
 
     @classmethod
     def _one(cls, data: Any, operation: str) -> CanonicalTradingTask:
+        return cls._from_row(cls._one_row(data, operation))
+
+    @staticmethod
+    def _one_row(data: Any, operation: str) -> dict[str, Any]:
         if isinstance(data, dict):
             rows = [data]
         else:
             rows = data or []
-        if len(rows) != 1:
+        if len(rows) != 1 or not isinstance(rows[0], dict):
             raise RuntimeError(f"{operation} returned {len(rows)} rows")
-        return cls._from_row(rows[0])
+        return dict(rows[0])
 
     @staticmethod
     def _from_row(row: dict[str, Any]) -> CanonicalTradingTask:
