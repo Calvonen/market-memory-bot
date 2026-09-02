@@ -89,32 +89,34 @@ _ENGLISH_MONTH_NAMES = (
 
 def _scheduled_date_patterns(event: ResultsPageSelectionTarget) -> tuple[re.Pattern[str], ...]:
     value = event.scheduled_date
-    numeric_tokens = (
+    tokens = (
         value.isoformat(),
         value.strftime("%Y%m%d"),
         value.strftime("%Y/%m/%d"),
         value.strftime("%Y_%m_%d"),
     )
-    patterns = [
+    return tuple(
         re.compile(rf"(?<!\d){re.escape(token)}(?!\d)", re.IGNORECASE)
-        for token in numeric_tokens
-    ]
+        for token in tokens
+    )
 
-    # Investor-relations result tables commonly print dates such as
-    # ``02 Sep 2026`` or ``2 September 2026`` rather than embedding an ISO date
-    # in the document URL. Build these tokens explicitly instead of relying on
-    # process locale, and require word boundaries so a date cannot be matched
-    # from inside a larger identifier.
+
+def _human_scheduled_date_patterns(
+    event: ResultsPageSelectionTarget,
+) -> tuple[re.Pattern[str], ...]:
+    value = event.scheduled_date
     month_tokens = (
         _ENGLISH_MONTH_ABBREVIATIONS[value.month - 1],
         _ENGLISH_MONTH_NAMES[value.month - 1],
     )
+    patterns: list[re.Pattern[str]] = []
     for month in month_tokens:
         for day in (str(value.day), f"{value.day:02d}"):
             token = f"{day} {month} {value.year}"
-            patterns.append(
-                re.compile(rf"(?<!\w){re.escape(token)}(?!\w)", re.IGNORECASE)
-            )
+            # These are deliberately English ASCII month names. ASCII case
+            # folding avoids Unicode lookalikes such as dotless-i/long-s being
+            # accepted as if they were one of the enumerated spellings.
+            patterns.append(re.compile(re.escape(token), re.IGNORECASE | re.ASCII))
     return tuple(patterns)
 
 
@@ -220,6 +222,23 @@ def _matching_candidates(
     )
 
 
+def _scheduled_date_matches(
+    event: ResultsPageSelectionTarget,
+    candidates: tuple[ResultsPageReleaseCandidate, ...],
+) -> tuple[ResultsPageReleaseCandidate, ...]:
+    numeric_matches = _matching_candidates(event, candidates, _scheduled_date_patterns(event))
+    human_matches = _matching_candidates(
+        event,
+        candidates,
+        _human_scheduled_date_patterns(event),
+        standalone_token=True,
+    )
+    matched_ids = {id(candidate) for candidate in numeric_matches}
+    return numeric_matches + tuple(
+        candidate for candidate in human_matches if id(candidate) not in matched_ids
+    )
+
+
 def select_results_page_release_candidate(
     event: ResultsPageSelectionTarget,
     candidates: tuple[ResultsPageReleaseCandidate, ...],
@@ -229,7 +248,7 @@ def select_results_page_release_candidate(
     """Select a unique release candidate using explicit evidence only."""
     period_patterns = _period_patterns(release_period)
 
-    date_matches = _matching_candidates(event, candidates, _scheduled_date_patterns(event))
+    date_matches = _scheduled_date_matches(event, candidates)
     if len(date_matches) == 1:
         return ResultsPageSelection(
             status=ResultsPageSelectionStatus.SELECTED,
