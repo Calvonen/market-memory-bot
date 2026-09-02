@@ -80,6 +80,31 @@ class SupabaseTradingTaskRepository:
             raise RuntimeError("canonical trading task read returned ambiguous rows")
         return self._from_row(rows[0])
 
+    def get_active_row_for_event_mode(
+        self,
+        *,
+        tracked_event_id: str,
+        mode: TradingMode,
+    ) -> dict[str, Any] | None:
+        if not isinstance(mode, TradingMode):
+            raise ValueError("mode must be a TradingMode")
+        rows = (
+            self.client.table("trading_tasks")
+            .select("*")
+            .eq("tracked_event_id", tracked_event_id)
+            .eq("mode", mode.value)
+            .in_("state", [TradingTaskState.PENDING.value, TradingTaskState.APPROVED.value])
+            .limit(2)
+            .execute()
+            .data
+            or []
+        )
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise RuntimeError("active trading task read returned ambiguous rows")
+        return dict(rows[0])
+
     def execution_context(self, task_id: str) -> CanonicalTradingTaskExecutionContext:
         task = self.get(task_id)
         if task is None:
