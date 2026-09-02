@@ -114,6 +114,25 @@ class TrendMonitoringWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payloads[-1]["type"], "trend_observation")
         self.assertEqual(payloads[-1]["confirmed_state"], "bullish")
 
+    async def test_pipeline_diagnostic_failure_does_not_abort_stream_or_observation(self):
+        service = FakeService(
+            [SimpleNamespace(candles=(), trend_results=(fake_result(),))]
+        )
+        emitted = []
+
+        def flaky_emit(line):
+            payload = json.loads(line)
+            if payload.get("type") == "trend_monitoring_diagnostic":
+                raise BrokenPipeError("diagnostic sink unavailable")
+            emitted.append(line)
+
+        result = await run_trend_monitoring_worker(service=service, emit=flaky_emit)
+
+        self.assertEqual(result, 0)
+        self.assertTrue(service.closed)
+        self.assertEqual(len(emitted), 1)
+        self.assertEqual(json.loads(emitted[0])["type"], "trend_observation")
+
     async def test_default_stdout_emitter_flushes_each_line(self):
         service = FakeService(
             [SimpleNamespace(candles=(), trend_results=(fake_result(),))]
