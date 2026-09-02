@@ -23,6 +23,14 @@ type BrokerOutcome =
   | { tone: 'warning'; headline: string }
   | { tone: 'meta'; headline: string };
 
+export type BrokerOutcomeKind =
+  | 'filled'
+  | 'pending'
+  | 'rejected'
+  | 'failed'
+  | 'missing'
+  | 'unknown';
+
 const FILLED_BROKER_STATUSES = new Set([
   'FILLED',
   'FILLED_SIMULATED',
@@ -40,6 +48,16 @@ const PENDING_BROKER_STATUSES = new Set([
 ]);
 const REJECTED_BROKER_STATUSES = new Set(['REJECTED', 'CANCELLED', 'CANCELED']);
 const FAILED_BROKER_STATUSES = new Set(['FAILED', 'ERROR']);
+
+export function classifyPaperBrokerStatus(rawStatus: string | undefined): BrokerOutcomeKind {
+  const status = (rawStatus ?? '').trim().toUpperCase();
+  if (FILLED_BROKER_STATUSES.has(status)) return 'filled';
+  if (PENDING_BROKER_STATUSES.has(status)) return 'pending';
+  if (REJECTED_BROKER_STATUSES.has(status)) return 'rejected';
+  if (FAILED_BROKER_STATUSES.has(status)) return 'failed';
+  if (!status) return 'missing';
+  return 'unknown';
+}
 
 export function TrackedEventPaperSummary({ eventId, expectationEventId }: Props) {
   const router = useRouter();
@@ -146,22 +164,23 @@ function PermissionSummary({ state }: { state: LoadState<TrackedEventPaperPermis
 }
 
 function brokerOutcome(rawStatus: string | undefined): BrokerOutcome {
-  const status = (rawStatus ?? '').trim().toUpperCase();
-  if (FILLED_BROKER_STATUSES.has(status)) {
+  const kind = classifyPaperBrokerStatus(rawStatus);
+  if (kind === 'filled') {
     return { tone: 'approved', headline: 'Kauppa: PAPER-kauppa toteutettu' };
   }
-  if (PENDING_BROKER_STATUSES.has(status)) {
+  if (kind === 'pending') {
     return { tone: 'warning', headline: 'Kauppa: PAPER-toimeksianto odottaa toteutusta' };
   }
-  if (REJECTED_BROKER_STATUSES.has(status)) {
+  if (kind === 'rejected') {
     return { tone: 'warning', headline: 'Kauppa: PAPER-toimeksianto hylätty tai peruttu' };
   }
-  if (FAILED_BROKER_STATUSES.has(status)) {
+  if (kind === 'failed') {
     return { tone: 'warning', headline: 'Kauppa: PAPER-toimeksianto epäonnistui' };
   }
-  if (!status) {
+  if (kind === 'missing') {
     return { tone: 'warning', headline: 'Kauppa: brokerin toteutustila puuttuu' };
   }
+  const status = (rawStatus ?? '').trim().toUpperCase();
   return { tone: 'warning', headline: `Kauppa: brokerin tila varmistamatta (${status})` };
 }
 
