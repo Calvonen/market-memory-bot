@@ -1,6 +1,7 @@
--- Bind an explicit per-event position-value ceiling to the execution task and
--- add an approval RPC that atomically verifies the exact expectation version
--- the user confirmed in the UI.
+-- Bind an explicit per-event position-value ceiling to execution authority and
+-- make the mobile PAPER permission a single atomic operation: verify the exact
+-- expectation version the user confirmed, replace any stale/different active
+-- task, and persist the approved task under the same per-event advisory lock.
 
 alter table public.trading_tasks
   add column if not exists max_position_value_usd numeric null;
@@ -17,15 +18,12 @@ alter table public.trading_tasks
     )
   );
 
--- Keep the existing five-argument create_trading_task() intact for existing
--- control paths. This overload is used by the mobile PAPER-permission flow and
--- makes the requested cap immutable once the active task is created.
-create or replace function public.create_trading_task(
+create or replace function public.approve_paper_trading_task_for_event(
   input_tracked_event_id uuid,
   input_source_event_id text,
   input_instrument text,
-  input_mode text,
   input_actor text,
+  input_expected_expectation_version integer,
   input_max_position_value_usd numeric
 )
 returns public.trading_tasks
@@ -38,9 +36,10 @@ declare
   canonical_source_event_id text;
   actor text := btrim(input_actor);
   instrument_value text := upper(btrim(input_instrument));
-  mode_value text := upper(btrim(input_mode));
   cap_value numeric := input_max_position_value_usd;
-  created public.trading_tasks%rowtype;
+  current_version integer;
+  active_task public.trading_tasks%rowtype;
+  approved public.trading_tasks%rowtype;
 begin
   if input_tracked_event_id is null then
     raise exception 'trading_task_invalid_tracked_event_id';
@@ -51,11 +50,11 @@ begin
   if instrument_value = '' then
     raise exception 'trading_task_invalid_instrument';
   end if;
-  if mode_value not in ('PAPER', 'LIVE') then
-    raise exception 'trading_task_invalid_mode';
-  end if;
   if actor is null or length(actor) not between 1 and 200 then
     raise exception 'trading_task_invalid_actor';
+  end if;
+  if input_expected_expectation_version is null or input_expected_expectation_version < 1 then
+    raise exception 'trading_task_invalid_expected_expectation_version';
   end if;
   if cap_value is null or cap_value = 'NaN'::numeric or cap_value <= 0 then
     raise exception 'trading_task_invalid_position_cap';
@@ -80,90 +79,13 @@ begin
     raise exception 'trading_task_instrument_mismatch';
   end if;
 
-  begin
-    insert into public.trading_tasks (
-      tracked_event_id,
-      source_event_id,
-      instrument,
-      mode,
-      state,
-      created_by,
-      max_position_value_usd
-    ) values (
-      input_tracked_event_id,
-      canonical_source_event_id,
-      instrument_value,
-      mode_value,
-      'pending',
-      actor,
-      cap_value
-    )
-    returning * into created;
-    return created;
-  exception
-    when unique_violation then
-      select * into created
-      from public.trading_tasks
-      where tracked_event_id = input_tracked_event_id
-        and mode = mode_value
-        and state in ('pending', 'approved')
-      limit 2;
-
-      if not found then
-        raise exception 'trading_task_creation_conflict';
-      end if;
-      if created.source_event_id <> canonical_source_event_id
-         or upper(btrim(created.instrument)) <> instrument_value
-         or created.created_by <> actor
-         or created.max_position_value_usd is distinct from cap_value then
-        raise exception 'trading_task_creation_conflict';
-      end if;
-      return created;
-  end;
-end;
-$$;
-
--- Existing two-argument approval remains available to existing operator paths.
--- The mobile control path uses this overload so the approval and lineage check
--- happen under the same per-event advisory lock.
-create or replace function public.approve_trading_task(
-  input_task_id uuid,
-  input_actor text,
-  input_expected_expectation_version integer
-)
-returns public.trading_tasks
-language plpgsql
-security definer
-set search_path = public, pg_temp
-as $$
-declare
-  actor text := btrim(input_actor);
-  source_event text;
-  current_version integer;
-  approved public.trading_tasks%rowtype;
-begin
-  if input_task_id is null then
-    raise exception 'trading_task_invalid_id';
-  end if;
-  if actor is null or length(actor) not between 1 and 200 then
-    raise exception 'trading_task_invalid_actor';
-  end if;
-  if input_expected_expectation_version is null or input_expected_expectation_version < 1 then
-    raise exception 'trading_task_invalid_expected_expectation_version';
-  end if;
-
-  select source_event_id into source_event
-  from public.trading_tasks
-  where id = input_task_id;
-  if not found then
-    raise exception 'trading_task_not_found';
-  end if;
-
-  perform pg_advisory_xact_lock(hashtextextended(source_event, 0));
+  -- Serialize this complete permission decision with expectation writes,
+  -- analysis lineage writes and task-aware execution claims for the same event.
+  perform pg_advisory_xact_lock(hashtextextended(canonical_source_event_id, 0));
 
   select version into current_version
   from public.current_event_expectations
-  where event_id = source_event
+  where event_id = canonical_source_event_id
   limit 1;
   if not found then
     raise exception 'trading_task_expectation_not_found';
@@ -172,28 +94,67 @@ begin
     raise exception 'trading_task_expectation_version_changed';
   end if;
 
-  update public.trading_tasks
-  set
-    state = 'approved',
-    approved_by = actor,
-    approved_at = now(),
-    approved_expectation_version = current_version
-  where id = input_task_id and state = 'pending'
+  select * into active_task
+  from public.trading_tasks
+  where tracked_event_id = input_tracked_event_id
+    and mode = 'PAPER'
+    and state in ('pending', 'approved')
+  limit 1
+  for update;
+
+  -- Exact retry of an already committed permission is idempotent.
+  if found
+     and active_task.state = 'approved'
+     and active_task.source_event_id = canonical_source_event_id
+     and upper(btrim(active_task.instrument)) = instrument_value
+     and active_task.approved_expectation_version = input_expected_expectation_version
+     and active_task.max_position_value_usd is not distinct from cap_value then
+    return active_task;
+  end if;
+
+  -- A changed cap, stale lineage, or pending predecessor is historical intent,
+  -- not authority for this newly confirmed permission. Replace it atomically.
+  if found then
+    update public.trading_tasks
+    set
+      state = 'cancelled',
+      cancelled_by = actor,
+      cancelled_at = now()
+    where id = active_task.id;
+  end if;
+
+  insert into public.trading_tasks (
+    tracked_event_id,
+    source_event_id,
+    instrument,
+    mode,
+    state,
+    created_by,
+    created_at,
+    approved_by,
+    approved_at,
+    approved_expectation_version,
+    max_position_value_usd
+  ) values (
+    input_tracked_event_id,
+    canonical_source_event_id,
+    instrument_value,
+    'PAPER',
+    'approved',
+    actor,
+    now(),
+    actor,
+    now(),
+    input_expected_expectation_version,
+    cap_value
+  )
   returning * into approved;
 
-  if found then
-    return approved;
-  end if;
-  raise exception 'trading_task_not_pending';
+  return approved;
 end;
 $$;
 
-revoke all on function public.create_trading_task(uuid, text, text, text, text, numeric)
+revoke all on function public.approve_paper_trading_task_for_event(uuid, text, text, text, integer, numeric)
   from public, anon, authenticated;
-grant execute on function public.create_trading_task(uuid, text, text, text, text, numeric)
-  to service_role;
-
-revoke all on function public.approve_trading_task(uuid, text, integer)
-  from public, anon, authenticated;
-grant execute on function public.approve_trading_task(uuid, text, integer)
+grant execute on function public.approve_paper_trading_task_for_event(uuid, text, text, text, integer, numeric)
   to service_role;
