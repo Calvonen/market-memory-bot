@@ -1,7 +1,7 @@
 -- Bind an explicit per-event position-value ceiling to execution authority and
 -- make the mobile PAPER permission a single atomic operation: verify the exact
 -- expectation version the user confirmed, replace any stale/different active
--- task, and persist the approved task under the same per-event advisory lock.
+-- task, and persist the approved task under the same canonical lineage locks.
 
 alter table public.trading_tasks
   add column if not exists max_position_value_usd numeric null;
@@ -79,8 +79,11 @@ begin
     raise exception 'trading_task_instrument_mismatch';
   end if;
 
-  -- Serialize this complete permission decision with expectation writes,
-  -- analysis lineage writes and task-aware execution claims for the same event.
+  -- Canonical lock order is lineage first (salt 1), then execution/analysis
+  -- state (salt 0). Expectation writers contend on salt 1, while task claims
+  -- and analysis writes use salt 0. Holding both keeps the displayed version,
+  -- task replacement and approval in one serialized decision.
+  perform pg_advisory_xact_lock(hashtextextended(canonical_source_event_id, 1));
   perform pg_advisory_xact_lock(hashtextextended(canonical_source_event_id, 0));
 
   select version into current_version
@@ -113,14 +116,11 @@ begin
   end if;
 
   -- A changed cap, stale lineage, or pending predecessor is historical intent,
-  -- not authority for this newly confirmed permission. Replace it atomically.
+  -- not authority for this newly confirmed permission. Reuse the canonical
+  -- cancellation boundary so an active execution lease or unresolved broker
+  -- attempt blocks replacement instead of orphaning a possible external order.
   if found then
-    update public.trading_tasks
-    set
-      state = 'cancelled',
-      cancelled_by = actor,
-      cancelled_at = now()
-    where id = active_task.id;
+    perform public.cancel_trading_task(active_task.id, actor);
   end if;
 
   insert into public.trading_tasks (
