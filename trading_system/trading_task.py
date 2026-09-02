@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -34,6 +35,7 @@ class CanonicalTradingTask:
     approved_at: datetime | None = None
     cancelled_by: str | None = None
     cancelled_at: datetime | None = None
+    max_position_value_usd: float | None = None
 
     def __post_init__(self) -> None:
         task_id = self.task_id.strip()
@@ -63,6 +65,11 @@ class CanonicalTradingTask:
             _require_aware(self.approved_at, "approved_at")
         if self.cancelled_at is not None:
             _require_aware(self.cancelled_at, "cancelled_at")
+        if self.max_position_value_usd is not None:
+            cap = float(self.max_position_value_usd)
+            if not math.isfinite(cap) or cap <= 0:
+                raise ValueError("max_position_value_usd must be finite and positive")
+            object.__setattr__(self, "max_position_value_usd", cap)
 
         if self.state is TradingTaskState.PENDING:
             if approved_by is not None or self.approved_at is not None:
