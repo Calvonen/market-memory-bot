@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from math import isfinite
 
 from trading_system.etoro_instrument_resolver import EtoroInstrumentResolver
@@ -12,10 +13,14 @@ from trading_system.trend_monitoring_live import stream_trend_monitoring_runtime
 from trading_system.trend_monitoring_runtime import TrendMonitoringRuntime
 from trading_system.trend_monitoring_service import stream_supervised_trend_monitoring
 from trading_system.trend_monitoring_supervisor import TrendMonitoringSupervisor
-from trading_system.trend_monitoring_targets import select_trend_monitoring_targets
+from trading_system.trend_monitoring_targets import (
+    TrendMonitoringTargets,
+    select_trend_monitoring_targets,
+)
 
 
 DEFAULT_TREND_REFRESH_SECONDS = 60.0
+TargetSnapshotObserver = Callable[[TrendMonitoringTargets], None]
 
 
 def trend_refresh_interval_seconds() -> float:
@@ -33,7 +38,26 @@ def trend_refresh_interval_seconds() -> float:
     return value
 
 
-def build_trend_monitoring_service_from_env():
+def _observe_target_snapshot_safely(
+    observer: TargetSnapshotObserver | None,
+    targets: TrendMonitoringTargets,
+) -> None:
+    """Keep best-effort diagnostics from changing target-refresh semantics."""
+    if observer is None:
+        return
+    try:
+        observer(targets)
+    except Exception:
+        # Diagnostics are observation-only. A broken stdout/journald path must
+        # never abort canonical target selection, close the market stream, or
+        # make systemd restart an otherwise healthy worker.
+        return
+
+
+def build_trend_monitoring_service_from_env(
+    *,
+    on_target_snapshot: TargetSnapshotObserver | None = None,
+):
     """Wire the reviewed observation-only Trend service to production backends.
 
     This factory intentionally stops at dependency wiring. It reads canonical
@@ -41,6 +65,11 @@ def build_trend_monitoring_service_from_env():
     conservatively through eToro, and feeds the existing supervised live Trend
     service. It does not persist Trend observations, create tracked events, or
     invoke Strategy/Risk/Broker/PAPER/LIVE paths.
+
+    ``on_target_snapshot`` is an optional best-effort observation-only diagnostic
+    hook. It is called with each canonical target snapshot selected by the
+    supervisor. Diagnostic-output failures are contained so they cannot alter
+    target selection, stream lifecycle, or worker restart behavior.
 
     Process lifecycle/systemd installation is kept outside this factory so the
     dependency boundary can be reviewed independently before anything is enabled
@@ -53,12 +82,17 @@ def build_trend_monitoring_service_from_env():
     runtime = TrendMonitoringRuntime()
     candle_pipeline = TrackedCandlePipeline()
 
-    supervisor = TrendMonitoringSupervisor(
-        select_targets=lambda: select_trend_monitoring_targets(
+    def select_targets() -> TrendMonitoringTargets:
+        targets = select_trend_monitoring_targets(
             tracked_reader,
             profile_reader,
             resolver,
-        ),
+        )
+        _observe_target_snapshot_safely(on_target_snapshot, targets)
+        return targets
+
+    supervisor = TrendMonitoringSupervisor(
+        select_targets=select_targets,
         runtime=runtime,
     )
 
