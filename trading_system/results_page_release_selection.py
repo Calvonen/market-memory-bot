@@ -131,7 +131,7 @@ def _period_patterns(release_period: str | None) -> tuple[re.Pattern[str], ...]:
     separator = r"(?:[ _\-/]+)"
     return (
         re.compile(rf"{period}{separator}{year}", re.IGNORECASE),
-        re.compile(rf"{period}{year}", re.IGNORECASE),
+        re.compile(rf"{period}{separator}{year}", re.IGNORECASE),
     )
 
 
@@ -206,7 +206,12 @@ def _candidate_evidence_fields(candidate: ResultsPageReleaseCandidate) -> tuple[
 
 def _is_explicit_powerpoint_candidate(candidate: ResultsPageReleaseCandidate) -> bool:
     title = candidate.source_title or ""
-    return _pattern_has_standalone_match(title, _POWERPOINT_LABEL_RE)
+    if _pattern_has_standalone_match(title, _POWERPOINT_LABEL_RE):
+        return True
+    return any(
+        field.strip().lower() in {"ppt", "pptx", "powerpoint"}
+        for field in candidate.evidence_fields
+    )
 
 
 def _matching_candidates(
