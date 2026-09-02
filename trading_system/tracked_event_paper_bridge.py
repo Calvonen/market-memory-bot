@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Iterable
@@ -21,6 +22,7 @@ from trading_system.models import (
 )
 from trading_system.pipeline import PaperTradingPipeline
 from trading_system.post_release_paper import PostReleasePaperResult, run_post_release_paper
+from trading_system.risk import RiskEngine
 from trading_system.tracked_event_repository import (
     PersistentTrackedEvent,
     TrackedEventReactionRecord,
@@ -43,6 +45,7 @@ class CanonicalTradingTaskExecutionContext:
     source_event_id: str
     instrument: str
     mode: TradingMode
+    max_position_value_usd: float | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +95,32 @@ def _validate_trading_task_execution(
         raise ValueError("canonical trading task instrument differs from tracked event")
     if trading_task.mode is not TradingMode.PAPER:
         raise ValueError("canonical trading task does not explicitly request PAPER execution")
+    cap = trading_task.max_position_value_usd
+    if cap is not None and (not math.isfinite(float(cap)) or cap <= 0):
+        raise ValueError("canonical trading task position cap is invalid")
+
+
+def _pipeline_with_task_cap(
+    pipeline: PaperTradingPipeline | None,
+    task: CanonicalTradingTaskExecutionContext,
+) -> PaperTradingPipeline | None:
+    cap = task.max_position_value_usd
+    if cap is None:
+        return pipeline
+
+    base = pipeline or PaperTradingPipeline()
+    existing_cap = base.risk_engine.config.max_position_value_usd
+    effective_cap = float(cap) if existing_cap is None else min(float(cap), float(existing_cap))
+    risk_engine = RiskEngine(
+        replace(base.risk_engine.config, max_position_value_usd=effective_cap)
+    )
+    return PaperTradingPipeline(
+        strategy_engine=base.strategy_engine,
+        risk_engine=risk_engine,
+        broker=base.broker,
+        journal=base.journal,
+        allow_fractional_sizing=base.allow_fractional_sizing,
+    )
 
 
 def _validate_broker_identity(
@@ -289,6 +318,6 @@ def run_post_release_paper_from_tracked_event(
         market_df=market_df,
         technical=technical,
         market_memory=market_memory,
-        pipeline=pipeline,
+        pipeline=_pipeline_with_task_cap(pipeline, trading_task),
         confirmed_reaction_pct=float(confirmation.return_pct),
     )
