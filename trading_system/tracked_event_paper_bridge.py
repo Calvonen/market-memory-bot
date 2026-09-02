@@ -13,6 +13,7 @@ from trading_system.etoro_instrument_resolver import (
     EtoroInstrumentResolver,
     InstrumentResolutionRequest,
 )
+from trading_system.market_open_paper import run_market_open_paper
 from trading_system.market_reaction import DEFAULT_FLAT_THRESHOLD_PCT
 from trading_system.models import (
     ComponentAssessment,
@@ -279,13 +280,13 @@ def run_post_release_paper_from_tracked_event(
     market_memory: ComponentAssessment | None = None,
     pipeline: PaperTradingPipeline | None = None,
 ) -> PostReleasePaperResult:
-    """Use canonical persisted live reaction, then the existing paper pipeline.
+    """Route canonical tracked evidence through the existing PAPER pipeline.
 
     Observation evidence alone never authorizes execution. The caller must also
     supply read-only execution authority loaded from the canonical trading task;
     the task must be bound to this event/instrument and explicitly request PAPER.
     The bridge performs no persistence or broker writes itself and has no
-    daily-bar fallback.
+    daily-bar fallback for tracked-event confirmation.
     """
     release_event_id = canonical_release_event_id(event)
     _validate_trading_task_execution(
@@ -293,6 +294,26 @@ def run_post_release_paper_from_tracked_event(
         release_event_id=release_event_id,
         instrument=event.instrument,
     )
+    if expectation.event_id != release_event_id:
+        raise ValueError("expectation identity differs from tracked event")
+    if expectation.instrument.strip().upper() != event.instrument.strip().upper():
+        raise ValueError("expectation instrument differs from tracked event")
+
+    kind = event.kind.strip().lower()
+    if kind == "market_open":
+        _validate_broker_identity(event, resolver)
+        return run_market_open_paper(
+            event=event,
+            expectation=expectation,
+            reactions=tuple(reactions),
+            portfolio=portfolio,
+            market_df=market_df,
+            technical=technical,
+            market_memory=market_memory,
+            pipeline=_pipeline_with_task_cap(pipeline, trading_task),
+        )
+    if kind != "earnings":
+        raise ValueError(f"tracked event kind is not PAPER-supported: {kind or 'blank'}")
 
     confirmation = build_tracked_event_price_confirmation(
         event=event,
