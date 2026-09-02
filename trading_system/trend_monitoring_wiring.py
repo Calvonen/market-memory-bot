@@ -38,6 +38,22 @@ def trend_refresh_interval_seconds() -> float:
     return value
 
 
+def _observe_target_snapshot_safely(
+    observer: TargetSnapshotObserver | None,
+    targets: TrendMonitoringTargets,
+) -> None:
+    """Keep best-effort diagnostics from changing target-refresh semantics."""
+    if observer is None:
+        return
+    try:
+        observer(targets)
+    except Exception:
+        # Diagnostics are observation-only. A broken stdout/journald path must
+        # never abort canonical target selection, close the market stream, or
+        # make systemd restart an otherwise healthy worker.
+        return
+
+
 def build_trend_monitoring_service_from_env(
     *,
     on_target_snapshot: TargetSnapshotObserver | None = None,
@@ -50,9 +66,10 @@ def build_trend_monitoring_service_from_env(
     service. It does not persist Trend observations, create tracked events, or
     invoke Strategy/Risk/Broker/PAPER/LIVE paths.
 
-    ``on_target_snapshot`` is an optional observation-only diagnostic hook. It is
-    called with each canonical target snapshot selected by the supervisor and
-    must not mutate target selection or trading state.
+    ``on_target_snapshot`` is an optional best-effort observation-only diagnostic
+    hook. It is called with each canonical target snapshot selected by the
+    supervisor. Diagnostic-output failures are contained so they cannot alter
+    target selection, stream lifecycle, or worker restart behavior.
 
     Process lifecycle/systemd installation is kept outside this factory so the
     dependency boundary can be reviewed independently before anything is enabled
@@ -71,8 +88,7 @@ def build_trend_monitoring_service_from_env(
             profile_reader,
             resolver,
         )
-        if on_target_snapshot is not None:
-            on_target_snapshot(targets)
+        _observe_target_snapshot_safely(on_target_snapshot, targets)
         return targets
 
     supervisor = TrendMonitoringSupervisor(
