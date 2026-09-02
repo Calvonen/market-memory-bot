@@ -4,7 +4,11 @@ import unittest
 from datetime import date
 
 from trading_system.calendar_repository import CalendarEvent, CalendarEventStatus
-from trading_system.results_page_release_candidates import ResultsPageReleaseCandidate
+from trading_system.official_release_source_repository import OfficialReleaseSource
+from trading_system.results_page_release_candidates import (
+    ResultsPageReleaseCandidate,
+    extract_results_page_candidates,
+)
 from trading_system.results_page_release_selection import (
     ResultsPageSelectionStatus,
     select_results_page_release_candidate,
@@ -25,6 +29,13 @@ class ResultsPageReleasePowerPointSelectionTests(unittest.TestCase):
             status=CalendarEventStatus.TRACKED,
         )
 
+    def _source(self) -> OfficialReleaseSource:
+        return OfficialReleaseSource(
+            event_id="calendar:test-event",
+            source_kind="results_page",
+            source_url="https://investor.example.com/results",
+        )
+
     def _candidate(self, url: str, title: str) -> ResultsPageReleaseCandidate:
         return ResultsPageReleaseCandidate(
             event_id="calendar:test-event",
@@ -42,7 +53,7 @@ class ResultsPageReleasePowerPointSelectionTests(unittest.TestCase):
         self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
         self.assertEqual(selection.candidate, pdf)
 
-    def test_pdf_wins_when_powerpoint_title_is_composite_accessibility_text(self):
+    def test_composite_powerpoint_link_title_is_excluded(self):
         pdf = self._candidate("https://investor.example.com/results.pdf", "PDF")
         ppt = self._candidate(
             "https://investor.example.com/presentation.pptx",
@@ -54,82 +65,62 @@ class ResultsPageReleasePowerPointSelectionTests(unittest.TestCase):
         self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
         self.assertEqual(selection.candidate, pdf)
 
-    def test_duplicate_link_powerpoint_evidence_is_not_lost_with_generic_first_title(self):
+    def test_duplicate_url_preserves_all_link_local_titles(self):
+        html = """
+        <a href="/presentation">Download</a>
+        <a href="/presentation" aria-label="Download PPT">PPT</a>
+        """
+
+        candidates = extract_results_page_candidates(self._source(), html)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source_url, "https://investor.example.com/presentation")
+        self.assertEqual(candidates[0].source_title, "Download Download PPT PPT")
+
+    def test_duplicate_generic_then_powerpoint_title_does_not_remain_ambiguous(self):
+        html = """
+        <a href="/presentation">Download</a>
+        <table><tr>
+          <td>26 Aug 2026</td>
+          <td><a href="/results.pdf">PDF</a></td>
+          <td><a href="/presentation" aria-label="Download PPT">PPT</a></td>
+        </tr></table>
+        """
+
+        candidates = extract_results_page_candidates(self._source(), html)
+        selection = select_results_page_release_candidate(self._event(), candidates)
+
+        self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
+        self.assertEqual(selection.candidate.source_url, "https://investor.example.com/results.pdf")
+
+    def test_fragmented_row_ppt_field_does_not_exclude_pdf(self):
+        html = """
+        <table><tr>
+          <td>26 Aug 2026</td>
+          <td><a href="/results.pdf">PDF</a></td>
+          <td><img alt="separator"></td>
+          <td><a href="/presentation.pptx">PPT</a></td>
+        </tr></table>
+        """
+
+        candidates = extract_results_page_candidates(self._source(), html)
+        pdf = next(candidate for candidate in candidates if candidate.source_url.endswith("results.pdf"))
+        self.assertIn("PPT", pdf.evidence_fields)
+
+        selection = select_results_page_release_candidate(self._event(), candidates)
+
+        self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
+        self.assertEqual(selection.candidate, pdf)
+
+    def test_repeated_powerpoint_labels_on_distinct_presentations_are_excluded(self):
         pdf = self._candidate("https://investor.example.com/results.pdf", "PDF")
-        ppt = ResultsPageReleaseCandidate(
-            event_id="calendar:test-event",
-            source_url="https://investor.example.com/presentation",
-            source_title="Download",
-            evidence_fields=(
-                "Download",
-                "PPT",
-                "26 Aug 2026 Half Year Results PDF PPT",
-            ),
-        )
-
-        selection = select_results_page_release_candidate(self._event(), (pdf, ppt))
-
-        self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
-        self.assertEqual(selection.candidate, pdf)
-
-    def test_composite_duplicate_link_powerpoint_evidence_is_recognized(self):
-        shared_row = "26 Aug 2026 Half Year Results PDF PPT"
-        pdf = ResultsPageReleaseCandidate(
-            event_id="calendar:test-event",
-            source_url="https://investor.example.com/results.pdf",
-            source_title="Download",
-            evidence_fields=("Download", shared_row),
-        )
-        ppt = ResultsPageReleaseCandidate(
-            event_id="calendar:test-event",
-            source_url="https://investor.example.com/presentation",
-            source_title="Download",
-            evidence_fields=("Download", "Download PPT", shared_row),
-        )
-
-        selection = select_results_page_release_candidate(self._event(), (pdf, ppt))
-
-        self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
-        self.assertEqual(selection.candidate, pdf)
-
-    def test_repeated_powerpoint_labels_on_distinct_presentations_are_all_excluded(self):
-        shared_row = "26 Aug 2026 Half Year Results PDF PPT"
-        pdf = ResultsPageReleaseCandidate(
-            event_id="calendar:test-event",
-            source_url="https://investor.example.com/results.pdf",
-            source_title="PDF",
-            evidence_fields=("PDF", shared_row),
-        )
-        first_ppt = ResultsPageReleaseCandidate(
-            event_id="calendar:test-event",
-            source_url="https://investor.example.com/presentation-a",
-            source_title="Download",
-            evidence_fields=("Download", "PPT", shared_row),
-        )
-        second_ppt = ResultsPageReleaseCandidate(
-            event_id="calendar:test-event",
-            source_url="https://investor.example.com/presentation-b",
-            source_title="Download",
-            evidence_fields=("Download", "PPT", shared_row),
-        )
+        first_ppt = self._candidate("https://investor.example.com/presentation-a", "PPT")
+        second_ppt = self._candidate("https://investor.example.com/presentation-b", "PPT")
 
         selection = select_results_page_release_candidate(
             self._event(),
             (pdf, first_ppt, second_ppt),
         )
-
-        self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
-        self.assertEqual(selection.candidate, pdf)
-
-    def test_row_evidence_with_pdf_and_ppt_does_not_exclude_pdf(self):
-        pdf = ResultsPageReleaseCandidate(
-            event_id="calendar:test-event",
-            source_url="https://investor.example.com/results.pdf",
-            source_title="Download",
-            evidence_fields=("Download", "26 Aug 2026 Half Year Results PDF PPT"),
-        )
-
-        selection = select_results_page_release_candidate(self._event(), (pdf,))
 
         self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
         self.assertEqual(selection.candidate, pdf)
