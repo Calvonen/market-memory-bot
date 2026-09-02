@@ -71,12 +71,31 @@ class MobileTrackedEventCardPaperSummaryTests(unittest.TestCase):
         ):
             self.assertIn(status, source)
 
+        self.assertIn("export function classifyPaperBrokerStatus", source)
         self.assertIn("PAPER-toimeksianto odottaa toteutusta", source)
         self.assertIn("PAPER-toimeksianto hylätty tai peruttu", source)
         self.assertIn("PAPER-toimeksianto epäonnistui", source)
         self.assertIn("brokerin toteutustila puuttuu", source)
         self.assertIn("brokerin tila varmistamatta", source)
         self.assertIn("brokerOutcome(order?.status)", source)
+
+    def test_merged_home_headline_uses_same_broker_outcome_classifier(self) -> None:
+        home = HOME_PATH.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "import { classifyPaperBrokerStatus } from '@/components/TrackedEventPaperSummary';",
+            home,
+        )
+        self.assertIn("classifyPaperBrokerStatus(run.paper_order?.status)", home)
+        self.assertIn("Paperitoimeksianto odottaa toteutusta", home)
+        self.assertIn("Paperitoimeksianto hylätty tai peruttu", home)
+        self.assertIn("Paperitoimeksianto epäonnistui", home)
+        self.assertIn("Brokerin toteutustila puuttuu", home)
+        self.assertIn("Brokerin tila varmistamatta", home)
+        paper_executed_start = home.index("case 'paper_executed':")
+        paper_executed_end = home.index("default:", paper_executed_start)
+        paper_executed_branch = home[paper_executed_start:paper_executed_end]
+        self.assertNotIn("return 'Paperikauppa toteutettu';\n    default", paper_executed_branch)
 
     def test_execution_status_is_bound_to_current_expectation_version(self) -> None:
         source = PAPER_SUMMARY_PATH.read_text(encoding="utf-8")
