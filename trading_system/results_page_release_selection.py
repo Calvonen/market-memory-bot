@@ -205,8 +205,13 @@ def _candidate_evidence_fields(candidate: ResultsPageReleaseCandidate) -> tuple[
 
 
 def _is_explicit_powerpoint_candidate(candidate: ResultsPageReleaseCandidate) -> bool:
-    title = candidate.source_title or ""
-    return _pattern_has_standalone_match(title, _POWERPOINT_LABEL_RE)
+    title_fields = candidate.link_title_fields
+    if not title_fields and candidate.source_title:
+        title_fields = (candidate.source_title,)
+    return any(
+        _pattern_has_standalone_match(field, _POWERPOINT_LABEL_RE)
+        for field in title_fields
+    )
 
 
 def _matching_candidates(
