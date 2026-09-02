@@ -57,6 +57,29 @@ class SupabaseTradingTaskRepository:
         ).execute()
         return self._one(response.data, "approve_trading_task")
 
+    def approve_paper_permission(
+        self,
+        *,
+        tracked_event_id: str,
+        source_event_id: str,
+        instrument: str,
+        actor: str,
+        expected_expectation_version: int,
+        max_position_value_usd: float,
+    ) -> dict[str, Any]:
+        response = self.client.rpc(
+            "approve_paper_trading_task_for_event",
+            {
+                "input_tracked_event_id": tracked_event_id,
+                "input_source_event_id": source_event_id,
+                "input_instrument": instrument,
+                "input_actor": actor,
+                "input_expected_expectation_version": expected_expectation_version,
+                "input_max_position_value_usd": max_position_value_usd,
+            },
+        ).execute()
+        return self._one_row(response.data, "approve_paper_trading_task_for_event")
+
     def cancel(self, *, task_id: str, actor: str) -> CanonicalTradingTask:
         response = self.client.rpc(
             "cancel_trading_task",
@@ -80,6 +103,31 @@ class SupabaseTradingTaskRepository:
             raise RuntimeError("canonical trading task read returned ambiguous rows")
         return self._from_row(rows[0])
 
+    def get_active_row_for_event_mode(
+        self,
+        *,
+        tracked_event_id: str,
+        mode: TradingMode,
+    ) -> dict[str, Any] | None:
+        if not isinstance(mode, TradingMode):
+            raise ValueError("mode must be a TradingMode")
+        rows = (
+            self.client.table("trading_tasks")
+            .select("*")
+            .eq("tracked_event_id", tracked_event_id)
+            .eq("mode", mode.value)
+            .in_("state", [TradingTaskState.PENDING.value, TradingTaskState.APPROVED.value])
+            .limit(2)
+            .execute()
+            .data
+            or []
+        )
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise RuntimeError("active trading task read returned ambiguous rows")
+        return dict(rows[0])
+
     def execution_context(self, task_id: str) -> CanonicalTradingTaskExecutionContext:
         task = self.get(task_id)
         if task is None:
@@ -91,21 +139,27 @@ class SupabaseTradingTaskRepository:
             source_event_id=task.source_event_id,
             instrument=task.instrument,
             mode=task.mode,
+            max_position_value_usd=task.max_position_value_usd,
         )
 
     @classmethod
     def _one(cls, data: Any, operation: str) -> CanonicalTradingTask:
+        return cls._from_row(cls._one_row(data, operation))
+
+    @staticmethod
+    def _one_row(data: Any, operation: str) -> dict[str, Any]:
         if isinstance(data, dict):
             rows = [data]
         else:
             rows = data or []
-        if len(rows) != 1:
+        if len(rows) != 1 or not isinstance(rows[0], dict):
             raise RuntimeError(f"{operation} returned {len(rows)} rows")
-        return cls._from_row(rows[0])
+        return dict(rows[0])
 
     @staticmethod
     def _from_row(row: dict[str, Any]) -> CanonicalTradingTask:
         try:
+            raw_cap = row.get("max_position_value_usd")
             return CanonicalTradingTask(
                 task_id=str(row["id"]),
                 tracked_event_id=str(row["tracked_event_id"]),
@@ -119,6 +173,7 @@ class SupabaseTradingTaskRepository:
                 approved_at=_parse_datetime(row["approved_at"]) if row.get("approved_at") else None,
                 cancelled_by=row.get("cancelled_by"),
                 cancelled_at=_parse_datetime(row["cancelled_at"]) if row.get("cancelled_at") else None,
+                max_position_value_usd=float(raw_cap) if raw_cap is not None else None,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError("malformed canonical trading task row") from exc

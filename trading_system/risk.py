@@ -29,6 +29,7 @@ class RiskConfig:
     cooldown_after_loss_minutes: int = 60
     kill_switch: bool = False
     live_trading_enabled: bool = False
+    max_position_value_usd: float | None = None
 
 
 def _decimal(value: float) -> Decimal:
@@ -40,6 +41,9 @@ class RiskEngine:
 
     def __init__(self, config: RiskConfig | None = None) -> None:
         self.config = config or RiskConfig()
+        cap = self.config.max_position_value_usd
+        if cap is not None and (not math.isfinite(float(cap)) or cap <= 0):
+            raise ValueError("max_position_value_usd must be finite and positive")
 
     def evaluate(
         self,
@@ -73,6 +77,8 @@ class RiskEngine:
         max_risk_amount = max(portfolio.equity, 0.0) * (self.config.max_risk_per_trade_pct / 100.0)
         equity_position_limit = max(portfolio.equity, 0.0) * (self.config.max_position_pct / 100.0)
         max_position_value = min(equity_position_limit, max(portfolio.cash, 0.0))
+        if self.config.max_position_value_usd is not None:
+            max_position_value = min(max_position_value, self.config.max_position_value_usd)
 
         if candidate.direction is Direction.NO_TRADE:
             return RiskDecision(

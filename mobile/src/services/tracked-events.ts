@@ -105,6 +105,26 @@ export type TrackedEventReleaseSource = {
   source_title: string | null;
 };
 
+export type TrackedEventPaperPermission = {
+  event_id: string;
+  source_event_id: string;
+  instrument: string;
+  mode: 'PAPER';
+  state: 'not_created' | 'pending' | 'approved';
+  task_id: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  approved_expectation_version: number | null;
+  current_expectation_version: number;
+  max_position_value_usd: number | null;
+  approval_current: boolean;
+};
+
+export type ApproveTrackedEventPaperPermissionInput = {
+  expected_expectation_version: number;
+  max_position_value_usd: number;
+};
+
 export type TrackedEventActivityResponse = {
   occurrence_id: string;
   exists: boolean;
@@ -238,6 +258,26 @@ export function getTrackedEventWorkflow(eventId: string): Promise<TrackedEventWo
 export function getTrackedEventReleaseSource(eventId: string): Promise<TrackedEventReleaseSource> {
   return apiGet<TrackedEventReleaseSource>(
     `/api/v1/tracked-events/${encodeURIComponent(eventId)}/release-source`,
+  );
+}
+
+export function getTrackedEventPaperPermission(
+  eventId: string,
+): Promise<TrackedEventPaperPermission> {
+  return apiGet<TrackedEventPaperPermission>(
+    `/api/v1/tracked-events/${encodeURIComponent(eventId)}/paper-permission`,
+  );
+}
+
+export function approveTrackedEventPaperPermission(
+  eventId: string,
+  actor: string,
+  input: ApproveTrackedEventPaperPermissionInput,
+): Promise<TrackedEventPaperPermission> {
+  return apiControlPost<TrackedEventPaperPermission>(
+    `/api/v1/tracked-events/${encodeURIComponent(eventId)}/paper-permission/approve`,
+    input,
+    { 'X-MarketAI-Actor': actor },
   );
 }
 
