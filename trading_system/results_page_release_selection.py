@@ -56,7 +56,6 @@ class ResultsPageSelection:
 
 _PERIOD_LABEL_RE = re.compile(r"^(Q[1-4]|H[12]|FY) ([0-9]{4})$", re.IGNORECASE)
 _POWERPOINT_LABEL_RE = re.compile(r"(?:pptx?|powerpoint)", re.IGNORECASE | re.ASCII)
-_PDF_LABEL_RE = re.compile(r"pdf", re.IGNORECASE | re.ASCII)
 _PERCENT_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}")
 _ZERO_WIDTH_SPACE = "\u200b"
 _ENGLISH_MONTH_ABBREVIATIONS = (
@@ -207,13 +206,7 @@ def _candidate_evidence_fields(candidate: ResultsPageReleaseCandidate) -> tuple[
 
 def _is_explicit_powerpoint_candidate(candidate: ResultsPageReleaseCandidate) -> bool:
     title = candidate.source_title or ""
-    if _pattern_has_standalone_match(title, _POWERPOINT_LABEL_RE):
-        return True
-    return any(
-        _pattern_has_standalone_match(field, _POWERPOINT_LABEL_RE)
-        and not _pattern_has_standalone_match(field, _PDF_LABEL_RE)
-        for field in candidate.evidence_fields
-    )
+    return _pattern_has_standalone_match(title, _POWERPOINT_LABEL_RE)
 
 
 def _matching_candidates(
