@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 
 from trading_system.trend_monitoring_wiring import (
     DEFAULT_TREND_REFRESH_SECONDS,
+    _observe_target_snapshot_safely,
     build_trend_monitoring_service_from_env,
     trend_refresh_interval_seconds,
 )
@@ -23,6 +24,14 @@ class TrendMonitoringWiringTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, "must be a positive number"):
                     trend_refresh_interval_seconds()
+
+    def test_target_snapshot_diagnostic_failure_is_contained(self) -> None:
+        targets = Mock(name="targets")
+        observer = Mock(side_effect=BrokenPipeError("journal pipe closed"))
+
+        _observe_target_snapshot_safely(observer, targets)
+
+        observer.assert_called_once_with(targets)
 
     @patch("trading_system.trend_monitoring_wiring.stream_supervised_trend_monitoring")
     @patch("trading_system.trend_monitoring_wiring.TrendMonitoringSupervisor")
