@@ -2,8 +2,8 @@ import { Link, useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { getEvent } from '@/services/api';
 import { TrackedEventPaperSummary } from '@/components/TrackedEventPaperSummary';
+import { getEvent } from '@/services/api';
 import {
   getTrackedEventLatestReaction,
   getTrackedEvents,
@@ -124,12 +124,7 @@ export function TrackedEventsSection({
 
 export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
   const scheduleText = formatTrackedEventSchedule(event);
-  const expectationCandidateId =
-    event.kind === 'earnings'
-      ? event.calendar_event_id
-        ? `calendar:${event.calendar_event_id}`
-        : `tracked:${event.event_id}`
-      : null;
+  const expectationCandidateId = expectationEventIdForTrackedEvent(event);
   const [expectationLinkState, setExpectationLinkState] = useState<ExpectationLinkState>(
     expectationCandidateId ? { status: 'loading' } : { status: 'none' },
   );
@@ -204,13 +199,6 @@ export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
         </View>
       ) : null}
 
-      {event.kind === 'earnings' ? (
-        <TrackedEventPaperSummary
-          eventId={event.event_id}
-          expectationEventId={expectationCandidateId}
-        />
-      ) : null}
-
       <TrackedEventDetails event={event} />
     </View>
   );
@@ -227,6 +215,7 @@ export function TrackedEventDetails({
 }) {
   const presentation = describeTrackedEvent(event);
   const configText = formatTrackingConfigSnapshot(event.tracking_config_snapshot);
+  const expectationEventId = expectationEventIdForTrackedEvent(event);
   const [latestReactionState, setLatestReactionState] = useState<LatestReactionState>({
     status: 'loading',
   });
@@ -282,6 +271,13 @@ export function TrackedEventDetails({
         {presentation.detail ? <Text style={styles.detailText}>{presentation.detail}</Text> : null}
       </View>
 
+      {event.kind === 'earnings' ? (
+        <TrackedEventPaperSummary
+          eventId={event.event_id}
+          expectationEventId={expectationEventId}
+        />
+      ) : null}
+
       <TrackedEventWorkflow state={workflowState} eventId={event.event_id} />
 
       <View style={styles.configBlock}>
@@ -292,6 +288,13 @@ export function TrackedEventDetails({
       <TrackedEventResult state={latestReactionState} />
     </>
   );
+}
+
+function expectationEventIdForTrackedEvent(event: TrackedMarketEvent): string | null {
+  if (event.kind !== 'earnings') return null;
+  return event.calendar_event_id
+    ? `calendar:${event.calendar_event_id}`
+    : `tracked:${event.event_id}`;
 }
 
 function TrackedEventWorkflow({ state, eventId }: { state: WorkflowState; eventId: string }) {
@@ -449,9 +452,40 @@ function formatPersistedNumber(value: number): string {
   return String(value);
 }
 
+function incrementUnsignedInteger(value: string): string {
+  const digits = value.split('');
+  let carry = 1;
+  for (let index = digits.length - 1; index >= 0 && carry; index -= 1) {
+    const next = digits[index].charCodeAt(0) - 48 + carry;
+    digits[index] = String(next % 10);
+    carry = next >= 10 ? 1 : 0;
+  }
+  if (carry) digits.unshift('1');
+  return digits.join('');
+}
+
 function formatReactionPercent(value: string): string {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed.toFixed(2) : value;
+  const trimmed = value.trim();
+  const match = /^([+-]?)(\d+)(?:\.(\d*))?$/.exec(trimmed);
+  if (!match) return value;
+
+  const sign = match[1];
+  let integerPart = match[2];
+  const fraction = match[3] ?? '';
+  let hundredths = `${fraction}00`.slice(0, 2);
+  const roundingDigit = fraction.length > 2 ? fraction[2] : '0';
+
+  if (roundingDigit >= '5') {
+    const roundedHundredths = Number(hundredths) + 1;
+    if (roundedHundredths === 100) {
+      integerPart = incrementUnsignedInteger(integerPart);
+      hundredths = '00';
+    } else {
+      hundredths = String(roundedHundredths).padStart(2, '0');
+    }
+  }
+
+  return `${sign}${integerPart}.${hundredths}`;
 }
 
 const EVENT_TIME_STATUS_LABELS: Record<TrackedMarketEvent['event_time_status'], string> = {
