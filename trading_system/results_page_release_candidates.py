@@ -4,7 +4,7 @@ import ipaddress
 import secrets
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from urllib.parse import urlsplit, urlunsplit
 
@@ -66,6 +66,7 @@ class ResultsPageReleaseCandidate:
     source_url: str
     source_title: str | None = None
     evidence_fields: tuple[str, ...] = ()
+    link_title_fields: tuple[str, ...] = field(default=(), compare=False, repr=False)
 
 
 def _contains_ascii_control(value: str) -> bool:
@@ -410,6 +411,26 @@ def _visible_anchor_text_fields(anchor) -> tuple[str, ...]:
         if normalized:
             fields.append(normalized)
     return tuple(fields)
+
+
+def _visible_anchor_image_alt_fields(anchor) -> tuple[str, ...]:
+    fields: list[str] = []
+
+    def visit(element) -> None:
+        for child in list(element):
+            if not isinstance(child.tag, str) or _element_hidden(child):
+                continue
+            namespace, local = _element_name(child.tag)
+            if namespace == _HTML_NAMESPACE and local == "img":
+                alt = _safe_normalized_text(child.attrib.get("alt", ""))
+                if alt:
+                    fields.append(alt)
+                continue
+            if _element_allows_simple_text(child):
+                visit(child)
+
+    visit(anchor)
+    return tuple(dict.fromkeys(fields))
 
 
 def _nearest_html_table_row(element, parents: dict[object, object]):
@@ -801,7 +822,7 @@ def _parse_html5_page(html_text: str):
     }
     row_evidence_cache: dict[object, tuple[str, ...]] = {}
 
-    links: list[tuple[str, str | None, tuple[str, ...]]] = []
+    links: list[tuple[str, str | None, tuple[str, ...], tuple[str, ...]]] = []
     for anchor in _iter_visible_html_anchors(fragment):
         href = anchor.attrib.get("href")
         if href is None or href in safety_scanner.unsafe_hrefs or _contains_ascii_control(href):
@@ -814,6 +835,8 @@ def _parse_html5_page(html_text: str):
         anchor_evidence_fields = tuple(
             value for value in (aria_label, title_attr, *visible_text_fields) if value
         )
+        image_alt_fields = _visible_anchor_image_alt_fields(anchor)
+        link_title_fields = tuple(dict.fromkeys((*anchor_evidence_fields, *image_alt_fields)))
         row = _nearest_html_table_row(anchor, parents)
         if row is None:
             row_evidence_fields = ()
@@ -824,7 +847,7 @@ def _parse_html5_page(html_text: str):
                 row_evidence_cache[row] = row_evidence_fields
         evidence_fields = tuple(dict.fromkeys((*anchor_evidence_fields, *row_evidence_fields)))
         title = " ".join(anchor_evidence_fields) or None
-        links.append((href, title, evidence_fields))
+        links.append((href, title, link_title_fields, evidence_fields))
     return base_href, links
 
 
@@ -1071,31 +1094,34 @@ def extract_results_page_candidates_with_reason(
 
     aggregated: dict[str, dict[str, object]] = {}
     order: list[str] = []
-    for href, title, evidence_fields in links:
+    for href, title, link_title_fields, evidence_fields in links:
         candidate_url = _canonical_candidate_url(base_url, href)
         # Neither spelling of the results page is itself a release document.
         if candidate_url is None or candidate_url in {served_page_url, approved_page_url}:
             continue
         if candidate_url not in aggregated:
-            aggregated[candidate_url] = {"titles": [], "fields": []}
+            aggregated[candidate_url] = {"title": None, "link_titles": [], "fields": []}
             order.append(candidate_url)
         record = aggregated[candidate_url]
-        if title and title not in record["titles"]:
-            record["titles"].append(title)
-        for field in evidence_fields:
-            if field not in record["fields"]:
-                record["fields"].append(field)
+        if title and record["title"] is None:
+            record["title"] = title
+        for link_title in link_title_fields:
+            if link_title not in record["link_titles"]:
+                record["link_titles"].append(link_title)
+        for field_value in evidence_fields:
+            if field_value not in record["fields"]:
+                record["fields"].append(field_value)
 
     candidates: list[ResultsPageReleaseCandidate] = []
     for candidate_url in order:
         record = aggregated[candidate_url]
-        source_title = " ".join(record["titles"]) or None
         candidates.append(
             ResultsPageReleaseCandidate(
                 event_id=source.event_id,
                 source_url=candidate_url,
-                source_title=source_title,
+                source_title=record["title"],
                 evidence_fields=tuple(record["fields"]),
+                link_title_fields=tuple(record["link_titles"]),
             )
         )
     return tuple(candidates), None
