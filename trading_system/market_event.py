@@ -17,6 +17,7 @@ class MarketEventSource(str, Enum):
 
 class MarketEventKind(str, Enum):
     EARNINGS = "earnings"
+    MARKET_OPEN = "market_open"
     GUIDANCE = "guidance"
     TRADING_UPDATE = "trading_update"
     ACQUISITION = "acquisition"
