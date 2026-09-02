@@ -204,12 +204,26 @@ def _candidate_evidence_fields(candidate: ResultsPageReleaseCandidate) -> tuple[
     return tuple(fields)
 
 
-def _is_explicit_powerpoint_candidate(candidate: ResultsPageReleaseCandidate) -> bool:
+def _shared_candidate_evidence_fields(
+    candidates: tuple[ResultsPageReleaseCandidate, ...],
+) -> frozenset[str]:
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        for field in set(candidate.evidence_fields):
+            counts[field] = counts.get(field, 0) + 1
+    return frozenset(field for field, count in counts.items() if count > 1)
+
+
+def _is_explicit_powerpoint_candidate(
+    candidate: ResultsPageReleaseCandidate,
+    shared_evidence_fields: frozenset[str],
+) -> bool:
     title = candidate.source_title or ""
     if _pattern_has_standalone_match(title, _POWERPOINT_LABEL_RE):
         return True
     return any(
-        field.strip().lower() in {"ppt", "pptx", "powerpoint"}
+        field not in shared_evidence_fields
+        and _pattern_has_standalone_match(field, _POWERPOINT_LABEL_RE)
         for field in candidate.evidence_fields
     )
 
@@ -221,10 +235,11 @@ def _matching_candidates(
     *,
     standalone_token: bool = False,
 ) -> tuple[ResultsPageReleaseCandidate, ...]:
+    shared_evidence_fields = _shared_candidate_evidence_fields(candidates)
     return tuple(
         candidate
         for candidate in candidates
-        if not _is_explicit_powerpoint_candidate(candidate)
+        if not _is_explicit_powerpoint_candidate(candidate, shared_evidence_fields)
         and candidate.event_id == event.calendar_event_id
         and any(
             _pattern_has_standalone_match(field, pattern) if standalone_token else bool(pattern.search(field))
