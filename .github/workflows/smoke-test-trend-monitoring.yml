@@ -133,6 +133,17 @@ jobs:
               echo "::error::Could not inspect $SERVICE SubState: ${SUB_STATE:-unknown error}."
               return 1
             fi
+            if [ "$ACTIVE_STATE" = "failed" ] && [ "$SUB_STATE" = "failed" ]; then
+              sudo /usr/bin/systemctl reset-failed "$SERVICE"
+              if ! ACTIVE_STATE="$(/usr/bin/systemctl show "$SERVICE" --property=ActiveState --value 2>&1)"; then
+                echo "::error::Could not re-check $SERVICE ActiveState after reset-failed: ${ACTIVE_STATE:-unknown error}."
+                return 1
+              fi
+              if ! SUB_STATE="$(/usr/bin/systemctl show "$SERVICE" --property=SubState --value 2>&1)"; then
+                echo "::error::Could not re-check $SERVICE SubState after reset-failed: ${SUB_STATE:-unknown error}."
+                return 1
+              fi
+            fi
             if [ "$ACTIVE_STATE" != "inactive" ] || [ "$SUB_STATE" != "dead" ]; then
               echo "::error::$SERVICE must start from inactive/dead (ActiveState=${ACTIVE_STATE}, SubState=${SUB_STATE})."
               return 1
