@@ -35,26 +35,36 @@ class SupabaseTradingTaskRepository:
         instrument: str,
         mode: TradingMode,
         actor: str,
+        max_position_value_usd: float | None = None,
     ) -> CanonicalTradingTask:
         if not isinstance(mode, TradingMode):
             raise ValueError("mode must be a TradingMode")
-        response = self.client.rpc(
-            "create_trading_task",
-            {
-                "input_tracked_event_id": tracked_event_id,
-                "input_source_event_id": source_event_id,
-                "input_instrument": instrument,
-                "input_mode": mode.value,
-                "input_actor": actor,
-            },
-        ).execute()
+        payload: dict[str, object] = {
+            "input_tracked_event_id": tracked_event_id,
+            "input_source_event_id": source_event_id,
+            "input_instrument": instrument,
+            "input_mode": mode.value,
+            "input_actor": actor,
+        }
+        if max_position_value_usd is not None:
+            payload["input_max_position_value_usd"] = max_position_value_usd
+        response = self.client.rpc("create_trading_task", payload).execute()
         return self._one(response.data, "create_trading_task")
 
-    def approve(self, *, task_id: str, actor: str) -> CanonicalTradingTask:
-        response = self.client.rpc(
-            "approve_trading_task",
-            {"input_task_id": task_id, "input_actor": actor},
-        ).execute()
+    def approve(
+        self,
+        *,
+        task_id: str,
+        actor: str,
+        expected_expectation_version: int | None = None,
+    ) -> CanonicalTradingTask:
+        payload: dict[str, object] = {
+            "input_task_id": task_id,
+            "input_actor": actor,
+        }
+        if expected_expectation_version is not None:
+            payload["input_expected_expectation_version"] = expected_expectation_version
+        response = self.client.rpc("approve_trading_task", payload).execute()
         return self._one(response.data, "approve_trading_task")
 
     def cancel(self, *, task_id: str, actor: str) -> CanonicalTradingTask:
@@ -131,6 +141,7 @@ class SupabaseTradingTaskRepository:
     @staticmethod
     def _from_row(row: dict[str, Any]) -> CanonicalTradingTask:
         try:
+            raw_cap = row.get("max_position_value_usd")
             return CanonicalTradingTask(
                 task_id=str(row["id"]),
                 tracked_event_id=str(row["tracked_event_id"]),
@@ -144,6 +155,7 @@ class SupabaseTradingTaskRepository:
                 approved_at=_parse_datetime(row["approved_at"]) if row.get("approved_at") else None,
                 cancelled_by=row.get("cancelled_by"),
                 cancelled_at=_parse_datetime(row["cancelled_at"]) if row.get("cancelled_at") else None,
+                max_position_value_usd=float(raw_cap) if raw_cap is not None else None,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError("malformed canonical trading task row") from exc
