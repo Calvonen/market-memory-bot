@@ -3,6 +3,7 @@ import { useCallback, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { getEvent } from '@/services/api';
+import { TrackedEventPaperSummary } from '@/components/TrackedEventPaperSummary';
 import {
   getTrackedEventLatestReaction,
   getTrackedEvents,
@@ -201,6 +202,13 @@ export function TrackedEventCard({ event }: { event: TrackedMarketEvent }) {
             <Text style={styles.retryText}>Yritä uudelleen</Text>
           </Pressable>
         </View>
+      ) : null}
+
+      {event.kind === 'earnings' ? (
+        <TrackedEventPaperSummary
+          eventId={event.event_id}
+          expectationEventId={expectationCandidateId}
+        />
       ) : null}
 
       <TrackedEventDetails event={event} />
@@ -407,7 +415,7 @@ function TrackedEventResult({ state }: { state: LatestReactionState }) {
     <View style={styles.resultBlock}>
       <Text style={styles.configTitle}>Tulos</Text>
       <Text style={styles.resultText}>
-        Viimeisin havainto · {reaction.interval_minutes} min · Muutos {reaction.return_pct} %
+        Viimeisin havainto · {reaction.interval_minutes} min · Muutos {formatReactionPercent(reaction.return_pct)} %
       </Text>
       <Text style={styles.resultDetail}>
         Reference {reaction.reference_price} · Close {reaction.close_price}
@@ -439,6 +447,11 @@ function formatTrackingConfigSnapshot(
 
 function formatPersistedNumber(value: number): string {
   return String(value);
+}
+
+function formatReactionPercent(value: string): string {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed.toFixed(2) : value;
 }
 
 const EVENT_TIME_STATUS_LABELS: Record<TrackedMarketEvent['event_time_status'], string> = {
