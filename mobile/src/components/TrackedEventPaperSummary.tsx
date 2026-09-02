@@ -2,7 +2,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { getPaperStatus, type PaperRun } from '@/services/api';
+import { getPaperStatus, type PaperStatus } from '@/services/api';
 import {
   getTrackedEventPaperPermission,
   type TrackedEventPaperPermission,
@@ -23,7 +23,7 @@ export function TrackedEventPaperSummary({ eventId, expectationEventId }: Props)
   const [permissionState, setPermissionState] = useState<LoadState<TrackedEventPaperPermission>>({
     status: 'loading',
   });
-  const [executionState, setExecutionState] = useState<LoadState<PaperRun | null>>({
+  const [executionState, setExecutionState] = useState<LoadState<PaperStatus | null>>({
     status: 'loading',
   });
 
@@ -46,7 +46,7 @@ export function TrackedEventPaperSummary({ eventId, expectationEventId }: Props)
       } else {
         void getPaperStatus(expectationEventId)
           .then((status) => {
-            if (active) setExecutionState({ status: 'ready', value: status.paper_run });
+            if (active) setExecutionState({ status: 'ready', value: status });
           })
           .catch(() => {
             if (active) setExecutionState({ status: 'error' });
@@ -84,7 +84,7 @@ function PermissionSummary({ state }: { state: LoadState<TrackedEventPaperPermis
     return <Text style={styles.meta}>Ladataan lupaa…</Text>;
   }
   if (state.status === 'error') {
-    return <Text style={styles.warning}>PAPER-luvan tilaa ei juuri nyt saatu haettua.</Text>;
+    return <Text style={styles.warning}>PAPER-lupa ei vielä ole saatavilla tai tilaa ei saatu haettua.</Text>;
   }
 
   const permission = state.value;
@@ -114,18 +114,30 @@ function PermissionSummary({ state }: { state: LoadState<TrackedEventPaperPermis
   );
 }
 
-function ExecutionSummary({ state }: { state: LoadState<PaperRun | null> }) {
+function ExecutionSummary({ state }: { state: LoadState<PaperStatus | null> }) {
   if (state.status === 'loading') {
     return <Text style={styles.meta}>Kauppa: tarkistetaan…</Text>;
   }
   if (state.status === 'error') {
     return <Text style={styles.warning}>Kaupan tilaa ei juuri nyt saatu haettua.</Text>;
   }
-  if (!state.value) {
+  if (!state.value || !state.value.paper_run) {
     return <Text style={styles.meta}>Kauppa: ei vielä käsitelty.</Text>;
   }
 
-  const run = state.value;
+  const status = state.value;
+  const run = status.paper_run;
+  if (
+    typeof run.expectation_version === 'number' &&
+    run.expectation_version !== status.expectation_version
+  ) {
+    return (
+      <Text style={styles.warning}>
+        Kaupan aiempi tila on expectation v{run.expectation_version}:lle · nykyinen v{status.expectation_version}
+      </Text>
+    );
+  }
+
   if (run.status === 'paper_executed') {
     const order = run.paper_order;
     const details = [order?.direction, order?.quantity, order?.status]
