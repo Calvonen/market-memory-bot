@@ -9,16 +9,20 @@ from uuid import UUID
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from trading_system.models import TradingMode
 from trading_system.official_release_source_repository import (
     OfficialReleaseSource,
     OfficialReleaseSourceEventNotFound,
     OfficialReleaseSourceState,
     OfficialReleaseSourceVersionConflict,
 )
+from trading_system.supabase_event_repository import SupabaseEventExpectationRepository
 from trading_system.tracked_event_release_source import (
     build_tracked_event_release_source_read_model,
 )
 from trading_system.tracked_event_repository import PersistentTrackedEvent
+from trading_system.trading_task import TradingTaskState
+from trading_system.trading_task_repository import SupabaseTradingTaskRepository
 from trading_system.workflow_readiness_evidence_loader import canonical_release_event_id
 
 
@@ -98,14 +102,108 @@ def _parse_occurrence_id(value: str) -> tuple[str, str]:
     return prefix, str(UUID(raw_id))
 
 
+def _iso_or_none(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(UTC).isoformat()
+    text = str(value).strip()
+    return text or None
+
+
+def _paper_permission_payload(
+    event: PersistentTrackedEvent,
+    *,
+    current_expectation_version: int,
+    task_row: dict[str, object] | None,
+) -> dict[str, object]:
+    source_event_id = canonical_release_event_id(event)
+    if task_row is None:
+        return {
+            "event_id": event.event_id,
+            "source_event_id": source_event_id,
+            "instrument": event.instrument,
+            "mode": TradingMode.PAPER.value,
+            "state": "not_created",
+            "task_id": None,
+            "approved_by": None,
+            "approved_at": None,
+            "approved_expectation_version": None,
+            "current_expectation_version": current_expectation_version,
+            "approval_current": False,
+        }
+
+    state = str(task_row.get("state") or "")
+    raw_approved_version = task_row.get("approved_expectation_version")
+    approved_version = int(raw_approved_version) if raw_approved_version is not None else None
+    approval_current = (
+        state == TradingTaskState.APPROVED.value
+        and approved_version == current_expectation_version
+    )
+    return {
+        "event_id": event.event_id,
+        "source_event_id": source_event_id,
+        "instrument": event.instrument,
+        "mode": TradingMode.PAPER.value,
+        "state": state,
+        "task_id": str(task_row.get("id") or "") or None,
+        "approved_by": str(task_row.get("approved_by") or "") or None,
+        "approved_at": _iso_or_none(task_row.get("approved_at")),
+        "approved_expectation_version": approved_version,
+        "current_expectation_version": current_expectation_version,
+        "approval_current": approval_current,
+    }
+
+
 def build_tracked_event_release_source_router(
     *,
     require_read: Callable[[str | None], None],
     require_control: Callable[[str | None], None],
     get_tracked_event_repository: Callable[[], TrackedEventRepository],
     get_official_release_source_repository: Callable[[], OfficialReleaseSourceRepository],
+    get_trading_task_repository: Callable[[], SupabaseTradingTaskRepository] | None = None,
+    get_event_expectation_repository: Callable[[], SupabaseEventExpectationRepository] | None = None,
 ) -> APIRouter:
     router = APIRouter()
+    trading_task_repository_factory = (
+        get_trading_task_repository or SupabaseTradingTaskRepository.from_env
+    )
+    event_expectation_repository_factory = (
+        get_event_expectation_repository or SupabaseEventExpectationRepository.from_env
+    )
+
+    def load_paper_permission_context(
+        event_id: str,
+    ) -> tuple[PersistentTrackedEvent, int, SupabaseTradingTaskRepository, dict[str, object] | None]:
+        try:
+            event = get_tracked_event_repository().get(event_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Tracked-event read failed") from exc
+        if event is None:
+            raise HTTPException(status_code=404, detail="Tracked event not found")
+
+        source_event_id = canonical_release_event_id(event)
+        try:
+            expectation = event_expectation_repository_factory().get(source_event_id)
+            if expectation is None:
+                raise HTTPException(status_code=409, detail="Current event expectation is not available")
+            if expectation.instrument.strip().upper() != event.instrument.strip().upper():
+                raise HTTPException(status_code=409, detail="Tracked event and expectation instrument differ")
+            tasks = trading_task_repository_factory()
+            task_row = tasks.get_active_row_for_event_mode(
+                tracked_event_id=event.event_id,
+                mode=TradingMode.PAPER,
+            )
+        except HTTPException:
+            raise
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="PAPER permission read failed") from exc
+
+        return event, expectation.version, tasks, task_row
 
     @router.get("/api/v1/tracked-events/activity")
     def get_tracked_event_activity_batch(
@@ -197,6 +295,99 @@ def build_tracked_event_release_source_router(
             "exists": True,
             "active": _tracked_event_is_active(event, now=datetime.now(UTC)),
         }
+
+    @router.get("/api/v1/tracked-events/{event_id}/paper-permission")
+    def get_tracked_event_paper_permission(
+        event_id: str,
+        x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
+    ) -> dict[str, object]:
+        require_read(x_marketai_key)
+        event_id = _require_valid_tracked_event_id(event_id)
+        event, current_version, _, task_row = load_paper_permission_context(event_id)
+        return _paper_permission_payload(
+            event,
+            current_expectation_version=current_version,
+            task_row=task_row,
+        )
+
+    @router.post("/api/v1/tracked-events/{event_id}/paper-permission/approve")
+    def approve_tracked_event_paper_permission(
+        event_id: str,
+        x_marketai_control_key: str | None = Header(
+            default=None, alias="X-MarketAI-Control-Key"
+        ),
+        x_marketai_actor: str | None = Header(default=None, alias="X-MarketAI-Actor"),
+    ) -> dict[str, object]:
+        require_control(x_marketai_control_key)
+        actor = _require_actor(x_marketai_actor)
+        event_id = _require_valid_tracked_event_id(event_id)
+        event, current_version, tasks, task_row = load_paper_permission_context(event_id)
+
+        try:
+            if task_row is not None:
+                state = str(task_row.get("state") or "")
+                raw_approved_version = task_row.get("approved_expectation_version")
+                approved_version = (
+                    int(raw_approved_version) if raw_approved_version is not None else None
+                )
+                if (
+                    state == TradingTaskState.APPROVED.value
+                    and approved_version == current_version
+                ):
+                    return _paper_permission_payload(
+                        event,
+                        current_expectation_version=current_version,
+                        task_row=task_row,
+                    )
+                if state == TradingTaskState.APPROVED.value:
+                    task_id = str(task_row.get("id") or "")
+                    if not task_id:
+                        raise RuntimeError("approved PAPER task is missing its identity")
+                    tasks.cancel(task_id=task_id, actor=actor)
+                    task_row = None
+
+            if task_row is None:
+                task = tasks.create_pending(
+                    tracked_event_id=event.event_id,
+                    source_event_id=canonical_release_event_id(event),
+                    instrument=event.instrument,
+                    mode=TradingMode.PAPER,
+                    actor=actor,
+                )
+            else:
+                task_id = str(task_row.get("id") or "")
+                if not task_id:
+                    raise RuntimeError("pending PAPER task is missing its identity")
+                task = tasks.get(task_id)
+                if task is None:
+                    raise RuntimeError("pending PAPER task disappeared before approval")
+
+            if task.state is TradingTaskState.PENDING:
+                task = tasks.approve(task_id=task.task_id, actor=actor)
+            if task.state is not TradingTaskState.APPROVED:
+                raise RuntimeError("PAPER permission did not reach approved state")
+
+            latest_expectation = event_expectation_repository_factory().get(
+                canonical_release_event_id(event)
+            )
+            if latest_expectation is None:
+                raise RuntimeError("current event expectation disappeared after approval")
+            latest_row = tasks.get_active_row_for_event_mode(
+                tracked_event_id=event.event_id,
+                mode=TradingMode.PAPER,
+            )
+            if latest_row is None:
+                raise RuntimeError("approved PAPER task disappeared after approval")
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="PAPER permission approval failed") from exc
+
+        return _paper_permission_payload(
+            event,
+            current_expectation_version=latest_expectation.version,
+            task_row=latest_row,
+        )
 
     @router.put("/api/v1/tracked-events/{event_id}/release-source")
     def set_tracked_event_release_source(
