@@ -114,6 +114,9 @@ def _human_scheduled_date_patterns(
     for month in month_tokens:
         for day in (str(value.day), f"{value.day:02d}"):
             token = f"{day} {month} {value.year}"
+            # These are deliberately English ASCII month names. ASCII case
+            # folding avoids Unicode lookalikes such as dotless-i/long-s being
+            # accepted as if they were one of the enumerated spellings.
             patterns.append(re.compile(re.escape(token), re.IGNORECASE | re.ASCII))
     return tuple(patterns)
 
@@ -134,6 +137,9 @@ def _period_patterns(release_period: str | None) -> tuple[re.Pattern[str], ...]:
 
 def _is_token_char(char: str) -> bool:
     category = unicodedata.category(char)
+    # U+200B is a deliberate word separator even though it is category Cf.
+    # Other format controls, including ZWNJ/ZWJ, must not manufacture token
+    # boundaries around fiscal-period evidence.
     return (
         char.isalnum()
         or category.startswith("M")
@@ -158,6 +164,9 @@ def _is_unicode_noncharacter(codepoint: int) -> bool:
 
 
 def _contains_rejected_decoded_url_char(value: str) -> bool:
+    # URL evidence must use the same fail-closed character policy as textual
+    # evidence after percent-decoding: neither Unicode controls nor designated
+    # noncharacters may manufacture fiscal-period token boundaries.
     return any(
         unicodedata.category(char) == "Cc" or _is_unicode_noncharacter(ord(char))
         for char in value
