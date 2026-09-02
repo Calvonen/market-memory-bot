@@ -75,12 +75,13 @@ export function TrackedEventPaperSummary({ eventId, expectationEventId }: Props)
       <ExecutionSummary state={executionState} />
       <Pressable
         style={styles.button}
-        onPress={() =>
+        onPress={(pressEvent) => {
+          pressEvent.stopPropagation();
           router.push({
             pathname: '/tracked-events/[eventId]/release',
             params: { eventId },
-          })
-        }
+          });
+        }}
       >
         <Text style={styles.buttonText}>PAPER-lupa ja asetukset</Text>
       </Pressable>
