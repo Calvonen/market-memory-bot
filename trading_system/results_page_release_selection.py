@@ -131,7 +131,7 @@ def _period_patterns(release_period: str | None) -> tuple[re.Pattern[str], ...]:
     separator = r"(?:[ _\-/]+)"
     return (
         re.compile(rf"{period}{separator}{year}", re.IGNORECASE),
-        re.compile(rf"{period}{separator}{year}", re.IGNORECASE),
+        re.compile(rf"{period}{year}", re.IGNORECASE),
     )
 
 
