@@ -55,6 +55,18 @@ class ResultsPageReleaseSelectionTests(unittest.TestCase):
         )
         self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
 
+    def test_results_table_title_can_supply_english_human_date(self):
+        for title in (
+            "Half Year Results 26 Aug 2026",
+            "Half Year Results 26 August 2026",
+        ):
+            with self.subTest(title=title):
+                selection = select_results_page_release_candidate(
+                    self._event(),
+                    (self._candidate("https://investor.example.com/release.pdf", title),),
+                )
+                self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
+
     def test_rejects_date_tokens_embedded_in_longer_numeric_values(self):
         for url in (
             "https://investor.example.com/id/20260826001.pdf",
