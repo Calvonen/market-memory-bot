@@ -122,8 +122,14 @@ class MobileTrackedEventReleaseSkipUiTests(unittest.TestCase):
 
     def test_skip_button_requires_reason_and_serializes_with_other_writes(self) -> None:
         source = SCREEN_PATH.read_text(encoding="utf-8")
-        self.assertIn("!canSkipRelease || !actor.trim() || !skipReason.trim() || skipping || processing || submitting", source)
-        self.assertIn("if (!eventId || !canSkipRelease || skipping || processing || submitting) return;", source)
+        self.assertIn(
+            "!canSkipRelease || !actor.trim() || !skipReason.trim() || skipping || processing || submitting || approvingPermission",
+            source,
+        )
+        self.assertIn(
+            "if (!eventId || !canSkipRelease || skipping || processing || submitting || approvingPermission) return;",
+            source,
+        )
         self.assertIn("submitting || processing || skipping", source)
         self.assertIn("processing || submitting || skipping", source)
 
@@ -131,8 +137,11 @@ class MobileTrackedEventReleaseSkipUiTests(unittest.TestCase):
         source = SCREEN_PATH.read_text(encoding="utf-8")
         self.assertIn("Ohita julkaisu", source)
         self.assertIn("Ohitus on auditoitu päätös.", source)
-        self.assertIn("ei luo kaupankäyntitehtävää", source)
-        self.assertIn("Strategy/Risk/Broker", source)
+        self.assertIn(
+            "Julkaisun käsittely ja ohitus pysyvät erillisinä auditoituina toimintoina.",
+            source,
+        )
+        self.assertIn("Se ei pakota kauppaa", source)
 
 
 if __name__ == "__main__":
