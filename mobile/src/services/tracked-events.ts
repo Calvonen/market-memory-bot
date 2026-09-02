@@ -116,7 +116,13 @@ export type TrackedEventPaperPermission = {
   approved_at: string | null;
   approved_expectation_version: number | null;
   current_expectation_version: number;
+  max_position_value_usd: number | null;
   approval_current: boolean;
+};
+
+export type ApproveTrackedEventPaperPermissionInput = {
+  expected_expectation_version: number;
+  max_position_value_usd: number;
 };
 
 export type TrackedEventActivityResponse = {
@@ -266,10 +272,11 @@ export function getTrackedEventPaperPermission(
 export function approveTrackedEventPaperPermission(
   eventId: string,
   actor: string,
+  input: ApproveTrackedEventPaperPermissionInput,
 ): Promise<TrackedEventPaperPermission> {
   return apiControlPost<TrackedEventPaperPermission>(
     `/api/v1/tracked-events/${encodeURIComponent(eventId)}/paper-permission/approve`,
-    undefined,
+    input,
     { 'X-MarketAI-Actor': actor },
   );
 }
