@@ -412,6 +412,16 @@ def _visible_anchor_text_fields(anchor) -> tuple[str, ...]:
     return tuple(fields)
 
 
+def _nearest_html_table_row(element, parents: dict[object, object]):
+    current = parents.get(element)
+    while current is not None:
+        namespace, local = _element_name(current.tag)
+        if namespace == _HTML_NAMESPACE and local == "tr":
+            return current
+        current = parents.get(current)
+    return None
+
+
 def _element_is_foreign(element) -> bool:
     namespace, _ = _element_name(element.tag)
     return namespace is not None and namespace != _HTML_NAMESPACE
@@ -784,6 +794,12 @@ def _parse_html5_page(html_text: str):
     template_local_anchors = _template_local_tree_anchors(
         fragment, safety_scanner, html_templates
     )
+    parents = {
+        child: parent
+        for parent in fragment.iter()
+        for child in list(parent)
+    }
+    row_evidence_cache: dict[object, tuple[str, ...]] = {}
 
     links: list[tuple[str, str | None, tuple[str, ...]]] = []
     for anchor in _iter_visible_html_anchors(fragment):
@@ -795,8 +811,19 @@ def _parse_html5_page(html_text: str):
         aria_label = _safe_normalized_text(anchor.attrib.get("aria-label", ""))
         title_attr = _safe_normalized_text(anchor.attrib.get("title", ""))
         visible_text_fields = _visible_anchor_text_fields(anchor)
-        evidence_fields = tuple(value for value in (aria_label, title_attr, *visible_text_fields) if value)
-        title = " ".join(evidence_fields) or None
+        anchor_evidence_fields = tuple(
+            value for value in (aria_label, title_attr, *visible_text_fields) if value
+        )
+        row = _nearest_html_table_row(anchor, parents)
+        if row is None:
+            row_evidence_fields = ()
+        else:
+            row_evidence_fields = row_evidence_cache.get(row)
+            if row_evidence_fields is None:
+                row_evidence_fields = _visible_anchor_text_fields(row)
+                row_evidence_cache[row] = row_evidence_fields
+        evidence_fields = tuple(dict.fromkeys((*anchor_evidence_fields, *row_evidence_fields)))
+        title = " ".join(anchor_evidence_fields) or None
         links.append((href, title, evidence_fields))
     return base_href, links
 
@@ -1087,4 +1114,3 @@ def extract_results_page_candidates(
         page_url=page_url,
     )
     return candidates
-
