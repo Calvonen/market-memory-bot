@@ -16,16 +16,26 @@ import {
   type TrackedEventWorkflowResponse,
 } from '@/services/tracked-events';
 
+const DEFAULT_PAPER_POSITION_CAP_USD = '500';
+
+function parsePositiveUsd(value: string): number | null {
+  const parsed = Number(value.trim().replace(',', '.'));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
 export default function TrackedEventReleaseHandoffScreen() {
   const { eventId } = useLocalSearchParams<{ eventId: string }>();
   const [releaseSource, setReleaseSource] = useState<TrackedEventReleaseSource | null>(null);
   const [workflow, setWorkflow] = useState<TrackedEventWorkflowResponse | null>(null);
   const [paperPermission, setPaperPermission] = useState<TrackedEventPaperPermission | null>(null);
   const [loading, setLoading] = useState(true);
+  const [permissionLoading, setPermissionLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [permissionError, setPermissionError] = useState<string | null>(null);
   const [sourceUrl, setSourceUrl] = useState('');
   const [sourceTitle, setSourceTitle] = useState('');
   const [actor, setActor] = useState('');
+  const [maxPositionUsd, setMaxPositionUsd] = useState(DEFAULT_PAPER_POSITION_CAP_USD);
   const [skipReason, setSkipReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [processing, setProcessing] = useState(false);
@@ -45,6 +55,7 @@ export default function TrackedEventReleaseHandoffScreen() {
   const canProcessRelease = Boolean(releaseSource?.active && releaseActionRequired);
   const canSkipRelease = releaseActionRequired;
   const paperPermissionCurrent = Boolean(paperPermission?.approval_current);
+  const parsedMaxPositionUsd = parsePositiveUsd(maxPositionUsd);
 
   useEffect(() => () => {
     mountedRef.current = false;
@@ -59,13 +70,16 @@ export default function TrackedEventReleaseHandoffScreen() {
     // Reset stale state immediately when the route switches to another event.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
+    setPermissionLoading(true);
     setReleaseSource(null);
     setWorkflow(null);
     setPaperPermission(null);
     setError(null);
+    setPermissionError(null);
     setSourceUrl('');
     setSourceTitle('');
     setActor('');
+    setMaxPositionUsd(DEFAULT_PAPER_POSITION_CAP_USD);
     setSkipReason('');
     setSubmitting(false);
     setProcessing(false);
@@ -84,15 +98,13 @@ export default function TrackedEventReleaseHandoffScreen() {
       }
 
       try {
-        const [source, currentWorkflow, permission] = await Promise.all([
+        const [source, currentWorkflow] = await Promise.all([
           getTrackedEventReleaseSource(eventId),
           getTrackedEventWorkflow(eventId),
-          getTrackedEventPaperPermission(eventId),
         ]);
         if (!cancelled) {
           setReleaseSource(source);
           setWorkflow(currentWorkflow);
-          setPaperPermission(permission);
           setSourceUrl(source.source_url ?? '');
           setSourceTitle(source.source_title ?? '');
           setError(null);
@@ -106,45 +118,79 @@ export default function TrackedEventReleaseHandoffScreen() {
       }
     }
 
+    async function loadPaperPermission() {
+      if (!eventId) {
+        setPermissionError('Tracked event puuttuu.');
+        setPermissionLoading(false);
+        return;
+      }
+
+      try {
+        const permission = await getTrackedEventPaperPermission(eventId);
+        if (!cancelled) {
+          setPaperPermission(permission);
+          if (permission.max_position_value_usd !== null) {
+            setMaxPositionUsd(String(permission.max_position_value_usd));
+          }
+          setPermissionError(null);
+        }
+      } catch (loadError) {
+        if (!cancelled) {
+          setPermissionError(
+            loadError instanceof Error ? loadError.message : 'PAPER-luvan lataus epäonnistui.',
+          );
+        }
+      } finally {
+        if (!cancelled) setPermissionLoading(false);
+      }
+    }
+
     void loadReleaseState();
+    void loadPaperPermission();
     return () => {
       cancelled = true;
     };
   }, [eventId]);
 
-  async function approvePaperPermission() {
+  async function approvePaperPermission(expectedVersion: number, positionCapUsd: number) {
     if (!eventId || approvingPermission || paperPermissionCurrent) return;
     const normalizedActor = actor.trim();
     if (!normalizedActor) {
-      setError('Syötä toimijan tunniste ennen PAPER-luvan hyväksymistä.');
+      setPermissionError('Syötä toimijan tunniste ennen PAPER-luvan hyväksymistä.');
       return;
     }
 
     const submittedEventId = eventId;
     setApprovingPermission(true);
-    setError(null);
+    setPermissionError(null);
     setPermissionMessage(null);
 
     try {
-      const approved = await approveTrackedEventPaperPermission(submittedEventId, normalizedActor);
+      const approved = await approveTrackedEventPaperPermission(
+        submittedEventId,
+        normalizedActor,
+        {
+          expected_expectation_version: expectedVersion,
+          max_position_value_usd: positionCapUsd,
+        },
+      );
       if (mountedRef.current && eventIdRef.current === submittedEventId) {
         setPaperPermission(approved);
-        setPermissionMessage(
-          approved.approval_current
-            ? 'Kertaluonteinen PAPER-demokauppalupa hyväksytty.'
-            : 'PAPER-lupa tallennettiin, mutta expectation-versio ehti muuttua. Hyväksy nykyinen versio uudelleen.',
-        );
+        if (approved.max_position_value_usd !== null) {
+          setMaxPositionUsd(String(approved.max_position_value_usd));
+        }
+        setPermissionMessage('Kertaluonteinen PAPER-demokauppalupa hyväksytty.');
       }
     } catch (approvalError) {
       if (mountedRef.current && eventIdRef.current === submittedEventId) {
         const writeError =
           approvalError instanceof Error ? approvalError.message : 'PAPER-luvan hyväksyntä epäonnistui.';
-        setError(writeError);
+        setPermissionError(writeError);
         try {
           const current = await getTrackedEventPaperPermission(submittedEventId);
           if (mountedRef.current && eventIdRef.current === submittedEventId) {
             setPaperPermission(current);
-            setError(writeError);
+            setPermissionError(writeError);
           }
         } catch {
           // Keep the original approval error visible if canonical refresh also fails.
@@ -161,15 +207,24 @@ export default function TrackedEventReleaseHandoffScreen() {
     if (!paperPermission || paperPermissionCurrent || approvingPermission) return;
     const normalizedActor = actor.trim();
     if (!normalizedActor) {
-      setError('Syötä toimijan tunniste ennen PAPER-luvan hyväksymistä.');
+      setPermissionError('Syötä toimijan tunniste ennen PAPER-luvan hyväksymistä.');
       return;
     }
+    const positionCapUsd = parsePositiveUsd(maxPositionUsd);
+    if (positionCapUsd === null) {
+      setPermissionError('Syötä positiivinen enimmäispositio USD-määräisenä.');
+      return;
+    }
+    const expectedVersion = paperPermission.current_expectation_version;
     Alert.alert(
       'Hyväksy PAPER-demokauppa',
-      `Annat MarketAI:lle kertaluonteisen luvan tehdä ${paperPermission.instrument}-demokaupan tämän yhden tulosjulkistuksen perusteella vain, jos Strategy ja Risk Engine hyväksyvät kaupan.`,
+      `Annat MarketAI:lle kertaluonteisen luvan tehdä ${paperPermission.instrument}-demokaupan tämän yhden tulosjulkistuksen perusteella. Expectation v${expectedVersion}. Enimmäispositio ${positionCapUsd} USD. Risk Engine voi käyttää tätä pienempää positiota. Kauppa tehdään vain, jos Strategy ja Risk Engine hyväksyvät sen.`,
       [
         { text: 'Peruuta', style: 'cancel' },
-        { text: 'Hyväksy', onPress: () => void approvePaperPermission() },
+        {
+          text: 'Hyväksy',
+          onPress: () => void approvePaperPermission(expectedVersion, positionCapUsd),
+        },
       ],
     );
   }
@@ -379,9 +434,26 @@ export default function TrackedEventReleaseHandoffScreen() {
       </View>
 
       <View style={styles.card}>
+        <Text style={styles.label}>Toimijan tunniste</Text>
+        <Text style={styles.meta}>
+          Tätä käytetään PAPER-luvan ja muiden tämän näkymän auditoitujen toimenpiteiden yhteydessä.
+        </Text>
+        <TextInput
+          autoCapitalize="none"
+          autoCorrect={false}
+          onChangeText={setActor}
+          placeholder="Esim. Marko"
+          placeholderTextColor="#677386"
+          style={styles.input}
+          value={actor}
+        />
+      </View>
+
+      <View style={styles.card}>
         <Text style={styles.label}>PAPER-kaupankäyntilupa</Text>
-        {loading ? <Text style={styles.value}>Ladataan…</Text> : null}
-        {!loading && paperPermission ? (
+        {permissionLoading ? <Text style={styles.value}>Ladataan…</Text> : null}
+        {!permissionLoading && permissionError ? <Text style={styles.error}>{permissionError}</Text> : null}
+        {!permissionLoading && paperPermission ? (
           <>
             <Text style={paperPermissionCurrent ? styles.permissionApproved : styles.status}>
               {paperPermissionCurrent
@@ -402,6 +474,11 @@ export default function TrackedEventReleaseHandoffScreen() {
                 ? ` · hyväksytty v${paperPermission.approved_expectation_version}`
                 : ''}
             </Text>
+            {paperPermission.max_position_value_usd !== null && paperPermissionCurrent ? (
+              <Text style={styles.meta}>
+                Hyväksytty enimmäispositio {paperPermission.max_position_value_usd} USD
+              </Text>
+            ) : null}
             {paperPermission.approved_by ? (
               <Text style={styles.meta}>
                 Hyväksyjä {paperPermission.approved_by}
@@ -410,22 +487,43 @@ export default function TrackedEventReleaseHandoffScreen() {
                   : ''}
               </Text>
             ) : null}
+            <Text style={styles.subLabel}>Enimmäispositio (USD)</Text>
+            <Text style={styles.meta}>
+              Risk Engine saa käyttää tätä pienempää positiota, mutta ei tätä suurempaa.
+            </Text>
             <TextInput
-              autoCapitalize="none"
-              autoCorrect={false}
-              onChangeText={setActor}
-              placeholder="Toimijan tunniste (esim. Marko)"
+              editable={!paperPermissionCurrent && !approvingPermission}
+              keyboardType="decimal-pad"
+              onChangeText={setMaxPositionUsd}
+              placeholder="500"
               placeholderTextColor="#677386"
               style={styles.input}
-              value={actor}
+              value={maxPositionUsd}
             />
+            {parsedMaxPositionUsd === null ? (
+              <Text style={styles.error}>Syötä positiivinen USD-määrä.</Text>
+            ) : null}
             <Pressable
-              disabled={paperPermissionCurrent || !actor.trim() || approvingPermission || submitting || processing || skipping}
+              disabled={
+                paperPermissionCurrent ||
+                !actor.trim() ||
+                parsedMaxPositionUsd === null ||
+                approvingPermission ||
+                submitting ||
+                processing ||
+                skipping
+              }
               onPress={confirmPaperPermission}
               style={({ pressed }) => [
                 styles.button,
                 paperPermissionCurrent && styles.permissionButtonApproved,
-                (paperPermissionCurrent || !actor.trim() || approvingPermission || submitting || processing || skipping) && styles.buttonDisabled,
+                (paperPermissionCurrent ||
+                  !actor.trim() ||
+                  parsedMaxPositionUsd === null ||
+                  approvingPermission ||
+                  submitting ||
+                  processing ||
+                  skipping) && styles.buttonDisabled,
                 pressed && styles.buttonPressed,
               ]}>
               <Text style={styles.buttonText}>
@@ -553,7 +651,7 @@ export default function TrackedEventReleaseHandoffScreen() {
       </View>
 
       <Text style={styles.note}>
-        PAPER-luvan hyväksyntä luo tai päivittää vain tämän yhden eventin explicit execution -luvan. Se ei pakota kauppaa: Strategy, markkinavahvistukset ja Risk Engine voivat edelleen päätyä NO TRADEen. Julkaisun käsittely ja ohitus pysyvät erillisinä auditoituina toimintoina.
+        PAPER-luvan hyväksyntä koskee vain tätä eventtiä, vahvistettua expectation-versiota ja hyväksyttyä enimmäispositiota. Se ei pakota kauppaa: Strategy, markkinavahvistukset ja Risk Engine voivat edelleen päätyä NO TRADEen. Julkaisun käsittely ja ohitus pysyvät erillisinä auditoituina toimintoina.
       </Text>
     </ScrollView>
   );
