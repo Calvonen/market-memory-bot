@@ -203,6 +203,10 @@ def _candidate_evidence_fields(candidate: ResultsPageReleaseCandidate) -> tuple[
     return tuple(fields)
 
 
+def _is_explicit_powerpoint_candidate(candidate: ResultsPageReleaseCandidate) -> bool:
+    return (candidate.source_title or "").strip().lower() in {"ppt", "pptx", "powerpoint"}
+
+
 def _matching_candidates(
     event: ResultsPageSelectionTarget,
     candidates: tuple[ResultsPageReleaseCandidate, ...],
@@ -213,7 +217,8 @@ def _matching_candidates(
     return tuple(
         candidate
         for candidate in candidates
-        if candidate.event_id == event.calendar_event_id
+        if not _is_explicit_powerpoint_candidate(candidate)
+        and candidate.event_id == event.calendar_event_id
         and any(
             _pattern_has_standalone_match(field, pattern) if standalone_token else bool(pattern.search(field))
             for field in _candidate_evidence_fields(candidate)
