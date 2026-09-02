@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from trading_system.market_open_paper import detect_market_open_pattern
+from trading_system.market_reaction import DEFAULT_FLAT_THRESHOLD_PCT
 from trading_system.models import Direction
 from trading_system.tracked_event_repository import (
     PersistentTrackedEvent,
@@ -18,7 +19,12 @@ OPEN_AT = datetime(2026, 9, 3, 0, 0, tzinfo=UTC)
 REFERENCE = Decimal("10.00")
 
 
-def market_open_event(*, previous_return: str = "-2.00") -> PersistentTrackedEvent:
+def market_open_event(
+    *,
+    previous_return: str = "-2.00",
+    reference_captured_at: datetime | None = None,
+    reference_kind: str = "etoro_last_execution_pre_event_snapshot",
+) -> PersistentTrackedEvent:
     return PersistentTrackedEvent(
         event_id="bhp-open-1",
         tracked_instrument_id="bhp-tracked",
@@ -33,7 +39,13 @@ def market_open_event(*, previous_return: str = "-2.00") -> PersistentTrackedEve
         event_at=OPEN_AT,
         event_time_status=TrackedEventTimeStatus.CONFIRMED,
         status=TrackedEventStatus.MONITORING,
+        resolved_etoro_instrument_id=123,
+        resolved_etoro_symbol="BHP.ASX",
+        resolved_etoro_display_name="BHP Group Limited",
+        resolved_etoro_market="Sydney",
         reference_price=REFERENCE,
+        reference_captured_at=reference_captured_at or OPEN_AT - timedelta(minutes=1),
+        reference_kind=reference_kind,
         reaction_anchor_at=OPEN_AT,
         pre_event_market_context={"close_to_close_return_pct": previous_return},
     )
@@ -42,9 +54,9 @@ def market_open_event(*, previous_return: str = "-2.00") -> PersistentTrackedEve
 def reaction(minute: int, return_pct: str) -> TrackedEventReactionRecord:
     pct = Decimal(return_pct)
     close = REFERENCE * (Decimal("1") + pct / Decimal("100"))
-    if pct > Decimal("0.15"):
+    if pct > DEFAULT_FLAT_THRESHOLD_PCT:
         direction = "positive"
-    elif pct < Decimal("-0.15"):
+    elif pct < -DEFAULT_FLAT_THRESHOLD_PCT:
         direction = "negative"
     else:
         direction = "flat"
@@ -66,11 +78,7 @@ class MarketOpenPatternTests(unittest.TestCase):
     def test_long_requires_reversal_and_positive_follow_through(self) -> None:
         pattern = detect_market_open_pattern(
             event=market_open_event(),
-            reactions=(
-                reaction(0, "-1.00"),
-                reaction(1, "0.40"),
-                reaction(2, "0.70"),
-            ),
+            reactions=(reaction(0, "-1.00"), reaction(1, "0.40"), reaction(2, "0.70")),
         )
         self.assertIsNotNone(pattern)
         assert pattern is not None
@@ -82,22 +90,14 @@ class MarketOpenPatternTests(unittest.TestCase):
     def test_single_positive_reclaim_does_not_create_long(self) -> None:
         pattern = detect_market_open_pattern(
             event=market_open_event(),
-            reactions=(
-                reaction(0, "-1.00"),
-                reaction(1, "0.40"),
-                reaction(2, "0.10"),
-            ),
+            reactions=(reaction(0, "-1.00"), reaction(1, "0.40"), reaction(2, "0.10")),
         )
         self.assertIsNone(pattern)
 
     def test_short_requires_bounce_then_renewed_negative_move(self) -> None:
         pattern = detect_market_open_pattern(
             event=market_open_event(),
-            reactions=(
-                reaction(0, "-1.00"),
-                reaction(1, "-0.40"),
-                reaction(2, "-0.80"),
-            ),
+            reactions=(reaction(0, "-1.00"), reaction(1, "-0.40"), reaction(2, "-0.80")),
         )
         self.assertIsNotNone(pattern)
         assert pattern is not None
@@ -109,33 +109,21 @@ class MarketOpenPatternTests(unittest.TestCase):
     def test_previous_session_must_be_bearish_for_this_setup(self) -> None:
         pattern = detect_market_open_pattern(
             event=market_open_event(previous_return="0.50"),
-            reactions=(
-                reaction(0, "-1.00"),
-                reaction(1, "0.40"),
-                reaction(2, "0.70"),
-            ),
+            reactions=(reaction(0, "-1.00"), reaction(1, "0.40"), reaction(2, "0.70")),
         )
         self.assertIsNone(pattern)
 
     def test_open_must_start_with_real_weakness(self) -> None:
         pattern = detect_market_open_pattern(
             event=market_open_event(),
-            reactions=(
-                reaction(0, "0.20"),
-                reaction(1, "0.40"),
-                reaction(2, "0.70"),
-            ),
+            reactions=(reaction(0, "0.20"), reaction(1, "0.40"), reaction(2, "0.70")),
         )
         self.assertIsNone(pattern)
 
     def test_reactions_outside_first_thirty_minutes_are_ignored(self) -> None:
         pattern = detect_market_open_pattern(
             event=market_open_event(),
-            reactions=(
-                reaction(0, "-1.00"),
-                reaction(1, "0.40"),
-                reaction(31, "0.70"),
-            ),
+            reactions=(reaction(0, "-1.00"), reaction(1, "0.40"), reaction(31, "0.70")),
         )
         self.assertIsNone(pattern)
 
@@ -143,11 +131,21 @@ class MarketOpenPatternTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate"):
             detect_market_open_pattern(
                 event=market_open_event(),
-                reactions=(
-                    reaction(0, "-1.00"),
-                    reaction(1, "0.40"),
-                    reaction(1, "0.70"),
-                ),
+                reactions=(reaction(0, "-1.00"), reaction(1, "0.40"), reaction(1, "0.70")),
+            )
+
+    def test_reference_captured_after_open_fails_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "captured after market open"):
+            detect_market_open_pattern(
+                event=market_open_event(reference_captured_at=OPEN_AT + timedelta(seconds=1)),
+                reactions=(reaction(0, "-1.00"), reaction(1, "0.40"), reaction(2, "0.70")),
+            )
+
+    def test_noncanonical_reference_kind_fails_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not canonical"):
+            detect_market_open_pattern(
+                event=market_open_event(reference_kind="manual"),
+                reactions=(reaction(0, "-1.00"), reaction(1, "0.40"), reaction(2, "0.70")),
             )
 
 
