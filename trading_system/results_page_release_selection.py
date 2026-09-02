@@ -57,17 +57,65 @@ class ResultsPageSelection:
 _PERIOD_LABEL_RE = re.compile(r"^(Q[1-4]|H[12]|FY) ([0-9]{4})$", re.IGNORECASE)
 _PERCENT_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}")
 _ZERO_WIDTH_SPACE = "\u200b"
+_ENGLISH_MONTH_ABBREVIATIONS = (
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+)
+_ENGLISH_MONTH_NAMES = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
 
 
 def _scheduled_date_patterns(event: ResultsPageSelectionTarget) -> tuple[re.Pattern[str], ...]:
     value = event.scheduled_date
-    tokens = (
+    numeric_tokens = (
         value.isoformat(),
         value.strftime("%Y%m%d"),
         value.strftime("%Y/%m/%d"),
         value.strftime("%Y_%m_%d"),
     )
-    return tuple(re.compile(rf"(?<!\d){re.escape(token)}(?!\d)", re.IGNORECASE) for token in tokens)
+    patterns = [
+        re.compile(rf"(?<!\d){re.escape(token)}(?!\d)", re.IGNORECASE)
+        for token in numeric_tokens
+    ]
+
+    # Investor-relations result tables commonly print dates such as
+    # ``02 Sep 2026`` or ``2 September 2026`` rather than embedding an ISO date
+    # in the document URL. Build these tokens explicitly instead of relying on
+    # process locale, and require word boundaries so a date cannot be matched
+    # from inside a larger identifier.
+    month_tokens = (
+        _ENGLISH_MONTH_ABBREVIATIONS[value.month - 1],
+        _ENGLISH_MONTH_NAMES[value.month - 1],
+    )
+    for month in month_tokens:
+        for day in (str(value.day), f"{value.day:02d}"):
+            token = f"{day} {month} {value.year}"
+            patterns.append(
+                re.compile(rf"(?<!\w){re.escape(token)}(?!\w)", re.IGNORECASE)
+            )
+    return tuple(patterns)
 
 
 def _period_patterns(release_period: str | None) -> tuple[re.Pattern[str], ...]:
