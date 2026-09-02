@@ -191,12 +191,17 @@ function ExecutionSummary({ state }: { state: LoadState<PaperStatus | null> }) {
   if (state.status === 'error') {
     return <Text style={styles.warning}>Kaupan tilaa ei juuri nyt saatu haettua.</Text>;
   }
-  if (!state.value || !state.value.paper_run) {
+
+  const status = state.value;
+  if (!status) {
     return <Text style={styles.meta}>Kauppa: ei vielä käsitelty.</Text>;
   }
 
-  const status = state.value;
   const run = status.paper_run;
+  if (!run) {
+    return <Text style={styles.meta}>Kauppa: ei vielä käsitelty.</Text>;
+  }
+
   if (
     typeof run.expectation_version === 'number' &&
     run.expectation_version !== status.expectation_version
