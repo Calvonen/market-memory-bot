@@ -40,18 +40,39 @@ class MobileTrackedEventCardPaperSummaryTests(unittest.TestCase):
 
         self.assertIn("Lupa hyväksytty", source)
         self.assertIn("Lupa vanhentunut", source)
+        self.assertIn("Lupa odottaa hyväksyntää", source)
         self.assertIn("Lupa puuttuu", source)
+        self.assertIn("permission.state === 'pending'", source)
         self.assertIn("Kauppa: ei vielä käsitelty.", source)
         self.assertIn("Kauppa: odottaa vahvistuksia", source)
         self.assertIn("Kauppa: PAPER-kauppa toteutettu", source)
         self.assertIn("Kauppa: NO TRADE", source)
 
-    def test_paper_executed_requires_known_broker_fill_status(self) -> None:
+    def test_paper_executed_uses_canonical_broker_outcome_statuses(self) -> None:
         source = PAPER_SUMMARY_PATH.read_text(encoding="utf-8")
 
-        self.assertIn("FILLED_SIMULATED", source)
-        self.assertIn("ETORO_DEMO_FILLED", source)
+        for status in (
+            "FILLED",
+            "FILLED_SIMULATED",
+            "ETORO_DEMO_FILLED",
+            "EXECUTED",
+            "COMPLETE",
+            "COMPLETED",
+            "ACCEPTED",
+            "ETORO_DEMO_ACCEPTED",
+            "PENDING",
+            "OPEN",
+            "SUBMITTED",
+            "REJECTED",
+            "CANCELLED",
+            "CANCELED",
+            "FAILED",
+            "ERROR",
+        ):
+            self.assertIn(status, source)
+
         self.assertIn("PAPER-toimeksianto odottaa toteutusta", source)
+        self.assertIn("PAPER-toimeksianto hylätty tai peruttu", source)
         self.assertIn("PAPER-toimeksianto epäonnistui", source)
         self.assertIn("brokerin toteutustila puuttuu", source)
         self.assertIn("brokerin tila varmistamatta", source)
