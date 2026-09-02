@@ -23,9 +23,23 @@ type BrokerOutcome =
   | { tone: 'warning'; headline: string }
   | { tone: 'meta'; headline: string };
 
-const FILLED_BROKER_STATUSES = new Set(['FILLED_SIMULATED', 'ETORO_DEMO_FILLED']);
-const PENDING_BROKER_STATUSES = new Set(['ACCEPTED', 'PENDING']);
-const FAILED_BROKER_STATUSES = new Set(['REJECTED', 'FAILED']);
+const FILLED_BROKER_STATUSES = new Set([
+  'FILLED',
+  'FILLED_SIMULATED',
+  'ETORO_DEMO_FILLED',
+  'EXECUTED',
+  'COMPLETE',
+  'COMPLETED',
+]);
+const PENDING_BROKER_STATUSES = new Set([
+  'ACCEPTED',
+  'ETORO_DEMO_ACCEPTED',
+  'PENDING',
+  'OPEN',
+  'SUBMITTED',
+]);
+const REJECTED_BROKER_STATUSES = new Set(['REJECTED', 'CANCELLED', 'CANCELED']);
+const FAILED_BROKER_STATUSES = new Set(['FAILED', 'ERROR']);
 
 export function TrackedEventPaperSummary({ eventId, expectationEventId }: Props) {
   const router = useRouter();
@@ -117,6 +131,13 @@ function PermissionSummary({ state }: { state: LoadState<TrackedEventPaperPermis
       </Text>
     );
   }
+  if (permission.state === 'pending') {
+    return (
+      <Text style={styles.warning}>
+        Lupa odottaa hyväksyntää · expectation v{permission.current_expectation_version}
+      </Text>
+    );
+  }
   return (
     <Text style={styles.warning}>
       Lupa puuttuu · expectation v{permission.current_expectation_version}
@@ -131,6 +152,9 @@ function brokerOutcome(rawStatus: string | undefined): BrokerOutcome {
   }
   if (PENDING_BROKER_STATUSES.has(status)) {
     return { tone: 'warning', headline: 'Kauppa: PAPER-toimeksianto odottaa toteutusta' };
+  }
+  if (REJECTED_BROKER_STATUSES.has(status)) {
+    return { tone: 'warning', headline: 'Kauppa: PAPER-toimeksianto hylätty tai peruttu' };
   }
   if (FAILED_BROKER_STATUSES.has(status)) {
     return { tone: 'warning', headline: 'Kauppa: PAPER-toimeksianto epäonnistui' };
