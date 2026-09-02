@@ -35,37 +35,50 @@ class SupabaseTradingTaskRepository:
         instrument: str,
         mode: TradingMode,
         actor: str,
-        max_position_value_usd: float | None = None,
     ) -> CanonicalTradingTask:
         if not isinstance(mode, TradingMode):
             raise ValueError("mode must be a TradingMode")
-        payload: dict[str, object] = {
-            "input_tracked_event_id": tracked_event_id,
-            "input_source_event_id": source_event_id,
-            "input_instrument": instrument,
-            "input_mode": mode.value,
-            "input_actor": actor,
-        }
-        if max_position_value_usd is not None:
-            payload["input_max_position_value_usd"] = max_position_value_usd
-        response = self.client.rpc("create_trading_task", payload).execute()
+        response = self.client.rpc(
+            "create_trading_task",
+            {
+                "input_tracked_event_id": tracked_event_id,
+                "input_source_event_id": source_event_id,
+                "input_instrument": instrument,
+                "input_mode": mode.value,
+                "input_actor": actor,
+            },
+        ).execute()
         return self._one(response.data, "create_trading_task")
 
-    def approve(
+    def approve(self, *, task_id: str, actor: str) -> CanonicalTradingTask:
+        response = self.client.rpc(
+            "approve_trading_task",
+            {"input_task_id": task_id, "input_actor": actor},
+        ).execute()
+        return self._one(response.data, "approve_trading_task")
+
+    def approve_paper_permission(
         self,
         *,
-        task_id: str,
+        tracked_event_id: str,
+        source_event_id: str,
+        instrument: str,
         actor: str,
-        expected_expectation_version: int | None = None,
+        expected_expectation_version: int,
+        max_position_value_usd: float,
     ) -> CanonicalTradingTask:
-        payload: dict[str, object] = {
-            "input_task_id": task_id,
-            "input_actor": actor,
-        }
-        if expected_expectation_version is not None:
-            payload["input_expected_expectation_version"] = expected_expectation_version
-        response = self.client.rpc("approve_trading_task", payload).execute()
-        return self._one(response.data, "approve_trading_task")
+        response = self.client.rpc(
+            "approve_paper_trading_task_for_event",
+            {
+                "input_tracked_event_id": tracked_event_id,
+                "input_source_event_id": source_event_id,
+                "input_instrument": instrument,
+                "input_actor": actor,
+                "input_expected_expectation_version": expected_expectation_version,
+                "input_max_position_value_usd": max_position_value_usd,
+            },
+        ).execute()
+        return self._one(response.data, "approve_paper_trading_task_for_event")
 
     def cancel(self, *, task_id: str, actor: str) -> CanonicalTradingTask:
         response = self.client.rpc(
