@@ -65,7 +65,7 @@ class ResultsPageReleasePowerPointSelectionTests(unittest.TestCase):
         self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
         self.assertEqual(selection.candidate, pdf)
 
-    def test_duplicate_url_preserves_all_link_local_titles(self):
+    def test_duplicate_url_preserves_first_display_title_and_all_link_labels(self):
         html = """
         <a href="/presentation">Download</a>
         <a href="/presentation" aria-label="Download PPT">PPT</a>
@@ -75,7 +75,11 @@ class ResultsPageReleasePowerPointSelectionTests(unittest.TestCase):
 
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].source_url, "https://investor.example.com/presentation")
-        self.assertEqual(candidates[0].source_title, "Download Download PPT PPT")
+        self.assertEqual(candidates[0].source_title, "Download")
+        self.assertEqual(
+            candidates[0].link_title_fields,
+            ("Download", "Download PPT", "PPT"),
+        )
 
     def test_duplicate_generic_then_powerpoint_title_does_not_remain_ambiguous(self):
         html = """
@@ -90,6 +94,11 @@ class ResultsPageReleasePowerPointSelectionTests(unittest.TestCase):
         candidates = extract_results_page_candidates(self._source(), html)
         selection = select_results_page_release_candidate(self._event(), candidates)
 
+        presentation = next(
+            candidate for candidate in candidates if candidate.source_url.endswith("/presentation")
+        )
+        self.assertEqual(presentation.source_title, "Download")
+        self.assertIn("Download PPT", presentation.link_title_fields)
         self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
         self.assertEqual(selection.candidate.source_url, "https://investor.example.com/results.pdf")
 
@@ -106,11 +115,31 @@ class ResultsPageReleasePowerPointSelectionTests(unittest.TestCase):
         candidates = extract_results_page_candidates(self._source(), html)
         pdf = next(candidate for candidate in candidates if candidate.source_url.endswith("results.pdf"))
         self.assertIn("PPT", pdf.evidence_fields)
+        self.assertNotIn("PPT", pdf.link_title_fields)
 
         selection = select_results_page_release_candidate(self._event(), candidates)
 
         self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
         self.assertEqual(selection.candidate, pdf)
+
+    def test_image_alt_powerpoint_label_is_link_local_provenance(self):
+        html = """
+        <table><tr>
+          <td>26 Aug 2026</td>
+          <td><a href="/results.pdf">PDF</a></td>
+          <td><a href="/slides.pptx"><img alt="PPT"></a></td>
+        </tr></table>
+        """
+
+        candidates = extract_results_page_candidates(self._source(), html)
+        slides = next(candidate for candidate in candidates if candidate.source_url.endswith("slides.pptx"))
+        self.assertIsNone(slides.source_title)
+        self.assertEqual(slides.link_title_fields, ("PPT",))
+
+        selection = select_results_page_release_candidate(self._event(), candidates)
+
+        self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
+        self.assertEqual(selection.candidate.source_url, "https://investor.example.com/results.pdf")
 
     def test_repeated_powerpoint_labels_on_distinct_presentations_are_excluded(self):
         pdf = self._candidate("https://investor.example.com/results.pdf", "PDF")
