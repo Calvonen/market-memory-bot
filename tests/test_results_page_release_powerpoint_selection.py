@@ -42,6 +42,26 @@ class ResultsPageReleasePowerPointSelectionTests(unittest.TestCase):
         self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
         self.assertEqual(selection.candidate, pdf)
 
+    def test_pdf_wins_when_powerpoint_title_is_composite_accessibility_text(self):
+        pdf = self._candidate("https://investor.example.com/results.pdf", "PDF")
+        ppt = self._candidate(
+            "https://investor.example.com/presentation.pptx",
+            "Download PPT PPT",
+        )
+
+        selection = select_results_page_release_candidate(self._event(), (pdf, ppt))
+
+        self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
+        self.assertEqual(selection.candidate, pdf)
+
+    def test_powerpoint_letters_inside_larger_token_do_not_exclude_candidate(self):
+        pdf = self._candidate("https://investor.example.com/results.pdf", "PDF")
+        other = self._candidate("https://investor.example.com/appendix.pdf", "PPTNotes")
+
+        selection = select_results_page_release_candidate(self._event(), (pdf, other))
+
+        self.assertEqual(selection.status, ResultsPageSelectionStatus.AMBIGUOUS)
+
     def test_two_non_powerpoint_matches_still_fail_closed(self):
         first = self._candidate("https://investor.example.com/results.pdf", "PDF")
         second = self._candidate("https://investor.example.com/appendix.pdf", "PDF")
