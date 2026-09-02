@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import argparse
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from trading_system.canonical_tracked_event_ingress import SupabaseCanonicalTrackedEventIngress
 from trading_system.etoro_instrument_resolver import (
@@ -23,12 +24,12 @@ _LOOKAHEAD_DAYS = 14
 _ACTOR = "market-open-registration-cli"
 
 
-def _next_grounded_open(*, etoro_market: str, now: datetime) -> tuple[datetime.date, datetime]:
+def _next_grounded_open(*, etoro_market: str, now: datetime) -> tuple[date, datetime]:
     profile = resolve_market_session_profile(
         etoro_market,
         profiles=GROUNDED_MARKET_SESSION_PROFILES,
     )
-    local_date = now.astimezone(__import__("zoneinfo").ZoneInfo(profile.market_timezone)).date()
+    local_date = now.astimezone(ZoneInfo(profile.market_timezone)).date()
     opens = confirmed_session_opens(
         profile,
         start_date=local_date,
