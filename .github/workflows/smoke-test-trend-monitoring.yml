@@ -222,7 +222,7 @@ jobs:
 
           sudo /usr/bin/systemctl start "$SERVICE"
           if [ "$(/usr/bin/systemctl is-active "$SERVICE" 2>/dev/null || true)" != "active" ]; then
-            sudo /usr/bin/journalctl -u "$SERVICE" --no-pager -o cat -n 100 || true
+            /usr/bin/journalctl -u "$SERVICE" --no-pager -o cat -n 100 || true
             echo "::error::$SERVICE failed to become active."
             exit 1
           fi
@@ -244,7 +244,7 @@ jobs:
           sleep "$((DURATION_MINUTES * 60))"
 
           if [ "$(/usr/bin/systemctl is-active "$SERVICE" 2>/dev/null || true)" != "active" ]; then
-            sudo /usr/bin/journalctl _SYSTEMD_INVOCATION_ID="$INVOCATION_ID" --no-pager -o cat || true
+            /usr/bin/journalctl _SYSTEMD_INVOCATION_ID="$INVOCATION_ID" --no-pager -o cat || true
             echo "::error::$SERVICE stopped unexpectedly during the smoke test."
             exit 1
           fi
@@ -265,7 +265,7 @@ jobs:
             exit 1
           fi
 
-          JOURNAL_OUTPUT="$(sudo /usr/bin/journalctl _SYSTEMD_INVOCATION_ID="$INVOCATION_ID" --no-pager -o cat)"
+          JOURNAL_OUTPUT="$(/usr/bin/journalctl _SYSTEMD_INVOCATION_ID="$INVOCATION_ID" --no-pager -o cat)"
           printf '%s\n' "$JOURNAL_OUTPUT"
           if ! printf '%s\n' "$JOURNAL_OUTPUT" | grep -q '"type": "trend_observation"'; then
             echo "::error::No Trend observation JSON was emitted by this service invocation during the smoke-test window."
