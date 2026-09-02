@@ -1077,11 +1077,11 @@ def extract_results_page_candidates_with_reason(
         if candidate_url is None or candidate_url in {served_page_url, approved_page_url}:
             continue
         if candidate_url not in aggregated:
-            aggregated[candidate_url] = {"title": None, "fields": []}
+            aggregated[candidate_url] = {"titles": [], "fields": []}
             order.append(candidate_url)
         record = aggregated[candidate_url]
-        if title and record["title"] is None:
-            record["title"] = title
+        if title and title not in record["titles"]:
+            record["titles"].append(title)
         for field in evidence_fields:
             if field not in record["fields"]:
                 record["fields"].append(field)
@@ -1089,11 +1089,12 @@ def extract_results_page_candidates_with_reason(
     candidates: list[ResultsPageReleaseCandidate] = []
     for candidate_url in order:
         record = aggregated[candidate_url]
+        source_title = " ".join(record["titles"]) or None
         candidates.append(
             ResultsPageReleaseCandidate(
                 event_id=source.event_id,
                 source_url=candidate_url,
-                source_title=record["title"],
+                source_title=source_title,
                 evidence_fields=tuple(record["fields"]),
             )
         )
