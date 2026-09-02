@@ -74,11 +74,11 @@ class MobileTrackedEventReleaseIngestionTests(unittest.TestCase):
             screen,
         )
         self.assertIn(
-            "if (!eventId || !canProcessRelease || processing || submitting || skipping) return;",
+            "if (!eventId || !canProcessRelease || processing || submitting || skipping || approvingPermission) return;",
             process_release,
         )
         self.assertIn(
-            "disabled={!canProcessRelease || !actor.trim() || processing || submitting || skipping}",
+            "disabled={!canProcessRelease || !actor.trim() || processing || submitting || skipping || approvingPermission}",
             screen,
         )
         self.assertIn("Käsittele julkaisu", screen)
