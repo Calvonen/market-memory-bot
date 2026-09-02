@@ -92,6 +92,35 @@ class ResultsPageReleasePowerPointSelectionTests(unittest.TestCase):
         self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
         self.assertEqual(selection.candidate, pdf)
 
+    def test_repeated_powerpoint_labels_on_distinct_presentations_are_all_excluded(self):
+        shared_row = "26 Aug 2026 Half Year Results PDF PPT"
+        pdf = ResultsPageReleaseCandidate(
+            event_id="calendar:test-event",
+            source_url="https://investor.example.com/results.pdf",
+            source_title="PDF",
+            evidence_fields=("PDF", shared_row),
+        )
+        first_ppt = ResultsPageReleaseCandidate(
+            event_id="calendar:test-event",
+            source_url="https://investor.example.com/presentation-a",
+            source_title="Download",
+            evidence_fields=("Download", "PPT", shared_row),
+        )
+        second_ppt = ResultsPageReleaseCandidate(
+            event_id="calendar:test-event",
+            source_url="https://investor.example.com/presentation-b",
+            source_title="Download",
+            evidence_fields=("Download", "PPT", shared_row),
+        )
+
+        selection = select_results_page_release_candidate(
+            self._event(),
+            (pdf, first_ppt, second_ppt),
+        )
+
+        self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
+        self.assertEqual(selection.candidate, pdf)
+
     def test_row_evidence_with_pdf_and_ppt_does_not_exclude_pdf(self):
         pdf = ResultsPageReleaseCandidate(
             event_id="calendar:test-event",
