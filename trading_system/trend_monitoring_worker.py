@@ -74,9 +74,16 @@ async def run_trend_monitoring_worker(
         else:
             emit(line)
 
+    def emit_diagnostic(payload: dict[str, Any]) -> None:
+        """Best-effort diagnostics must never alter monitoring lifecycle."""
+        try:
+            emit_payload(payload)
+        except Exception:
+            pass
+
     if service is None:
         stream = build_trend_monitoring_service_from_env(
-            on_target_snapshot=lambda targets: emit_payload(
+            on_target_snapshot=lambda targets: emit_diagnostic(
                 _target_snapshot_payload(targets)
             )
         )
@@ -88,7 +95,7 @@ async def run_trend_monitoring_worker(
     try:
         async for batch in stream:
             if not saw_market_update:
-                emit_payload(
+                emit_diagnostic(
                     {
                         "type": "trend_monitoring_diagnostic",
                         "status": "market_update_received",
@@ -96,7 +103,7 @@ async def run_trend_monitoring_worker(
                 )
                 saw_market_update = True
             if batch.candles and not saw_closed_candle:
-                emit_payload(
+                emit_diagnostic(
                     {
                         "type": "trend_monitoring_diagnostic",
                         "status": "closed_candle_received",
