@@ -54,6 +54,37 @@ class ResultsPageReleasePowerPointSelectionTests(unittest.TestCase):
         self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
         self.assertEqual(selection.candidate, pdf)
 
+    def test_duplicate_link_powerpoint_evidence_is_not_lost_with_generic_first_title(self):
+        pdf = self._candidate("https://investor.example.com/results.pdf", "PDF")
+        ppt = ResultsPageReleaseCandidate(
+            event_id="calendar:test-event",
+            source_url="https://investor.example.com/presentation",
+            source_title="Download",
+            evidence_fields=(
+                "Download",
+                "PPT",
+                "26 Aug 2026 Half Year Results PDF PPT",
+            ),
+        )
+
+        selection = select_results_page_release_candidate(self._event(), (pdf, ppt))
+
+        self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
+        self.assertEqual(selection.candidate, pdf)
+
+    def test_row_evidence_with_pdf_and_ppt_does_not_exclude_pdf(self):
+        pdf = ResultsPageReleaseCandidate(
+            event_id="calendar:test-event",
+            source_url="https://investor.example.com/results.pdf",
+            source_title="Download",
+            evidence_fields=("Download", "26 Aug 2026 Half Year Results PDF PPT"),
+        )
+
+        selection = select_results_page_release_candidate(self._event(), (pdf,))
+
+        self.assertEqual(selection.status, ResultsPageSelectionStatus.SELECTED)
+        self.assertEqual(selection.candidate, pdf)
+
     def test_powerpoint_letters_inside_larger_token_do_not_exclude_candidate(self):
         pdf = self._candidate("https://investor.example.com/results.pdf", "PDF")
         other = self._candidate("https://investor.example.com/appendix.pdf", "PPTNotes")
