@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 
 import { HomeTrackedCompaniesSection } from '@/components/HomeTrackedCompaniesSection';
+import { classifyPaperBrokerStatus } from '@/components/TrackedEventPaperSummary';
 import { TrackedEventDetails, TrackedEventsSection } from '@/components/TrackedEventsSection';
 import {
   CalendarEvent,
@@ -655,8 +656,23 @@ function describeStatus(run: PaperRun | null, statusError: boolean): string {
       return 'Odottaa vahvistusta';
     case 'expired_no_trade':
       return 'Vanhentui – ei kauppaa';
-    case 'paper_executed':
-      return 'Paperikauppa toteutettu';
+    case 'paper_executed': {
+      const brokerOutcome = classifyPaperBrokerStatus(run.paper_order?.status);
+      switch (brokerOutcome) {
+        case 'filled':
+          return 'Paperikauppa toteutettu';
+        case 'pending':
+          return 'Paperitoimeksianto odottaa toteutusta';
+        case 'rejected':
+          return 'Paperitoimeksianto hylätty tai peruttu';
+        case 'failed':
+          return 'Paperitoimeksianto epäonnistui';
+        case 'missing':
+          return 'Brokerin toteutustila puuttuu';
+        case 'unknown':
+          return 'Brokerin tila varmistamatta';
+      }
+    }
     default:
       return 'Käsitellään';
   }
