@@ -62,6 +62,11 @@ class OfficialReleaseSourceSetRequest(BaseModel):
     expected_version: int = Field(ge=0)
 
 
+class PaperPermissionApproveRequest(BaseModel):
+    expected_expectation_version: int = Field(ge=1)
+    max_position_value_usd: float = Field(gt=0, allow_inf_nan=False)
+
+
 def _require_valid_tracked_event_id(event_id: str) -> str:
     if _POSTGRES_UUID_TEXT.fullmatch(event_id) is None:
         raise HTTPException(status_code=400, detail="event_id must be a valid UUID")
@@ -111,6 +116,13 @@ def _iso_or_none(value: object) -> str | None:
     return text or None
 
 
+def _task_position_cap(task_row: dict[str, object] | None) -> float | None:
+    if task_row is None:
+        return None
+    raw_cap = task_row.get("max_position_value_usd")
+    return float(raw_cap) if raw_cap is not None else None
+
+
 def _paper_permission_payload(
     event: PersistentTrackedEvent,
     *,
@@ -130,6 +142,7 @@ def _paper_permission_payload(
             "approved_at": None,
             "approved_expectation_version": None,
             "current_expectation_version": current_expectation_version,
+            "max_position_value_usd": None,
             "approval_current": False,
         }
 
@@ -151,8 +164,23 @@ def _paper_permission_payload(
         "approved_at": _iso_or_none(task_row.get("approved_at")),
         "approved_expectation_version": approved_version,
         "current_expectation_version": current_expectation_version,
+        "max_position_value_usd": _task_position_cap(task_row),
         "approval_current": approval_current,
     }
+
+
+def _is_paper_permission_conflict(exc: Exception) -> bool:
+    text = str(exc)
+    return any(
+        token in text
+        for token in (
+            "trading_task_expectation_version_changed",
+            "trading_task_expectation_not_found",
+            "trading_task_event_identity_mismatch",
+            "trading_task_instrument_mismatch",
+            "trading_task_tracked_event_not_found",
+        )
+    )
 
 
 def build_tracked_event_release_source_router(
@@ -313,6 +341,7 @@ def build_tracked_event_release_source_router(
     @router.post("/api/v1/tracked-events/{event_id}/paper-permission/approve")
     def approve_tracked_event_paper_permission(
         event_id: str,
+        request: PaperPermissionApproveRequest,
         x_marketai_control_key: str | None = Header(
             default=None, alias="X-MarketAI-Control-Key"
         ),
@@ -321,72 +350,37 @@ def build_tracked_event_release_source_router(
         require_control(x_marketai_control_key)
         actor = _require_actor(x_marketai_actor)
         event_id = _require_valid_tracked_event_id(event_id)
-        event, current_version, tasks, task_row = load_paper_permission_context(event_id)
+        event, current_version, tasks, _ = load_paper_permission_context(event_id)
+
+        # Reject the visibly stale request before entering the write boundary.
+        # The DB RPC repeats the same check under the per-event advisory lock,
+        # so a version change after this read still rolls back the whole action.
+        if request.expected_expectation_version != current_version:
+            raise HTTPException(
+                status_code=409,
+                detail="Event expectation changed; review the current version before approving",
+            )
 
         try:
-            if task_row is not None:
-                state = str(task_row.get("state") or "")
-                raw_approved_version = task_row.get("approved_expectation_version")
-                approved_version = (
-                    int(raw_approved_version) if raw_approved_version is not None else None
-                )
-                if (
-                    state == TradingTaskState.APPROVED.value
-                    and approved_version == current_version
-                ):
-                    return _paper_permission_payload(
-                        event,
-                        current_expectation_version=current_version,
-                        task_row=task_row,
-                    )
-                if state == TradingTaskState.APPROVED.value:
-                    task_id = str(task_row.get("id") or "")
-                    if not task_id:
-                        raise RuntimeError("approved PAPER task is missing its identity")
-                    tasks.cancel(task_id=task_id, actor=actor)
-                    task_row = None
-
-            if task_row is None:
-                task = tasks.create_pending(
-                    tracked_event_id=event.event_id,
-                    source_event_id=canonical_release_event_id(event),
-                    instrument=event.instrument,
-                    mode=TradingMode.PAPER,
-                    actor=actor,
-                )
-            else:
-                task_id = str(task_row.get("id") or "")
-                if not task_id:
-                    raise RuntimeError("pending PAPER task is missing its identity")
-                task = tasks.get(task_id)
-                if task is None:
-                    raise RuntimeError("pending PAPER task disappeared before approval")
-
-            if task.state is TradingTaskState.PENDING:
-                task = tasks.approve(task_id=task.task_id, actor=actor)
-            if task.state is not TradingTaskState.APPROVED:
-                raise RuntimeError("PAPER permission did not reach approved state")
-
-            latest_expectation = event_expectation_repository_factory().get(
-                canonical_release_event_id(event)
-            )
-            if latest_expectation is None:
-                raise RuntimeError("current event expectation disappeared after approval")
-            latest_row = tasks.get_active_row_for_event_mode(
+            approved_row = tasks.approve_paper_permission(
                 tracked_event_id=event.event_id,
-                mode=TradingMode.PAPER,
+                source_event_id=canonical_release_event_id(event),
+                instrument=event.instrument,
+                actor=actor,
+                expected_expectation_version=request.expected_expectation_version,
+                max_position_value_usd=request.max_position_value_usd,
             )
-            if latest_row is None:
-                raise RuntimeError("approved PAPER task disappeared after approval")
         except (RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except Exception as exc:
+            if _is_paper_permission_conflict(exc):
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             raise HTTPException(status_code=503, detail="PAPER permission approval failed") from exc
 
         return _paper_permission_payload(
             event,
-            current_expectation_version=latest_expectation.version,
-            task_row=latest_row,
+            current_expectation_version=request.expected_expectation_version,
+            task_row=approved_row,
         )
 
     @router.put("/api/v1/tracked-events/{event_id}/release-source")
