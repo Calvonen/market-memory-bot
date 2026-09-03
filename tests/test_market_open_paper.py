@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
+from trading_system.market_open_evidence import _canonical_raw_text, _pattern_from_raw_text
 from trading_system.market_open_paper import _provider_symbol, detect_market_open_pattern
 from trading_system.market_reaction import DEFAULT_FLAT_THRESHOLD_PCT
-from trading_system.models import Direction
+from trading_system.models import Direction, EventExpectation
 from trading_system.tracked_event_repository import (
     PersistentTrackedEvent,
     TrackedEventReactionRecord,
@@ -108,6 +109,34 @@ class MarketOpenPatternTests(unittest.TestCase):
         self.assertEqual(pattern.confirmation.score, 25)
         self.assertEqual(pattern.reaction_pct, Decimal("-0.80"))
         self.assertEqual(pattern.execution_price, Decimal("9.9200"))
+
+    def test_frozen_evidence_roundtrips_confirming_execution_price(self) -> None:
+        event = market_open_event()
+        reactions = (reaction(0, "-1.00"), reaction(1, "0.40"), reaction(2, "0.70"))
+        pattern = detect_market_open_pattern(event=event, reactions=reactions)
+        self.assertIsNotNone(pattern)
+        assert pattern is not None
+        expectation = EventExpectation(
+            event_id="tracked:bhp-open-1",
+            instrument="BHP.ASX",
+            event_name="BHP.ASX market open",
+            scheduled_date=date(2026, 9, 3),
+            version=1,
+        )
+        raw_text = _canonical_raw_text(
+            event=event,
+            expectation=expectation,
+            pattern=pattern,
+            reactions=reactions,
+        )
+        restored = _pattern_from_raw_text(
+            raw_text,
+            event=event,
+            expectation=expectation,
+        )
+        self.assertEqual(restored.execution_price, pattern.execution_price)
+        self.assertEqual(restored.reaction_pct, pattern.reaction_pct)
+        self.assertIs(restored.direction, pattern.direction)
 
     def test_previous_session_must_be_bearish_for_this_setup(self) -> None:
         pattern = detect_market_open_pattern(
