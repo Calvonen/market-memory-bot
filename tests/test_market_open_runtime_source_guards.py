@@ -59,6 +59,10 @@ class MarketOpenRuntimeSourceGuardTests(unittest.TestCase):
         self.assertIn("pg_get_expr(c.conbin, c.conrelid) ilike '%source_type%'", migration)
         self.assertIn("source_type = %L", migration)
         self.assertIn("'market_open_reaction_evidence'", migration)
+        self.assertIn("matched_constraints integer := 0", migration)
+        self.assertIn("matched_constraints := matched_constraints + 1", migration)
+        self.assertIn("if matched_constraints = 0 then", migration)
+        self.assertIn("market_open_source_type_constraint_not_found", migration)
 
     def test_market_open_shell_uses_jsonb_case_arrays(self) -> None:
         migration = (
