@@ -79,6 +79,7 @@ def _canonical_raw_text(
             "confirmation_score": pattern.confirmation.score,
             "confirmation_max_score": pattern.confirmation.max_score,
             "reaction_pct": str(pattern.reaction_pct),
+            "execution_price": str(pattern.execution_price),
             "setup_reasons": list(pattern.setup.reasons),
             "confirmation_reasons": list(pattern.confirmation.reasons),
         },
@@ -148,6 +149,7 @@ def _pattern_from_raw_text(
         confirmation_score = int(pattern_payload["confirmation_score"])
         confirmation_max = int(pattern_payload["confirmation_max_score"])
         reaction_pct = Decimal(str(pattern_payload["reaction_pct"]))
+        execution_price = Decimal(str(pattern_payload["execution_price"]))
     except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
         raise RuntimeError("frozen market-open evidence pattern is malformed") from exc
     if direction not in (Direction.LONG, Direction.SHORT):
@@ -156,6 +158,28 @@ def _pattern_from_raw_text(
         raise RuntimeError("frozen market-open evidence scores differ from reviewed strategy")
     if not reaction_pct.is_finite():
         raise RuntimeError("frozen market-open evidence reaction is invalid")
+    if not execution_price.is_finite() or execution_price <= 0:
+        raise RuntimeError("frozen market-open evidence execution price is invalid")
+
+    opening_rows = payload.get("opening_reactions")
+    if not isinstance(opening_rows, list):
+        raise RuntimeError("frozen market-open evidence has no reaction sequence")
+    confirming_row_found = False
+    for raw_row in opening_rows:
+        if not isinstance(raw_row, dict):
+            raise RuntimeError("frozen market-open reaction is malformed")
+        try:
+            close_price = Decimal(str(raw_row["close_price"]))
+            row_return = Decimal(str(raw_row["return_pct"]))
+        except (KeyError, InvalidOperation, TypeError, ValueError) as exc:
+            raise RuntimeError("frozen market-open reaction prices are malformed") from exc
+        if close_price == execution_price and row_return == reaction_pct:
+            confirming_row_found = True
+            break
+    if not confirming_row_found:
+        raise RuntimeError(
+            "frozen market-open execution price does not match the confirming reaction"
+        )
 
     setup_reasons = tuple(str(item) for item in pattern_payload.get("setup_reasons") or ())
     confirmation_reasons = tuple(
@@ -168,6 +192,7 @@ def _pattern_from_raw_text(
         setup=ComponentAssessment("fundamental", direction, 35, 35, setup_reasons),
         confirmation=ComponentAssessment("catalyst", direction, 25, 25, confirmation_reasons),
         reaction_pct=reaction_pct,
+        execution_price=execution_price,
     )
 
 
