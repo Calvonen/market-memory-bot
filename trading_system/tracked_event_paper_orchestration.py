@@ -474,6 +474,16 @@ def run_approved_tracked_paper_once(
         expectation_version=expectation.version,
         lease_seconds=lease_seconds,
     )
+    renewed_terminal_status = str(renewed_claim.get("terminal_status") or "").strip()
+    if renewed_terminal_status:
+        persisted = paper_runs.get_latest_for_event(release_event_id)
+        if persisted is not None:
+            return _persisted_result(persisted)
+        return TrackedPaperOrchestrationResult(
+            renewed_terminal_status,
+            "canonical paper run already has a terminal result",
+            renewed_claim,
+        )
     if not _claim_is_owned(
         renewed_claim,
         analysis_id=analysis_id,
