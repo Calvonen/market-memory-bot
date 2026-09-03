@@ -8,6 +8,7 @@ After=network-online.target marketai-tracked-events.service
 Type=simple
 WorkingDirectory=/home/marko/marketai-repo
 EnvironmentFile=/home/marko/marketai-deploy-state/approved-paper-prepared.env
+ExecStartPre=/home/marko/marketai-repo/.venv/bin/python /home/marko/marketai-repo/scripts/verify_market_open_runtime_schema.py
 ExecStart=/home/marko/marketai-repo/.venv/bin/python -m trading_system.approved_paper_dispatch_worker
 Restart=no
 TimeoutStopSec=20
