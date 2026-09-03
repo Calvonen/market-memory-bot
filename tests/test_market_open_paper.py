@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from trading_system.market_open_paper import detect_market_open_pattern
+from trading_system.market_open_paper import _provider_symbol, detect_market_open_pattern
 from trading_system.market_reaction import DEFAULT_FLAT_THRESHOLD_PCT
 from trading_system.models import Direction
 from trading_system.tracked_event_repository import (
@@ -86,6 +87,7 @@ class MarketOpenPatternTests(unittest.TestCase):
         self.assertEqual(pattern.setup.score, 35)
         self.assertEqual(pattern.confirmation.score, 25)
         self.assertEqual(pattern.reaction_pct, Decimal("0.70"))
+        self.assertEqual(pattern.execution_price, Decimal("10.0700"))
 
     def test_single_positive_reclaim_does_not_create_long(self) -> None:
         pattern = detect_market_open_pattern(
@@ -105,6 +107,7 @@ class MarketOpenPatternTests(unittest.TestCase):
         self.assertEqual(pattern.setup.score, 35)
         self.assertEqual(pattern.confirmation.score, 25)
         self.assertEqual(pattern.reaction_pct, Decimal("-0.80"))
+        self.assertEqual(pattern.execution_price, Decimal("9.9200"))
 
     def test_previous_session_must_be_bearish_for_this_setup(self) -> None:
         pattern = detect_market_open_pattern(
@@ -147,6 +150,11 @@ class MarketOpenPatternTests(unittest.TestCase):
                 event=market_open_event(reference_kind="manual"),
                 reactions=(reaction(0, "-1.00"), reaction(1, "0.40"), reaction(2, "0.70")),
             )
+
+    def test_provider_symbol_requires_exact_canonical_broker_symbol(self) -> None:
+        event = replace(market_open_event(), resolved_etoro_symbol="BHP")
+        with self.assertRaisesRegex(ValueError, "differs from canonical instrument"):
+            _provider_symbol(event)
 
 
 if __name__ == "__main__":
