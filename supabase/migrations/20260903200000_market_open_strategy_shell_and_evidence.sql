@@ -330,4 +330,33 @@ revoke all on function public.freeze_market_open_evidence(uuid, integer, text, j
 grant execute on function public.freeze_market_open_evidence(uuid, integer, text, jsonb)
   to service_role;
 
+create or replace function public.verify_market_open_runtime_schema()
+returns table (
+  market_open_shell_function_exists boolean,
+  market_open_shell_trigger_exists boolean,
+  freeze_market_open_evidence_function_exists boolean
+)
+language sql
+security definer
+set search_path = pg_catalog, public
+as $$
+  select
+    to_regprocedure('public.ensure_market_open_strategy_shell(uuid)') is not null,
+    exists (
+      select 1
+      from pg_trigger t
+      join pg_class c on c.oid = t.tgrelid
+      join pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = 'public'
+        and c.relname = 'tracked_market_events'
+        and t.tgname = 'tracked_market_events_market_open_shell_after_date_write'
+        and not t.tgisinternal
+    ),
+    to_regprocedure('public.freeze_market_open_evidence(uuid,integer,text,jsonb)') is not null;
+$$;
+
+revoke all on function public.verify_market_open_runtime_schema()
+  from public, anon, authenticated;
+grant execute on function public.verify_market_open_runtime_schema() to service_role;
+
 commit;
