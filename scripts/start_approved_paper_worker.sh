@@ -108,11 +108,12 @@ case "$ENVIRONMENT_FILES" in
 esac
 
 if /usr/bin/systemctl is-active --quiet "$SERVICE"; then
-  echo "$SERVICE is already active on prepared SHA $PREPARED_SHA."
-  exit 0
+  echo "$SERVICE is already active; restarting it so the process loads prepared SHA $PREPARED_SHA."
+  sudo /usr/bin/systemctl restart "$SERVICE"
+else
+  sudo /usr/bin/systemctl start "$SERVICE"
 fi
 
-sudo /usr/bin/systemctl start "$SERVICE"
 if ! /usr/bin/systemctl is-active --quiet "$SERVICE"; then
   echo "$SERVICE did not become active." >&2
   sudo /usr/bin/systemctl status "$SERVICE" --no-pager -l || true
