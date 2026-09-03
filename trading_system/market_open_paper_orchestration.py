@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -118,9 +119,6 @@ def _load_existing_evidence(
         raise RuntimeError("market-open evidence source document identity conflicts")
     raw_text = str(doc.get("raw_text") or "")
 
-    # Reuse the freeze loader's strict event/version/reference validation without
-    # allowing later reactions to choose another direction. The persisted RPC is
-    # idempotent and returns the already-frozen row while the lineage locks are held.
     pattern_payload = json.loads(raw_text).get("pattern")
     if not isinstance(pattern_payload, dict):
         raise RuntimeError("market-open evidence pattern is missing")
@@ -198,6 +196,12 @@ def run_approved_market_open_paper_once(
         release_event_id=source_event_id,
         instrument=event.instrument,
     )
+    event_cap = execution_context.max_position_value_usd
+    if event_cap is None or not math.isfinite(event_cap) or event_cap <= 0:
+        return TrackedPaperOrchestrationResult(
+            "waiting_approval",
+            "market-open PAPER requires a finite positive per-event position cap",
+        )
     _validate_broker_identity(event, resolver)
 
     reactions = tracked_events.list_reactions(event.event_id)
@@ -228,6 +232,8 @@ def run_approved_market_open_paper_once(
     frozen_pattern = detect_market_open_pattern(event=event, reactions=frozen_reactions)
     if frozen_pattern is None or frozen_pattern.direction is not evidence.pattern.direction:
         raise RuntimeError("frozen market-open evidence no longer reproduces its persisted direction")
+    if frozen_pattern.execution_price != evidence.pattern.execution_price:
+        raise RuntimeError("frozen market-open evidence no longer reproduces its execution price")
 
     claim = _claim_event_for_task(
         paper_runs,
