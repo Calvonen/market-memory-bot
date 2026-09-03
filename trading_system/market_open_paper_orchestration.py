@@ -5,7 +5,7 @@ import json
 import math
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -21,7 +21,7 @@ from trading_system.market_open_paper import (
     detect_market_open_pattern,
     run_market_open_paper,
 )
-from trading_system.models import ComponentAssessment, PortfolioState, TradingMode
+from trading_system.models import ComponentAssessment, PortfolioState, TradeProposal, TradingMode
 from trading_system.paper_trade_repository import SupabasePaperTradeRepository
 from trading_system.pipeline import PaperTradingPipeline
 from trading_system.release_repository import SupabaseReleaseRepository
@@ -48,6 +48,21 @@ from trading_system.trading_task_repository import SupabaseTradingTaskRepository
 
 
 _MAX_FROZEN_EXECUTION_AGE = timedelta(minutes=2)
+
+
+class _BrokerBoundaryFreshnessGuard:
+    """Fail closed immediately before the durable broker-attempt reservation."""
+
+    def __init__(self, broker: Any, check: Callable[[], None]) -> None:
+        self._broker = broker
+        self._check = check
+        self.supports_fractional_sizing = bool(
+            getattr(broker, "supports_fractional_sizing", False)
+        )
+
+    def execute(self, proposal: TradeProposal):
+        self._check()
+        return self._broker.execute(proposal)
 
 
 def _parse_aware(value: object, field: str) -> datetime:
@@ -175,6 +190,19 @@ def _execution_evidence_is_fresh(
     return current <= completed_at + _MAX_FROZEN_EXECUTION_AGE
 
 
+def _with_broker_boundary_freshness(
+    pipeline: PaperTradingPipeline,
+    check: Callable[[], None],
+) -> PaperTradingPipeline:
+    return PaperTradingPipeline(
+        strategy_engine=pipeline.strategy_engine,
+        risk_engine=pipeline.risk_engine,
+        broker=_BrokerBoundaryFreshnessGuard(pipeline.broker, check),
+        journal=pipeline.journal,
+        allow_fractional_sizing=pipeline.allow_fractional_sizing,
+    )
+
+
 def run_approved_market_open_paper_once(
     *,
     tracked_event_id: str,
@@ -277,19 +305,8 @@ def run_approved_market_open_paper_once(
     if frozen_pattern.execution_price != evidence.pattern.execution_price:
         raise RuntimeError("frozen market-open evidence no longer reproduces its execution price")
 
-    execution_now = now or datetime.now(UTC)
-    if not _execution_evidence_is_fresh(
-        event=event,
-        live_reactions=reactions,
-        frozen_reactions=frozen_reactions,
-        evidence=evidence,
-        now=execution_now,
-    ):
-        return TrackedPaperOrchestrationResult(
-            "waiting_confirmation",
-            "frozen market-open execution evidence expired or was superseded by a newer 1m reaction",
-        )
-
+    # Claim first: the claim RPC performs terminal/completed-attempt recovery. Freshness
+    # only gates a *new* broker attempt and must never hide an already-submitted order.
     claim = _claim_event_for_task(
         paper_runs,
         event_id=source_event_id,
@@ -320,6 +337,32 @@ def run_approved_market_open_paper_once(
             claim,
         )
 
+    execution_now = now or datetime.now(UTC)
+    if not _execution_evidence_is_fresh(
+        event=event,
+        live_reactions=tracked_events.list_reactions(event.event_id),
+        frozen_reactions=frozen_reactions,
+        evidence=evidence,
+        now=execution_now,
+    ):
+        return TrackedPaperOrchestrationResult(
+            "waiting_confirmation",
+            "frozen market-open execution evidence expired or was superseded by a newer 1m reaction",
+        )
+
+    def recheck_before_broker_attempt() -> None:
+        boundary_now = now or datetime.now(UTC)
+        if not _execution_evidence_is_fresh(
+            event=event,
+            live_reactions=tracked_events.list_reactions(event.event_id),
+            frozen_reactions=frozen_reactions,
+            evidence=evidence,
+            now=boundary_now,
+        ):
+            raise RuntimeError(
+                "market-open execution evidence expired or was superseded before broker attempt"
+            )
+
     capped_pipeline = _pipeline_with_task_cap(pipeline, execution_context)
     guarded_pipeline = _guard_pipeline(
         capped_pipeline,
@@ -329,6 +372,10 @@ def run_approved_market_open_paper_once(
         task_id=requested_task_id,
         expectation_version=expectation.version,
         lease_seconds=lease_seconds,
+    )
+    guarded_pipeline = _with_broker_boundary_freshness(
+        guarded_pipeline,
+        recheck_before_broker_attempt,
     )
     result = run_market_open_paper(
         event=event,
