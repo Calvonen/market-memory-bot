@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -11,9 +12,15 @@ import pandas as pd
 from trading_system.etoro_instrument_resolver import EtoroInstrumentResolver
 from trading_system.market_open_evidence import (
     FrozenMarketOpenEvidence,
+    _analysis_payload,
+    _pattern_from_raw_text,
     freeze_or_load_market_open_evidence,
 )
-from trading_system.market_open_paper import detect_market_open_pattern, run_market_open_paper
+from trading_system.market_open_paper import (
+    _validated_opening_reactions,
+    detect_market_open_pattern,
+    run_market_open_paper,
+)
 from trading_system.models import ComponentAssessment, PortfolioState, TradingMode
 from trading_system.paper_trade_repository import SupabasePaperTradeRepository
 from trading_system.pipeline import PaperTradingPipeline
@@ -38,6 +45,9 @@ from trading_system.tracked_event_repository import (
 )
 from trading_system.trading_task import TradingTaskState
 from trading_system.trading_task_repository import SupabaseTradingTaskRepository
+
+
+_MAX_FROZEN_EXECUTION_AGE = timedelta(minutes=2)
 
 
 def _parse_aware(value: object, field: str) -> datetime:
@@ -105,7 +115,7 @@ def _load_existing_evidence(
         raise RuntimeError("market-open evidence analysis identity is incomplete")
     docs = (
         releases.client.table("event_source_documents")
-        .select("id,event_id,source_type,raw_text")
+        .select("id,event_id,source_type,content_sha256,raw_text")
         .eq("id", source_document_id)
         .limit(1)
         .execute()
@@ -118,13 +128,17 @@ def _load_existing_evidence(
     if str(doc.get("event_id") or "") != event_id or str(doc.get("source_type") or "") != "market_open_reaction_evidence":
         raise RuntimeError("market-open evidence source document identity conflicts")
     raw_text = str(doc.get("raw_text") or "")
-
-    pattern_payload = json.loads(raw_text).get("pattern")
-    if not isinstance(pattern_payload, dict):
-        raise RuntimeError("market-open evidence pattern is missing")
-    from trading_system.market_open_evidence import _pattern_from_raw_text
+    stored_hash = str(doc.get("content_sha256") or "").strip().lower()
+    computed_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+    if not stored_hash or stored_hash != computed_hash:
+        raise RuntimeError("frozen market-open evidence content hash does not match raw text")
 
     pattern = _pattern_from_raw_text(raw_text, event=event, expectation=expectation)
+    persisted_analysis = row.get("analysis")
+    if not isinstance(persisted_analysis, dict) or persisted_analysis != _analysis_payload(pattern):
+        raise RuntimeError("frozen market-open analysis payload disagrees with reaction evidence")
+    if str(row.get("raw_response") or "") != raw_text:
+        raise RuntimeError("frozen market-open analysis raw response disagrees with source document")
     return FrozenMarketOpenEvidence(
         analysis_id=analysis_id,
         source_document_id=source_document_id,
@@ -132,6 +146,33 @@ def _load_existing_evidence(
         raw_text=raw_text,
         created=False,
     )
+
+
+def _execution_evidence_is_fresh(
+    *,
+    event: Any,
+    live_reactions: tuple[TrackedEventReactionRecord, ...],
+    frozen_reactions: tuple[TrackedEventReactionRecord, ...],
+    evidence: FrozenMarketOpenEvidence,
+    now: datetime,
+) -> bool:
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("market-open execution clock must be timezone-aware")
+    frozen_rows = _validated_opening_reactions(event=event, reactions=frozen_reactions)
+    live_rows = _validated_opening_reactions(event=event, reactions=live_reactions)
+    if not frozen_rows or not live_rows:
+        return False
+    frozen_latest = frozen_rows[-1]
+    live_latest = live_rows[-1]
+    if live_latest.candle_start.astimezone(UTC) != frozen_latest.candle_start.astimezone(UTC):
+        return False
+    if live_latest.close_price != evidence.pattern.execution_price:
+        return False
+    completed_at = frozen_latest.candle_start.astimezone(UTC) + timedelta(minutes=1)
+    current = now.astimezone(UTC)
+    if current < completed_at:
+        raise RuntimeError("market-open execution clock precedes confirming candle completion")
+    return current <= completed_at + _MAX_FROZEN_EXECUTION_AGE
 
 
 def run_approved_market_open_paper_once(
@@ -150,6 +191,7 @@ def run_approved_market_open_paper_once(
     technical: ComponentAssessment | None = None,
     market_memory: ComponentAssessment | None = None,
     pipeline: PaperTradingPipeline | None = None,
+    now: datetime | None = None,
 ) -> TrackedPaperOrchestrationResult:
     event_key = tracked_event_id.strip()
     requested_task_id = task_id.strip()
@@ -234,6 +276,19 @@ def run_approved_market_open_paper_once(
         raise RuntimeError("frozen market-open evidence no longer reproduces its persisted direction")
     if frozen_pattern.execution_price != evidence.pattern.execution_price:
         raise RuntimeError("frozen market-open evidence no longer reproduces its execution price")
+
+    execution_now = now or datetime.now(UTC)
+    if not _execution_evidence_is_fresh(
+        event=event,
+        live_reactions=reactions,
+        frozen_reactions=frozen_reactions,
+        evidence=evidence,
+        now=execution_now,
+    ):
+        return TrackedPaperOrchestrationResult(
+            "waiting_confirmation",
+            "frozen market-open execution evidence expired or was superseded by a newer 1m reaction",
+        )
 
     claim = _claim_event_for_task(
         paper_runs,
