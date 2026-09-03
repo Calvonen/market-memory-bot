@@ -13,6 +13,15 @@ class MarketOpenRuntimeSourceGuardTests(unittest.TestCase):
         self.assertIn("-m trading_system.approved_paper_dispatch_worker", service)
         self.assertNotIn("-m trading_system.approved_tracked_paper_worker\n", service)
 
+    def test_systemd_gates_dispatcher_on_market_open_schema(self) -> None:
+        service = (ROOT / "deploy/systemd/marketai-approved-paper.service").read_text()
+        self.assertIn("ExecStartPre=", service)
+        self.assertIn("scripts/verify_market_open_runtime_schema.py", service)
+        gate = (ROOT / "scripts/verify_market_open_runtime_schema.py").read_text()
+        self.assertIn("verify_market_open_runtime_schema", gate)
+        self.assertIn("market_open_shell_trigger_exists", gate)
+        self.assertIn("freeze_market_open_evidence_function_exists", gate)
+
     def test_dispatcher_keeps_earnings_and_market_open_as_only_executable_kinds(self) -> None:
         source = (ROOT / "trading_system/approved_paper_dispatch_worker.py").read_text()
         self.assertIn('if normalized == "earnings"', source)
@@ -31,6 +40,16 @@ class MarketOpenRuntimeSourceGuardTests(unittest.TestCase):
         self.assertIn("extensions.digest", migration)
         self.assertIn("existing_count > 1", migration)
         self.assertIn("return query select analysis_row.id, document_row.id, false", migration)
+
+    def test_market_open_runtime_verifier_checks_shell_trigger_and_freeze_rpc(self) -> None:
+        migration = (
+            ROOT
+            / "supabase/migrations/20260903200000_market_open_strategy_shell_and_evidence.sql"
+        ).read_text()
+        self.assertIn("verify_market_open_runtime_schema", migration)
+        self.assertIn("ensure_market_open_strategy_shell(uuid)", migration)
+        self.assertIn("tracked_market_events_market_open_shell_after_date_write", migration)
+        self.assertIn("freeze_market_open_evidence(uuid,integer,text,jsonb)", migration)
 
     def test_market_open_source_type_constraint_is_extended(self) -> None:
         migration = (
@@ -86,6 +105,16 @@ class MarketOpenRuntimeSourceGuardTests(unittest.TestCase):
         self.assertIn("frozen_latest.candle_start", source)
         self.assertIn("current <= completed_at + _MAX_FROZEN_EXECUTION_AGE", source)
         self.assertIn("expired or was superseded by a newer 1m reaction", source)
+
+    def test_recovery_precedes_freshness_and_boundary_rechecks_live_reactions(self) -> None:
+        source = (ROOT / "trading_system/market_open_paper_orchestration.py").read_text()
+        claim = source.index("claim = _claim_event_for_task(")
+        freshness = source.index("execution_now = now or datetime.now(UTC)", claim)
+        self.assertLess(claim, freshness)
+        self.assertIn("class _BrokerBoundaryFreshnessGuard", source)
+        self.assertIn("def recheck_before_broker_attempt()", source)
+        self.assertIn("tracked_events.list_reactions(event.event_id)", source)
+        self.assertIn("_with_broker_boundary_freshness(", source)
 
     def test_market_open_execution_requires_positive_event_cap(self) -> None:
         source = (ROOT / "trading_system/market_open_paper_orchestration.py").read_text()
