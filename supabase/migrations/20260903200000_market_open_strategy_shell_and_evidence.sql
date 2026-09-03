@@ -5,6 +5,32 @@
 -- release or an official company document.
 begin;
 
+-- Preserve every existing source_type rule while admitting deterministic market-open
+-- reaction evidence. Production already carries a CHECK constraint that was extended
+-- earlier for company_results_pdf, so extend whatever expression currently exists.
+do $$
+declare
+  item record;
+begin
+  for item in
+    select c.conname, pg_get_expr(c.conbin, c.conrelid) as expression
+    from pg_constraint c
+    where c.conrelid = 'public.event_source_documents'::regclass
+      and c.contype = 'c'
+      and pg_get_expr(c.conbin, c.conrelid) ilike '%source_type%'
+  loop
+    execute format(
+      'alter table public.event_source_documents drop constraint %I', item.conname
+    );
+    execute format(
+      'alter table public.event_source_documents add constraint %I check ((%s) or source_type = %L)',
+      item.conname,
+      item.expression,
+      'market_open_reaction_evidence'
+    );
+  end loop;
+end $$;
+
 create or replace function public.ensure_market_open_strategy_shell(
   input_tracked_event_id uuid
 )
@@ -97,15 +123,15 @@ begin
       tracked_row.event_date,
       '{}'::jsonb,
       '[]'::jsonb,
-      array[
+      jsonb_build_array(
         'LONG only after completed 1m opening weakness reverses positive and a later completed 1m candle confirms the reclaim.'
-      ]::text[],
-      array[
+      ),
+      jsonb_build_array(
         'NO TRADE until a reviewed market-open pattern plus aligned Technical and Market Memory evidence is present.'
-      ]::text[],
-      array[
+      ),
+      jsonb_build_array(
         'SHORT only after completed opening weakness, a bounce attempt, and a later completed 1m candle rolls back negative.'
-      ]::text[],
+      ),
       jsonb_build_object(
         'event_kind', 'market_open',
         'opening_window_minutes', 30,
@@ -115,11 +141,11 @@ begin
         'technical_same_direction_required', true,
         'market_memory_same_direction_required', true
       ),
-      array[
+      jsonb_build_array(
         'Opening pattern no longer matches the frozen complete 1m reaction evidence.',
         'Technical or Market Memory does not confirm the same direction.',
         'Risk Engine or broker guard rejects execution.'
-      ]::text[],
+      ),
       'automatic canonical market-open strategy shell; no earnings consensus or release evidence inferred'
     );
     current_version := 1;
