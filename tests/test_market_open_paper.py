@@ -90,6 +90,18 @@ class MarketOpenPatternTests(unittest.TestCase):
         self.assertEqual(pattern.reaction_pct, Decimal("0.70"))
         self.assertEqual(pattern.execution_price, Decimal("10.0700"))
 
+    def test_later_negative_reaction_invalidates_earlier_long(self) -> None:
+        pattern = detect_market_open_pattern(
+            event=market_open_event(),
+            reactions=(
+                reaction(0, "-1.00"),
+                reaction(1, "0.40"),
+                reaction(2, "0.70"),
+                reaction(3, "-0.80"),
+            ),
+        )
+        self.assertIsNot(pattern.direction if pattern else None, Direction.LONG)
+
     def test_single_positive_reclaim_does_not_create_long(self) -> None:
         pattern = detect_market_open_pattern(
             event=market_open_event(),
@@ -109,6 +121,18 @@ class MarketOpenPatternTests(unittest.TestCase):
         self.assertEqual(pattern.confirmation.score, 25)
         self.assertEqual(pattern.reaction_pct, Decimal("-0.80"))
         self.assertEqual(pattern.execution_price, Decimal("9.9200"))
+
+    def test_later_positive_reaction_invalidates_earlier_short(self) -> None:
+        pattern = detect_market_open_pattern(
+            event=market_open_event(),
+            reactions=(
+                reaction(0, "-1.00"),
+                reaction(1, "-0.40"),
+                reaction(2, "-0.80"),
+                reaction(3, "0.30"),
+            ),
+        )
+        self.assertIsNot(pattern.direction if pattern else None, Direction.SHORT)
 
     def test_frozen_evidence_roundtrips_confirming_execution_price(self) -> None:
         event = market_open_event()
