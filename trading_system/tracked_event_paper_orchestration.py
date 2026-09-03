@@ -466,6 +466,26 @@ def run_approved_tracked_paper_once(
         market_memory=market_memory,
         pipeline=guarded_pipeline,
     )
+    renewed_claim = _claim_event_for_task(
+        paper_runs,
+        event_id=release_event_id,
+        analysis_id=analysis_id,
+        task_id=requested_task_id,
+        expectation_version=expectation.version,
+        lease_seconds=lease_seconds,
+    )
+    if not _claim_is_owned(
+        renewed_claim,
+        analysis_id=analysis_id,
+        task_id=requested_task_id,
+        claim_token=paper_runs.claim_token,
+    ):
+        return TrackedPaperOrchestrationResult(
+            "claim_not_owned",
+            "canonical paper execution lease is owned by another runner",
+            renewed_claim,
+        )
+
     persisted = paper_runs.save_result(
         event_id=release_event_id,
         expectation_version=expectation.version,
