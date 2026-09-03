@@ -322,8 +322,9 @@ class TrackedEventPaperOrchestrationTests(unittest.TestCase):
         self.assertEqual(result.status, "waiting_confirmation")
         self.assertEqual(tasks.execution_context_calls, 1)
         self.assertEqual(tracked.reaction_reads, 1)
-        self.assertEqual(len(paper.claim_calls), 1)
+        self.assertEqual(len(paper.claim_calls), 2)
         self.assertEqual(paper.claim_calls[0]["task_id"], TASK_ID)
+        self.assertEqual(paper.claim_calls[1]["task_id"], TASK_ID)
         bridge.assert_called_once()
         self.assertEqual(len(paper.save_calls), 1)
         saved = paper.save_calls[0]
@@ -333,6 +334,41 @@ class TrackedEventPaperOrchestrationTests(unittest.TestCase):
         self.assertEqual(saved["analysis_id"], ANALYSIS_ID)
         self.assertEqual(saved["claim_token"], paper.claim_token)
         self.assertIs(saved["result"], bridge_result)
+
+    def test_save_is_skipped_when_pre_save_lease_renew_is_not_owned(self) -> None:
+        class LeaseLostOnRenew(PaperRuns):
+            def claim_event_for_task(self, **kwargs):
+                self.claim_calls.append(kwargs)
+                if len(self.claim_calls) == 1:
+                    return self.claim
+                return {
+                    "event_id": RELEASE_EVENT_ID,
+                    "analysis_id": ANALYSIS_ID,
+                    "claim_token": "other-token",
+                    "task_id": TASK_ID,
+                }
+
+        paper = LeaseLostOnRenew()
+        local = PostReleasePaperResult("waiting_confirmation", "technical pending")
+        with patch(
+            "trading_system.tracked_event_paper_orchestration.run_post_release_paper_from_tracked_event",
+            return_value=local,
+        ):
+            result = run_approved_tracked_paper_once(
+                tracked_event_id=TRACKED_ID,
+                task_id=TASK_ID,
+                tracked_events=TrackedEvents(),
+                expectations=Expectations(),
+                releases=Releases(),
+                trading_tasks=TradingTasks(task()),
+                paper_runs=paper,
+                resolver=SimpleNamespace(),
+                portfolio=PORTFOLIO,
+            )
+
+        self.assertEqual(result.status, "claim_not_owned")
+        self.assertEqual(len(paper.claim_calls), 2)
+        self.assertEqual(paper.save_calls, [])
 
     def test_lost_lease_reports_persisted_rejection_not_local_execution(self) -> None:
         persisted = {
