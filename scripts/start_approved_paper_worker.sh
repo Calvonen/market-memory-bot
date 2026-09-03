@@ -108,12 +108,12 @@ case "$ENVIRONMENT_FILES" in
 esac
 
 if /usr/bin/systemctl is-active --quiet "$SERVICE"; then
-  echo "$SERVICE is already active; restarting it so the process loads prepared SHA $PREPARED_SHA."
-  sudo /usr/bin/systemctl restart "$SERVICE"
-else
-  sudo /usr/bin/systemctl start "$SERVICE"
+  MAIN_PID="$(/usr/bin/systemctl show "$SERVICE" --property=MainPID --value 2>/dev/null || true)"
+  echo "Refusing PAPER start: $SERVICE is already active (MainPID=${MAIN_PID:-unknown}). The running process SHA is not proven to match prepared SHA $PREPARED_SHA; do not interrupt an in-flight broker attempt. Quiesce/stop the worker safely before starting it again." >&2
+  exit 1
 fi
 
+sudo /usr/bin/systemctl start "$SERVICE"
 if ! /usr/bin/systemctl is-active --quiet "$SERVICE"; then
   echo "$SERVICE did not become active." >&2
   sudo /usr/bin/systemctl status "$SERVICE" --no-pager -l || true
