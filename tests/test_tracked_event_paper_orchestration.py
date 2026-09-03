@@ -145,10 +145,15 @@ class PaperRuns:
         self.persisted = persisted
         self.latest = latest
         self.claim_calls = []
+        self.revalidate_calls = []
         self.save_calls = []
 
     def claim_event_for_task(self, **kwargs):
         self.claim_calls.append(kwargs)
+        return self.claim
+
+    def revalidate_event_for_task(self, **kwargs):
+        self.revalidate_calls.append(kwargs)
         return self.claim
 
     def get_latest_for_event(self, event_id: str):
@@ -325,6 +330,7 @@ class TrackedEventPaperOrchestrationTests(unittest.TestCase):
         self.assertEqual(len(paper.claim_calls), 2)
         self.assertEqual(paper.claim_calls[0]["task_id"], TASK_ID)
         self.assertEqual(paper.claim_calls[1]["task_id"], TASK_ID)
+        self.assertEqual(paper.revalidate_calls, [])
         bridge.assert_called_once()
         self.assertEqual(len(paper.save_calls), 1)
         saved = paper.save_calls[0]
@@ -334,6 +340,36 @@ class TrackedEventPaperOrchestrationTests(unittest.TestCase):
         self.assertEqual(saved["analysis_id"], ANALYSIS_ID)
         self.assertEqual(saved["claim_token"], paper.claim_token)
         self.assertIs(saved["result"], bridge_result)
+
+    def test_completed_order_revalidates_without_reclaiming_before_save(self) -> None:
+        paper = PaperRuns()
+        local = PostReleasePaperResult(
+            "paper_executed",
+            "local order",
+            pipeline=SimpleNamespace(order=object()),
+        )
+        with patch(
+            "trading_system.tracked_event_paper_orchestration.run_post_release_paper_from_tracked_event",
+            return_value=local,
+        ):
+            result = run_approved_tracked_paper_once(
+                tracked_event_id=TRACKED_ID,
+                task_id=TASK_ID,
+                tracked_events=TrackedEvents(),
+                expectations=Expectations(),
+                releases=Releases(),
+                trading_tasks=TradingTasks(task()),
+                paper_runs=paper,
+                resolver=SimpleNamespace(),
+                portfolio=PORTFOLIO,
+            )
+
+        self.assertEqual(result.status, "paper_executed")
+        self.assertEqual(len(paper.claim_calls), 1)
+        self.assertEqual(len(paper.revalidate_calls), 1)
+        self.assertEqual(paper.revalidate_calls[0]["task_id"], TASK_ID)
+        self.assertEqual(len(paper.save_calls), 1)
+        self.assertIs(paper.save_calls[0]["result"], local)
 
     def test_save_is_skipped_when_pre_save_lease_renew_is_not_owned(self) -> None:
         class LeaseLostOnRenew(PaperRuns):
