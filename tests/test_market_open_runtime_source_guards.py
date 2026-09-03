@@ -59,6 +59,20 @@ class MarketOpenRuntimeSourceGuardTests(unittest.TestCase):
         self.assertIn("pattern.execution_price", source)
         self.assertIn("resolved eToro symbol differs from canonical instrument", source)
 
+    def test_frozen_market_open_evidence_persists_execution_price(self) -> None:
+        source = (ROOT / "trading_system/market_open_evidence.py").read_text()
+        self.assertIn('"execution_price": str(pattern.execution_price)', source)
+        self.assertIn('pattern_payload["execution_price"]', source)
+        self.assertIn("execution price does not match the confirming reaction", source)
+        self.assertIn("execution_price=execution_price", source)
+
+    def test_market_open_execution_requires_positive_event_cap(self) -> None:
+        source = (ROOT / "trading_system/market_open_paper_orchestration.py").read_text()
+        self.assertIn("execution_context.max_position_value_usd", source)
+        self.assertIn("not math.isfinite(event_cap)", source)
+        self.assertIn("event_cap <= 0", source)
+        self.assertIn("requires a finite positive per-event position cap", source)
+
 
 if __name__ == "__main__":
     unittest.main()
