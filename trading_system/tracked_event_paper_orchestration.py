@@ -198,6 +198,42 @@ def _claim_event_for_task(
     return rows[0]
 
 
+def _revalidate_event_for_task(
+    paper_runs: SupabasePaperTradeRepository,
+    *,
+    event_id: str,
+    analysis_id: str,
+    task_id: str,
+    expectation_version: int,
+    lease_seconds: int,
+) -> dict[str, Any] | None:
+    """Renew an owned live lease without invoking broker-attempt recovery."""
+    revalidate_for_task = getattr(paper_runs, "revalidate_event_for_task", None)
+    if callable(revalidate_for_task):
+        return revalidate_for_task(
+            event_id=event_id,
+            analysis_id=analysis_id,
+            task_id=task_id,
+            expectation_version=expectation_version,
+            lease_seconds=lease_seconds,
+            claim_token=paper_runs.claim_token,
+        )
+
+    response = paper_runs.client.rpc(
+        "revalidate_event_paper_run_task_lease",
+        {
+            "input_event_id": event_id,
+            "input_analysis_id": analysis_id,
+            "input_task_id": task_id,
+            "input_expectation_version": expectation_version,
+            "input_claim_token": paper_runs.claim_token,
+            "input_lease_seconds": max(1, lease_seconds),
+        },
+    ).execute()
+    rows = response.data or []
+    return rows[0] if rows else None
+
+
 def _begin_broker_attempt(
     paper_runs: SupabasePaperTradeRepository,
     *,
@@ -466,6 +502,56 @@ def run_approved_tracked_paper_once(
         market_memory=market_memory,
         pipeline=guarded_pipeline,
     )
+    broker_order_completed = result.pipeline is not None and result.pipeline.order is not None
+    if broker_order_completed:
+        renewed_claim = _revalidate_event_for_task(
+            paper_runs,
+            event_id=release_event_id,
+            analysis_id=analysis_id,
+            task_id=requested_task_id,
+            expectation_version=expectation.version,
+            lease_seconds=lease_seconds,
+        )
+        if renewed_claim is None:
+            persisted = paper_runs.get_latest_for_event(release_event_id)
+            if persisted is not None:
+                return _persisted_result(persisted)
+            return TrackedPaperOrchestrationResult(
+                "claim_not_owned",
+                "canonical paper execution lease could not be revalidated",
+            )
+    else:
+        renewed_claim = _claim_event_for_task(
+            paper_runs,
+            event_id=release_event_id,
+            analysis_id=analysis_id,
+            task_id=requested_task_id,
+            expectation_version=expectation.version,
+            lease_seconds=lease_seconds,
+        )
+        renewed_terminal_status = str(renewed_claim.get("terminal_status") or "").strip()
+        if renewed_terminal_status:
+            persisted = paper_runs.get_latest_for_event(release_event_id)
+            if persisted is not None:
+                return _persisted_result(persisted)
+            return TrackedPaperOrchestrationResult(
+                renewed_terminal_status,
+                "canonical paper run already has a terminal result",
+                renewed_claim,
+            )
+
+    if not _claim_is_owned(
+        renewed_claim,
+        analysis_id=analysis_id,
+        task_id=requested_task_id,
+        claim_token=paper_runs.claim_token,
+    ):
+        return TrackedPaperOrchestrationResult(
+            "claim_not_owned",
+            "canonical paper execution lease is owned by another runner",
+            renewed_claim,
+        )
+
     persisted = paper_runs.save_result(
         event_id=release_event_id,
         expectation_version=expectation.version,
