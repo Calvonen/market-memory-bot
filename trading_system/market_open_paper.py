@@ -46,6 +46,7 @@ class MarketOpenPattern:
     setup: ComponentAssessment
     confirmation: ComponentAssessment
     reaction_pct: Decimal
+    execution_price: Decimal
 
 
 def _is_aware(value: datetime) -> bool:
@@ -181,6 +182,7 @@ def detect_market_open_pattern(
                     ("Market-open confirmation: a later completed 1m reaction held positive and did not give back the first reclaim.",),
                 ),
                 reaction_pct=latest_positive.return_pct,
+                execution_price=latest_positive.close_price,
             )
 
     for bounce_index in range(1, len(rows) - 1):
@@ -213,13 +215,20 @@ def detect_market_open_pattern(
                 ("Market-open confirmation: a completed bounce attempt failed and a later 1m reaction rolled back negative.",),
             ),
             reaction_pct=failure.return_pct,
+            execution_price=failure.close_price,
         )
     return None
 
 
-def _levels_from_market(df: pd.DataFrame, direction: Direction) -> TradeLevels:
+def _levels_from_market(
+    df: pd.DataFrame,
+    direction: Direction,
+    execution_price: Decimal,
+) -> TradeLevels:
+    if not execution_price.is_finite() or execution_price <= 0:
+        raise ValueError("market-open execution price is invalid")
     current = df.iloc[-1]
-    entry = float(current["Close"])
+    entry = float(execution_price)
     atr_pct = max(float(current["atr_pct"]), 0.0)
     risk_distance = max(entry * (atr_pct / 100.0), entry * 0.02)
     if direction is Direction.LONG:
@@ -232,11 +241,15 @@ def _provider_symbol(event: PersistentTrackedEvent) -> str:
         raise ValueError("market-open resolved eToro market is missing")
     if not event.resolved_etoro_symbol:
         raise ValueError("market-open resolved eToro symbol is missing")
+    resolved_symbol = event.resolved_etoro_symbol.strip().upper()
+    canonical_symbol = event.instrument.strip().upper()
+    if not canonical_symbol or resolved_symbol != canonical_symbol:
+        raise ValueError("market-open resolved eToro symbol differs from canonical instrument")
     profile = resolve_market_session_profile(
         event.resolved_etoro_market,
         profiles=GROUNDED_MARKET_SESSION_PROFILES,
     )
-    return resolve_provider_symbol(event.resolved_etoro_symbol, profile=profile)
+    return resolve_provider_symbol(resolved_symbol, profile=profile)
 
 
 def run_market_open_paper(
@@ -310,7 +323,7 @@ def run_market_open_paper(
     )
     result = (pipeline or PaperTradingPipeline()).run(
         inputs,
-        _levels_from_market(market_df, pattern.direction),
+        _levels_from_market(market_df, pattern.direction, pattern.execution_price),
         portfolio,
     )
     if result.order is None:
