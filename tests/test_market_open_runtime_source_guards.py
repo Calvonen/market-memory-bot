@@ -54,10 +54,15 @@ class MarketOpenRuntimeSourceGuardTests(unittest.TestCase):
 
     def test_market_open_execution_uses_confirming_one_minute_price(self) -> None:
         source = (ROOT / "trading_system/market_open_paper.py").read_text()
-        self.assertIn("execution_price=latest_positive.close_price", source)
-        self.assertIn("execution_price=failure.close_price", source)
+        self.assertIn("execution_price=latest.close_price", source)
         self.assertIn("pattern.execution_price", source)
         self.assertIn("resolved eToro symbol differs from canonical instrument", source)
+
+    def test_latest_reaction_must_confirm_market_open_direction(self) -> None:
+        source = (ROOT / "trading_system/market_open_paper.py").read_text()
+        self.assertIn('if _direction(latest.return_pct) == "positive"', source)
+        self.assertIn('if _direction(latest.return_pct) != "negative"', source)
+        self.assertIn("reaction_pct=latest.return_pct", source)
 
     def test_frozen_market_open_evidence_persists_execution_price(self) -> None:
         source = (ROOT / "trading_system/market_open_evidence.py").read_text()
@@ -65,6 +70,22 @@ class MarketOpenRuntimeSourceGuardTests(unittest.TestCase):
         self.assertIn('pattern_payload["execution_price"]', source)
         self.assertIn("execution price does not match the confirming reaction", source)
         self.assertIn("execution_price=execution_price", source)
+
+    def test_existing_frozen_evidence_verifies_hash_and_analysis_payload(self) -> None:
+        source = (ROOT / "trading_system/market_open_paper_orchestration.py").read_text()
+        self.assertIn('select("id,event_id,source_type,content_sha256,raw_text")', source)
+        self.assertIn("hashlib.sha256(raw_text.encode(\"utf-8\")).hexdigest()", source)
+        self.assertIn("persisted_analysis != _analysis_payload(pattern)", source)
+        self.assertIn('row.get("raw_response")', source)
+        self.assertIn("raw response disagrees with source document", source)
+
+    def test_market_open_execution_expires_frozen_price_and_newer_reactions(self) -> None:
+        source = (ROOT / "trading_system/market_open_paper_orchestration.py").read_text()
+        self.assertIn("_MAX_FROZEN_EXECUTION_AGE = timedelta(minutes=2)", source)
+        self.assertIn("live_latest.candle_start", source)
+        self.assertIn("frozen_latest.candle_start", source)
+        self.assertIn("current <= completed_at + _MAX_FROZEN_EXECUTION_AGE", source)
+        self.assertIn("expired or was superseded by a newer 1m reaction", source)
 
     def test_market_open_execution_requires_positive_event_cap(self) -> None:
         source = (ROOT / "trading_system/market_open_paper_orchestration.py").read_text()
