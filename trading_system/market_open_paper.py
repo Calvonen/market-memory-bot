@@ -147,23 +147,25 @@ def detect_market_open_pattern(
     The previous session is context only and contributes no directional score.
     Directional Strategy evidence comes exclusively from complete persisted 1m
     opening reactions. At least three reactions are required so a single print
-    cannot create both setup and confirmation evidence.
+    cannot create both setup and confirmation evidence. The latest accepted
+    reaction must itself confirm the selected direction; later contradictory
+    evidence invalidates an earlier signal instead of being ignored.
     """
     rows = _validated_opening_reactions(event=event, reactions=reactions)
     if len(rows) < 3 or not _previous_session_was_down(event):
         return None
 
     first = rows[0]
+    latest = rows[-1]
     if _direction(first.return_pct) != "negative":
         return None
 
     positives = [row for row in rows[1:] if _direction(row.return_pct) == "positive"]
-    if len(positives) >= 2:
+    if _direction(latest.return_pct) == "positive" and len(positives) >= 2:
         first_positive = positives[0]
-        latest_positive = positives[-1]
         if (
-            latest_positive.candle_start > first_positive.candle_start
-            and latest_positive.return_pct >= first_positive.return_pct
+            latest.candle_start > first_positive.candle_start
+            and latest.return_pct >= first_positive.return_pct
         ):
             return MarketOpenPattern(
                 direction=Direction.LONG,
@@ -179,25 +181,20 @@ def detect_market_open_pattern(
                     Direction.LONG,
                     25,
                     25,
-                    ("Market-open confirmation: a later completed 1m reaction held positive and did not give back the first reclaim.",),
+                    ("Market-open confirmation: the latest completed 1m reaction held positive and did not give back the first reclaim.",),
                 ),
-                reaction_pct=latest_positive.return_pct,
-                execution_price=latest_positive.close_price,
+                reaction_pct=latest.return_pct,
+                execution_price=latest.close_price,
             )
 
+    if _direction(latest.return_pct) != "negative":
+        return None
     for bounce_index in range(1, len(rows) - 1):
         bounce = rows[bounce_index]
         if bounce.return_pct <= first.return_pct:
             continue
-        later = rows[bounce_index + 1 :]
-        failures = [
-            row
-            for row in later
-            if _direction(row.return_pct) == "negative" and row.return_pct < bounce.return_pct
-        ]
-        if not failures:
+        if latest.return_pct >= bounce.return_pct:
             continue
-        failure = failures[-1]
         return MarketOpenPattern(
             direction=Direction.SHORT,
             setup=ComponentAssessment(
@@ -212,10 +209,10 @@ def detect_market_open_pattern(
                 Direction.SHORT,
                 25,
                 25,
-                ("Market-open confirmation: a completed bounce attempt failed and a later 1m reaction rolled back negative.",),
+                ("Market-open confirmation: a completed bounce attempt failed and the latest 1m reaction rolled back negative.",),
             ),
-            reaction_pct=failure.return_pct,
-            execution_price=failure.close_price,
+            reaction_pct=latest.return_pct,
+            execution_price=latest.close_price,
         )
     return None
 
