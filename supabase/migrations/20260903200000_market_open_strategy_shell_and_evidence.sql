@@ -11,6 +11,7 @@ begin;
 do $$
 declare
   item record;
+  matched_constraints integer := 0;
 begin
   for item in
     select c.conname, pg_get_expr(c.conbin, c.conrelid) as expression
@@ -19,6 +20,7 @@ begin
       and c.contype = 'c'
       and pg_get_expr(c.conbin, c.conrelid) ilike '%source_type%'
   loop
+    matched_constraints := matched_constraints + 1;
     execute format(
       'alter table public.event_source_documents drop constraint %I', item.conname
     );
@@ -29,6 +31,10 @@ begin
       'market_open_reaction_evidence'
     );
   end loop;
+
+  if matched_constraints = 0 then
+    raise exception 'market_open_source_type_constraint_not_found';
+  end if;
 end $$;
 
 create or replace function public.ensure_market_open_strategy_shell(
@@ -338,15 +344,15 @@ returns table (
 )
 language sql
 security definer
-set search_path = pg_catalog, public
+set search_path = pg_catalog, public, pg_temp
 as $$
   select
     to_regprocedure('public.ensure_market_open_strategy_shell(uuid)') is not null,
     exists (
       select 1
-      from pg_trigger t
-      join pg_class c on c.oid = t.tgrelid
-      join pg_namespace n on n.oid = c.relnamespace
+      from pg_catalog.pg_trigger t
+      join pg_catalog.pg_class c on c.oid = t.tgrelid
+      join pg_catalog.pg_namespace n on n.oid = c.relnamespace
       where n.nspname = 'public'
         and c.relname = 'tracked_market_events'
         and t.tgname = 'tracked_market_events_market_open_shell_after_date_write'
