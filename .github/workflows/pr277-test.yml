@@ -1,0 +1,32 @@
+name: PR277 temporary validation
+
+on:
+  push:
+    branches:
+      - feature/market-open-paper
+    paths:
+      - '.github/workflows/pr277-test.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate PR277 current HEAD
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+      - name: Install backend dependencies
+        run: /home/marko/marketai-repo/.venv/bin/pip install -r requirements.txt
+      - name: Compile Python
+        run: /home/marko/marketai-repo/.venv/bin/python -m py_compile trading_system/*.py trading_system/brokers/*.py scripts/*.py tests/*.py
+      - name: Run Python tests
+        run: /home/marko/marketai-repo/.venv/bin/python -m unittest discover -s tests -v
+      - name: Validate mobile app
+        working-directory: mobile
+        run: |
+          npm ci
+          npx tsc --noEmit
+          npm run lint
