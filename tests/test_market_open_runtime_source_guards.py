@@ -32,7 +32,16 @@ class MarketOpenRuntimeSourceGuardTests(unittest.TestCase):
         self.assertIn("existing_count > 1", migration)
         self.assertIn("return query select analysis_row.id, document_row.id, false", migration)
 
-    def test_market_open_shell_does_not_claim_earnings_consensus(self) -> None:
+    def test_market_open_source_type_constraint_is_extended(self) -> None:
+        migration = (
+            ROOT
+            / "supabase/migrations/20260903200000_market_open_strategy_shell_and_evidence.sql"
+        ).read_text()
+        self.assertIn("pg_get_expr(c.conbin, c.conrelid) ilike '%source_type%'", migration)
+        self.assertIn("source_type = %L", migration)
+        self.assertIn("'market_open_reaction_evidence'", migration)
+
+    def test_market_open_shell_uses_jsonb_case_arrays(self) -> None:
         migration = (
             ROOT
             / "supabase/migrations/20260903200000_market_open_strategy_shell_and_evidence.sql"
@@ -40,7 +49,15 @@ class MarketOpenRuntimeSourceGuardTests(unittest.TestCase):
         self.assertIn("'tracked:market_open:strategy-shell'", migration)
         self.assertIn("'{}'::jsonb", migration)
         self.assertIn("'[]'::jsonb", migration)
+        self.assertGreaterEqual(migration.count("jsonb_build_array("), 4)
         self.assertIn("no earnings consensus or release evidence inferred", migration)
+
+    def test_market_open_execution_uses_confirming_one_minute_price(self) -> None:
+        source = (ROOT / "trading_system/market_open_paper.py").read_text()
+        self.assertIn("execution_price=latest_positive.close_price", source)
+        self.assertIn("execution_price=failure.close_price", source)
+        self.assertIn("pattern.execution_price", source)
+        self.assertIn("resolved eToro symbol differs from canonical instrument", source)
 
 
 if __name__ == "__main__":
