@@ -13,7 +13,6 @@ from trading_system.etoro_instrument_resolver import (
     EtoroInstrumentResolver,
     InstrumentResolutionRequest,
 )
-from trading_system.market_open_paper import run_market_open_paper
 from trading_system.market_reaction import DEFAULT_FLAT_THRESHOLD_PCT
 from trading_system.models import (
     ComponentAssessment,
@@ -301,17 +300,7 @@ def run_post_release_paper_from_tracked_event(
 
     kind = event.kind.strip().lower()
     if kind == "market_open":
-        _validate_broker_identity(event, resolver)
-        return run_market_open_paper(
-            event=event,
-            expectation=expectation,
-            reactions=tuple(reactions),
-            portfolio=portfolio,
-            market_df=market_df,
-            technical=technical,
-            market_memory=market_memory,
-            pipeline=_pipeline_with_task_cap(pipeline, trading_task),
-        )
+        raise ValueError("market_open must use dedicated approved market-open PAPER orchestration")
     if kind != "earnings":
         raise ValueError(f"tracked event kind is not PAPER-supported: {kind or 'blank'}")
 
