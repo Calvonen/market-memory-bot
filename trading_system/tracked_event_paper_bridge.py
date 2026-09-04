@@ -202,6 +202,28 @@ def _validated_confirmation_reaction(
     return canonical_return, canonical_direction
 
 
+def _confirmation_result(
+    *,
+    event: PersistentTrackedEvent,
+    release_event_id: str,
+    reaction: TrackedEventReactionRecord,
+    canonical_return: Decimal,
+    canonical_direction: str,
+) -> TrackedEventPriceConfirmation:
+    return TrackedEventPriceConfirmation(
+        tracked_market_event_id=event.event_id,
+        release_event_id=release_event_id,
+        tracked_instrument_id=event.tracked_instrument_id,
+        instrument=event.instrument,
+        market=event.market,
+        candle_start=reaction.candle_start,
+        reference_price=reaction.reference_price,
+        close_price=reaction.close_price,
+        return_pct=canonical_return,
+        direction=canonical_direction,
+    )
+
+
 def build_tracked_event_price_confirmation(
     *,
     event: PersistentTrackedEvent,
@@ -271,41 +293,55 @@ def build_tracked_event_price_confirmation(
     if len(anchored) != 1:
         raise ValueError("tracked event has ambiguous anchored 1m reactions")
 
-    by_start: dict[datetime, TrackedEventReactionRecord] = {}
-    validated: list[tuple[TrackedEventReactionRecord, Decimal, str]] = []
-    for reaction in sorted(candidates, key=lambda row: row.candle_start.astimezone(UTC)):
+    anchored_reaction = anchored[0]
+    anchored_return, anchored_direction = _validated_confirmation_reaction(
+        event=event,
+        reaction=anchored_reaction,
+        reference=reference,
+    )
+    if anchored_direction != "flat":
+        return _confirmation_result(
+            event=event,
+            release_event_id=release_event_id,
+            reaction=anchored_reaction,
+            canonical_return=anchored_return,
+            canonical_direction=anchored_direction,
+        )
+
+    later = sorted(
+        (
+            reaction
+            for reaction in candidates
+            if reaction.candle_start.astimezone(UTC) > anchor_utc
+        ),
+        key=lambda row: row.candle_start.astimezone(UTC),
+    )
+    previous_start: datetime | None = None
+    for reaction in later:
         start = reaction.candle_start.astimezone(UTC)
-        if start in by_start:
+        if previous_start == start:
             raise ValueError("tracked event has ambiguous confirmation-window 1m reactions")
-        by_start[start] = reaction
+        previous_start = start
         canonical_return, canonical_direction = _validated_confirmation_reaction(
             event=event,
             reaction=reaction,
             reference=reference,
         )
-        validated.append((reaction, canonical_return, canonical_direction))
+        if canonical_direction != "flat":
+            return _confirmation_result(
+                event=event,
+                release_event_id=release_event_id,
+                reaction=reaction,
+                canonical_return=canonical_return,
+                canonical_direction=canonical_direction,
+            )
 
-    selected = validated[0]
-    if selected[0].candle_start.astimezone(UTC) != anchor_utc:
-        raise RuntimeError("anchored 1m reaction ordering invariant failed")
-    if selected[2] == "flat":
-        for candidate in validated[1:]:
-            if candidate[2] != "flat":
-                selected = candidate
-                break
-
-    reaction, canonical_return, canonical_direction = selected
-    return TrackedEventPriceConfirmation(
-        tracked_market_event_id=event.event_id,
+    return _confirmation_result(
+        event=event,
         release_event_id=release_event_id,
-        tracked_instrument_id=event.tracked_instrument_id,
-        instrument=event.instrument,
-        market=event.market,
-        candle_start=reaction.candle_start,
-        reference_price=reaction.reference_price,
-        close_price=reaction.close_price,
-        return_pct=canonical_return,
-        direction=canonical_direction,
+        reaction=anchored_reaction,
+        canonical_return=anchored_return,
+        canonical_direction=anchored_direction,
     )
 
 
