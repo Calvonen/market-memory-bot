@@ -6,7 +6,10 @@ import requests
 from trading_system.tracked_candle_pipeline import TrackedCandlePipeline
 from trading_system.tracked_instrument_etoro import TrackedEtoroInstrument
 from trading_system.trend_monitoring_runtime import TrendMonitoringRuntime
-from trading_system.trend_monitoring_service import stream_supervised_trend_monitoring
+from trading_system.trend_monitoring_service import (
+    _is_transient_refresh_error,
+    stream_supervised_trend_monitoring,
+)
 from trading_system.trend_monitoring_supervisor import TrendMonitoringSupervisor
 from trading_system.trend_monitoring_targets import _selected_targets
 
@@ -67,6 +70,16 @@ class ControlledSleep:
 
 
 class TrendMonitoringServiceFailureTests(unittest.IsolatedAsyncioTestCase):
+    def test_json_decode_failure_is_not_transient_transport_error(self) -> None:
+        decode_error = requests.exceptions.JSONDecodeError("bad json", "{", 0)
+        try:
+            raise decode_error
+        except requests.RequestException as exc:
+            wrapped = RuntimeError("eToro instrument search returned invalid JSON")
+            wrapped.__cause__ = exc
+
+        self.assertFalse(_is_transient_refresh_error(wrapped))
+
     async def test_initial_refresh_failure_still_propagates(self) -> None:
         runtime = TrendMonitoringRuntime()
         pipeline = TrackedCandlePipeline()
