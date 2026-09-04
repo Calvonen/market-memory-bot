@@ -49,6 +49,24 @@ class _MarketOpenLeasePaperRuns(_PortfolioLeasePaperRuns):
             preflight()
 
 
+def _unreconciled_market_open_attempts(
+    paper_runs: SupabasePaperTradeRepository,
+    *,
+    limit: int,
+) -> tuple[dict, ...]:
+    response = paper_runs.client.rpc(
+        "list_unreconciled_completed_market_open_broker_attempts",
+        {"input_limit": max(1, limit)},
+    ).execute()
+    rows = tuple(response.data or [])
+    for row in rows:
+        if not isinstance(row, dict):
+            raise RuntimeError("market-open recovery discovery returned malformed state")
+        if not str(row.get("event_id") or "").strip() or not str(row.get("task_id") or "").strip():
+            raise RuntimeError("market-open recovery discovery returned blank identity")
+    return rows
+
+
 def _run_for_event_kind(
     *,
     event_kind: str,
@@ -104,6 +122,31 @@ def run_forever() -> None:
 
     while True:
         try:
+            # Completed market-open attempts are discovered independently of the
+            # current task state. Recovery happens before approved-task discovery,
+            # broker construction, eToro access, portfolio reads, or leases.
+            for recovery_row in _unreconciled_market_open_attempts(
+                paper_runs,
+                limit=batch_size,
+            ):
+                recovery_event_id = str(recovery_row["event_id"])
+                recovery_task_id = str(recovery_row["task_id"])
+                recovered = _recover_completed_attempt(
+                    paper_runs,
+                    source_event_id=recovery_event_id,
+                    task_id=recovery_task_id,
+                )
+                if recovered is None:
+                    raise RuntimeError(
+                        "completed market-open broker attempt remained unreconciled after recovery"
+                    )
+                print(
+                    f"approved-paper recovery broker={broker_mode} task={recovery_task_id} "
+                    f"event={recovery_event_id} status={recovered.get('status')} "
+                    f"message={recovered.get('message')}",
+                    flush=True,
+                )
+
             rows = _approved_task_rows(trading_tasks, batch_size)
             for row in rows:
                 task_id = str(row.get("id") or "").strip()
@@ -124,9 +167,9 @@ def run_forever() -> None:
                             f"approved PAPER task event kind is unsupported: {event.kind}"
                         )
 
-                    # Recovery of an already-completed market-open broker attempt is
-                    # deliberately before broker construction, demo-access checks,
-                    # portfolio reads, portfolio leases, and current expectation reads.
+                    # Normal approved-task handling keeps this idempotent recovery
+                    # check too; the independent pass above is what covers cancelled
+                    # tasks whose completed broker attempt still needs persistence.
                     if event_kind == "market_open":
                         recovered = _recover_completed_attempt(
                             paper_runs,
