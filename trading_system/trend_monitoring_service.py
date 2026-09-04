@@ -31,14 +31,15 @@ def _is_transient_refresh_error(exc: BaseException) -> bool:
     """Return True only for explicitly identified transport failures.
 
     Canonical validation and identity failures must propagate fail-closed. The
-    eToro target resolver currently wraps ``requests.RequestException`` in a
-    RuntimeError, so inspect the causal chain rather than matching messages.
+    eToro target resolver wraps requests transport failures in RuntimeError, so
+    inspect the causal chain but accept only timeout/connection exceptions.
+    JSON decoding and other RequestException subclasses remain fail-closed.
     """
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, requests.RequestException):
+        if isinstance(current, (requests.Timeout, requests.ConnectionError)):
             return True
         current = current.__cause__ or current.__context__
     return False
