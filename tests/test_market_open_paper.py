@@ -183,6 +183,24 @@ class MarketOpenPatternTests(unittest.TestCase):
         )
         self.assertIsNone(pattern)
 
+    def test_delayed_reaction_anchor_fails_closed(self) -> None:
+        event = replace(
+            market_open_event(),
+            reaction_anchor_at=OPEN_AT + timedelta(minutes=5),
+        )
+        with self.assertRaisesRegex(ValueError, "does not match grounded market open"):
+            detect_market_open_pattern(
+                event=event,
+                reactions=(reaction(5, "-1.00"), reaction(6, "0.40"), reaction(7, "0.70")),
+            )
+
+    def test_missing_first_opening_candle_fails_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "misses the first grounded 1m candle"):
+            detect_market_open_pattern(
+                event=market_open_event(),
+                reactions=(reaction(1, "-1.00"), reaction(2, "0.40"), reaction(3, "0.70")),
+            )
+
     def test_duplicate_one_minute_candle_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "duplicate"):
             detect_market_open_pattern(
