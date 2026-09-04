@@ -41,7 +41,10 @@ def main() -> int:
     required = {
         "market_open_shell_function_exists": "ensure_market_open_strategy_shell(uuid)",
         "market_open_shell_trigger_exists": "tracked_market_events_market_open_shell_after_date_write trigger",
-        "freeze_market_open_evidence_function_exists": "freeze_market_open_evidence(uuid,integer,text,jsonb)",
+        "freeze_market_open_evidence_function_exists": (
+            "freeze_market_open_evidence(uuid,integer,text,jsonb) and "
+            "recover_completed_event_paper_broker_attempt_for_task(text,uuid)"
+        ),
     }
     missing = [label for key_name, label in required.items() if row.get(key_name) is not True]
     if missing:
