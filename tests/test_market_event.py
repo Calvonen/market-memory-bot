@@ -37,6 +37,7 @@ class MarketEventTests(unittest.TestCase):
             {kind.value for kind in MarketEventKind},
             {
                 "earnings",
+                "market_open",
                 "guidance",
                 "trading_update",
                 "acquisition",

@@ -11,6 +11,8 @@ from trading_system.market_session_profile import MarketSessionProfile
 class SessionCalendar(Protocol):
     def sessions_in_range(self, start: str, end: str): ...
 
+    def session_open(self, session): ...
+
     def session_close(self, session): ...
 
 
@@ -34,6 +36,30 @@ def confirmed_session_dates(
     calendar = calendar_loader(profile.calendar_id)
     sessions = calendar.sessions_in_range(start_date.isoformat(), end_date.isoformat())
     return tuple(session.date() for session in sessions)
+
+
+def confirmed_session_opens(
+    profile: MarketSessionProfile,
+    *,
+    start_date: date,
+    end_date: date,
+    calendar_loader: Callable[[str], SessionCalendar] = xcals.get_calendar,
+) -> tuple[tuple[date, datetime], ...]:
+    """Return (session date, actual session open) pairs for one market profile."""
+    if start_date > end_date:
+        raise ValueError("start_date must be on or before end_date")
+
+    calendar = calendar_loader(profile.calendar_id)
+    sessions = calendar.sessions_in_range(start_date.isoformat(), end_date.isoformat())
+
+    opens: list[tuple[date, datetime]] = []
+    for session in sessions:
+        opened = calendar.session_open(session)
+        open_at = opened.to_pydatetime() if hasattr(opened, "to_pydatetime") else opened
+        if open_at.tzinfo is None or open_at.utcoffset() is None:
+            raise ValueError("exchange calendar returned a timezone-naive session open")
+        opens.append((session.date(), open_at.astimezone(UTC)))
+    return tuple(opens)
 
 
 def confirmed_session_closes(

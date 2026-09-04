@@ -105,7 +105,8 @@ class ApprovedPaperProductionEntrypointTests(unittest.TestCase):
         self.assertIn('broker = PaperBroker()', self.worker)
 
     def test_systemd_runs_the_production_worker(self) -> None:
-        self.assertIn("python -m trading_system.approved_tracked_paper_worker", self.service)
+        self.assertIn("python -m trading_system.approved_paper_dispatch_worker", self.service)
+        self.assertNotIn("python -m trading_system.approved_tracked_paper_worker", self.service)
         self.assertIn(
             "EnvironmentFile=/home/marko/marketai-deploy-state/approved-paper-prepared.env",
             self.service,
