@@ -25,14 +25,28 @@ from trading_system.brokers.etoro_demo import EtoroDemoBroker
 from trading_system.brokers.paper import PaperBroker
 from trading_system.etoro_instrument_resolver import EtoroInstrumentResolver
 from trading_system.etoro_market_data import EtoroMarketDataProvider
-from trading_system.market_open_paper_orchestration import run_approved_market_open_paper_once
+from trading_system.market_open_paper_orchestration import (
+    _recover_completed_attempt,
+    run_approved_market_open_paper_once,
+)
 from trading_system.paper_trade_repository import SupabasePaperTradeRepository
 from trading_system.pipeline import PaperTradingPipeline
 from trading_system.release_repository import SupabaseReleaseRepository
 from trading_system.supabase_event_repository import SupabaseEventExpectationRepository
+from trading_system.tracked_event_paper_bridge import canonical_release_event_id
 from trading_system.tracked_event_paper_orchestration import run_approved_tracked_paper_once
 from trading_system.tracked_event_repository import SupabaseTrackedEventRepository
 from trading_system.trading_task_repository import SupabaseTradingTaskRepository
+
+
+class _MarketOpenLeasePaperRuns(_PortfolioLeasePaperRuns):
+    """Expose one-shot new-attempt preflight before market-open freshness checks."""
+
+    def preflight_new_attempt(self) -> None:
+        preflight = self._preflight
+        self._preflight = None
+        if preflight is not None:
+            preflight()
 
 
 def _run_for_event_kind(
@@ -110,6 +124,25 @@ def run_forever() -> None:
                             f"approved PAPER task event kind is unsupported: {event.kind}"
                         )
 
+                    # Recovery of an already-completed market-open broker attempt is
+                    # deliberately before broker construction, demo-access checks,
+                    # portfolio reads, portfolio leases, and current expectation reads.
+                    if event_kind == "market_open":
+                        recovered = _recover_completed_attempt(
+                            paper_runs,
+                            source_event_id=canonical_release_event_id(event),
+                            task_id=task_id,
+                        )
+                        if recovered is not None:
+                            print(
+                                f"approved-paper kind={event.kind} broker={broker_mode} "
+                                f"task={task_id} event={tracked_event_id} "
+                                f"status={recovered.get('status')} "
+                                f"message={recovered.get('message')}",
+                                flush=True,
+                            )
+                            continue
+
                     etoro_broker: EtoroDemoBroker | None = None
                     if broker_mode == "etoro_demo":
                         etoro_broker = _etoro_demo_broker_for_event(
@@ -138,25 +171,20 @@ def run_forever() -> None:
                                 page_size=batch_size,
                             )
 
-                        # For market-open execution the network access preflight must finish
-                        # before the dedicated broker-boundary freshness check runs. Do not
-                        # repeat it inside begin_broker_attempt, where it could consume the
-                        # remaining two-minute evidence lifetime after that freshness check.
-                        if etoro_broker is not None and event_kind == "market_open":
-                            etoro_broker.verify_demo_access()
-                            broker_attempt_preflight = None
-                        else:
-                            broker_attempt_preflight = (
-                                etoro_broker.verify_demo_access
-                                if etoro_broker is not None
-                                else None
-                            )
-
-                        lease_aware_runs = _PortfolioLeasePaperRuns(
+                        runs_type = (
+                            _MarketOpenLeasePaperRuns
+                            if event_kind == "market_open"
+                            else _PortfolioLeasePaperRuns
+                        )
+                        lease_aware_runs = runs_type(
                             paper_runs,
                             portfolio_token=portfolio_token,
                             portfolio_lease_seconds=portfolio_lease_seconds,
-                            preflight=broker_attempt_preflight,
+                            preflight=(
+                                etoro_broker.verify_demo_access
+                                if etoro_broker is not None
+                                else None
+                            ),
                             etoro_broker=etoro_broker,
                         )
                         result = _run_for_event_kind(
