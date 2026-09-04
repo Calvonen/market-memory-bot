@@ -203,6 +203,38 @@ def _with_broker_boundary_freshness(
     )
 
 
+def _terminal_or_unowned_result(
+    *,
+    claim: dict[str, Any],
+    paper_runs: SupabasePaperTradeRepository,
+    source_event_id: str,
+    analysis_id: str,
+    task_id: str,
+) -> TrackedPaperOrchestrationResult | None:
+    terminal_status = str(claim.get("terminal_status") or "").strip()
+    if terminal_status:
+        persisted = paper_runs.get_latest_for_event(source_event_id)
+        if persisted is not None:
+            return _persisted_result(persisted)
+        return TrackedPaperOrchestrationResult(
+            terminal_status,
+            "canonical market-open PAPER run already has a terminal result",
+            claim,
+        )
+    if not _claim_is_owned(
+        claim,
+        analysis_id=analysis_id,
+        task_id=task_id,
+        claim_token=paper_runs.claim_token,
+    ):
+        return TrackedPaperOrchestrationResult(
+            "claim_not_owned",
+            "canonical PAPER execution lease is owned by another runner",
+            claim,
+        )
+    return None
+
+
 def run_approved_market_open_paper_once(
     *,
     tracked_event_id: str,
@@ -260,6 +292,38 @@ def run_approved_market_open_paper_once(
             "waiting_approval",
             "canonical PAPER trading task is not approved",
         )
+
+    # Recovery is intentionally attempted before mutable new-attempt validation.
+    # A completed broker operation must remain reconcilable even if the frozen
+    # source document was later lost/corrupted or other execution inputs changed.
+    existing_analysis = releases.get_analysis_for_event_version(
+        event_id=source_event_id,
+        expectation_version=expectation.version,
+    )
+    existing_analysis_id = ""
+    claim: dict[str, Any] | None = None
+    if existing_analysis is not None:
+        existing_analysis_id = str(existing_analysis.get("id") or "").strip()
+        if not existing_analysis_id:
+            raise RuntimeError("market-open analysis identity is incomplete for recovery")
+        claim = _claim_event_for_task(
+            paper_runs,
+            event_id=source_event_id,
+            analysis_id=existing_analysis_id,
+            task_id=requested_task_id,
+            expectation_version=expectation.version,
+            lease_seconds=lease_seconds,
+        )
+        recovered = _terminal_or_unowned_result(
+            claim=claim,
+            paper_runs=paper_runs,
+            source_event_id=source_event_id,
+            analysis_id=existing_analysis_id,
+            task_id=requested_task_id,
+        )
+        if recovered is not None:
+            return recovered
+
     execution_context = trading_tasks.execution_context(requested_task_id)
     _validate_trading_task_execution(
         execution_context,
@@ -283,6 +347,8 @@ def run_approved_market_open_paper_once(
         event=event,
         expectation=expectation,
     )
+    if existing_analysis is not None and evidence is None:
+        raise RuntimeError("market-open analysis disappeared after recovery preflight")
     if evidence is None:
         pattern = detect_market_open_pattern(event=event, reactions=reactions)
         if pattern is None:
@@ -305,37 +371,26 @@ def run_approved_market_open_paper_once(
     if frozen_pattern.execution_price != evidence.pattern.execution_price:
         raise RuntimeError("frozen market-open evidence no longer reproduces its execution price")
 
-    # Claim first: the claim RPC performs terminal/completed-attempt recovery. Freshness
-    # only gates a *new* broker attempt and must never hide an already-submitted order.
-    claim = _claim_event_for_task(
-        paper_runs,
-        event_id=source_event_id,
-        analysis_id=evidence.analysis_id,
-        task_id=requested_task_id,
-        expectation_version=expectation.version,
-        lease_seconds=lease_seconds,
-    )
-    terminal_status = str(claim.get("terminal_status") or "").strip()
-    if terminal_status:
-        persisted = paper_runs.get_latest_for_event(source_event_id)
-        if persisted is not None:
-            return _persisted_result(persisted)
-        return TrackedPaperOrchestrationResult(
-            terminal_status,
-            "canonical market-open PAPER run already has a terminal result",
-            claim,
+    if claim is None:
+        claim = _claim_event_for_task(
+            paper_runs,
+            event_id=source_event_id,
+            analysis_id=evidence.analysis_id,
+            task_id=requested_task_id,
+            expectation_version=expectation.version,
+            lease_seconds=lease_seconds,
         )
-    if not _claim_is_owned(
-        claim,
-        analysis_id=evidence.analysis_id,
-        task_id=requested_task_id,
-        claim_token=paper_runs.claim_token,
-    ):
-        return TrackedPaperOrchestrationResult(
-            "claim_not_owned",
-            "canonical PAPER execution lease is owned by another runner",
-            claim,
+        claimed = _terminal_or_unowned_result(
+            claim=claim,
+            paper_runs=paper_runs,
+            source_event_id=source_event_id,
+            analysis_id=evidence.analysis_id,
+            task_id=requested_task_id,
         )
+        if claimed is not None:
+            return claimed
+    elif evidence.analysis_id != existing_analysis_id:
+        raise RuntimeError("market-open analysis identity changed after recovery preflight")
 
     execution_now = now or datetime.now(UTC)
     if not _execution_evidence_is_fresh(
