@@ -183,6 +183,17 @@ class MarketOpenPatternTests(unittest.TestCase):
         )
         self.assertIsNone(pattern)
 
+    def test_event_time_must_match_grounded_exchange_open(self) -> None:
+        late = OPEN_AT + timedelta(minutes=5)
+        event = replace(
+            market_open_event(),
+            event_at=late,
+            reaction_anchor_at=late,
+            reference_captured_at=late - timedelta(minutes=1),
+        )
+        with self.assertRaisesRegex(ValueError, "does not match grounded exchange session open"):
+            detect_market_open_pattern(event=event, reactions=())
+
     def test_delayed_reaction_anchor_fails_closed(self) -> None:
         event = replace(
             market_open_event(),
