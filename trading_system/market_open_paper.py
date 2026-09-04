@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -30,6 +31,7 @@ from trading_system.models import (
 )
 from trading_system.pipeline import PaperTradingPipeline
 from trading_system.post_release_paper import PostReleasePaperResult
+from trading_system.session_calendar_adapter import confirmed_session_opens
 from trading_system.tracked_event_repository import (
     PersistentTrackedEvent,
     TrackedEventReactionRecord,
@@ -61,6 +63,28 @@ def _direction(value: Decimal) -> str:
     return "flat"
 
 
+def _grounded_market_open(event: PersistentTrackedEvent) -> datetime:
+    if not event.resolved_etoro_market:
+        raise ValueError("market-open resolved eToro market is missing")
+    profile = resolve_market_session_profile(
+        event.resolved_etoro_market,
+        profiles=GROUNDED_MARKET_SESSION_PROFILES,
+    )
+    event_at = event.event_at.astimezone(UTC)
+    session_date = event_at.astimezone(ZoneInfo(profile.market_timezone)).date()
+    opens = confirmed_session_opens(
+        profile,
+        start_date=session_date,
+        end_date=session_date,
+    )
+    if len(opens) != 1:
+        raise ValueError("market-open event date is not a grounded exchange session")
+    grounded_open = opens[0][1].astimezone(UTC)
+    if event_at != grounded_open:
+        raise ValueError("market-open event time does not match grounded exchange session open")
+    return grounded_open
+
+
 def _validate_reference_provenance(event: PersistentTrackedEvent) -> None:
     if event.reference_price is None or not event.reference_price.is_finite() or event.reference_price <= 0:
         raise ValueError("market-open reference price is invalid")
@@ -81,13 +105,13 @@ def _validated_opening_reactions(
         raise ValueError("tracked event is not a market-open event")
     if not _is_aware(event.event_at):
         raise ValueError("market-open event time must be timezone-aware")
+    market_open = _grounded_market_open(event)
     _validate_reference_provenance(event)
     if event.reaction_anchor_at is None:
         return ()
     if not _is_aware(event.reaction_anchor_at):
         raise ValueError("market-open reaction anchor must be timezone-aware")
 
-    market_open = event.event_at.astimezone(UTC)
     anchor = event.reaction_anchor_at.astimezone(UTC)
     if anchor != market_open:
         raise ValueError("market-open reaction anchor does not match grounded market open")
