@@ -65,6 +65,74 @@ class ControlledSleep:
 
 
 class TrendMonitoringServiceFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_initial_refresh_failure_still_propagates(self) -> None:
+        runtime = TrendMonitoringRuntime()
+        pipeline = TrackedCandlePipeline()
+
+        def select_targets():
+            raise RuntimeError("initial refresh failed")
+
+        supervisor = TrendMonitoringSupervisor(select_targets=select_targets, runtime=runtime)
+        service = stream_supervised_trend_monitoring(
+            supervisor=supervisor,
+            candle_pipeline=pipeline,
+            stream_factory=lambda _targets: FailureStream("unused"),
+            refresh_interval_seconds=30,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "initial refresh failed"):
+            await anext(service)
+
+    async def test_periodic_refresh_failure_keeps_existing_stream_and_retries(self) -> None:
+        runtime = TrendMonitoringRuntime()
+        pipeline = TrackedCandlePipeline()
+        a = target("a", 101)
+        calls = 0
+
+        def select_targets():
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("transient refresh failed")
+            return snapshot(a)
+
+        supervisor = TrendMonitoringSupervisor(select_targets=select_targets, runtime=runtime)
+        sleep = ControlledSleep()
+        streams: list[FailureStream] = []
+
+        def stream_factory(_targets):
+            stream = FailureStream("first")
+            streams.append(stream)
+            return stream
+
+        service = stream_supervised_trend_monitoring(
+            supervisor=supervisor,
+            candle_pipeline=pipeline,
+            stream_factory=stream_factory,
+            refresh_interval_seconds=30,
+            sleep=sleep,
+        )
+
+        self.assertEqual(await anext(service), "first")
+        streams[0].queue.put_nowait("second")
+        sleep.trigger()
+        with self.assertLogs("trading_system.trend_monitoring_service", level="ERROR") as logs:
+            self.assertEqual(await asyncio.wait_for(anext(service), timeout=1), "second")
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(len(streams), 1)
+        self.assertFalse(streams[0].closed)
+        self.assertIn("keeping last successful snapshot and live stream", "\n".join(logs.output))
+
+        streams[0].queue.put_nowait("third")
+        sleep.trigger()
+        self.assertEqual(await asyncio.wait_for(anext(service), timeout=1), "third")
+        self.assertEqual(calls, 3)
+        self.assertEqual(len(streams), 1)
+        self.assertFalse(streams[0].closed)
+        await service.aclose()
+        self.assertTrue(streams[0].closed)
+
     async def test_changed_refresh_does_not_hide_completed_provider_failure(self) -> None:
         runtime = TrendMonitoringRuntime()
         pipeline = TrackedCandlePipeline()
