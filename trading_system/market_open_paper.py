@@ -86,10 +86,12 @@ def _validated_opening_reactions(
         return ()
     if not _is_aware(event.reaction_anchor_at):
         raise ValueError("market-open reaction anchor must be timezone-aware")
-    if event.reaction_anchor_at.astimezone(UTC) < event.event_at.astimezone(UTC):
-        raise ValueError("market-open reaction anchor precedes market open")
 
+    market_open = event.event_at.astimezone(UTC)
     anchor = event.reaction_anchor_at.astimezone(UTC)
+    if anchor != market_open:
+        raise ValueError("market-open reaction anchor does not match grounded market open")
+
     end = anchor + _OPENING_WINDOW
     selected: list[TrackedEventReactionRecord] = []
     seen_starts: set[datetime] = set()
@@ -122,7 +124,10 @@ def _validated_opening_reactions(
             raise ValueError("market-open reaction was observed before candle completion")
         selected.append(reaction)
 
-    return tuple(sorted(selected, key=lambda row: row.candle_start.astimezone(UTC)))
+    ordered = tuple(sorted(selected, key=lambda row: row.candle_start.astimezone(UTC)))
+    if ordered and ordered[0].candle_start.astimezone(UTC) != market_open:
+        raise ValueError("market-open opening evidence misses the first grounded 1m candle")
+    return ordered
 
 
 def _previous_session_was_down(event: PersistentTrackedEvent) -> bool:
