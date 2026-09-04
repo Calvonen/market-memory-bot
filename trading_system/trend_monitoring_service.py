@@ -6,6 +6,8 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import Protocol
 
+import requests
+
 from trading_system.tracked_candle_pipeline import TrackedCandlePipeline
 from trading_system.trend_monitoring_live import TrendRuntimeMarketBatch
 from trading_system.trend_monitoring_supervisor import TrendMonitoringSupervisor
@@ -23,6 +25,23 @@ class ClosableTrendStream(Protocol):
 
 TrendStreamFactory = Callable[[TrendMonitoringTargets], ClosableTrendStream]
 SleepFunction = Callable[[float], Awaitable[None]]
+
+
+def _is_transient_refresh_error(exc: BaseException) -> bool:
+    """Return True only for explicitly identified transport failures.
+
+    Canonical validation and identity failures must propagate fail-closed. The
+    eToro target resolver currently wraps ``requests.RequestException`` in a
+    RuntimeError, so inspect the causal chain rather than matching messages.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, requests.RequestException):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _align_candle_pipeline(
@@ -106,9 +125,10 @@ async def stream_supervised_trend_monitoring(
     A refresh that leaves the snapshot unchanged does not restart the stream.
     Empty snapshots are valid: the service waits for the next refresh without
     opening a market-data stream. Once an initial snapshot has started monitoring,
-    a failed target refresh keeps that last successful snapshot and live stream in
-    place until the next refresh attempt. Initial selection and unexpected live
-    stream termination still fail closed.
+    an explicitly identified transient transport failure during target refresh
+    keeps the last successful snapshot and live stream in place until the next
+    refresh attempt. Canonical validation/identity failures, initial selection,
+    and unexpected live-stream termination still fail closed.
 
     This function does not persist observations, create events, or invoke
     Strategy/Risk/Broker/PAPER/LIVE trading paths.
@@ -145,9 +165,11 @@ async def stream_supervised_trend_monitoring(
                 refresh_task.result()
                 try:
                     refreshed = supervisor.refresh()
-                except Exception:
+                except Exception as exc:
+                    if not _is_transient_refresh_error(exc):
+                        raise
                     logger.exception(
-                        "Trend target refresh failed; keeping last successful snapshot and live stream"
+                        "Trend target refresh hit transient transport failure; keeping last successful snapshot and live stream"
                     )
                     refresh_task = asyncio.create_task(sleep(refresh_interval_seconds))
                 else:
