@@ -218,31 +218,33 @@ revoke all on function public.recover_completed_event_paper_broker_attempt_for_t
 grant execute on function public.recover_completed_event_paper_broker_attempt_for_task(text, uuid)
   to service_role;
 
--- Extend the market-open runtime gate so dispatcher activation requires the
--- recovery primitive as well as the strategy shell/evidence objects.
+-- Preserve the existing readiness RPC shape. The third boolean remains the
+-- runtime dependency gate for evidence execution and now also requires the
+-- recovery-only primitive used by the dispatcher.
 create or replace function public.verify_market_open_runtime_schema()
-returns boolean
-language plpgsql
+returns table (
+  market_open_shell_function_exists boolean,
+  market_open_shell_trigger_exists boolean,
+  freeze_market_open_evidence_function_exists boolean
+)
+language sql
 security definer
-set search_path = public, pg_temp
+set search_path = pg_catalog, public, pg_temp
 as $$
-begin
-  if to_regprocedure('public.register_market_open_strategy_shell(uuid)') is null
-     or to_regprocedure('public.freeze_market_open_evidence(text,integer,uuid,text,jsonb)') is null
-     or to_regprocedure('public.recover_completed_event_paper_broker_attempt_for_task(text,uuid)') is null then
-    return false;
-  end if;
-  if not exists (
-    select 1
-    from pg_trigger
-    where tgrelid = 'public.tracked_market_events'::regclass
-      and tgname = 'create_market_open_strategy_shell'
-      and not tgisinternal
-  ) then
-    return false;
-  end if;
-  return true;
-end;
+  select
+    to_regprocedure('public.ensure_market_open_strategy_shell(uuid)') is not null,
+    exists (
+      select 1
+      from pg_catalog.pg_trigger t
+      join pg_catalog.pg_class c on c.oid = t.tgrelid
+      join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = 'public'
+        and c.relname = 'tracked_market_events'
+        and t.tgname = 'tracked_market_events_market_open_shell_after_date_write'
+        and not t.tgisinternal
+    ),
+    to_regprocedure('public.freeze_market_open_evidence(uuid,integer,text,jsonb)') is not null
+      and to_regprocedure('public.recover_completed_event_paper_broker_attempt_for_task(text,uuid)') is not null;
 $$;
 
 revoke all on function public.verify_market_open_runtime_schema()
