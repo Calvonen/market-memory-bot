@@ -106,18 +106,19 @@ def reaction(
     close_price: Decimal = Decimal("10.20"),
     return_pct: Decimal = Decimal("2.00"),
     direction: str = "positive",
-    observed_at: datetime = ANCHOR_AT + timedelta(minutes=1),
+    candle_start: datetime = ANCHOR_AT,
+    observed_at: datetime | None = None,
 ) -> TrackedEventReactionRecord:
     return TrackedEventReactionRecord(
         tracked_market_event_id="tracked-event-1",
         interval_minutes=1,
-        candle_start=ANCHOR_AT,
+        candle_start=candle_start,
         reference_price=reference_price,
         close_price=close_price,
         return_pct=return_pct,
         direction=direction,
         evolution="initial",
-        observed_at=observed_at,
+        observed_at=observed_at or candle_start + timedelta(minutes=1),
     )
 
 
@@ -315,6 +316,128 @@ class TrackedEventPaperBridgeTests(unittest.TestCase):
             )
         self.assertEqual(result.status, "waiting_confirmation")
         run_paper.assert_not_called()
+
+    def test_flat_anchor_uses_first_later_positive_one_minute_reaction(self) -> None:
+        flat = reaction(
+            close_price=Decimal("10.01"),
+            return_pct=Decimal("0.10"),
+            direction="flat",
+        )
+        later = reaction(
+            candle_start=ANCHOR_AT + timedelta(minutes=2),
+            close_price=Decimal("10.20"),
+            return_pct=Decimal("2.00"),
+            direction="positive",
+        )
+        expected = PostReleasePaperResult("waiting_confirmation", "delegated")
+        with patch(
+            "trading_system.tracked_event_paper_bridge.run_post_release_paper",
+            return_value=expected,
+        ) as run_paper:
+            result = run_post_release_paper_from_tracked_event(
+                event=event(),
+                expectation=expectation(),
+                analysis=analysis(),
+                reactions=(flat, later),
+                portfolio=portfolio(),
+                resolver=FakeResolver(),
+                trading_task=trading_task(),
+            )
+        self.assertIs(result, expected)
+        self.assertEqual(run_paper.call_args.kwargs["confirmed_reaction_pct"], 2.0)
+
+    def test_flat_anchor_uses_first_later_nonflat_reaction_deterministically(self) -> None:
+        flat = reaction(
+            close_price=Decimal("10.01"),
+            return_pct=Decimal("0.10"),
+            direction="flat",
+        )
+        earlier_positive = reaction(
+            candle_start=ANCHOR_AT + timedelta(minutes=2),
+            close_price=Decimal("10.20"),
+            return_pct=Decimal("2.00"),
+            direction="positive",
+        )
+        later_negative = reaction(
+            candle_start=ANCHOR_AT + timedelta(minutes=5),
+            close_price=Decimal("9.80"),
+            return_pct=Decimal("-2.00"),
+            direction="negative",
+        )
+        selected = build_tracked_event_price_confirmation(
+            event=event(),
+            expectation=expectation(),
+            reactions=(later_negative, flat, earlier_positive),
+            resolver=FakeResolver(),
+        )
+        self.assertIsNotNone(selected)
+        assert selected is not None
+        self.assertEqual(selected.candle_start, ANCHOR_AT + timedelta(minutes=2))
+        self.assertEqual(selected.direction, "positive")
+
+    def test_flat_anchor_can_use_later_negative_one_minute_reaction(self) -> None:
+        flat = reaction(
+            close_price=Decimal("10.01"),
+            return_pct=Decimal("0.10"),
+            direction="flat",
+        )
+        later_negative = reaction(
+            candle_start=ANCHOR_AT + timedelta(minutes=3),
+            close_price=Decimal("9.80"),
+            return_pct=Decimal("-2.00"),
+            direction="negative",
+        )
+        selected = build_tracked_event_price_confirmation(
+            event=event(),
+            expectation=expectation(),
+            reactions=(flat, later_negative),
+            resolver=FakeResolver(),
+        )
+        self.assertIsNotNone(selected)
+        assert selected is not None
+        self.assertEqual(selected.candle_start, ANCHOR_AT + timedelta(minutes=3))
+        self.assertEqual(selected.direction, "negative")
+
+    def test_later_reaction_outside_30_minute_window_does_not_confirm(self) -> None:
+        flat = reaction(
+            close_price=Decimal("10.01"),
+            return_pct=Decimal("0.10"),
+            direction="flat",
+        )
+        outside = reaction(
+            candle_start=ANCHOR_AT + timedelta(minutes=30),
+            close_price=Decimal("10.20"),
+            return_pct=Decimal("2.00"),
+            direction="positive",
+        )
+        selected = build_tracked_event_price_confirmation(
+            event=event(),
+            expectation=expectation(),
+            reactions=(flat, outside),
+            resolver=FakeResolver(),
+        )
+        self.assertIsNotNone(selected)
+        assert selected is not None
+        self.assertEqual(selected.candle_start, ANCHOR_AT)
+        self.assertEqual(selected.direction, "flat")
+
+    def test_directional_anchor_does_not_validate_later_reactions(self) -> None:
+        malformed_later = reaction(
+            candle_start=ANCHOR_AT + timedelta(minutes=2),
+            close_price=Decimal("10.20"),
+            return_pct=Decimal("99.00"),
+            direction="positive",
+        )
+        selected = build_tracked_event_price_confirmation(
+            event=event(),
+            expectation=expectation(),
+            reactions=(reaction(), malformed_later),
+            resolver=FakeResolver(),
+        )
+        self.assertIsNotNone(selected)
+        assert selected is not None
+        self.assertEqual(selected.candle_start, ANCHOR_AT)
+        self.assertEqual(selected.direction, "positive")
 
     def test_anchored_live_reaction_is_explicit_input_to_existing_paper_path(self) -> None:
         expected = PostReleasePaperResult("waiting_confirmation", "delegated")
