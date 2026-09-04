@@ -104,7 +104,8 @@ def run_forever() -> None:
                         raise RuntimeError("approved PAPER task tracked event is missing")
                     if event.instrument.strip().upper() != instrument.upper():
                         raise RuntimeError("approved PAPER task instrument differs from tracked event")
-                    if event.kind.strip().lower() not in {"earnings", "market_open"}:
+                    event_kind = event.kind.strip().lower()
+                    if event_kind not in {"earnings", "market_open"}:
                         raise RuntimeError(
                             f"approved PAPER task event kind is unsupported: {event.kind}"
                         )
@@ -136,15 +137,26 @@ def run_forever() -> None:
                                 instrument=instrument,
                                 page_size=batch_size,
                             )
+
+                        # For market-open execution the network access preflight must finish
+                        # before the dedicated broker-boundary freshness check runs. Do not
+                        # repeat it inside begin_broker_attempt, where it could consume the
+                        # remaining two-minute evidence lifetime after that freshness check.
+                        if etoro_broker is not None and event_kind == "market_open":
+                            etoro_broker.verify_demo_access()
+                            broker_attempt_preflight = None
+                        else:
+                            broker_attempt_preflight = (
+                                etoro_broker.verify_demo_access
+                                if etoro_broker is not None
+                                else None
+                            )
+
                         lease_aware_runs = _PortfolioLeasePaperRuns(
                             paper_runs,
                             portfolio_token=portfolio_token,
                             portfolio_lease_seconds=portfolio_lease_seconds,
-                            preflight=(
-                                etoro_broker.verify_demo_access
-                                if etoro_broker is not None
-                                else None
-                            ),
+                            preflight=broker_attempt_preflight,
                             etoro_broker=etoro_broker,
                         )
                         result = _run_for_event_kind(
