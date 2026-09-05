@@ -169,6 +169,26 @@ class ScannerConfirmedTrendEventTests(unittest.TestCase):
                 ),
             )
 
+    def test_unchanged_transition_without_candle_identity_fails_closed(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "missing candle identity"):
+            register_confirmed_scanner_trend_event(
+                _monitor(),
+                TRACKED,
+                _result(state=TrendState.BULLISH, changed=False, candle_at=None),
+            )
+
+    def test_neutral_change_with_naive_candle_identity_fails_closed(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "timezone-aware"):
+            register_confirmed_scanner_trend_event(
+                _monitor(),
+                TRACKED,
+                _result(
+                    state=TrendState.NEUTRAL,
+                    changed=True,
+                    candle_at=datetime(2026, 9, 5, 12, 15),
+                ),
+            )
+
     def test_runtime_result_for_different_tracked_instrument_fails_closed(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "does not match tracked instrument identity"):
             register_confirmed_scanner_trend_event(
