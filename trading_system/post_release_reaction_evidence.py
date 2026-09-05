@@ -73,8 +73,8 @@ def canonical_post_release_reaction_evidence(
         candle_complete_at = candle_start_utc + timedelta(minutes=reaction.interval_minutes)
         if candle_start_utc < anchor_utc:
             raise ValueError("persisted post-release reaction starts before reaction anchor")
-        if reaction.observed_at.astimezone(UTC) < candle_complete_at:
-            raise ValueError("tracked reaction was observed before its candle completed")
+        if reaction.observed_at.astimezone(UTC) != candle_complete_at:
+            raise ValueError("tracked reaction observation time must equal candle completion")
         if candle_complete_at <= post_observation_start:
             continue
 
