@@ -46,6 +46,44 @@ class ReleaseWorkerCanonicalTerminalGuardTests(unittest.TestCase):
             _terminal_paper_status(_Persistence("waiting_confirmation"), "event-1")
         )
 
+    def test_terminal_states_block_runner_across_retries_and_restarts(self) -> None:
+        for terminal_status in ("paper_executed", "expired_no_trade"):
+            with self.subTest(terminal_status=terminal_status):
+                runner_calls = 0
+
+                def runner(**_: Any):
+                    nonlocal runner_calls
+                    runner_calls += 1
+                    raise AssertionError(
+                        "runner must not execute after a terminal PAPER lifecycle state"
+                    )
+
+                persistence = _Persistence(terminal_status)
+                first = run_paper_confirmation_loop(
+                    event_id="hays-fy2026-results",
+                    expectation=HAYS_FY2026,
+                    analysis=self.analysis,
+                    interval_seconds=300,
+                    once=True,
+                    analysis_id="analysis-1",
+                    persistence=persistence,
+                    runner=runner,
+                )
+                second = run_paper_confirmation_loop(
+                    event_id="hays-fy2026-results",
+                    expectation=HAYS_FY2026,
+                    analysis=self.analysis,
+                    interval_seconds=300,
+                    once=True,
+                    analysis_id="analysis-1",
+                    persistence=persistence,
+                    runner=runner,
+                )
+
+                self.assertEqual(first.status, terminal_status)
+                self.assertEqual(second.status, terminal_status)
+                self.assertEqual(runner_calls, 0)
+
     def test_unknown_persisted_status_fails_closed_before_runner(self) -> None:
         runner_called = False
 
