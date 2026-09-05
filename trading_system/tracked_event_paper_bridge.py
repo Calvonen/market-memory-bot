@@ -224,6 +224,41 @@ def _confirmation_result(
     )
 
 
+def _observation_window_complete(
+    *,
+    event: PersistentTrackedEvent,
+    reactions: Iterable[TrackedEventReactionRecord],
+) -> bool:
+    anchor = event.reaction_anchor_at
+    reference = event.reference_price
+    if anchor is None or reference is None:
+        return False
+    if not _is_aware(anchor):
+        raise ValueError("tracked reaction anchor must be timezone-aware")
+
+    closing_start = anchor.astimezone(UTC) + _LATER_CONFIRMATION_WINDOW - timedelta(minutes=1)
+    closing = []
+    for reaction in reactions:
+        if reaction.tracked_market_event_id != event.event_id or reaction.interval_minutes != 1:
+            continue
+        if not _is_aware(reaction.candle_start):
+            raise ValueError("tracked reaction candle_start must be timezone-aware")
+        if reaction.candle_start.astimezone(UTC) == closing_start:
+            closing.append(reaction)
+
+    if not closing:
+        return False
+    if len(closing) != 1:
+        raise ValueError("tracked event has ambiguous observation-closing 1m reactions")
+
+    _validated_confirmation_reaction(
+        event=event,
+        reaction=closing[0],
+        reference=reference,
+    )
+    return True
+
+
 def build_tracked_event_price_confirmation(
     *,
     event: PersistentTrackedEvent,
@@ -386,10 +421,17 @@ def run_post_release_paper_from_tracked_event(
     if kind != "earnings":
         raise ValueError(f"tracked event kind is not PAPER-supported: {kind or 'blank'}")
 
+    reaction_rows = tuple(reactions)
+    if not _observation_window_complete(event=event, reactions=reaction_rows):
+        return PostReleasePaperResult(
+            "waiting_confirmation",
+            "observing first 30 minutes after earnings; PAPER execution remains blocked",
+        )
+
     confirmation = build_tracked_event_price_confirmation(
         event=event,
         expectation=expectation,
-        reactions=reactions,
+        reactions=reaction_rows,
         resolver=resolver,
     )
     if confirmation is None:

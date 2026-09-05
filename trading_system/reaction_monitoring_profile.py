@@ -57,7 +57,11 @@ class ReactionMonitoringProfile:
 
         selected = self.stages[0].interval_minutes
         for stage in self.stages[1:]:
-            if elapsed < stage.start_after:
+            # A candle that closes exactly on a stage boundary still belongs to
+            # the preceding stage. This lets the final 1m candle of the first
+            # 30-minute observation window persist at +30:00 before 5m sampling
+            # becomes active immediately afterwards.
+            if elapsed <= stage.start_after:
                 break
             selected = stage.interval_minutes
         return selected
