@@ -35,6 +35,7 @@ from trading_system.market_open_paper_orchestration import (
 from trading_system.paper_trade_repository import SupabasePaperTradeRepository
 from trading_system.pipeline import PaperTradingPipeline
 from trading_system.release_repository import SupabaseReleaseRepository
+from trading_system.session_execution_gate import evaluate_session_execution
 from trading_system.supabase_event_repository import SupabaseEventExpectationRepository
 from trading_system.tracked_event_paper_bridge import canonical_release_event_id
 from trading_system.tracked_event_paper_orchestration import run_approved_tracked_paper_once
@@ -55,6 +56,27 @@ class _MarketOpenLeasePaperRuns(_PortfolioLeasePaperRuns):
         self._preflight = None
         if preflight is not None:
             preflight()
+
+
+def _etoro_earnings_execution_preflight(
+    market_data: EtoroMarketDataProvider,
+    broker: EtoroDemoBroker,
+) -> None:
+    """Keep session evidence as the final remote check before attempt reservation."""
+    broker.verify_demo_access()
+    session = read_etoro_session_state(
+        market_data,
+        instrument_id=broker.instrument_id,
+        timeout_seconds=ETORO_SESSION_TIMEOUT_SECONDS,
+        max_age_seconds=ETORO_SESSION_MAX_AGE_SECONDS,
+        allow_extended_hours=False,
+    )
+    decision = evaluate_session_execution(session=session, broker=broker)
+    if not decision.allowed:
+        raise RuntimeError(
+            "PAPER broker execution blocked by session gate: "
+            f"{decision.reason}"
+        )
 
 
 def _unreconciled_market_open_attempts(
@@ -209,15 +231,6 @@ def run_forever() -> None:
                             amount_cap_usd=float(etoro_amount_cap),
                         )
                         broker = etoro_broker
-                        if event_kind == "earnings":
-                            session_reader = partial(
-                                read_etoro_session_state,
-                                market_data,
-                                instrument_id=etoro_broker.instrument_id,
-                                timeout_seconds=ETORO_SESSION_TIMEOUT_SECONDS,
-                                max_age_seconds=ETORO_SESSION_MAX_AGE_SECONDS,
-                                allow_extended_hours=False,
-                            )
                     else:
                         broker = PaperBroker()
 
@@ -244,15 +257,22 @@ def run_forever() -> None:
                             if event_kind == "market_open"
                             else _PortfolioLeasePaperRuns
                         )
+                        if etoro_broker is None:
+                            preflight = None
+                        elif event_kind == "earnings":
+                            preflight = partial(
+                                _etoro_earnings_execution_preflight,
+                                market_data,
+                                etoro_broker,
+                            )
+                        else:
+                            preflight = etoro_broker.verify_demo_access
+
                         lease_aware_runs = runs_type(
                             paper_runs,
                             portfolio_token=portfolio_token,
                             portfolio_lease_seconds=portfolio_lease_seconds,
-                            preflight=(
-                                etoro_broker.verify_demo_access
-                                if etoro_broker is not None
-                                else None
-                            ),
+                            preflight=preflight,
                             etoro_broker=etoro_broker,
                         )
                         result = _run_for_event_kind(
