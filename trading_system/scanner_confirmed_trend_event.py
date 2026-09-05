@@ -46,11 +46,6 @@ def register_confirmed_scanner_trend_event(
         raise RuntimeError("Trend runtime result does not match tracked instrument identity")
 
     transition = result.transition
-    if not transition.changed:
-        return None
-    if transition.state not in {TrendState.BULLISH, TrendState.BEARISH}:
-        return None
-
     event_at = transition.last_processed_candle_at
     if event_at is None:
         raise RuntimeError("confirmed trend transition is missing candle identity")
@@ -58,6 +53,11 @@ def register_confirmed_scanner_trend_event(
         raise RuntimeError(
             "confirmed trend transition candle identity must be timezone-aware"
         )
+
+    if not transition.changed:
+        return None
+    if transition.state not in {TrendState.BULLISH, TrendState.BEARISH}:
+        return None
 
     event_at_utc = event_at.astimezone(UTC)
     event_id = (
