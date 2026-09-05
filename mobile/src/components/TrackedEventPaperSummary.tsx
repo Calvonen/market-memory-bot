@@ -226,6 +226,14 @@ function ExecutionSummary({ state }: { state: LoadState<PaperStatus | null> }) {
       </>
     );
   }
+  if (run.status === 'observing_post_release') {
+    return (
+      <>
+        <Text style={styles.warning}>Kauppa: seurataan tulosreaktiota</Text>
+        {run.message ? <Text style={styles.meta}>{run.message}</Text> : null}
+      </>
+    );
+  }
   if (run.status === 'waiting_confirmation') {
     return (
       <>
