@@ -11,6 +11,7 @@ from market_memory.indicators import add_indicators
 from market_memory.pivots import detect_pivots
 from market_memory.similarity import find_best_matches
 from trading_system.ai_event_analyzer import EventAnalysisPayload
+from trading_system.earnings_paper_lifecycle import EarningsPaperLifecycleStatus
 from trading_system.event_strategy_bridge import (
     build_event_strategy_inputs,
     event_analysis_components,
@@ -175,14 +176,14 @@ def run_post_release_paper(
     hypothesis = _hypothesis_from_components(completed)
     if hypothesis is Direction.NO_TRADE:
         return PostReleasePaperResult(
-            "waiting_confirmation",
+            EarningsPaperLifecycleStatus.WAITING_CONFIRMATION,
             "event direction is mixed or neutral",
             completed_components=completed,
         )
 
     if confirmed_reaction_pct is not None and not math.isfinite(confirmed_reaction_pct):
         return PostReleasePaperResult(
-            "waiting_confirmation",
+            EarningsPaperLifecycleStatus.WAITING_CONFIRMATION,
             "confirmed price reaction is invalid",
             completed_components=completed,
         )
@@ -193,7 +194,9 @@ def run_post_release_paper(
         )
     if market_df.empty:
         return PostReleasePaperResult(
-            "waiting_confirmation", "no market data", completed_components=completed
+            EarningsPaperLifecycleStatus.WAITING_CONFIRMATION,
+            "no market data",
+            completed_components=completed,
         )
 
     reaction = confirmed_reaction_pct
@@ -201,7 +204,7 @@ def run_post_release_paper(
         reaction = _event_price_reaction_pct(market_df, expectation.scheduled_date)
         if reaction is None:
             return PostReleasePaperResult(
-                "waiting_confirmation",
+                EarningsPaperLifecycleStatus.WAITING_CONFIRMATION,
                 "no event-day market bar yet",
                 completed_components=completed,
             )
@@ -209,14 +212,14 @@ def run_post_release_paper(
         hypothesis is Direction.SHORT and reaction >= 0
     ):
         return PostReleasePaperResult(
-            "waiting_confirmation",
+            EarningsPaperLifecycleStatus.WAITING_CONFIRMATION,
             f"price reaction conflicts with {hypothesis.value}: {reaction:+.2f}%",
             completed_components=completed,
         )
 
     if portfolio.spread_pct is None:
         return PostReleasePaperResult(
-            "waiting_confirmation",
+            EarningsPaperLifecycleStatus.WAITING_CONFIRMATION,
             "paper spread assumption unavailable",
             completed_components=completed,
         )
@@ -233,13 +236,13 @@ def run_post_release_paper(
 
     if technical.direction is not hypothesis:
         return PostReleasePaperResult(
-            "waiting_confirmation",
+            EarningsPaperLifecycleStatus.WAITING_CONFIRMATION,
             "technical confirmation is not aligned",
             completed_components=completed,
         )
     if market_memory.direction is not hypothesis:
         return PostReleasePaperResult(
-            "waiting_confirmation",
+            EarningsPaperLifecycleStatus.WAITING_CONFIRMATION,
             "market-memory confirmation is not aligned",
             completed_components=completed,
         )
@@ -276,13 +279,13 @@ def run_post_release_paper(
     result = (pipeline or PaperTradingPipeline()).run(inputs, levels, portfolio)
     if result.order is None:
         return PostReleasePaperResult(
-            "waiting_confirmation",
+            EarningsPaperLifecycleStatus.WAITING_CONFIRMATION,
             f"strategy/risk did not approve: {result.strategy.direction.value}/{result.proposal.risk.status.value}",
             result,
             completed,
         )
     return PostReleasePaperResult(
-        "paper_executed",
+        EarningsPaperLifecycleStatus.PAPER_EXECUTED,
         f"{result.order.direction.value} {result.order.quantity} {result.order.instrument} {result.order.status}",
         result,
         completed,
