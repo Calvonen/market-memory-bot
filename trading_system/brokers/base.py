@@ -65,6 +65,11 @@ def broker_order_from_payload(payload: dict[str, Any]) -> BrokerOrder:
 
 
 class Broker(ABC):
+    # Extended-hours order submission must be proven against the broker API
+    # contract and opted in explicitly by a concrete broker implementation.
+    # Market/session observability alone must never imply order capability.
+    supports_extended_hours_orders = False
+
     @abstractmethod
     def execute(self, proposal: TradeProposal) -> BrokerOrder:
         raise NotImplementedError
