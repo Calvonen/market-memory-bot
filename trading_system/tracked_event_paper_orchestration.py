@@ -8,6 +8,7 @@ import pandas as pd
 
 from trading_system.ai_event_analyzer import analysis_from_record
 from trading_system.brokers.base import BrokerOrder, broker_order_from_payload, broker_order_payload
+from trading_system.earnings_paper_lifecycle import EarningsPaperLifecycleStatus
 from trading_system.etoro_instrument_resolver import EtoroInstrumentResolver
 from trading_system.models import (
     ComponentAssessment,
@@ -433,7 +434,7 @@ def run_approved_tracked_paper_once(
     expectation = expectations.get(release_event_id)
     if expectation is None:
         return TrackedPaperOrchestrationResult(
-            "waiting_analysis",
+            EarningsPaperLifecycleStatus.WAITING_ANALYSIS,
             "current canonical event expectation is not available",
         )
     if expectation.instrument.strip().upper() != event.instrument.strip().upper():
@@ -445,7 +446,7 @@ def run_approved_tracked_paper_once(
     )
     if analysis_row is None:
         return TrackedPaperOrchestrationResult(
-            "waiting_analysis",
+            EarningsPaperLifecycleStatus.WAITING_ANALYSIS,
             "current expectation version has no persisted release analysis",
         )
     analysis_id, source_document_id = _validate_analysis_row(
@@ -473,7 +474,7 @@ def run_approved_tracked_paper_once(
         raise ValueError("canonical trading task does not request PAPER execution")
     if task.state is not TradingTaskState.APPROVED:
         return TrackedPaperOrchestrationResult(
-            "waiting_approval",
+            EarningsPaperLifecycleStatus.WAITING_APPROVAL,
             "canonical PAPER trading task is not approved",
         )
     execution_context = trading_tasks.execution_context(requested_task_id)
