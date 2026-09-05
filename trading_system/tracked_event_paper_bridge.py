@@ -22,7 +22,14 @@ from trading_system.models import (
 )
 from trading_system.pipeline import PaperTradingPipeline
 from trading_system.post_release_paper import PostReleasePaperResult, run_post_release_paper
+from trading_system.post_release_reaction_evidence import (
+    canonical_post_release_reaction_evidence,
+)
+from trading_system.reaction_monitoring_profile import (
+    DEFAULT_EVENT_REACTION_MONITORING_PROFILE,
+)
 from trading_system.risk import RiskEngine
+from trading_system.tracked_event_config import TRACKING_CONFIG_SCHEMA_VERSION
 from trading_system.tracked_event_repository import (
     PersistentTrackedEvent,
     TrackedEventReactionRecord,
@@ -51,7 +58,7 @@ class CanonicalTradingTaskExecutionContext:
 
 @dataclass(frozen=True)
 class TrackedEventPriceConfirmation:
-    """Canonical persisted 1m confirmation for one tracked earnings event."""
+    """Canonical persisted reaction confirmation for one tracked earnings event."""
 
     tracked_market_event_id: str
     release_event_id: str
@@ -382,6 +389,83 @@ def build_tracked_event_price_confirmation(
     )
 
 
+def _post_observation_price_confirmation(
+    *,
+    event: PersistentTrackedEvent,
+    reactions: Iterable[TrackedEventReactionRecord],
+) -> TrackedEventPriceConfirmation | None:
+    """Return the first bounded canonical post-30m non-flat reaction, if any."""
+    snapshot = event.tracking_config_snapshot
+    if snapshot is None:
+        # Legacy monitoring rows do not prove which horizon/profile produced
+        # their later reactions, so they must never gain new execution authority.
+        return None
+    if not isinstance(snapshot, dict):
+        raise ValueError("tracked event monitoring snapshot is invalid")
+
+    raw_schema_version = snapshot.get("schema_version")
+    if (
+        isinstance(raw_schema_version, bool)
+        or not isinstance(raw_schema_version, int)
+        or raw_schema_version != TRACKING_CONFIG_SCHEMA_VERSION
+    ):
+        raise ValueError("tracked event monitoring snapshot schema is unsupported")
+
+    raw_monitor_hours = snapshot.get("monitor_hours")
+    if isinstance(raw_monitor_hours, bool) or not isinstance(raw_monitor_hours, (int, float)):
+        raise ValueError("tracked event monitoring snapshot monitor_hours is invalid")
+    monitor_hours = float(raw_monitor_hours)
+    if not math.isfinite(monitor_hours) or monitor_hours <= 0:
+        raise ValueError("tracked event monitoring snapshot monitor_hours is invalid")
+
+    expected_stages = [
+        {
+            "start_after_minutes": int(stage.start_after / timedelta(minutes=1)),
+            "interval_minutes": stage.interval_minutes,
+        }
+        for stage in DEFAULT_EVENT_REACTION_MONITORING_PROFILE.stages
+    ]
+    raw_stages = snapshot.get("reaction_stages")
+    if not isinstance(raw_stages, list) or len(raw_stages) != len(expected_stages):
+        raise ValueError("tracked event monitoring snapshot differs from canonical reaction profile")
+    for raw_stage, expected_stage in zip(raw_stages, expected_stages, strict=True):
+        if not isinstance(raw_stage, dict) or set(raw_stage) != set(expected_stage):
+            raise ValueError("tracked event monitoring snapshot differs from canonical reaction profile")
+        for field, expected_value in expected_stage.items():
+            value = raw_stage.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value != expected_value:
+                raise ValueError("tracked event monitoring snapshot differs from canonical reaction profile")
+
+    anchor = event.reaction_anchor_at
+    if anchor is None:
+        return None
+    if not _is_aware(anchor):
+        raise ValueError("tracked reaction anchor must be timezone-aware")
+    horizon_end = anchor.astimezone(UTC) + timedelta(hours=monitor_hours)
+    release_event_id = canonical_release_event_id(event)
+
+    for reaction in canonical_post_release_reaction_evidence(
+        event=event,
+        reactions=reactions,
+    ):
+        candle_complete_at = reaction.candle_start.astimezone(UTC) + timedelta(
+            minutes=reaction.interval_minutes
+        )
+        if candle_complete_at > horizon_end:
+            continue
+        canonical_direction = _canonical_direction(reaction.return_pct)
+        if canonical_direction == "flat":
+            continue
+        return _confirmation_result(
+            event=event,
+            release_event_id=release_event_id,
+            reaction=reaction,
+            canonical_return=reaction.return_pct,
+            canonical_direction=canonical_direction,
+        )
+    return None
+
+
 def run_post_release_paper_from_tracked_event(
     *,
     event: PersistentTrackedEvent,
@@ -440,10 +524,16 @@ def run_post_release_paper_from_tracked_event(
             "no canonical anchored 1m tracked reaction yet",
         )
     if confirmation.direction == "flat":
-        return PostReleasePaperResult(
-            "waiting_confirmation",
-            f"tracked price reaction is flat: {float(confirmation.return_pct):+.2f}%",
+        later_confirmation = _post_observation_price_confirmation(
+            event=event,
+            reactions=reaction_rows,
         )
+        if later_confirmation is None:
+            return PostReleasePaperResult(
+                "waiting_confirmation",
+                f"tracked price reaction is flat: {float(confirmation.return_pct):+.2f}%",
+            )
+        confirmation = later_confirmation
 
     return run_post_release_paper(
         expectation=expectation,
