@@ -122,6 +122,15 @@ def reaction(
     )
 
 
+def observation_close() -> TrackedEventReactionRecord:
+    return reaction(
+        candle_start=ANCHOR_AT + timedelta(minutes=29),
+        close_price=Decimal("10.01"),
+        return_pct=Decimal("0.10"),
+        direction="flat",
+    )
+
+
 def analysis() -> EventAnalysisPayload:
     return EventAnalysisPayload(
         metrics=[],
@@ -317,6 +326,23 @@ class TrackedEventPaperBridgeTests(unittest.TestCase):
         self.assertEqual(result.status, "waiting_confirmation")
         run_paper.assert_not_called()
 
+    def test_directional_reaction_waits_until_observation_window_is_complete(self) -> None:
+        with patch(
+            "trading_system.tracked_event_paper_bridge.run_post_release_paper"
+        ) as run_paper:
+            result = run_post_release_paper_from_tracked_event(
+                event=event(),
+                expectation=expectation(),
+                analysis=analysis(),
+                reactions=(reaction(),),
+                portfolio=portfolio(),
+                resolver=FakeResolver(),
+                trading_task=trading_task(),
+            )
+        self.assertEqual(result.status, "waiting_confirmation")
+        self.assertIn("observing first 30 minutes", result.message)
+        run_paper.assert_not_called()
+
     def test_flat_anchor_uses_first_later_positive_one_minute_reaction(self) -> None:
         flat = reaction(
             close_price=Decimal("10.01"),
@@ -338,7 +364,7 @@ class TrackedEventPaperBridgeTests(unittest.TestCase):
                 event=event(),
                 expectation=expectation(),
                 analysis=analysis(),
-                reactions=(flat, later),
+                reactions=(flat, later, observation_close()),
                 portfolio=portfolio(),
                 resolver=FakeResolver(),
                 trading_task=trading_task(),
@@ -449,7 +475,7 @@ class TrackedEventPaperBridgeTests(unittest.TestCase):
                 event=event(),
                 expectation=expectation(),
                 analysis=analysis(),
-                reactions=(reaction(),),
+                reactions=(reaction(), observation_close()),
                 portfolio=portfolio(),
                 resolver=FakeResolver(),
                 trading_task=trading_task(),
