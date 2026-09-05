@@ -33,6 +33,10 @@ def register_confirmed_scanner_trend_event(
     event_at = transition.last_processed_candle_at
     if event_at is None:
         raise RuntimeError("confirmed trend transition is missing candle identity")
+    if event_at.tzinfo is None or event_at.utcoffset() is None:
+        raise RuntimeError(
+            "confirmed trend transition candle identity must be timezone-aware"
+        )
 
     event_at_utc = event_at.astimezone(UTC)
     event_id = (
