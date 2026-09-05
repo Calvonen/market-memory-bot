@@ -30,6 +30,7 @@ from trading_system.tracked_event_repository import (
 
 
 _CANONICAL_REFERENCE_KIND = "etoro_last_execution_pre_event_snapshot"
+_LATER_CONFIRMATION_WINDOW = timedelta(minutes=30)
 
 
 @dataclass(frozen=True)
@@ -50,7 +51,7 @@ class CanonicalTradingTaskExecutionContext:
 
 @dataclass(frozen=True)
 class TrackedEventPriceConfirmation:
-    """Canonical first-live-candle confirmation for one tracked earnings event."""
+    """Canonical persisted 1m confirmation for one tracked earnings event."""
 
     tracked_market_event_id: str
     release_event_id: str
@@ -168,6 +169,61 @@ def _canonical_direction(return_pct: Decimal) -> str:
     return "flat"
 
 
+def _validated_confirmation_reaction(
+    *,
+    event: PersistentTrackedEvent,
+    reaction: TrackedEventReactionRecord,
+    reference: Decimal,
+) -> tuple[Decimal, str]:
+    if not _is_aware(reaction.observed_at):
+        raise ValueError("tracked reaction observed_at must be timezone-aware")
+    if reaction.candle_start.astimezone(UTC) < event.event_at.astimezone(UTC):
+        raise ValueError("tracked reaction precedes event time")
+    candle_complete_at = reaction.candle_start.astimezone(UTC) + timedelta(
+        minutes=reaction.interval_minutes
+    )
+    if reaction.observed_at.astimezone(UTC) < candle_complete_at:
+        raise ValueError("tracked reaction was observed before its candle completed")
+    if reaction.reference_price != reference:
+        raise ValueError("tracked reaction reference differs from event reference")
+    if reaction.close_price <= 0 or not reaction.close_price.is_finite():
+        raise ValueError("tracked reaction close price is invalid")
+    if not reaction.return_pct.is_finite():
+        raise ValueError("tracked reaction return is invalid")
+
+    canonical_return = ((reaction.close_price - reference) / reference) * Decimal("100")
+    if reaction.return_pct != canonical_return:
+        raise ValueError("tracked reaction return differs from stored prices")
+
+    direction = reaction.direction.strip().lower()
+    canonical_direction = _canonical_direction(canonical_return)
+    if direction != canonical_direction:
+        raise ValueError("tracked reaction direction differs from canonical return")
+    return canonical_return, canonical_direction
+
+
+def _confirmation_result(
+    *,
+    event: PersistentTrackedEvent,
+    release_event_id: str,
+    reaction: TrackedEventReactionRecord,
+    canonical_return: Decimal,
+    canonical_direction: str,
+) -> TrackedEventPriceConfirmation:
+    return TrackedEventPriceConfirmation(
+        tracked_market_event_id=event.event_id,
+        release_event_id=release_event_id,
+        tracked_instrument_id=event.tracked_instrument_id,
+        instrument=event.instrument,
+        market=event.market,
+        candle_start=reaction.candle_start,
+        reference_price=reaction.reference_price,
+        close_price=reaction.close_price,
+        return_pct=canonical_return,
+        direction=canonical_direction,
+    )
+
+
 def build_tracked_event_price_confirmation(
     *,
     event: PersistentTrackedEvent,
@@ -175,11 +231,13 @@ def build_tracked_event_price_confirmation(
     reactions: Iterable[TrackedEventReactionRecord],
     resolver: EtoroInstrumentResolver,
 ) -> TrackedEventPriceConfirmation | None:
-    """Validate and select the persisted first complete post-event 1m reaction.
+    """Validate and select deterministic persisted post-event 1m confirmation.
 
-    Missing runtime evidence returns ``None`` so orchestration can keep waiting.
-    Identity or persisted-reference contradictions raise ``ValueError`` and must
-    fail closed rather than silently falling back to another price source.
+    The anchored first complete 1m candle remains canonical when directional. If
+    that anchored candle is flat, the first later non-flat complete persisted 1m
+    reaction within the first 30 minutes is used. Missing runtime evidence returns
+    ``None`` so orchestration can keep waiting. Identity or persisted-reference
+    contradictions raise ``ValueError`` and fail closed.
     """
     if event.kind.strip().lower() != "earnings":
         raise ValueError("tracked event is not an earnings event")
@@ -211,57 +269,81 @@ def build_tracked_event_price_confirmation(
 
     _validate_broker_identity(event, resolver)
 
+    anchor_utc = anchor.astimezone(UTC)
+    window_end = anchor_utc + _LATER_CONFIRMATION_WINDOW
     candidates: list[TrackedEventReactionRecord] = []
     for reaction in reactions:
         if reaction.tracked_market_event_id != event.event_id or reaction.interval_minutes != 1:
             continue
         if not _is_aware(reaction.candle_start):
             raise ValueError("tracked reaction candle_start must be timezone-aware")
-        if reaction.candle_start.astimezone(UTC) == anchor.astimezone(UTC):
-            candidates.append(reaction)
+        candle_start_utc = reaction.candle_start.astimezone(UTC)
+        candle_complete_at = candle_start_utc + timedelta(minutes=1)
+        if candle_start_utc < anchor_utc or candle_complete_at > window_end:
+            continue
+        candidates.append(reaction)
 
-    if not candidates:
+    anchored = [
+        reaction
+        for reaction in candidates
+        if reaction.candle_start.astimezone(UTC) == anchor_utc
+    ]
+    if not anchored:
         return None
-    if len(candidates) != 1:
+    if len(anchored) != 1:
         raise ValueError("tracked event has ambiguous anchored 1m reactions")
 
-    reaction = candidates[0]
-    if not _is_aware(reaction.observed_at):
-        raise ValueError("tracked reaction observed_at must be timezone-aware")
-    if reaction.candle_start.astimezone(UTC) < event.event_at.astimezone(UTC):
-        raise ValueError("tracked reaction precedes event time")
-    candle_complete_at = reaction.candle_start.astimezone(UTC) + timedelta(
-        minutes=reaction.interval_minutes
+    anchored_reaction = anchored[0]
+    anchored_return, anchored_direction = _validated_confirmation_reaction(
+        event=event,
+        reaction=anchored_reaction,
+        reference=reference,
     )
-    if reaction.observed_at.astimezone(UTC) < candle_complete_at:
-        raise ValueError("tracked reaction was observed before its candle completed")
-    if reaction.reference_price != reference:
-        raise ValueError("tracked reaction reference differs from event reference")
-    if reaction.close_price <= 0 or not reaction.close_price.is_finite():
-        raise ValueError("tracked reaction close price is invalid")
-    if not reaction.return_pct.is_finite():
-        raise ValueError("tracked reaction return is invalid")
+    if anchored_direction != "flat":
+        return _confirmation_result(
+            event=event,
+            release_event_id=release_event_id,
+            reaction=anchored_reaction,
+            canonical_return=anchored_return,
+            canonical_direction=anchored_direction,
+        )
 
-    canonical_return = ((reaction.close_price - reference) / reference) * Decimal("100")
-    if reaction.return_pct != canonical_return:
-        raise ValueError("tracked reaction return differs from stored prices")
+    later = sorted(
+        (
+            reaction
+            for reaction in candidates
+            if reaction.candle_start.astimezone(UTC) > anchor_utc
+        ),
+        key=lambda row: row.candle_start.astimezone(UTC),
+    )
+    previous_start: datetime | None = None
+    for reaction in later:
+        start = reaction.candle_start.astimezone(UTC)
+        if previous_start == start:
+            raise ValueError("tracked event has ambiguous confirmation-window 1m reactions")
+        previous_start = start
 
-    direction = reaction.direction.strip().lower()
-    canonical_direction = _canonical_direction(canonical_return)
-    if direction != canonical_direction:
-        raise ValueError("tracked reaction direction differs from canonical return")
+    for reaction in later:
+        canonical_return, canonical_direction = _validated_confirmation_reaction(
+            event=event,
+            reaction=reaction,
+            reference=reference,
+        )
+        if canonical_direction != "flat":
+            return _confirmation_result(
+                event=event,
+                release_event_id=release_event_id,
+                reaction=reaction,
+                canonical_return=canonical_return,
+                canonical_direction=canonical_direction,
+            )
 
-    return TrackedEventPriceConfirmation(
-        tracked_market_event_id=event.event_id,
+    return _confirmation_result(
+        event=event,
         release_event_id=release_event_id,
-        tracked_instrument_id=event.tracked_instrument_id,
-        instrument=event.instrument,
-        market=event.market,
-        candle_start=reaction.candle_start,
-        reference_price=reaction.reference_price,
-        close_price=reaction.close_price,
-        return_pct=canonical_return,
-        direction=canonical_direction,
+        reaction=anchored_reaction,
+        canonical_return=anchored_return,
+        canonical_direction=anchored_direction,
     )
 
 
