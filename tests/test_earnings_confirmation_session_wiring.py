@@ -93,11 +93,43 @@ class EarningsConfirmationSessionWiringTests(unittest.TestCase):
             "confirmation still pending",
         )
 
+        def bridge_side_effect(**kwargs):
+            self.assertFalse(kwargs["pipeline"].uses_extended_hours)
+            return bridge_result
+
         with patch(
             "trading_system.tracked_event_paper_orchestration.run_post_release_paper_from_tracked_event",
-            return_value=bridge_result,
+            side_effect=bridge_side_effect,
         ) as bridge:
             result = self._run(paper=paper, session=broker_session)
+
+        self.assertEqual(result.status, "waiting_confirmation")
+        bridge.assert_called_once()
+        self.assertEqual(len(paper.save_calls), 1)
+        self.assertIs(paper.save_calls[0]["result"], bridge_result)
+
+    def test_extended_broker_session_marks_guarded_pipeline_for_extended_risk(self) -> None:
+        paper = PaperRuns()
+        extended_session = TradingSessionState(
+            exchange_session_open=False,
+            broker_extended_session_available=True,
+            allow_extended_hours=True,
+            market_data_fresh=True,
+        )
+        bridge_result = PostReleasePaperResult(
+            "waiting_confirmation",
+            "confirmation still pending",
+        )
+
+        def bridge_side_effect(**kwargs):
+            self.assertTrue(kwargs["pipeline"].uses_extended_hours)
+            return bridge_result
+
+        with patch(
+            "trading_system.tracked_event_paper_orchestration.run_post_release_paper_from_tracked_event",
+            side_effect=bridge_side_effect,
+        ) as bridge:
+            result = self._run(paper=paper, session=extended_session)
 
         self.assertEqual(result.status, "waiting_confirmation")
         bridge.assert_called_once()

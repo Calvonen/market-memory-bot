@@ -346,8 +346,14 @@ def _guard_pipeline(
     lease_seconds: int,
     session: TradingSessionState | None = None,
     session_reader: Callable[[], TradingSessionState] | None = None,
+    uses_extended_hours: bool | None = None,
 ) -> PaperTradingPipeline:
     base = pipeline or PaperTradingPipeline()
+    risk_uses_extended_hours = (
+        base.uses_extended_hours
+        if uses_extended_hours is None
+        else bool(uses_extended_hours)
+    )
     guarded_broker = _LeaseGuardedBroker(
         base.broker,
         lambda execution_token, strategy_payload, risk_payload: _begin_broker_attempt(
@@ -376,6 +382,7 @@ def _guard_pipeline(
         broker=guarded_broker,
         journal=base.journal,
         allow_fractional_sizing=base.allow_fractional_sizing,
+        uses_extended_hours=risk_uses_extended_hours,
     )
 
 
@@ -547,6 +554,11 @@ def run_approved_tracked_paper_once(
         lease_seconds=lease_seconds,
         session=session,
         session_reader=session_reader,
+        uses_extended_hours=(
+            confirmation_session.uses_extended_hours
+            if confirmation_session is not None
+            else None
+        ),
     )
 
     result: PostReleasePaperResult = run_post_release_paper_from_tracked_event(

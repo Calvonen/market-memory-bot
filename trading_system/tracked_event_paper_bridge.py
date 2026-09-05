@@ -131,6 +131,7 @@ def _pipeline_with_task_cap(
         broker=base.broker,
         journal=base.journal,
         allow_fractional_sizing=base.allow_fractional_sizing,
+        uses_extended_hours=base.uses_extended_hours,
     )
 
 
