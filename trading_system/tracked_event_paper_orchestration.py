@@ -8,6 +8,9 @@ import pandas as pd
 
 from trading_system.ai_event_analyzer import analysis_from_record
 from trading_system.brokers.base import BrokerOrder, broker_order_from_payload, broker_order_payload
+from trading_system.earnings_confirmation_session_bridge import (
+    evaluate_earnings_confirmation_session,
+)
 from trading_system.earnings_paper_lifecycle import EarningsPaperLifecycleStatus
 from trading_system.etoro_instrument_resolver import EtoroInstrumentResolver
 from trading_system.models import (
@@ -412,9 +415,10 @@ def run_approved_tracked_paper_once(
     canonical PAPER trading task, an already-persisted current release analysis,
     and the persisted tracked-event reaction evidence consumed by the #230 bridge.
     The task-bound paper-run lease is claimed before Strategy/Risk work. When an
-    explicit session state or reader is supplied, the broker execution is
+    explicit session state or reader is supplied, confirmation must first have
+    fresh exchange- or broker-session evidence. The broker execution is separately
     session-gated before a durable broker-attempt row is reserved. A reader is
-    invoked at that boundary so timestamped evidence is not frozen during
+    invoked again at that boundary so timestamped evidence is not frozen during
     Strategy/Risk work. Immediately before broker I/O, one durable broker-attempt
     row is reserved with the exact Strategy and Risk audit so recovery can replay
     the original authorization.
@@ -510,6 +514,28 @@ def run_approved_tracked_paper_once(
             "canonical paper execution lease is owned by another runner",
             claim,
         )
+
+    try:
+        confirmation_session = (
+            session_reader() if session_reader is not None else session
+        )
+    except RuntimeError as exc:
+        return TrackedPaperOrchestrationResult(
+            EarningsPaperLifecycleStatus.WAITING_CONFIRMATION,
+            f"earnings confirmation waiting for session evidence: {exc}",
+            claim,
+        )
+    if confirmation_session is not None:
+        confirmation_decision = evaluate_earnings_confirmation_session(
+            session=confirmation_session,
+        )
+        if not confirmation_decision.continue_confirmation:
+            return TrackedPaperOrchestrationResult(
+                EarningsPaperLifecycleStatus.WAITING_CONFIRMATION,
+                "earnings confirmation waiting for observable broker session: "
+                f"{confirmation_decision.reason}",
+                claim,
+            )
 
     guarded_pipeline = _guard_pipeline(
         pipeline,
