@@ -6,7 +6,7 @@ from enum import StrEnum
 class EarningsPaperLifecycleStatus(StrEnum):
     """Canonical externally visible lifecycle states for earnings PAPER execution.
 
-    Values intentionally match the existing API/runtime strings.  This module is
+    Values intentionally match the existing API/runtime strings. This module is
     vocabulary only: introducing it must not change execution authority, state
     persistence, broker behavior, or LIVE behavior.
     """
@@ -17,27 +17,16 @@ class EarningsPaperLifecycleStatus(StrEnum):
     WAITING_CONFIRMATION = "waiting_confirmation"
     PAPER_EXECUTED = "paper_executed"
     EXPIRED_NO_TRADE = "expired_no_trade"
-    FAILED = "failed"
 
 
 TERMINAL_EARNINGS_PAPER_STATUSES = frozenset(
     {
         EarningsPaperLifecycleStatus.PAPER_EXECUTED,
         EarningsPaperLifecycleStatus.EXPIRED_NO_TRADE,
-        EarningsPaperLifecycleStatus.FAILED,
     }
 )
 
-EXECUTION_BLOCKED_EARNINGS_PAPER_STATUSES = frozenset(
-    {
-        EarningsPaperLifecycleStatus.WAITING_ANALYSIS,
-        EarningsPaperLifecycleStatus.WAITING_APPROVAL,
-        EarningsPaperLifecycleStatus.OBSERVING_POST_RELEASE,
-        EarningsPaperLifecycleStatus.WAITING_CONFIRMATION,
-        EarningsPaperLifecycleStatus.EXPIRED_NO_TRADE,
-        EarningsPaperLifecycleStatus.FAILED,
-    }
-)
+EXECUTION_BLOCKED_EARNINGS_PAPER_STATUSES = frozenset(EarningsPaperLifecycleStatus)
 
 
 def is_terminal_earnings_paper_status(
@@ -50,10 +39,12 @@ def is_terminal_earnings_paper_status(
 def blocks_earnings_paper_execution(
     status: EarningsPaperLifecycleStatus | str,
 ) -> bool:
-    """Return whether ``status`` must not itself authorize broker execution.
+    """Return whether an existing lifecycle state blocks another broker execution.
 
-    ``paper_executed`` is the only canonical state that represents execution
-    already having occurred.  All pre-execution, expired and failed states remain
-    execution-blocking.
+    Every existing lifecycle state is execution-blocking. In particular,
+    ``paper_executed`` must block retries from executing again. Broker execution
+    authority is established by the existing task/claim/Strategy/Risk/session
+    gates, not by treating any persisted lifecycle status as executable.
+    Unknown values raise ``ValueError`` and therefore fail closed.
     """
     return EarningsPaperLifecycleStatus(status) in EXECUTION_BLOCKED_EARNINGS_PAPER_STATUSES
