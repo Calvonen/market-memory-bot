@@ -41,6 +41,9 @@ class PostReleasePaperResult:
     confirmation_deadline_at: datetime | None = None
     expired_at: datetime | None = None
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "status", EarningsPaperLifecycleStatus(self.status))
+
 
 def _event_hypothesis(
     expectation: EventExpectation,
