@@ -19,12 +19,14 @@ from trading_system.paper_trade_repository import SupabasePaperTradeRepository
 from trading_system.pipeline import PaperTradingPipeline
 from trading_system.post_release_paper import PostReleasePaperResult
 from trading_system.release_repository import SupabaseReleaseRepository
+from trading_system.session_execution_gate import evaluate_session_execution
 from trading_system.supabase_event_repository import SupabaseEventExpectationRepository
 from trading_system.tracked_event_paper_bridge import (
     canonical_release_event_id,
     run_post_release_paper_from_tracked_event,
 )
 from trading_system.tracked_event_repository import SupabaseTrackedEventRepository
+from trading_system.trading_session_state import TradingSessionState
 from trading_system.trading_task import TradingTaskState
 from trading_system.trading_task_repository import SupabaseTradingTaskRepository
 
@@ -95,15 +97,29 @@ class _LeaseGuardedBroker:
         broker: Any,
         begin_attempt: Callable[[str, dict[str, Any], dict[str, Any]], dict[str, Any]],
         complete_attempt: Callable[[str, BrokerOrder], None],
+        *,
+        session: TradingSessionState | None = None,
     ) -> None:
         self._broker = broker
         self._begin_attempt = begin_attempt
         self._complete_attempt = complete_attempt
+        self._session = session
         self.supports_fractional_sizing = bool(
             getattr(broker, "supports_fractional_sizing", False)
         )
 
     def execute(self, proposal: TradeProposal) -> BrokerOrder:
+        if self._session is not None:
+            session_decision = evaluate_session_execution(
+                session=self._session,
+                broker=self._broker,
+            )
+            if not session_decision.allowed:
+                raise RuntimeError(
+                    "PAPER broker execution blocked by session gate: "
+                    f"{session_decision.reason}"
+                )
+
         execution_token = str(uuid4())
         strategy_payload = _strategy_payload(proposal)
         risk_payload = _risk_payload(proposal)
@@ -319,6 +335,7 @@ def _guard_pipeline(
     task_id: str,
     expectation_version: int,
     lease_seconds: int,
+    session: TradingSessionState | None = None,
 ) -> PaperTradingPipeline:
     base = pipeline or PaperTradingPipeline()
     guarded_broker = _LeaseGuardedBroker(
@@ -340,6 +357,7 @@ def _guard_pipeline(
             execution_token=execution_token,
             order=order,
         ),
+        session=session,
     )
     return PaperTradingPipeline(
         strategy_engine=base.strategy_engine,
@@ -377,15 +395,18 @@ def run_approved_tracked_paper_once(
     technical: ComponentAssessment | None = None,
     market_memory: ComponentAssessment | None = None,
     pipeline: PaperTradingPipeline | None = None,
+    session: TradingSessionState | None = None,
 ) -> TrackedPaperOrchestrationResult:
     """Run one canonical tracked earnings event through the existing PAPER path.
 
     This function creates no execution authority. It requires an already-approved
     canonical PAPER trading task, an already-persisted current release analysis,
     and the persisted tracked-event reaction evidence consumed by the #230 bridge.
-    The task-bound paper-run lease is claimed before Strategy/Risk work. Immediately
-    before broker I/O, one durable broker-attempt row is reserved with the exact
-    Strategy and Risk audit so recovery can replay the original authorization.
+    The task-bound paper-run lease is claimed before Strategy/Risk work. When an
+    explicit session state is supplied, the broker execution is session-gated before
+    a durable broker-attempt row is reserved. Immediately before broker I/O, one
+    durable broker-attempt row is reserved with the exact Strategy and Risk audit so
+    recovery can replay the original authorization.
     """
     event_id = tracked_event_id.strip()
     requested_task_id = task_id.strip()
@@ -487,6 +508,7 @@ def run_approved_tracked_paper_once(
         task_id=requested_task_id,
         expectation_version=expectation.version,
         lease_seconds=lease_seconds,
+        session=session,
     )
 
     result: PostReleasePaperResult = run_post_release_paper_from_tracked_event(
