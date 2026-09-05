@@ -424,7 +424,7 @@ def run_post_release_paper_from_tracked_event(
     reaction_rows = tuple(reactions)
     if not _observation_window_complete(event=event, reactions=reaction_rows):
         return PostReleasePaperResult(
-            "waiting_confirmation",
+            "observing_post_release",
             "observing first 30 minutes after earnings; PAPER execution remains blocked",
         )
 
