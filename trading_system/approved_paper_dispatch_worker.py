@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from uuid import uuid4
 
+from trading_system.approved_paper_etoro_session import read_etoro_session_state
 from trading_system.approved_tracked_paper_worker import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_LEASE_SECONDS,
@@ -36,7 +37,12 @@ from trading_system.supabase_event_repository import SupabaseEventExpectationRep
 from trading_system.tracked_event_paper_bridge import canonical_release_event_id
 from trading_system.tracked_event_paper_orchestration import run_approved_tracked_paper_once
 from trading_system.tracked_event_repository import SupabaseTrackedEventRepository
+from trading_system.trading_session_state import TradingSessionState
 from trading_system.trading_task_repository import SupabaseTradingTaskRepository
+
+
+ETORO_SESSION_TIMEOUT_SECONDS = 10.0
+ETORO_SESSION_MAX_AGE_SECONDS = 30.0
 
 
 class _MarketOpenLeasePaperRuns(_PortfolioLeasePaperRuns):
@@ -81,6 +87,7 @@ def _run_for_event_kind(
     portfolio,
     lease_seconds: int,
     pipeline: PaperTradingPipeline,
+    session: TradingSessionState | None = None,
 ):
     normalized = event_kind.strip().lower()
     common = dict(
@@ -97,7 +104,7 @@ def _run_for_event_kind(
         pipeline=pipeline,
     )
     if normalized == "earnings":
-        return run_approved_tracked_paper_once(**common)
+        return run_approved_tracked_paper_once(**common, session=session)
     if normalized == "market_open":
         return run_approved_market_open_paper_once(**common)
     raise ValueError(f"approved PAPER event kind is not executable: {event_kind}")
@@ -118,7 +125,8 @@ def run_forever() -> None:
     releases = SupabaseReleaseRepository.from_env()
     trading_tasks = SupabaseTradingTaskRepository.from_env()
     paper_runs = SupabasePaperTradeRepository.from_env()
-    resolver = EtoroInstrumentResolver(EtoroMarketDataProvider.from_env())
+    market_data = EtoroMarketDataProvider.from_env()
+    resolver = EtoroInstrumentResolver(market_data)
 
     while True:
         try:
@@ -187,12 +195,21 @@ def run_forever() -> None:
                             continue
 
                     etoro_broker: EtoroDemoBroker | None = None
+                    session: TradingSessionState | None = None
                     if broker_mode == "etoro_demo":
                         etoro_broker = _etoro_demo_broker_for_event(
                             event,
                             amount_cap_usd=float(etoro_amount_cap),
                         )
                         broker = etoro_broker
+                        if event_kind == "earnings":
+                            session = read_etoro_session_state(
+                                market_data,
+                                instrument_id=etoro_broker.instrument_id,
+                                timeout_seconds=ETORO_SESSION_TIMEOUT_SECONDS,
+                                max_age_seconds=ETORO_SESSION_MAX_AGE_SECONDS,
+                                allow_extended_hours=False,
+                            )
                     else:
                         broker = PaperBroker()
 
@@ -243,6 +260,7 @@ def run_forever() -> None:
                             portfolio=portfolio,
                             lease_seconds=lease_seconds,
                             pipeline=PaperTradingPipeline(broker=broker),
+                            session=session,
                         )
                         print(
                             f"approved-paper kind={event.kind} broker={broker_mode} "
