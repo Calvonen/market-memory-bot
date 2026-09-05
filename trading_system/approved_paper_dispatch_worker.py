@@ -231,6 +231,15 @@ def run_forever() -> None:
                             amount_cap_usd=float(etoro_amount_cap),
                         )
                         broker = etoro_broker
+                        if event_kind == "earnings":
+                            session_reader = partial(
+                                read_etoro_session_state,
+                                market_data,
+                                instrument_id=etoro_broker.instrument_id,
+                                timeout_seconds=ETORO_SESSION_TIMEOUT_SECONDS,
+                                max_age_seconds=ETORO_SESSION_MAX_AGE_SECONDS,
+                                allow_extended_hours=False,
+                            )
                     else:
                         broker = PaperBroker()
 
