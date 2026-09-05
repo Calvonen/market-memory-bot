@@ -322,6 +322,8 @@ def build_tracked_event_price_confirmation(
         if previous_start == start:
             raise ValueError("tracked event has ambiguous confirmation-window 1m reactions")
         previous_start = start
+
+    for reaction in later:
         canonical_return, canonical_direction = _validated_confirmation_reaction(
             event=event,
             reaction=reaction,
