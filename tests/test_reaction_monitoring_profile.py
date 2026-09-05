@@ -37,6 +37,13 @@ class ReactionMonitoringProfileTests(unittest.TestCase):
                 event_at=self.event_at,
                 observed_at=self.event_at + timedelta(minutes=30),
             ),
+            1,
+        )
+        self.assertEqual(
+            profile.interval_for(
+                event_at=self.event_at,
+                observed_at=self.event_at + timedelta(minutes=30, seconds=1),
+            ),
             5,
         )
         self.assertEqual(
@@ -50,6 +57,13 @@ class ReactionMonitoringProfileTests(unittest.TestCase):
             profile.interval_for(
                 event_at=self.event_at,
                 observed_at=self.event_at + timedelta(minutes=150),
+            ),
+            5,
+        )
+        self.assertEqual(
+            profile.interval_for(
+                event_at=self.event_at,
+                observed_at=self.event_at + timedelta(minutes=150, seconds=1),
             ),
             15,
         )
@@ -74,6 +88,13 @@ class ReactionMonitoringProfileTests(unittest.TestCase):
             profile.interval_for(
                 event_at=self.event_at,
                 observed_at=self.event_at + timedelta(minutes=60),
+            ),
+            1,
+        )
+        self.assertEqual(
+            profile.interval_for(
+                event_at=self.event_at,
+                observed_at=self.event_at + timedelta(minutes=60, seconds=1),
             ),
             5,
         )
@@ -109,7 +130,7 @@ class ReactionMonitoringProfileTests(unittest.TestCase):
                 event_at=event_at,
                 observed_at=observed_at,
             ),
-            15,
+            5,
         )
 
     def test_elapsed_time_is_correct_across_spring_dst_forward_and_does_not_switch_stage_early(
