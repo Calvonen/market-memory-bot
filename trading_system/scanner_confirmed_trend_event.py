@@ -6,25 +6,46 @@ from trading_system.market_event import MarketEvent
 from trading_system.registered_market_event_monitor import RegisteredMarketEventMonitor
 from trading_system.scanner_market_event_ingress import register_scanner_market_event
 from trading_system.tracked_instrument_etoro import TrackedEtoroInstrument
-from trading_system.trend_monitoring_contract import TrendState, TrendTransition
+from trading_system.trend_monitoring_contract import TrendState
+from trading_system.trend_monitoring_runtime import TrendRuntimeResult
 
 
 def register_confirmed_scanner_trend_event(
     monitor: RegisteredMarketEventMonitor,
     tracked: TrackedEtoroInstrument,
-    transition: TrendTransition,
+    result: TrendRuntimeResult,
 ) -> MarketEvent | None:
     """Promote only a confirmed canonical bullish/bearish trend change to scanner ingress.
 
-    Confirmation remains owned by ``apply_trend_confirmation`` in the canonical
-    Trend monitoring contract. This adapter deliberately does not inspect Market
-    Memory similarity scores or invent a separate scanner threshold.
+    The enclosing Trend runtime result binds the transition to the canonical
+    tracked/candle identity that produced it. Identity is validated against the
+    already-resolved tracked eToro instrument before any event can be registered.
+    Confirmation remains owned by the canonical Trend monitoring contract.
 
     A pending observation, duplicate candle, neutral transition, or otherwise
     unchanged Trend state produces no market event. The resulting scanner event
     remains metadata only; Strategy, Risk, trading-task creation and broker
     execution stay downstream of the canonical market-event workflow.
     """
+    candle = result.candle
+    expected_identity = (
+        tracked.tracked_instrument_id,
+        tracked.instrument,
+        tracked.market,
+        tracked.etoro_instrument_id,
+    )
+    runtime_identity = (
+        result.tracked_instrument_id,
+        candle.instrument,
+        candle.market,
+        candle.etoro_instrument_id,
+    )
+    if candle.tracked_instrument_id != result.tracked_instrument_id:
+        raise RuntimeError("Trend runtime result tracked identity is inconsistent")
+    if runtime_identity != expected_identity:
+        raise RuntimeError("Trend runtime result does not match tracked instrument identity")
+
+    transition = result.transition
     if not transition.changed:
         return None
     if transition.state not in {TrendState.BULLISH, TrendState.BEARISH}:
