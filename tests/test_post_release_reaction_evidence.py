@@ -96,6 +96,21 @@ class PostReleaseReactionEvidenceTests(unittest.TestCase):
                 reactions=(wrong_1m,),
             )
 
+    def test_observation_after_candle_completion_fails_closed(self) -> None:
+        boundary_5m = replace(
+            _reaction(
+                interval_minutes=5,
+                candle_start=ANCHOR + timedelta(minutes=145),
+            ),
+            observed_at=ANCHOR + timedelta(minutes=151),
+        )
+
+        with self.assertRaisesRegex(ValueError, "observation time must equal candle completion"):
+            canonical_post_release_reaction_evidence(
+                event=_event(),
+                reactions=(boundary_5m,),
+            )
+
     def test_inconsistent_persisted_return_fails_closed(self) -> None:
         first_5m = replace(
             _reaction(
