@@ -17,6 +17,10 @@ class _ExtendedBroker(_Broker):
     supports_extended_hours_orders = True
 
 
+class _WrapperWithoutCapability:
+    pass
+
+
 class SessionExecutionGateTests(unittest.TestCase):
     def test_regular_session_does_not_require_extended_order_capability(self) -> None:
         decision = evaluate_session_execution(
@@ -44,6 +48,14 @@ class SessionExecutionGateTests(unittest.TestCase):
         supported = evaluate_session_execution(session=session, broker=_ExtendedBroker())
         self.assertTrue(supported.allowed)
         self.assertEqual(supported.reason, "extended_hours")
+
+    def test_missing_capability_attribute_fails_closed_instead_of_raising(self) -> None:
+        decision = evaluate_session_execution(
+            session=TradingSessionState(False, True, True, True),
+            broker=_WrapperWithoutCapability(),
+        )
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "extended_hours_order_unsupported")
 
 
 if __name__ == "__main__":
