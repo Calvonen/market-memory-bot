@@ -58,11 +58,13 @@ class PaperTradingPipeline:
         broker: PaperBroker | None = None,
         journal: DecisionJournal | None = None,
         allow_fractional_sizing: bool | None = None,
+        uses_extended_hours: bool = False,
     ) -> None:
         self.strategy_engine = strategy_engine or StrategyEngine()
         self.risk_engine = risk_engine or RiskEngine()
         self.broker = broker or PaperBroker()
         self.journal = journal or InMemoryDecisionJournal()
+        self.uses_extended_hours = bool(uses_extended_hours)
         broker_supports_fractional = bool(
             getattr(self.broker, "supports_fractional_sizing", False)
             or self.broker.__class__.__name__ == "EtoroDemoBroker"
@@ -100,6 +102,7 @@ class PaperTradingPipeline:
             portfolio,
             requested_mode=TradingMode.PAPER,
             allow_fractional_sizing=self.allow_fractional_sizing,
+            uses_extended_hours=self.uses_extended_hours,
         )
         proposal = replace(proposal, strategy_decision=strategy)
         self.journal.record_proposal(proposal)

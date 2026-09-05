@@ -77,6 +77,20 @@ class StrategyPipelineTests(unittest.TestCase):
         self.assertEqual(len(journal.orders), 1)
         self.assertEqual(journal.proposals[0].candidate.strategy_decision_id, journal.strategies[0].decision_id)
 
+    def test_extended_hours_context_reaches_risk_engine_and_fails_closed(self) -> None:
+        journal = InMemoryDecisionJournal()
+        pipeline = PaperTradingPipeline(
+            journal=journal,
+            uses_extended_hours=True,
+        )
+
+        result = pipeline.run(self.short_inputs, self.levels, self.portfolio)
+
+        self.assertEqual(result.strategy.direction, Direction.SHORT)
+        self.assertIn("extended_hours_risk_policy_missing", result.proposal.risk.reasons)
+        self.assertIsNone(result.order)
+        self.assertEqual(len(journal.orders), 0)
+
     def test_no_trade_is_logged_but_never_sent_to_broker(self) -> None:
         weak_inputs = StrategyInputs(
             instrument="HAS.L",
