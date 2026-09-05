@@ -323,7 +323,7 @@ class TrackedEventPaperBridgeTests(unittest.TestCase):
                 resolver=FakeResolver(),
                 trading_task=trading_task(),
             )
-        self.assertEqual(result.status, "waiting_confirmation")
+        self.assertEqual(result.status, "observing_post_release")
         run_paper.assert_not_called()
 
     def test_directional_reaction_waits_until_observation_window_is_complete(self) -> None:
@@ -339,7 +339,7 @@ class TrackedEventPaperBridgeTests(unittest.TestCase):
                 resolver=FakeResolver(),
                 trading_task=trading_task(),
             )
-        self.assertEqual(result.status, "waiting_confirmation")
+        self.assertEqual(result.status, "observing_post_release")
         self.assertIn("observing first 30 minutes", result.message)
         run_paper.assert_not_called()
 
@@ -496,7 +496,7 @@ class TrackedEventPaperBridgeTests(unittest.TestCase):
                 resolver=FakeResolver(),
                 trading_task=trading_task(),
             )
-        self.assertEqual(result.status, "waiting_confirmation")
+        self.assertEqual(result.status, "observing_post_release")
         run_paper.assert_not_called()
 
 
