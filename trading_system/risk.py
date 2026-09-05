@@ -30,6 +30,9 @@ class RiskConfig:
     kill_switch: bool = False
     live_trading_enabled: bool = False
     max_position_value_usd: float | None = None
+    extended_hours_max_spread_pct: float | None = None
+    extended_hours_max_volatility_pct: float | None = None
+    extended_hours_position_size_multiplier: float | None = None
 
 
 def _decimal(value: float) -> Decimal:
@@ -45,6 +48,30 @@ class RiskEngine:
         if cap is not None and (not math.isfinite(float(cap)) or cap <= 0):
             raise ValueError("max_position_value_usd must be finite and positive")
 
+        extended_spread = self.config.extended_hours_max_spread_pct
+        if extended_spread is not None:
+            if not math.isfinite(float(extended_spread)) or extended_spread <= 0:
+                raise ValueError("extended_hours_max_spread_pct must be finite and positive")
+            if extended_spread > self.config.max_spread_pct:
+                raise ValueError("extended_hours_max_spread_pct must not exceed max_spread_pct")
+
+        extended_volatility = self.config.extended_hours_max_volatility_pct
+        if extended_volatility is not None:
+            if not math.isfinite(float(extended_volatility)) or extended_volatility <= 0:
+                raise ValueError("extended_hours_max_volatility_pct must be finite and positive")
+            if extended_volatility > self.config.max_volatility_pct:
+                raise ValueError(
+                    "extended_hours_max_volatility_pct must not exceed max_volatility_pct"
+                )
+
+        extended_size = self.config.extended_hours_position_size_multiplier
+        if extended_size is not None and (
+            not math.isfinite(float(extended_size)) or extended_size <= 0 or extended_size > 1
+        ):
+            raise ValueError(
+                "extended_hours_position_size_multiplier must be finite and in (0, 1]"
+            )
+
     def evaluate(
         self,
         candidate: TradeCandidate,
@@ -53,6 +80,7 @@ class RiskEngine:
         requested_mode: TradingMode = TradingMode.PAPER,
         now: datetime | None = None,
         allow_fractional_sizing: bool = False,
+        uses_extended_hours: bool = False,
     ) -> TradeProposal:
         decision = self._evaluate(
             candidate=candidate,
@@ -60,6 +88,7 @@ class RiskEngine:
             requested_mode=requested_mode,
             now=now,
             allow_fractional_sizing=allow_fractional_sizing,
+            uses_extended_hours=uses_extended_hours,
         )
         return TradeProposal(candidate=candidate, risk=decision, mode=requested_mode)
 
@@ -70,15 +99,37 @@ class RiskEngine:
         requested_mode: TradingMode,
         now: datetime | None,
         allow_fractional_sizing: bool = False,
+        uses_extended_hours: bool = False,
     ) -> RiskDecision:
         reasons: list[str] = []
         current_time = now or datetime.now(UTC)
 
-        max_risk_amount = max(portfolio.equity, 0.0) * (self.config.max_risk_per_trade_pct / 100.0)
-        equity_position_limit = max(portfolio.equity, 0.0) * (self.config.max_position_pct / 100.0)
+        extended_policy = (
+            self.config.extended_hours_max_spread_pct,
+            self.config.extended_hours_max_volatility_pct,
+            self.config.extended_hours_position_size_multiplier,
+        )
+        extended_policy_ready = all(value is not None for value in extended_policy)
+        if uses_extended_hours and not extended_policy_ready:
+            reasons.append("extended_hours_risk_policy_missing")
+
+        sizing_multiplier = (
+            float(self.config.extended_hours_position_size_multiplier)
+            if uses_extended_hours and extended_policy_ready
+            else 1.0
+        )
+        max_risk_amount = (
+            max(portfolio.equity, 0.0)
+            * (self.config.max_risk_per_trade_pct / 100.0)
+            * sizing_multiplier
+        )
+        equity_position_limit = max(portfolio.equity, 0.0) * (
+            self.config.max_position_pct / 100.0
+        )
         max_position_value = min(equity_position_limit, max(portfolio.cash, 0.0))
         if self.config.max_position_value_usd is not None:
             max_position_value = min(max_position_value, self.config.max_position_value_usd)
+        max_position_value *= sizing_multiplier
 
         if candidate.direction is Direction.NO_TRADE:
             return RiskDecision(
@@ -120,10 +171,23 @@ class RiskEngine:
             reasons.append("missing_spread_data")
         elif portfolio.spread_pct > self.config.max_spread_pct:
             reasons.append("spread_too_wide")
+        elif (
+            uses_extended_hours
+            and extended_policy_ready
+            and portfolio.spread_pct > float(self.config.extended_hours_max_spread_pct)
+        ):
+            reasons.append("extended_hours_spread_too_wide")
+
         if portfolio.volatility_pct is None:
             reasons.append("missing_volatility_data")
         elif portfolio.volatility_pct > self.config.max_volatility_pct:
             reasons.append("volatility_too_high")
+        elif (
+            uses_extended_hours
+            and extended_policy_ready
+            and portfolio.volatility_pct > float(self.config.extended_hours_max_volatility_pct)
+        ):
+            reasons.append("extended_hours_volatility_too_high")
 
         if portfolio.last_loss_at is not None:
             cooldown_until = portfolio.last_loss_at + timedelta(minutes=self.config.cooldown_after_loss_minutes)
