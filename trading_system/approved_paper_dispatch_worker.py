@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+from functools import partial
+from typing import Callable
 from uuid import uuid4
 
 from trading_system.approved_paper_etoro_session import read_etoro_session_state
@@ -88,6 +90,7 @@ def _run_for_event_kind(
     lease_seconds: int,
     pipeline: PaperTradingPipeline,
     session: TradingSessionState | None = None,
+    session_reader: Callable[[], TradingSessionState] | None = None,
 ):
     normalized = event_kind.strip().lower()
     common = dict(
@@ -104,7 +107,11 @@ def _run_for_event_kind(
         pipeline=pipeline,
     )
     if normalized == "earnings":
-        return run_approved_tracked_paper_once(**common, session=session)
+        return run_approved_tracked_paper_once(
+            **common,
+            session=session,
+            session_reader=session_reader,
+        )
     if normalized == "market_open":
         return run_approved_market_open_paper_once(**common)
     raise ValueError(f"approved PAPER event kind is not executable: {event_kind}")
@@ -195,7 +202,7 @@ def run_forever() -> None:
                             continue
 
                     etoro_broker: EtoroDemoBroker | None = None
-                    session: TradingSessionState | None = None
+                    session_reader = None
                     if broker_mode == "etoro_demo":
                         etoro_broker = _etoro_demo_broker_for_event(
                             event,
@@ -203,7 +210,8 @@ def run_forever() -> None:
                         )
                         broker = etoro_broker
                         if event_kind == "earnings":
-                            session = read_etoro_session_state(
+                            session_reader = partial(
+                                read_etoro_session_state,
                                 market_data,
                                 instrument_id=etoro_broker.instrument_id,
                                 timeout_seconds=ETORO_SESSION_TIMEOUT_SECONDS,
@@ -260,7 +268,7 @@ def run_forever() -> None:
                             portfolio=portfolio,
                             lease_seconds=lease_seconds,
                             pipeline=PaperTradingPipeline(broker=broker),
-                            session=session,
+                            session_reader=session_reader,
                         )
                         print(
                             f"approved-paper kind={event.kind} broker={broker_mode} "

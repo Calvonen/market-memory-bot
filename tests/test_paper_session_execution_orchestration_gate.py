@@ -32,6 +32,48 @@ class RecordingBroker:
 
 
 class PaperSessionExecutionOrchestrationGateTests(unittest.TestCase):
+    def test_session_reader_runs_at_broker_attempt_boundary(self) -> None:
+        broker = RecordingBroker()
+        calls: list[str] = []
+        guarded = _LeaseGuardedBroker(
+            broker,
+            lambda *_args: calls.append("begin") or {"can_execute": True},
+            lambda *_args: None,
+            session_reader=lambda: calls.append("session")
+            or TradingSessionState(True, False, False, True),
+        )
+
+        with (
+            patch(
+                "trading_system.tracked_event_paper_orchestration._strategy_payload",
+                return_value={"strategy": "audit"},
+            ),
+            patch(
+                "trading_system.tracked_event_paper_orchestration._risk_payload",
+                return_value={"risk": "audit"},
+            ),
+        ):
+            guarded.execute(SimpleNamespace())
+
+        self.assertEqual(calls, ["session", "begin"])
+        self.assertEqual(broker.calls, 1)
+
+    def test_session_reader_failure_blocks_before_broker_attempt(self) -> None:
+        broker = RecordingBroker()
+        begins: list[object] = []
+        guarded = _LeaseGuardedBroker(
+            broker,
+            lambda *args: begins.append(args) or {"can_execute": True},
+            lambda *_args: None,
+            session_reader=lambda: (_ for _ in ()).throw(RuntimeError("stale evidence")),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "stale evidence"):
+            guarded.execute(SimpleNamespace())
+
+        self.assertEqual(begins, [])
+        self.assertEqual(broker.calls, 0)
+
     def test_unobservable_session_blocks_before_broker_attempt(self) -> None:
         broker = RecordingBroker()
         begins: list[object] = []
