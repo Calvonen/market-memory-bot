@@ -10,6 +10,7 @@ from trading_system.brokers.etoro_demo import EtoroDemoBroker
 from trading_system.brokers.paper import PaperBroker
 from trading_system.etoro_instrument_resolver import EtoroInstrumentResolver
 from trading_system.etoro_market_data import EtoroMarketDataProvider
+from trading_system.etoro_paper_session_preflight import verify_etoro_demo_session_execution
 from trading_system.models import PortfolioState
 from trading_system.paper_trade_repository import SupabasePaperTradeRepository
 from trading_system.pipeline import PaperTradingPipeline
@@ -323,6 +324,14 @@ def _etoro_demo_portfolio(etoro_broker: EtoroDemoBroker) -> PortfolioState:
     )
 
 
+def _etoro_demo_execution_preflight(
+    etoro_broker: EtoroDemoBroker,
+    market_data: EtoroMarketDataProvider,
+) -> None:
+    etoro_broker.verify_demo_access()
+    verify_etoro_demo_session_execution(market_data, etoro_broker)
+
+
 class _PortfolioLeasePaperRuns:
     """Atomically preflight, renew account authority and reserve the broker attempt."""
 
@@ -433,7 +442,8 @@ def run_forever() -> None:
     releases = SupabaseReleaseRepository.from_env()
     trading_tasks = SupabaseTradingTaskRepository.from_env()
     paper_runs = SupabasePaperTradeRepository.from_env()
-    resolver = EtoroInstrumentResolver(EtoroMarketDataProvider.from_env())
+    market_data = EtoroMarketDataProvider.from_env()
+    resolver = EtoroInstrumentResolver(market_data)
 
     while True:
         try:
@@ -482,7 +492,16 @@ def run_forever() -> None:
                             paper_runs,
                             portfolio_token=portfolio_token,
                             portfolio_lease_seconds=portfolio_lease_seconds,
-                            preflight=(etoro_broker.verify_demo_access if etoro_broker is not None else None),
+                            preflight=(
+                                (
+                                    lambda broker=etoro_broker: _etoro_demo_execution_preflight(
+                                        broker,
+                                        market_data,
+                                    )
+                                )
+                                if etoro_broker is not None
+                                else None
+                            ),
                             etoro_broker=etoro_broker,
                         )
                         result = run_approved_tracked_paper_once(
