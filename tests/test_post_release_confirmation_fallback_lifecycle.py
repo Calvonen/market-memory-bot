@@ -34,7 +34,7 @@ class PostReleaseConfirmationFallbackLifecycleTests(unittest.TestCase):
 
     def test_post_30m_reaction_outside_horizon_keeps_canonical_waiting_confirmation(self) -> None:
         later = _reaction(
-            interval_minutes=5,
+            interval_minutes=15,
             candle_start=ANCHOR + timedelta(hours=9),
             close_price=Decimal("102"),
             direction="positive",
