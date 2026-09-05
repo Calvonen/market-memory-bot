@@ -16,6 +16,7 @@ from trading_system.ai_event_analyzer import (
     analysis_from_record,
     build_default_event_analyzer,
 )
+from trading_system.earnings_paper_lifecycle import is_terminal_earnings_paper_status
 from trading_system.models import EventExpectation, PortfolioState
 from trading_system.paper_trade_repository import SupabasePaperTradeRepository
 from trading_system.post_release_paper import (
@@ -233,18 +234,28 @@ def build_paper_portfolio_from_env() -> PortfolioState:
     )
 
 
+def _canonical_terminal_status(value: object) -> str | None:
+    if value is None:
+        return None
+    status = str(value)
+    if not status:
+        raise ValueError("paper lifecycle status must not be blank")
+    if status != status.strip():
+        raise ValueError("paper lifecycle status must not contain surrounding whitespace")
+    if is_terminal_earnings_paper_status(status):
+        return status
+    return None
+
+
 def _terminal_paper_status(
     persistence: SupabasePaperTradeRepository | None, event_id: str
 ) -> str | None:
     if persistence is None:
         return None
     latest = persistence.get_latest_for_event(event_id)
-    if latest is None or latest.get("status") not in {
-        "paper_executed",
-        "expired_no_trade",
-    }:
+    if latest is None:
         return None
-    return str(latest["status"])
+    return _canonical_terminal_status(latest.get("status"))
 
 
 def hays_confirmation_deadline(
@@ -299,11 +310,10 @@ def run_paper_confirmation_loop(
     latest = (
         persistence.get_latest_for_event(event_id) if persistence is not None else None
     )
-    if latest is not None and latest.get("status") in {
-        "paper_executed",
-        "expired_no_trade",
-    }:
-        terminal_status = str(latest["status"])
+    terminal_status = (
+        _canonical_terminal_status(latest.get("status")) if latest is not None else None
+    )
+    if terminal_status is not None:
         message = (
             f"terminal paper state already recorded for {event_id}; skipping re-run"
         )
@@ -390,13 +400,15 @@ def run_paper_confirmation_loop(
                 lease_seconds=lease_seconds,
                 claim_token=claim_token,
             )
-            terminal_claim_status = owner.get("terminal_status")
-            if terminal_claim_status in {"paper_executed", "expired_no_trade"}:
+            terminal_claim_status = _canonical_terminal_status(
+                owner.get("terminal_status")
+            )
+            if terminal_claim_status is not None:
                 message = f"terminal paper state already recorded for {event_id}"
                 print(
                     f"{event_id}: {terminal_claim_status} ({message})", flush=True
                 )
-                return PostReleasePaperResult(str(terminal_claim_status), message)
+                return PostReleasePaperResult(terminal_claim_status, message)
             owner_token = owner.get("claim_token")
             if str(owner.get("analysis_id")) != analysis_id or str(
                 owner_token
@@ -473,7 +485,7 @@ def run_paper_confirmation_loop(
                     confirmation_deadline_at=deadline,
                 )
         print(f"{event_id}: {result.status} ({result.message})", flush=True)
-        if once or result.status in {"paper_executed", "expired_no_trade"}:
+        if once or is_terminal_earnings_paper_status(result.status):
             return result
         sleeper(max(60, interval_seconds))
 
