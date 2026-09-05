@@ -231,7 +231,7 @@ class PostReleaseConfirmationFallbackTests(unittest.TestCase):
         self.assertEqual(result.status, "waiting_confirmation")
         run_paper.assert_not_called()
 
-    def test_reaction_after_persisted_monitor_horizon_cannot_confirm(self) -> None:
+    def test_reaction_after_persisted_monitor_horizon_cannot_confirm_and_expires(self) -> None:
         later = _reaction(
             interval_minutes=5,
             candle_start=ANCHOR + timedelta(minutes=30),
@@ -247,7 +247,7 @@ class PostReleaseConfirmationFallbackTests(unittest.TestCase):
                 tracked_event=tracked_event,
             )
 
-        self.assertEqual(result.status, "waiting_confirmation")
+        self.assertEqual(result.status, "expired_no_trade")
         run_paper.assert_not_called()
 
     def test_legacy_event_without_snapshot_cannot_gain_post_30m_authority(self) -> None:

@@ -9,6 +9,9 @@ from typing import Iterable
 import pandas as pd
 
 from trading_system.ai_event_analyzer import EventAnalysisPayload
+from trading_system.earnings_confirmation_horizon import (
+    evaluate_earnings_confirmation_horizon,
+)
 from trading_system.etoro_instrument_resolver import (
     EtoroInstrumentResolver,
     InstrumentResolutionRequest,
@@ -529,6 +532,15 @@ def run_post_release_paper_from_tracked_event(
             reactions=reaction_rows,
         )
         if later_confirmation is None:
+            horizon = evaluate_earnings_confirmation_horizon(
+                event=event,
+                reactions=reaction_rows,
+            )
+            if horizon.complete:
+                return PostReleasePaperResult(
+                    "expired_no_trade",
+                    "earnings confirmation horizon completed without a qualifying price reaction",
+                )
             return PostReleasePaperResult(
                 "waiting_confirmation",
                 f"tracked price reaction is flat: {float(confirmation.return_pct):+.2f}%",
