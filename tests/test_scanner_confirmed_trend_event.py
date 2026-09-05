@@ -111,6 +111,19 @@ class ScannerConfirmedTrendEventTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "missing candle identity"):
             register_confirmed_scanner_trend_event(_monitor(), TRACKED, transition)
 
+    def test_changed_direction_with_naive_candle_identity_fails_closed(self) -> None:
+        transition = TrendTransition(
+            state=TrendState.BULLISH,
+            pending_candidate=None,
+            pending_count=0,
+            pending_last_candle_at=None,
+            last_processed_candle_at=datetime(2026, 9, 5, 12, 15),
+            changed=True,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "timezone-aware"):
+            register_confirmed_scanner_trend_event(_monitor(), TRACKED, transition)
+
 
 if __name__ == "__main__":
     unittest.main()
