@@ -175,23 +175,16 @@ class AssistantProposalMaterializer:
         if mismatches:
             raise AssistantProposalCanonicalIdentityConflict("; ".join(mismatches))
 
-        approved_via = proposal_approval_via(proposal)
-        fingerprint = draft_fingerprint(normalized)
-        receipt = self.proposals.find_approval(approved_via=approved_via)
-        if receipt is not None:
-            version = self._matching_receipt_version(receipt, event_id, fingerprint)
-            self._ensure_official_source(event_id, payload, proposal)
-            self.proposals.mark_materialized(proposal.id)
-            return AssistantProposalMaterializationResult(
-                proposal.id, tracked_event_id, event_id, version, True
-            )
-
         if current.version != payload.base_expectation_version:
             raise AssistantProposalReviewedVersionConflict(
                 "current expectation version differs from the reviewed proposal base version"
             )
 
-        self._ensure_official_source(event_id, payload, proposal)
+        desired_source, source_version, source_needs_set = self._official_source_for_finalization(
+            event_id, payload
+        )
+        approved_via = proposal_approval_via(proposal)
+        fingerprint = draft_fingerprint(normalized)
         retried = False
         try:
             approved = self.approvals.approve_assistant_proposal(
@@ -212,15 +205,27 @@ class AssistantProposalMaterializer:
                 draft_fingerprint=fingerprint,
                 approved_by=proposal.reviewed_by or "",
                 approved_via=approved_via,
+                official_source=desired_source,
+                official_source_expected_version=source_version,
+                official_source_needs_set=source_needs_set,
+                official_source_actor=_source_audit_actor(proposal),
             )
             version = int(approved.version)
-        except ExpectationVersionConflict:
+        except OfficialReleaseSourceVersionConflict as exc:
+            raise AssistantProposalOfficialSourceConflict(
+                "official release source changed during assistant finalization"
+            ) from exc
+        except ExpectationVersionConflict as exc:
             receipt = self.proposals.find_approval(approved_via=approved_via)
             if receipt is None:
-                raise
+                raise AssistantProposalReviewedVersionConflict(str(exc)) from exc
             version = self._matching_receipt_version(receipt, event_id, fingerprint)
             retried = True
 
+        # The atomic DB finalizer already moves the proposal to materialized.
+        # Keep this repository CAS as an idempotent postcondition check so a
+        # malformed/non-Supabase test double cannot silently violate the state
+        # contract; production sees the already-materialized row and returns.
         self.proposals.mark_materialized(proposal.id)
         return AssistantProposalMaterializationResult(
             proposal.id, tracked_event_id, event_id, version, retried
@@ -246,7 +251,9 @@ class AssistantProposalMaterializer:
             proposal.id, tracked_event_id, event_id, version, True
         )
 
-    def _ensure_official_source(self, event_id: str, payload: Any, proposal: Any) -> None:
+    def _official_source_for_finalization(
+        self, event_id: str, payload: Any
+    ) -> tuple[OfficialReleaseSource, int, bool]:
         desired = OfficialReleaseSource(
             event_id=event_id,
             source_kind=payload.official_source.source_kind,
@@ -254,26 +261,13 @@ class AssistantProposalMaterializer:
             source_title=payload.official_source.source_title,
         )
         state = self.official_sources.get_state(event_id)
-        if state.source is not None:
-            if _same_source(state.source, desired):
-                return
+        if state.source is None:
+            return desired, state.version, True
+        if not _same_source(state.source, desired):
             raise AssistantProposalOfficialSourceConflict(
                 "event already has a different approved official release source"
             )
-        try:
-            self.official_sources.set_for_assistant_proposal(
-                proposal.id,
-                desired,
-                expected_version=state.version,
-                actor=_source_audit_actor(proposal),
-            )
-        except OfficialReleaseSourceVersionConflict:
-            latest = self.official_sources.get_state(event_id)
-            if latest.source is not None and _same_source(latest.source, desired):
-                return
-            raise AssistantProposalOfficialSourceConflict(
-                "official release source changed concurrently"
-            )
+        return desired, state.version, False
 
     @staticmethod
     def _matching_receipt_version(
