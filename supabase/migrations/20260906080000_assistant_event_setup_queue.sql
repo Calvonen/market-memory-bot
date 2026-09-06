@@ -123,29 +123,104 @@ begin
      and jsonb_typeof(req.strategy_payload->'consensus') <> 'object' then
     raise exception 'assistant_setup_consensus_must_be_object' using errcode = '22023';
   end if;
+  if req.strategy_payload ? 'consensus'
+     and exists (
+       select 1
+       from jsonb_each(req.strategy_payload->'consensus') as item
+       where jsonb_typeof(item.value) not in ('string', 'number', 'null')
+     ) then
+    raise exception 'assistant_setup_consensus_value_invalid' using errcode = '22023';
+  end if;
+
   if req.strategy_payload ? 'triggers'
      and jsonb_typeof(req.strategy_payload->'triggers') <> 'object' then
     raise exception 'assistant_setup_triggers_must_be_object' using errcode = '22023';
   end if;
+  if req.strategy_payload ? 'triggers'
+     and exists (
+       select 1
+       from jsonb_each(req.strategy_payload->'triggers') as item
+       where jsonb_typeof(item.value) not in ('string', 'number')
+     ) then
+    raise exception 'assistant_setup_trigger_value_invalid' using errcode = '22023';
+  end if;
+
   if req.strategy_payload ? 'important_kpis'
      and jsonb_typeof(req.strategy_payload->'important_kpis') <> 'array' then
     raise exception 'assistant_setup_important_kpis_must_be_array' using errcode = '22023';
   end if;
+  if req.strategy_payload ? 'important_kpis'
+     and exists (
+       select 1
+       from jsonb_array_elements(req.strategy_payload->'important_kpis') as item
+       where jsonb_typeof(item) <> 'string'
+     ) then
+    raise exception 'assistant_setup_important_kpis_value_invalid' using errcode = '22023';
+  end if;
+
   if req.strategy_payload ? 'bull_case'
      and jsonb_typeof(req.strategy_payload->'bull_case') <> 'array' then
     raise exception 'assistant_setup_bull_case_must_be_array' using errcode = '22023';
   end if;
+  if req.strategy_payload ? 'bull_case'
+     and exists (
+       select 1
+       from jsonb_array_elements(req.strategy_payload->'bull_case') as item
+       where jsonb_typeof(item) <> 'string'
+     ) then
+    raise exception 'assistant_setup_bull_case_value_invalid' using errcode = '22023';
+  end if;
+
   if req.strategy_payload ? 'base_case'
      and jsonb_typeof(req.strategy_payload->'base_case') <> 'array' then
     raise exception 'assistant_setup_base_case_must_be_array' using errcode = '22023';
   end if;
+  if req.strategy_payload ? 'base_case'
+     and exists (
+       select 1
+       from jsonb_array_elements(req.strategy_payload->'base_case') as item
+       where jsonb_typeof(item) <> 'string'
+     ) then
+    raise exception 'assistant_setup_base_case_value_invalid' using errcode = '22023';
+  end if;
+
   if req.strategy_payload ? 'bear_case'
      and jsonb_typeof(req.strategy_payload->'bear_case') <> 'array' then
     raise exception 'assistant_setup_bear_case_must_be_array' using errcode = '22023';
   end if;
+  if req.strategy_payload ? 'bear_case'
+     and exists (
+       select 1
+       from jsonb_array_elements(req.strategy_payload->'bear_case') as item
+       where jsonb_typeof(item) <> 'string'
+     ) then
+    raise exception 'assistant_setup_bear_case_value_invalid' using errcode = '22023';
+  end if;
+
   if req.strategy_payload ? 'invalidation_conditions'
      and jsonb_typeof(req.strategy_payload->'invalidation_conditions') <> 'array' then
     raise exception 'assistant_setup_invalidation_conditions_must_be_array' using errcode = '22023';
+  end if;
+  if req.strategy_payload ? 'invalidation_conditions'
+     and exists (
+       select 1
+       from jsonb_array_elements(req.strategy_payload->'invalidation_conditions') as item
+       where jsonb_typeof(item) <> 'string'
+     ) then
+    raise exception 'assistant_setup_invalidation_conditions_value_invalid' using errcode = '22023';
+  end if;
+
+  if req.strategy_payload ? 'source_name'
+     and jsonb_typeof(req.strategy_payload->'source_name') not in ('string', 'null') then
+    raise exception 'assistant_setup_source_name_invalid' using errcode = '22023';
+  end if;
+  if req.strategy_payload ? 'source_url'
+     and jsonb_typeof(req.strategy_payload->'source_url') not in ('string', 'null') then
+    raise exception 'assistant_setup_source_url_invalid' using errcode = '22023';
+  end if;
+  if req.strategy_payload ? 'source_as_of'
+     and jsonb_typeof(req.strategy_payload->'source_as_of') not in ('string', 'null') then
+    raise exception 'assistant_setup_source_as_of_invalid' using errcode = '22023';
   end if;
 
   -- Canonical generic tracked-event upsert. request_key is the durable
