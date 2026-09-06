@@ -76,10 +76,19 @@ class AssistantProposalMaterializer:
         self.approvals = approvals
         self.actor = actor
 
-    def materialize(self, proposal_id: str) -> AssistantProposalMaterializationResult:
+    def materialize(
+        self,
+        proposal_id: str,
+        *,
+        expected_review_round: int | None = None,
+    ) -> AssistantProposalMaterializationResult:
         proposal = self.proposals.get(proposal_id)
         if proposal is None:
             raise AssistantProposalMaterializationError("assistant proposal not found")
+        if expected_review_round is not None and proposal.review_round != expected_review_round:
+            raise AssistantProposalReviewedVersionConflict(
+                "assistant_proposal_review_round_conflict: materializer read a different review round"
+            )
 
         is_terminal_retry = proposal.status == "materialized"
         payload = validate_proposal_for_materialization(
@@ -232,10 +241,6 @@ class AssistantProposalMaterializer:
                 raise AssistantProposalReviewedVersionConflict(str(exc)) from exc
             raise
 
-        # The atomic DB finalizer already moves the proposal to materialized.
-        # Keep this repository CAS as an idempotent postcondition check so a
-        # malformed/non-Supabase test double cannot silently violate the state
-        # contract; production sees the already-materialized row and returns.
         self.proposals.mark_materialized(proposal.id)
         return AssistantProposalMaterializationResult(
             proposal.id, tracked_event_id, event_id, version, retried
