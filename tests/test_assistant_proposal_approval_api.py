@@ -20,6 +20,7 @@ from trading_system.assistant_proposal_materializer import AssistantProposalMate
 
 PROPOSAL_ID = "00000000-0000-0000-0000-000000000324"
 EXPECTED_REVIEW_ROUND = 2
+POST_TRANSITION_REVIEW_ROUND = EXPECTED_REVIEW_ROUND + 1
 
 
 class FakeApprovalService:
@@ -36,7 +37,7 @@ class FakeApprovalService:
         return AssistantPreparationApprovalResult(
             proposal_id=proposal_id,
             status="materialized",
-            review_round=expected_review_round,
+            review_round=POST_TRANSITION_REVIEW_ROUND,
             event_id="tracked:event-324",
             tracked_event_id="event-324",
             expectation_version=3,
@@ -48,7 +49,7 @@ class FakeProposals:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, int]] = []
         self.status = "approved_for_materialization"
-        self.review_round = EXPECTED_REVIEW_ROUND
+        self.review_round = POST_TRANSITION_REVIEW_ROUND
         self.error: Exception | None = None
 
     def approve_for_materialization(
@@ -118,7 +119,7 @@ class AssistantProposalApprovalApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertEqual(service.calls, [])
 
-    def test_success_binds_to_displayed_review_round_and_grants_no_trading_authority(self) -> None:
+    def test_success_binds_to_displayed_round_and_returns_post_transition_round(self) -> None:
         client, service, _ = self._client()
         response = client.post(
             f"/api/v1/assistant-proposals/{PROPOSAL_ID}/approve-preparation",
@@ -128,7 +129,7 @@ class AssistantProposalApprovalApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(service.calls, [(PROPOSAL_ID, "marko", EXPECTED_REVIEW_ROUND)])
-        self.assertEqual(payload["review_round"], EXPECTED_REVIEW_ROUND)
+        self.assertEqual(payload["review_round"], POST_TRANSITION_REVIEW_ROUND)
         self.assertIs(payload["trading_authority_granted"], False)
 
     def test_stale_review_round_conflict_is_409(self) -> None:
@@ -174,7 +175,7 @@ class AssistantProposalApprovalApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 409)
 
-    def test_service_passes_expected_round_before_materializing(self) -> None:
+    def test_service_accepts_post_transition_round_and_materializes(self) -> None:
         proposals = FakeProposals()
         materializer = FakeMaterializer()
         service = AssistantProposalApprovalService(proposals=proposals, materializer=materializer)
@@ -190,7 +191,7 @@ class AssistantProposalApprovalApiTests(unittest.TestCase):
             [(PROPOSAL_ID, "marko", EXPECTED_REVIEW_ROUND)],
         )
         self.assertEqual(materializer.calls, [PROPOSAL_ID])
-        self.assertEqual(result.review_round, EXPECTED_REVIEW_ROUND)
+        self.assertEqual(result.review_round, POST_TRANSITION_REVIEW_ROUND)
 
     def test_service_does_not_materialize_when_round_conflicts(self) -> None:
         proposals = FakeProposals()
