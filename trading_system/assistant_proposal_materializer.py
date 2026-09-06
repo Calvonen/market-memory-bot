@@ -134,6 +134,7 @@ class AssistantProposalMaterializer:
             event_write = self.events.register_assistant_proposal_for_tracked_instrument(
                 tracked,
                 proposal_id=proposal.id,
+                expected_review_round=proposal.review_round,
                 expected_base_version=payload.base_expectation_version,
                 company_name=payload.company_name,
                 source="manual",
@@ -146,8 +147,12 @@ class AssistantProposalMaterializer:
                 actor=self.actor,
             )
         except Exception as exc:
-            if "expectation_version_conflict" in str(exc):
-                raise AssistantProposalReviewedVersionConflict(str(exc)) from exc
+            message = str(exc)
+            if (
+                "expectation_version_conflict" in message
+                or "assistant_proposal_review_round_conflict" in message
+            ):
+                raise AssistantProposalReviewedVersionConflict(message) from exc
             raise
 
         tracked_event_id = str(event_write.event_id)
@@ -189,6 +194,7 @@ class AssistantProposalMaterializer:
         try:
             approved = self.approvals.approve_assistant_proposal(
                 proposal_id=proposal.id,
+                expected_review_round=proposal.review_round,
                 event_id=event_id,
                 expected_base_version=payload.base_expectation_version,
                 source_name=normalized["source_name"],
@@ -221,6 +227,10 @@ class AssistantProposalMaterializer:
                 raise AssistantProposalReviewedVersionConflict(str(exc)) from exc
             version = self._matching_receipt_version(receipt, event_id, fingerprint)
             retried = True
+        except Exception as exc:
+            if "assistant_proposal_review_round_conflict" in str(exc):
+                raise AssistantProposalReviewedVersionConflict(str(exc)) from exc
+            raise
 
         # The atomic DB finalizer already moves the proposal to materialized.
         # Keep this repository CAS as an idempotent postcondition check so a
