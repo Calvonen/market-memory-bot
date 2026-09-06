@@ -68,6 +68,43 @@ class AssistantEventProposalStorageMigrationTests(unittest.TestCase):
         self.assertIn("reviewed_by text", self.sql)
         self.assertIn("reviewed_at timestamptz", self.sql)
 
+    def test_insert_cannot_skip_review(self) -> None:
+        self.assertIn("if new.status not in ('draft', 'ready_for_review') then", self.sql)
+        self.assertIn("assistant_proposal_invalid_initial_status", self.sql)
+        self.assertIn("assistant_proposal_review_metadata_not_allowed_on_insert", self.sql)
+
+    def test_content_freezes_when_review_begins(self) -> None:
+        self.assertIn("if old.status <> 'draft' and (", self.sql)
+        for field in (
+            "proposal_key",
+            "payload",
+            "requested_execution_mode",
+            "created_by",
+            "created_at",
+        ):
+            self.assertIn(f"new.{field} is distinct from old.{field}", self.sql)
+        self.assertIn("assistant_proposal_reviewed_content_is_immutable", self.sql)
+
+    def test_status_transitions_are_forward_only(self) -> None:
+        self.assertIn("old.status = 'draft' and new.status = 'ready_for_review'", self.sql)
+        self.assertIn(
+            "old.status = 'ready_for_review' and new.status in ('approved_for_materialization', 'rejected')",
+            self.sql,
+        )
+        self.assertIn(
+            "old.status = 'approved_for_materialization' and new.status = 'materialized'",
+            self.sql,
+        )
+        self.assertIn("assistant_proposal_invalid_status_transition", self.sql)
+
+    def test_review_decision_requires_reviewer_metadata(self) -> None:
+        self.assertIn(
+            "if new.status in ('approved_for_materialization', 'rejected') then",
+            self.sql,
+        )
+        self.assertIn("assistant_proposal_review_metadata_required", self.sql)
+        self.assertIn("assistant_proposal_review_metadata_only_on_review", self.sql)
+
 
 if __name__ == "__main__":
     unittest.main()
