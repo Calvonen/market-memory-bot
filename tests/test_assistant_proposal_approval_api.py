@@ -63,10 +63,12 @@ class FakeProposals:
 
 class FakeMaterializer:
     def __init__(self) -> None:
-        self.calls: list[str] = []
+        self.calls: list[tuple[str, int | None]] = []
 
-    def materialize(self, proposal_id: str) -> AssistantProposalMaterializationResult:
-        self.calls.append(proposal_id)
+    def materialize(
+        self, proposal_id: str, *, expected_review_round: int | None = None
+    ) -> AssistantProposalMaterializationResult:
+        self.calls.append((proposal_id, expected_review_round))
         return AssistantProposalMaterializationResult(
             proposal_id=proposal_id,
             tracked_event_id="event-324",
@@ -175,7 +177,7 @@ class AssistantProposalApprovalApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 409)
 
-    def test_service_accepts_post_transition_round_and_materializes(self) -> None:
+    def test_service_binds_materializer_to_post_transition_round(self) -> None:
         proposals = FakeProposals()
         materializer = FakeMaterializer()
         service = AssistantProposalApprovalService(proposals=proposals, materializer=materializer)
@@ -190,7 +192,10 @@ class AssistantProposalApprovalApiTests(unittest.TestCase):
             proposals.calls,
             [(PROPOSAL_ID, "marko", EXPECTED_REVIEW_ROUND)],
         )
-        self.assertEqual(materializer.calls, [PROPOSAL_ID])
+        self.assertEqual(
+            materializer.calls,
+            [(PROPOSAL_ID, POST_TRANSITION_REVIEW_ROUND)],
+        )
         self.assertEqual(result.review_round, POST_TRANSITION_REVIEW_ROUND)
 
     def test_service_does_not_materialize_when_round_conflicts(self) -> None:
