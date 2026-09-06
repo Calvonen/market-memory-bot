@@ -47,13 +47,19 @@ class FakeReadRepository:
         self.get_calls: list[str] = []
         self.list_result = [_record()]
         self.get_result = _record()
+        self.list_error: Exception | None = None
+        self.get_error: Exception | None = None
 
     def list(self, *, status: str | None = None, limit: int = 50):
         self.list_calls.append((status, limit))
+        if self.list_error is not None:
+            raise self.list_error
         return self.list_result
 
     def get(self, proposal_id: str):
         self.get_calls.append(proposal_id)
+        if self.get_error is not None:
+            raise self.get_error
         return self.get_result
 
 
@@ -130,6 +136,33 @@ class AssistantProposalReadApiTests(unittest.TestCase):
             headers={"X-MarketAI-Key": "read-secret"},
         )
         self.assertEqual(response.status_code, 404)
+
+    def test_malformed_detail_id_is_422_before_repository_call(self) -> None:
+        client, repository, _ = self._client()
+        response = client.get(
+            "/api/v1/assistant-proposals/bad",
+            headers={"X-MarketAI-Key": "read-secret"},
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(repository.get_calls, [])
+
+    def test_list_backend_failure_is_503(self) -> None:
+        client, repository, _ = self._client()
+        repository.list_error = Exception("postgrest unavailable")
+        response = client.get(
+            "/api/v1/assistant-proposals",
+            headers={"X-MarketAI-Key": "read-secret"},
+        )
+        self.assertEqual(response.status_code, 503)
+
+    def test_detail_backend_failure_is_503(self) -> None:
+        client, repository, _ = self._client()
+        repository.get_error = Exception("postgrest unavailable")
+        response = client.get(
+            f"/api/v1/assistant-proposals/{PROPOSAL_ID}",
+            headers={"X-MarketAI-Key": "read-secret"},
+        )
+        self.assertEqual(response.status_code, 503)
 
 
 if __name__ == "__main__":
