@@ -55,7 +55,8 @@ export default function AssistantProposalDetailScreen() {
   const [error, setError] = useState<string | null>(null);
   const [approving, setApproving] = useState(false);
   const [approval, setApproval] = useState<AssistantPreparationApprovalResult | null>(null);
-  const [reviewer, setReviewer] = useState('marko');
+  // Reviewer identity is audit data. Never guess or prefill it with a person name.
+  const [reviewer, setReviewer] = useState('');
 
   const load = useCallback(async () => {
     if (!proposalId) {
@@ -76,6 +77,10 @@ export default function AssistantProposalDetailScreen() {
 
   const strategy = useMemo(
     () => (proposal?.payload.strategy ?? {}) as StrategyView,
+    [proposal],
+  );
+  const exactStrategyPayload = useMemo(
+    () => JSON.stringify(proposal?.payload.strategy ?? {}, null, 2),
     [proposal],
   );
 
@@ -99,6 +104,8 @@ export default function AssistantProposalDetailScreen() {
     && proposal.requested_execution_mode === 'demo'
     && reviewer.trim().length > 0
     && reviewer.trim().length <= 135;
+  const requestedDemo = proposal?.requested_execution_mode === 'demo';
+  const requestedLive = proposal?.requested_execution_mode === 'live';
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
@@ -114,13 +121,25 @@ export default function AssistantProposalDetailScreen() {
           </Text>
 
           <View style={styles.modeRow}>
-            <View style={[styles.modeChip, styles.demoChip]}>
-              <Text style={styles.demoText}>● DEMO</Text>
+            <View style={[styles.modeChip, requestedDemo ? styles.demoChip : styles.inactiveChip]}>
+              <Text style={requestedDemo ? styles.demoText : styles.inactiveText}>
+                {requestedDemo ? '● DEMO' : 'DEMO'}
+              </Text>
             </View>
-            <Pressable style={[styles.modeChip, styles.liveChip]} onPress={showLiveLocked}>
-              <Text style={styles.liveText}>🔒 LIVE</Text>
+            <Pressable
+              style={[styles.modeChip, requestedLive ? styles.liveRequestedChip : styles.liveChip]}
+              onPress={showLiveLocked}
+            >
+              <Text style={requestedLive ? styles.liveRequestedText : styles.liveText}>
+                {requestedLive ? '🔒 LIVE · pyydetty' : '🔒 LIVE'}
+              </Text>
             </Pressable>
           </View>
+          {requestedLive ? (
+            <Text style={styles.lockedNotice}>
+              Proposal pyytää LIVE-tilaa. LIVE on lukittu eikä tätä proposal-ehdotusta voi hyväksyä valmisteluun.
+            </Text>
+          ) : null}
 
           <View style={styles.card}>
             <Text style={styles.cardTitle}>{proposal.payload.title}</Text>
@@ -131,7 +150,6 @@ export default function AssistantProposalDetailScreen() {
 
           <View style={styles.card}>
             <Text style={styles.cardTitle}>Strategia</Text>
-            <Text style={styles.meta}>Post-release confirmation</Text>
             {strategy.summary ? <Text style={styles.bodyText}>{strategy.summary}</Text> : null}
             <DetailList title="Tärkeät KPI:t" items={strategy.important_kpis} />
             <DetailList title="Bull case" items={strategy.bull_case} />
@@ -146,6 +164,10 @@ export default function AssistantProposalDetailScreen() {
               </View>
             ) : null}
             <DetailList title="Invalidointi" items={strategy.invalidation_conditions} />
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Tallennettu strategiapayload kokonaisuudessaan</Text>
+              <Text selectable style={styles.payloadText}>{exactStrategyPayload}</Text>
+            </View>
           </View>
 
           <View style={styles.card}>
@@ -160,6 +182,9 @@ export default function AssistantProposalDetailScreen() {
               onChangeText={setReviewer}
               maxLength={135}
               autoCapitalize="none"
+              autoCorrect={false}
+              placeholder="Kirjoita oma hyväksyjäidentiteettisi"
+              placeholderTextColor="#596476"
               editable={proposal.status !== 'materialized'}
             />
             {proposal.status === 'materialized' ? (
@@ -199,13 +224,19 @@ const styles = StyleSheet.create({
   modeRow: { flexDirection: 'row', gap: 8 },
   modeChip: { borderWidth: 1, borderRadius: 18, paddingHorizontal: 12, paddingVertical: 7 },
   demoChip: { backgroundColor: '#15281f', borderColor: '#28553d' },
+  inactiveChip: { backgroundColor: '#17191d', borderColor: '#30343b' },
   liveChip: { backgroundColor: '#17191d', borderColor: '#30343b' },
+  liveRequestedChip: { backgroundColor: '#2a1d1d', borderColor: '#704040' },
   demoText: { color: '#65c98b', fontSize: 12, fontWeight: '800' },
+  inactiveText: { color: '#727985', fontSize: 12, fontWeight: '800' },
   liveText: { color: '#727985', fontSize: 12, fontWeight: '800' },
+  liveRequestedText: { color: '#e09a9a', fontSize: 12, fontWeight: '800' },
+  lockedNotice: { color: '#e09a9a', fontSize: 12, lineHeight: 18 },
   card: { backgroundColor: '#131821', borderWidth: 1, borderColor: '#202734', borderRadius: 16, padding: 16, gap: 8 },
   cardTitle: { color: '#f4f7fb', fontSize: 17, fontWeight: '800' },
   meta: { color: '#8994a6', fontSize: 12, lineHeight: 18 },
   bodyText: { color: '#c2cad6', fontSize: 13, lineHeight: 19 },
+  payloadText: { color: '#aeb8c7', fontSize: 11, lineHeight: 16, fontFamily: 'monospace' },
   section: { marginTop: 6, gap: 3 },
   sectionTitle: { color: '#72b8db', fontSize: 12, fontWeight: '800', marginBottom: 2 },
   inputLabel: { color: '#687386', fontSize: 11, fontWeight: '800', letterSpacing: 1.1, marginTop: 6 },
