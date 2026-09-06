@@ -176,11 +176,15 @@ class FakeOfficialSources:
     def __init__(self) -> None:
         self.state = OfficialReleaseSourceState(source=None, version=0)
         self.actors: list[str] = []
+        self.proposal_ids: list[str] = []
 
     def get_state(self, event_id: str):
         return self.state
 
-    def set(self, source, *, expected_version: int, actor: str):
+    def set_for_assistant_proposal(
+        self, proposal_id: str, source, *, expected_version: int, actor: str
+    ):
+        self.proposal_ids.append(proposal_id)
         self.actors.append(actor)
         self.state = OfficialReleaseSourceState(
             source=OfficialReleaseSource(
@@ -240,6 +244,7 @@ class AssistantProposalMaterializerTests(unittest.TestCase):
         self.assertEqual(h.events.calls[0]["expected_base_version"], 1)
         self.assertEqual(h.approvals.calls[0]["proposal_id"], PROPOSAL_ID)
         self.assertEqual(h.approvals.calls[0]["expected_base_version"], 1)
+        self.assertEqual(h.sources.proposal_ids, [PROPOSAL_ID])
         self.assertEqual(
             h.sources.actors,
             [f"assistant_proposal:{PROPOSAL_ID}:reviewer:marko"],
