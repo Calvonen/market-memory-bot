@@ -22,6 +22,8 @@ from trading_system.official_release_source_repository import (
     OfficialReleaseSourceState,
     OfficialReleaseSourceVersionConflict,
 )
+from trading_system.strategy_draft import draft_fingerprint, normalize_draft
+from trading_system.strategy_draft import StrategyDraftPayload
 from trading_system.strategy_draft_repository import ExpectationVersionConflict
 
 
@@ -337,6 +339,58 @@ class AssistantProposalMaterializerTests(unittest.TestCase):
         self.assertEqual(h.approvals.calls, [])
         self.assertIn("source.get_state", h.sources.calls)
         self.assertEqual(h.proposals.marked, [PROPOSAL_ID])
+
+    def test_materialized_retry_recovers_from_matching_receipt_without_new_writes(self) -> None:
+        h = _harness()
+        proposal = h.proposals.proposal
+        h.proposals.proposal = AssistantEventProposalRecord(
+            id=proposal.id,
+            proposal_key=proposal.proposal_key,
+            payload=proposal.payload,
+            requested_execution_mode=proposal.requested_execution_mode,
+            status="materialized",
+            reviewed_by=proposal.reviewed_by,
+        )
+        strategy = StrategyDraftPayload.model_validate(proposal.payload["strategy"])
+        fingerprint = draft_fingerprint(normalize_draft(EVENT_ID, strategy))
+        h.proposals.receipt = ExistingProposalApproval(EVENT_ID, 2, fingerprint)
+
+        result = h.materializer.materialize(PROPOSAL_ID)
+
+        self.assertTrue(result.retried)
+        self.assertEqual(result.event_id, EVENT_ID)
+        self.assertEqual(result.expectation_version, 2)
+        self.assertEqual(h.resolver.calls, [])
+        self.assertEqual(h.registry.calls, [])
+        self.assertEqual(h.events.calls, [])
+        self.assertEqual(h.sources.calls, [])
+        self.assertEqual(h.approvals.calls, [])
+        self.assertEqual(h.proposals.marked, [])
+
+    def test_materialized_retry_without_matching_receipt_fails_closed(self) -> None:
+        h = _harness()
+        proposal = h.proposals.proposal
+        h.proposals.proposal = AssistantEventProposalRecord(
+            id=proposal.id,
+            proposal_key=proposal.proposal_key,
+            payload=proposal.payload,
+            requested_execution_mode=proposal.requested_execution_mode,
+            status="materialized",
+            reviewed_by=proposal.reviewed_by,
+        )
+        h.proposals.receipt = ExistingProposalApproval(
+            event_id=EVENT_ID,
+            expectation_version=2,
+            draft_fingerprint="wrong",
+        )
+
+        with self.assertRaises(AssistantProposalCanonicalIdentityConflict):
+            h.materializer.materialize(PROPOSAL_ID)
+
+        self.assertEqual(h.resolver.calls, [])
+        self.assertEqual(h.registry.calls, [])
+        self.assertEqual(h.events.calls, [])
+        self.assertEqual(h.approvals.calls, [])
 
     def test_receipt_with_wrong_event_or_fingerprint_fails_closed(self) -> None:
         h = _harness()
