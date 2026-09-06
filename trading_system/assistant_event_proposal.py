@@ -24,6 +24,14 @@ class AssistantProposalIdentityConflict(RuntimeError):
     pass
 
 
+class AssistantProposalNotFound(RuntimeError):
+    pass
+
+
+class AssistantProposalPreparationApprovalConflict(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class AssistantEventProposalRecord:
     id: str
@@ -136,6 +144,55 @@ class SupabaseAssistantEventProposalRepository:
             reviewed_by=(str(row["reviewed_by"]) if row.get("reviewed_by") else None),
             review_round=review_round,
         )
+
+    def approve_for_materialization(
+        self, proposal_id: str, *, reviewer: str
+    ) -> tuple[str, int]:
+        canonical_reviewer = reviewer.strip()
+        if not canonical_reviewer or len(canonical_reviewer) > 200:
+            raise ValueError("reviewer must be between 1 and 200 characters")
+        try:
+            response = self.client.rpc(
+                "approve_assistant_event_proposal_for_materialization",
+                {
+                    "input_proposal_id": proposal_id,
+                    "input_reviewer": canonical_reviewer,
+                },
+            ).execute()
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            message = str(getattr(exc, "message", None) or exc)
+            if code == "P0002" or "assistant_proposal_not_found" in message:
+                raise AssistantProposalNotFound("assistant proposal not found") from exc
+            if any(
+                marker in message
+                for marker in (
+                    "assistant_proposal_already_approved_by_different_reviewer",
+                    "assistant_proposal_not_ready_for_preparation_approval",
+                    "assistant_proposal_review_status_cas_failed",
+                    "assistant_proposal_missing_review_snapshot",
+                )
+            ):
+                raise AssistantProposalPreparationApprovalConflict(message) from exc
+            raise RuntimeError("assistant proposal preparation approval failed") from exc
+
+        rows = response.data or []
+        if len(rows) != 1 or not isinstance(rows[0], dict):
+            raise RuntimeError("assistant proposal preparation approval returned invalid data")
+        row = rows[0]
+        status = str(row.get("out_status") or "").strip()
+        reviewed_by = str(row.get("out_reviewed_by") or "").strip()
+        try:
+            review_round = int(row.get("out_review_round"))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("assistant proposal preparation approval returned invalid review round") from exc
+        if (
+            status not in {"approved_for_materialization", "materialized"}
+            or reviewed_by != canonical_reviewer
+            or review_round < 1
+        ):
+            raise RuntimeError("assistant proposal preparation approval returned invalid data")
+        return status, review_round
 
     def find_approval(self, *, approved_via: str) -> ExistingProposalApproval | None:
         response = (
