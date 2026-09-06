@@ -15,6 +15,7 @@ from trading_system.assistant_event_proposal import (
 )
 from trading_system.assistant_proposal_approval_service import (
     AssistantProposalApprovalService,
+    MAX_PREPARATION_REVIEWER_LENGTH,
 )
 from trading_system.assistant_proposal_materializer import (
     AssistantProposalMaterializationError,
@@ -22,7 +23,7 @@ from trading_system.assistant_proposal_materializer import (
 
 
 class AssistantPreparationApprovalRequest(BaseModel):
-    reviewer: str = Field(min_length=1, max_length=200)
+    reviewer: str = Field(min_length=1, max_length=MAX_PREPARATION_REVIEWER_LENGTH)
 
     @field_validator("reviewer", mode="before")
     @classmethod
