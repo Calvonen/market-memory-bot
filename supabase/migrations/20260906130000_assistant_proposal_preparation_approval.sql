@@ -21,7 +21,13 @@ declare
   proposal_row public.assistant_event_proposals%rowtype;
   canonical_reviewer text := btrim(input_reviewer);
 begin
-  if canonical_reviewer is null or canonical_reviewer = '' or length(canonical_reviewer) > 200 then
+  -- The official-source audit actor is
+  -- assistant_proposal:<uuid>:reviewer:<reviewer>. Its fixed portion is 65
+  -- characters, so a reviewer longer than 135 can never fit the 200-character
+  -- audit identity contract. Reject it before any review-state transition.
+  if canonical_reviewer is null
+     or canonical_reviewer = ''
+     or length(canonical_reviewer) > 135 then
     raise exception 'assistant_proposal_reviewer_invalid' using errcode = '22023';
   end if;
 
