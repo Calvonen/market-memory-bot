@@ -10,6 +10,7 @@ from trading_system.assistant_proposal_api import build_assistant_proposal_route
 from trading_system.assistant_proposal_approval_service import (
     AssistantPreparationApprovalResult,
     AssistantProposalApprovalService,
+    MAX_PREPARATION_REVIEWER_LENGTH,
 )
 from trading_system.assistant_proposal_materializer import (
     AssistantProposalMaterializationResult,
@@ -109,6 +110,27 @@ class AssistantProposalApprovalApiTests(unittest.TestCase):
         self.assertEqual(payload["expectation_version"], 3)
         self.assertIs(payload["trading_authority_granted"], False)
 
+    def test_reviewer_at_audit_limit_is_accepted(self) -> None:
+        client, service, _ = self._client()
+        reviewer = "r" * MAX_PREPARATION_REVIEWER_LENGTH
+        response = client.post(
+            f"/api/v1/assistant-proposals/{PROPOSAL_ID}/approve-preparation",
+            headers={"X-MarketAI-Control-Key": "control-secret"},
+            json={"reviewer": reviewer},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(service.calls, [(PROPOSAL_ID, reviewer)])
+
+    def test_reviewer_over_audit_limit_is_rejected_before_service_call(self) -> None:
+        client, service, _ = self._client()
+        response = client.post(
+            f"/api/v1/assistant-proposals/{PROPOSAL_ID}/approve-preparation",
+            headers={"X-MarketAI-Control-Key": "control-secret"},
+            json={"reviewer": "r" * (MAX_PREPARATION_REVIEWER_LENGTH + 1)},
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(service.calls, [])
+
     def test_locked_live_proposal_is_a_conflict_not_retryable_service_failure(self) -> None:
         client, service, _ = self._client()
         service.error = AssistantProposalLiveLocked("LIVE proposal materialization is locked")
@@ -133,6 +155,22 @@ class AssistantProposalApprovalApiTests(unittest.TestCase):
         self.assertEqual(result.status, "materialized")
         self.assertEqual(result.review_round, 2)
         self.assertFalse(result.retried)
+
+    def test_service_rejects_overlong_reviewer_before_repository_call(self) -> None:
+        proposals = FakeProposals()
+        materializer = FakeMaterializer()
+        service = AssistantProposalApprovalService(
+            proposals=proposals, materializer=materializer
+        )
+
+        with self.assertRaises(ValueError):
+            service.approve_preparation(
+                PROPOSAL_ID,
+                reviewer="r" * (MAX_PREPARATION_REVIEWER_LENGTH + 1),
+            )
+
+        self.assertEqual(proposals.calls, [])
+        self.assertEqual(materializer.calls, [])
 
     def test_service_marks_retry_when_proposal_was_already_materialized(self) -> None:
         proposals = FakeProposals()
