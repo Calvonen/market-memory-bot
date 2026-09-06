@@ -48,8 +48,6 @@ class OfficialSourcePayload(BaseModel):
 
     @model_validator(mode="after")
     def _validate_canonical_source(self) -> "OfficialSourcePayload":
-        # Reuse the canonical release-source validator at the proposal boundary
-        # so malformed sources fail before any later materializer side effects.
         OfficialReleaseSource(
             event_id="assistant-proposal-validation",
             source_kind=self.source_kind,
@@ -68,9 +66,6 @@ class AssistantEventProposalPayload(BaseModel):
     scheduled_date: date
     event_at: datetime
     event_time_status: Literal["confirmed", "estimated", "unknown"]
-    # Immutable with the reviewed proposal payload. New strategy approval must
-    # CAS against this exact reviewed version, never whatever happens to be
-    # current when materialization eventually runs.
     base_expectation_version: int = Field(ge=1, le=2147483647)
     official_source: OfficialSourcePayload
     strategy: StrategyDraftPayload
@@ -168,28 +163,14 @@ class SupabaseAssistantEventProposalRepository:
             raise RuntimeError("assistant proposal materialized status CAS failed")
 
     def reopen_for_review(self, proposal_id: str) -> None:
-        """Re-open the same durable proposal identity after a stale review conflict.
-
-        Re-review is only valid before a strategy approval has committed. If the
-        proposal-scoped approval receipt already exists, callers must recover
-        that committed approval instead of creating a new review cycle.
-        """
-        if self.find_approval(approved_via=f"assistant_proposal:{proposal_id}") is not None:
-            raise RuntimeError(
-                "assistant proposal already has a strategy approval receipt; use retry recovery"
-            )
-        response = (
-            self.client.table(self.TABLE)
-            .update({"status": "draft"})
-            .eq("id", proposal_id)
-            .eq("status", "approved_for_materialization")
-            .execute()
-        )
-        if response.data:
-            return
-        current = self.get(proposal_id)
-        if current is None or current.status != "draft":
-            raise RuntimeError("assistant proposal re-review status CAS failed")
+        """Atomically reopen before any proposal-scoped strategy approval commits."""
+        response = self.client.rpc(
+            "reopen_assistant_event_proposal_for_review",
+            {"input_proposal_id": proposal_id},
+        ).execute()
+        rows = response.data or []
+        if not rows or str(rows[0].get("out_status")) != "draft":
+            raise RuntimeError("assistant proposal re-review RPC returned invalid data")
 
 
 def validate_proposal_for_materialization(
