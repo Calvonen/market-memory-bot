@@ -167,6 +167,27 @@ class SupabaseAssistantEventProposalRepository:
         if current is None or current.status != "materialized":
             raise RuntimeError("assistant proposal materialized status CAS failed")
 
+    def reopen_for_review(self, proposal_id: str) -> None:
+        """Re-open the same durable proposal identity after a stale review conflict.
+
+        The database lifecycle trigger permits only an
+        approved_for_materialization -> draft transition here, resets reviewer
+        metadata, keeps proposal_key immutable, and preserves the old decision
+        in the review audit table. Payload edits happen only after this CAS.
+        """
+        response = (
+            self.client.table(self.TABLE)
+            .update({"status": "draft"})
+            .eq("id", proposal_id)
+            .eq("status", "approved_for_materialization")
+            .execute()
+        )
+        if response.data:
+            return
+        current = self.get(proposal_id)
+        if current is None or current.status != "draft":
+            raise RuntimeError("assistant proposal re-review status CAS failed")
+
 
 def validate_proposal_for_materialization(
     proposal: AssistantEventProposalRecord,
