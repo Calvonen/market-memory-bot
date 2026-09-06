@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Callable
+from typing import Callable, Literal
 
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 
 from trading_system.assistant_event_proposal import (
@@ -20,6 +20,18 @@ from trading_system.assistant_proposal_approval_service import (
 from trading_system.assistant_proposal_materializer import (
     AssistantProposalMaterializationError,
 )
+from trading_system.assistant_proposal_read_repository import (
+    ALL_STATUSES,
+    SupabaseAssistantProposalReadRepository,
+)
+
+AssistantProposalStatus = Literal[
+    "draft",
+    "ready_for_review",
+    "rejected",
+    "approved_for_materialization",
+    "materialized",
+]
 
 
 class AssistantPreparationApprovalRequest(BaseModel):
@@ -35,8 +47,53 @@ def build_assistant_proposal_router(
     *,
     require_control: Callable[[str | None], None],
     get_approval_service: Callable[[], AssistantProposalApprovalService],
+    require_read: Callable[[str | None], None] | None = None,
+    get_read_repository: Callable[[], SupabaseAssistantProposalReadRepository] | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/assistant-proposals", tags=["assistant-proposals"])
+
+    if require_read is not None and get_read_repository is not None:
+
+        @router.get("")
+        def list_proposals(
+            proposal_status: AssistantProposalStatus | None = Query(
+                default=None, alias="status"
+            ),
+            limit: int = Query(default=50, ge=1, le=100),
+            x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
+        ) -> list[dict]:
+            require_read(x_marketai_key)
+            try:
+                if proposal_status is not None and proposal_status not in ALL_STATUSES:
+                    raise HTTPException(status_code=422, detail="Invalid assistant proposal status")
+                return [
+                    asdict(record)
+                    for record in get_read_repository().list(
+                        status=proposal_status, limit=limit
+                    )
+                ]
+            except HTTPException:
+                raise
+            except (RuntimeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=503, detail="Assistant proposal read failed"
+                ) from exc
+
+        @router.get("/{proposal_id}")
+        def get_proposal(
+            proposal_id: str,
+            x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
+        ) -> dict:
+            require_read(x_marketai_key)
+            try:
+                record = get_read_repository().get(proposal_id)
+            except RuntimeError as exc:
+                raise HTTPException(
+                    status_code=503, detail="Assistant proposal read failed"
+                ) from exc
+            if record is None:
+                raise HTTPException(status_code=404, detail="Assistant proposal not found")
+            return asdict(record)
 
     @router.post("/{proposal_id}/approve-preparation")
     def approve_preparation(
