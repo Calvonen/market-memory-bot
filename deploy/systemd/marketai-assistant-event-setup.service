@@ -1,0 +1,15 @@
+[Unit]
+Description=MarketAI assistant event setup queue worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=marko
+WorkingDirectory=/home/marko/marketai-repo
+EnvironmentFile=/home/marko/marketai/.env
+ExecStart=/home/marko/marketai-repo/.venv/bin/python -m trading_system.assistant_event_setup_worker
+
+# This worker can only materialize event metadata, approved official release
+# source configuration and versioned strategy expectations. It has no
+# Strategy/Risk/Broker execution authority and never creates PAPER permission.
