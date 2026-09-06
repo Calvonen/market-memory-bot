@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from typing import Callable, Literal
+from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
@@ -43,6 +44,13 @@ class AssistantPreparationApprovalRequest(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
+def _canonical_proposal_id(value: str) -> str:
+    try:
+        return str(UUID(value))
+    except (ValueError, AttributeError) as exc:
+        raise HTTPException(status_code=422, detail="Assistant proposal id must be a UUID") from exc
+
+
 def build_assistant_proposal_router(
     *,
     require_control: Callable[[str | None], None],
@@ -74,7 +82,7 @@ def build_assistant_proposal_router(
                 ]
             except HTTPException:
                 raise
-            except (RuntimeError, ValueError) as exc:
+            except Exception as exc:
                 raise HTTPException(
                     status_code=503, detail="Assistant proposal read failed"
                 ) from exc
@@ -85,9 +93,10 @@ def build_assistant_proposal_router(
             x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
         ) -> dict:
             require_read(x_marketai_key)
+            canonical_id = _canonical_proposal_id(proposal_id)
             try:
-                record = get_read_repository().get(proposal_id)
-            except RuntimeError as exc:
+                record = get_read_repository().get(canonical_id)
+            except Exception as exc:
                 raise HTTPException(
                     status_code=503, detail="Assistant proposal read failed"
                 ) from exc
