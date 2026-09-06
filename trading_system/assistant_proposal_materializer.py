@@ -2,19 +2,17 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
 from trading_system.assistant_event_proposal import (
-    AssistantEventProposalRecord,
     ExistingProposalApproval,
     proposal_approval_via,
     validate_proposal_for_materialization,
 )
 from trading_system.calendar_release_worker import CalendarReleaseTarget
-from trading_system.etoro_instrument_resolver import InstrumentResolutionRequest, ResolvedEtoroInstrument
+from trading_system.etoro_instrument_resolver import InstrumentResolutionRequest
 from trading_system.official_release_source_repository import (
     OfficialReleaseSource,
-    OfficialReleaseSourceState,
     OfficialReleaseSourceVersionConflict,
 )
 from trading_system.strategy_draft import draft_fingerprint, identity_mismatches, normalize_draft
@@ -39,41 +37,6 @@ class AssistantProposalOfficialSourceConflict(AssistantProposalMaterializationEr
     pass
 
 
-class ProposalRepository(Protocol):
-    def get(self, proposal_id: str) -> AssistantEventProposalRecord | None: ...
-    def find_approval(self, *, approved_via: str) -> ExistingProposalApproval | None: ...
-    def mark_materialized(self, proposal_id: str) -> None: ...
-
-
-class InstrumentResolver(Protocol):
-    def resolve(self, request: InstrumentResolutionRequest) -> ResolvedEtoroInstrument | None: ...
-
-
-class TrackedInstrumentRegistry(Protocol):
-    def upsert(self, *, instrument: str, company_name: str, market: str, source: str, actor: str) -> Any: ...
-
-
-class CanonicalEventIngress(Protocol):
-    def register_for_tracked_instrument(self, tracked: TrackedEtoroInstrument, **kwargs: Any) -> Any: ...
-
-
-class ReleaseTargetRepository(Protocol):
-    def ensure_release_shell(self, target: CalendarReleaseTarget) -> str: ...
-
-
-class ExpectationRepository(Protocol):
-    def get(self, event_id: str) -> Any | None: ...
-
-
-class OfficialSourceRepository(Protocol):
-    def get_state(self, event_id: str) -> OfficialReleaseSourceState: ...
-    def set(self, source: OfficialReleaseSource, *, expected_version: int, actor: str) -> OfficialReleaseSource: ...
-
-
-class StrategyApprovalRepository(Protocol):
-    def approve(self, **kwargs: Any) -> Any: ...
-
-
 @dataclass(frozen=True)
 class AssistantProposalMaterializationResult:
     proposal_id: str
@@ -84,24 +47,22 @@ class AssistantProposalMaterializationResult:
 
 
 class AssistantProposalMaterializer:
-    """Compose approved assistant proposals into existing canonical event workflow.
+    """Compose an approved proposal into tracking/expectation state only.
 
-    This class deliberately has no trading-task, risk-engine or broker dependency.
-    Materialization creates tracking/expectation state only; DEMO/PAPER permission
-    remains a separate user-controlled workflow.
+    There is deliberately no trading-task, RiskEngine or broker dependency here.
     """
 
     def __init__(
         self,
         *,
-        proposals: ProposalRepository,
-        resolver: InstrumentResolver,
-        registry: TrackedInstrumentRegistry,
-        events: CanonicalEventIngress,
-        release_targets: ReleaseTargetRepository,
-        expectations: ExpectationRepository,
-        official_sources: OfficialSourceRepository,
-        approvals: StrategyApprovalRepository,
+        proposals: Any,
+        resolver: Any,
+        registry: Any,
+        events: Any,
+        release_targets: Any,
+        expectations: Any,
+        official_sources: Any,
+        approvals: Any,
         actor: str = "assistant_proposal_materializer",
     ) -> None:
         self.proposals = proposals
@@ -179,8 +140,7 @@ class AssistantProposalMaterializer:
             market=tracked.market,
             tracked_event_id=tracked_event_id,
         )
-        release_event_id = self.release_targets.ensure_release_shell(target)
-        if release_event_id != event_id:
+        if self.release_targets.ensure_release_shell(target) != event_id:
             raise AssistantProposalCanonicalIdentityConflict(
                 "release shell returned a different event identity"
             )
@@ -195,8 +155,7 @@ class AssistantProposalMaterializer:
         if mismatches:
             raise AssistantProposalCanonicalIdentityConflict("; ".join(mismatches))
 
-        self._ensure_official_source(event_id=event_id, payload=payload)
-
+        self._ensure_official_source(event_id, payload)
         approved_via = proposal_approval_via(proposal)
         fingerprint = draft_fingerprint(normalized)
         receipt = self.proposals.find_approval(approved_via=approved_via)
@@ -204,13 +163,10 @@ class AssistantProposalMaterializer:
             version = self._matching_receipt_version(receipt, event_id, fingerprint)
             self.proposals.mark_materialized(proposal.id)
             return AssistantProposalMaterializationResult(
-                proposal_id=proposal.id,
-                tracked_event_id=tracked_event_id,
-                event_id=event_id,
-                expectation_version=version,
-                retried=True,
+                proposal.id, tracked_event_id, event_id, version, True
             )
 
+        retried = False
         try:
             approved = self.approvals.approve(
                 event_id=event_id,
@@ -236,17 +192,14 @@ class AssistantProposalMaterializer:
             if receipt is None:
                 raise
             version = self._matching_receipt_version(receipt, event_id, fingerprint)
+            retried = True
 
         self.proposals.mark_materialized(proposal.id)
         return AssistantProposalMaterializationResult(
-            proposal_id=proposal.id,
-            tracked_event_id=tracked_event_id,
-            event_id=event_id,
-            expectation_version=version,
-            retried=False,
+            proposal.id, tracked_event_id, event_id, version, retried
         )
 
-    def _ensure_official_source(self, *, event_id: str, payload: Any) -> None:
+    def _ensure_official_source(self, event_id: str, payload: Any) -> None:
         desired = OfficialReleaseSource(
             event_id=event_id,
             source_kind=payload.official_source.source_kind,
@@ -262,9 +215,7 @@ class AssistantProposalMaterializer:
             )
         try:
             self.official_sources.set(
-                desired,
-                expected_version=state.version,
-                actor=self.actor,
+                desired, expected_version=state.version, actor=self.actor
             )
         except OfficialReleaseSourceVersionConflict:
             latest = self.official_sources.get_state(event_id)
@@ -276,9 +227,7 @@ class AssistantProposalMaterializer:
 
     @staticmethod
     def _matching_receipt_version(
-        receipt: ExistingProposalApproval,
-        event_id: str,
-        fingerprint: str,
+        receipt: ExistingProposalApproval, event_id: str, fingerprint: str
     ) -> int:
         if receipt.event_id != event_id or receipt.draft_fingerprint != fingerprint:
             raise AssistantProposalCanonicalIdentityConflict(
@@ -289,10 +238,15 @@ class AssistantProposalMaterializer:
 
 def _same_source(left: OfficialReleaseSource, right: OfficialReleaseSource) -> bool:
     return (
-        left.event_id == right.event_id
-        and left.source_kind == right.source_kind
-        and left.source_url == right.source_url
-        and left.source_title == right.source_title
+        left.event_id,
+        left.source_kind,
+        left.source_url,
+        left.source_title,
+    ) == (
+        right.event_id,
+        right.source_kind,
+        right.source_url,
+        right.source_title,
     )
 
 
