@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from trading_system.official_release_source_repository import OfficialReleaseSource
 from trading_system.strategy_draft import StrategyDraftPayload
 
 
@@ -45,12 +46,24 @@ class OfficialSourcePayload(BaseModel):
     source_url: str = Field(min_length=1, max_length=2000)
     source_title: str | None = Field(default=None, max_length=500)
 
+    @model_validator(mode="after")
+    def _validate_canonical_source(self) -> "OfficialSourcePayload":
+        # Reuse the canonical release-source validator at the proposal boundary
+        # so malformed sources fail before any later materializer side effects.
+        OfficialReleaseSource(
+            event_id="assistant-proposal-validation",
+            source_kind=self.source_kind,
+            source_url=self.source_url,
+            source_title=self.source_title,
+        )
+        return self
+
 
 class AssistantEventProposalPayload(BaseModel):
     company_name: str = Field(min_length=1, max_length=200)
     instrument: str = Field(min_length=1, max_length=32)
     market: str = Field(min_length=1, max_length=64)
-    kind: Literal["earnings"] = "earnings"
+    kind: Literal["earnings"]
     title: str = Field(min_length=1, max_length=200)
     scheduled_date: date
     event_at: datetime
