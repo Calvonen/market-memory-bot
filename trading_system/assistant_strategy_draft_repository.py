@@ -26,6 +26,7 @@ class SupabaseAssistantStrategyDraftApprovalRepository:
         self,
         *,
         proposal_id: str,
+        expected_review_round: int,
         event_id: str,
         expected_base_version: int,
         source_name: str | None,
@@ -47,8 +48,11 @@ class SupabaseAssistantStrategyDraftApprovalRepository:
         official_source_needs_set: bool,
         official_source_actor: str,
     ) -> StrategyDraftApprovalResult:
+        if expected_review_round < 1:
+            raise ValueError("expected_review_round must be positive")
         params = {
             "input_proposal_id": proposal_id,
+            "input_expected_review_round": expected_review_round,
             "input_event_id": event_id,
             "input_expected_base_version": expected_base_version,
             "input_source_name": source_name,
