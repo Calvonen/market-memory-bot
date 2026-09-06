@@ -100,6 +100,12 @@ class AssistantEventProposalTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             validate_proposal_for_materialization(_proposal(payload=payload))
 
+    def test_unknown_event_time_status_is_preserved(self) -> None:
+        payload = _payload()
+        payload["event_time_status"] = "unknown"
+        validated = validate_proposal_for_materialization(_proposal(payload=payload))
+        self.assertEqual(validated.event_time_status, "unknown")
+
     def test_kind_must_be_explicit(self) -> None:
         payload = _payload()
         payload.pop("kind")
