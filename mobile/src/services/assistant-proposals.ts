@@ -61,9 +61,10 @@ export function getAssistantProposal(proposalId: string): Promise<AssistantPropo
 export function approveAssistantProposalPreparation(
   proposalId: string,
   reviewer: string,
+  expectedReviewRound: number,
 ): Promise<AssistantPreparationApprovalResult> {
   return apiControlPost<AssistantPreparationApprovalResult>(
     `/api/v1/assistant-proposals/${encodeURIComponent(proposalId)}/approve-preparation`,
-    { reviewer },
+    { reviewer, expected_review_round: expectedReviewRound },
   );
 }
