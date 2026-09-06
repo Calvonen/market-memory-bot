@@ -20,6 +20,7 @@ from trading_system.models import EventExpectation
 from trading_system.official_release_source_repository import (
     OfficialReleaseSource,
     OfficialReleaseSourceState,
+    OfficialReleaseSourceVersionConflict,
 )
 from trading_system.strategy_draft import StrategyDraftPayload, draft_fingerprint, normalize_draft
 from trading_system.strategy_draft_repository import ExpectationVersionConflict
@@ -175,37 +176,21 @@ class FakeExpectations:
 class FakeOfficialSources:
     def __init__(self) -> None:
         self.state = OfficialReleaseSourceState(source=None, version=0)
-        self.actors: list[str] = []
-        self.proposal_ids: list[str] = []
 
     def get_state(self, event_id: str):
         return self.state
-
-    def set_for_assistant_proposal(
-        self, proposal_id: str, source, *, expected_version: int, actor: str
-    ):
-        self.proposal_ids.append(proposal_id)
-        self.actors.append(actor)
-        self.state = OfficialReleaseSourceState(
-            source=OfficialReleaseSource(
-                event_id=source.event_id,
-                source_kind=source.source_kind,
-                source_url=source.source_url,
-                source_title=source.source_title,
-                version=expected_version + 1,
-            ),
-            version=expected_version + 1,
-        )
-        return self.state.source
 
 
 class FakeApprovals:
     def __init__(self) -> None:
         self.calls: list[dict] = []
         self.raise_conflict = False
+        self.raise_source_conflict = False
 
     def approve_assistant_proposal(self, **kwargs):
         self.calls.append(kwargs)
+        if self.raise_source_conflict:
+            raise OfficialReleaseSourceVersionConflict("source conflict")
         if self.raise_conflict:
             raise ExpectationVersionConflict("conflict")
         return SimpleNamespace(version=2)
@@ -234,7 +219,7 @@ class Harness:
 
 
 class AssistantProposalMaterializerTests(unittest.TestCase):
-    def test_happy_path_uses_atomic_assistant_boundaries(self) -> None:
+    def test_happy_path_passes_source_into_atomic_finalizer(self) -> None:
         h = Harness()
         result = h.materializer.materialize(PROPOSAL_ID)
 
@@ -242,14 +227,41 @@ class AssistantProposalMaterializerTests(unittest.TestCase):
         self.assertEqual(result.expectation_version, 2)
         self.assertEqual(h.events.calls[0]["proposal_id"], PROPOSAL_ID)
         self.assertEqual(h.events.calls[0]["expected_base_version"], 1)
-        self.assertEqual(h.approvals.calls[0]["proposal_id"], PROPOSAL_ID)
-        self.assertEqual(h.approvals.calls[0]["expected_base_version"], 1)
-        self.assertEqual(h.sources.proposal_ids, [PROPOSAL_ID])
+        call = h.approvals.calls[0]
+        self.assertEqual(call["proposal_id"], PROPOSAL_ID)
+        self.assertEqual(call["expected_base_version"], 1)
+        self.assertTrue(call["official_source_needs_set"])
+        self.assertEqual(call["official_source_expected_version"], 0)
+        self.assertEqual(call["official_source"].event_id, EVENT_ID)
         self.assertEqual(
-            h.sources.actors,
-            [f"assistant_proposal:{PROPOSAL_ID}:reviewer:marko"],
+            call["official_source_actor"],
+            f"assistant_proposal:{PROPOSAL_ID}:reviewer:marko",
         )
         self.assertEqual(h.proposals.marked, [PROPOSAL_ID])
+
+    def test_matching_existing_source_is_reverified_inside_finalizer(self) -> None:
+        h = Harness()
+        h.sources.state = OfficialReleaseSourceState(
+            source=OfficialReleaseSource(
+                event_id=EVENT_ID,
+                source_kind="results_page",
+                source_url="https://www.syrahresources.com.au/investors/reports-presentations",
+                source_title="Syrah Resources - Reports & Presentations",
+                version=4,
+            ),
+            version=4,
+        )
+        h.materializer.materialize(PROPOSAL_ID)
+        call = h.approvals.calls[0]
+        self.assertFalse(call["official_source_needs_set"])
+        self.assertEqual(call["official_source_expected_version"], 4)
+
+    def test_source_conflict_in_atomic_finalizer_does_not_mark_materialized(self) -> None:
+        h = Harness()
+        h.approvals.raise_source_conflict = True
+        with self.assertRaises(AssistantProposalOfficialSourceConflict):
+            h.materializer.materialize(PROPOSAL_ID)
+        self.assertEqual(h.proposals.marked, [])
 
     def test_stale_review_is_rejected_inside_event_cas_before_event_write(self) -> None:
         h = Harness()
@@ -284,15 +296,14 @@ class AssistantProposalMaterializerTests(unittest.TestCase):
                     h.materializer.materialize(PROPOSAL_ID)
                 self.assertEqual(h.registry.calls, 0)
 
-    def test_release_shell_identity_mismatch_blocks_source_and_approval(self) -> None:
+    def test_release_shell_identity_mismatch_blocks_finalizer(self) -> None:
         h = Harness()
         h.expectations.current = _expectation(event_name="WRONG earnings")
         with self.assertRaises(AssistantProposalCanonicalIdentityConflict):
             h.materializer.materialize(PROPOSAL_ID)
-        self.assertEqual(h.sources.actors, [])
         self.assertEqual(h.approvals.calls, [])
 
-    def test_existing_different_official_source_fails_without_approval(self) -> None:
+    def test_existing_different_official_source_fails_without_finalizer(self) -> None:
         h = Harness()
         h.sources.state = OfficialReleaseSourceState(
             source=OfficialReleaseSource(
@@ -307,19 +318,6 @@ class AssistantProposalMaterializerTests(unittest.TestCase):
         with self.assertRaises(AssistantProposalOfficialSourceConflict):
             h.materializer.materialize(PROPOSAL_ID)
         self.assertEqual(h.approvals.calls, [])
-
-    def test_matching_receipt_is_idempotent(self) -> None:
-        h = Harness()
-        strategy = StrategyDraftPayload.model_validate(_payload()["strategy"])
-        fingerprint = draft_fingerprint(normalize_draft(EVENT_ID, strategy))
-        h.proposals.receipt = ExistingProposalApproval(EVENT_ID, 2, fingerprint)
-        h.expectations.current = _expectation(version=2)
-
-        result = h.materializer.materialize(PROPOSAL_ID)
-        self.assertTrue(result.retried)
-        self.assertEqual(result.expectation_version, 2)
-        self.assertEqual(h.approvals.calls, [])
-        self.assertEqual(h.proposals.marked, [PROPOSAL_ID])
 
     def test_materialized_retry_uses_receipt_without_new_writes(self) -> None:
         h = Harness()
@@ -338,22 +336,15 @@ class AssistantProposalMaterializerTests(unittest.TestCase):
     def test_strategy_cas_conflict_recovers_only_from_matching_receipt(self) -> None:
         h = Harness()
         h.approvals.raise_conflict = True
-        original_find = h.proposals.find_approval
-        calls = 0
+        fingerprint_holder: list[str] = []
 
         def find_after_conflict(*, approved_via: str):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                return None
-            fingerprint = h.approvals.calls[0]["draft_fingerprint"]
-            return ExistingProposalApproval(EVENT_ID, 2, fingerprint)
+            if not fingerprint_holder:
+                fingerprint_holder.append(h.approvals.calls[0]["draft_fingerprint"])
+            return ExistingProposalApproval(EVENT_ID, 2, fingerprint_holder[0])
 
         h.proposals.find_approval = find_after_conflict  # type: ignore[method-assign]
-        try:
-            result = h.materializer.materialize(PROPOSAL_ID)
-        finally:
-            h.proposals.find_approval = original_find  # type: ignore[method-assign]
+        result = h.materializer.materialize(PROPOSAL_ID)
 
         self.assertTrue(result.retried)
         self.assertEqual(result.expectation_version, 2)
