@@ -4,6 +4,10 @@ from datetime import date
 from typing import Any
 
 from trading_system.models import utc_now
+from trading_system.official_release_source_repository import (
+    OfficialReleaseSource,
+    OfficialReleaseSourceVersionConflict,
+)
 from trading_system.strategy_draft_repository import (
     ExpectationVersionConflict,
     StrategyDraftApprovalResult,
@@ -13,7 +17,7 @@ from trading_system.strategy_draft_repository import (
 
 
 class SupabaseAssistantStrategyDraftApprovalRepository:
-    """Assistant-only approval boundary that serializes approval with re-review."""
+    """Assistant-only finalizer serialized with re-review and source approval."""
 
     def __init__(self, client: Any) -> None:
         self.client = client
@@ -38,6 +42,10 @@ class SupabaseAssistantStrategyDraftApprovalRepository:
         draft_fingerprint: str,
         approved_by: str,
         approved_via: str,
+        official_source: OfficialReleaseSource,
+        official_source_expected_version: int,
+        official_source_needs_set: bool,
+        official_source_actor: str,
     ) -> StrategyDraftApprovalResult:
         params = {
             "input_proposal_id": proposal_id,
@@ -57,6 +65,12 @@ class SupabaseAssistantStrategyDraftApprovalRepository:
             "input_draft_fingerprint": draft_fingerprint,
             "input_approved_by": approved_by,
             "input_approved_via": approved_via,
+            "input_official_source_kind": official_source.source_kind,
+            "input_official_source_url": official_source.source_url,
+            "input_official_source_title": official_source.source_title,
+            "input_official_source_expected_version": official_source_expected_version,
+            "input_official_source_needs_set": official_source_needs_set,
+            "input_official_source_actor": official_source_actor,
         }
         try:
             response = self.client.rpc(
@@ -65,6 +79,15 @@ class SupabaseAssistantStrategyDraftApprovalRepository:
         except Exception as exc:
             if SupabaseStrategyDraftApprovalRepository._is_version_conflict(exc):
                 raise ExpectationVersionConflict(str(exc)) from exc
+            message = getattr(exc, "message", None)
+            message_text = str(message) if message is not None else str(exc)
+            if getattr(exc, "code", None) == "40001" and (
+                "version_conflict:" in message_text
+                or "assistant_proposal_official_source_state_conflict" in message_text
+            ):
+                raise OfficialReleaseSourceVersionConflict(
+                    "official release source changed during assistant finalization"
+                ) from exc
             if SupabaseStrategyDraftApprovalRepository._is_event_not_found(exc):
                 raise StrategyDraftEventNotFound(event_id) from exc
             raise
