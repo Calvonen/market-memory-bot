@@ -18,6 +18,11 @@ import {
   AssistantProposal,
   getAssistantProposal,
 } from '@/services/assistant-proposals';
+import {
+  approveTrackedEventPaperPermission,
+  getTrackedEventPaperPermission,
+  type TrackedEventPaperPermission,
+} from '@/services/tracked-events';
 
 type StrategyView = {
   summary?: string;
@@ -28,6 +33,13 @@ type StrategyView = {
   invalidation_conditions?: string[];
   triggers?: Record<string, unknown>;
 };
+
+const DEFAULT_DEMO_POSITION_CAP_USD = '500';
+
+function parsePositiveUsd(value: string): number | null {
+  const parsed = Number(value.trim().replace(',', '.'));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
 
 function DetailList({ title, items }: { title: string; items?: string[] }) {
   if (!items?.length) return null;
@@ -56,6 +68,12 @@ export default function AssistantProposalDetailScreen() {
   const [approving, setApproving] = useState(false);
   const [approval, setApproval] = useState<AssistantPreparationApprovalResult | null>(null);
   const [reviewer, setReviewer] = useState('');
+  const [paperPermission, setPaperPermission] = useState<TrackedEventPaperPermission | null>(null);
+  const [permissionError, setPermissionError] = useState<string | null>(null);
+  const [permissionLoading, setPermissionLoading] = useState(false);
+  const [approvingDemo, setApprovingDemo] = useState(false);
+  const [demoActor, setDemoActor] = useState('');
+  const [maxPositionUsd, setMaxPositionUsd] = useState(DEFAULT_DEMO_POSITION_CAP_USD);
 
   const load = useCallback(async () => {
     if (!proposalId) {
@@ -73,6 +91,42 @@ export default function AssistantProposalDetailScreen() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const materialization = proposal?.materialization;
+    if (proposal?.status !== 'materialized' || !materialization) {
+      setPaperPermission(null);
+      setPermissionError(null);
+      setPermissionLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setPermissionLoading(true);
+    setPermissionError(null);
+    void getTrackedEventPaperPermission(materialization.tracked_event_id)
+      .then((permission) => {
+        if (cancelled) return;
+        setPaperPermission(permission);
+        if (permission.max_position_value_usd !== null) {
+          setMaxPositionUsd(String(permission.max_position_value_usd));
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setPaperPermission(null);
+        setPermissionError(err instanceof Error ? err.message : 'DEMO-luvan lataus epäonnistui.');
+      })
+      .finally(() => {
+        if (!cancelled) setPermissionLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [proposal?.materialization, proposal?.status]);
 
   const strategy = useMemo(
     () => (proposal?.payload.strategy ?? {}) as StrategyView,
@@ -94,26 +148,84 @@ export default function AssistantProposalDetailScreen() {
         proposal.review_round,
       );
       setApproval(result);
-      setProposal((current) => current ? {
-        ...current,
-        status: 'materialized',
-        reviewed_by: reviewer.trim(),
-        review_round: result.review_round,
-      } : current);
+      await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Valmistelun hyväksyntä epäonnistui');
     } finally {
       setApproving(false);
     }
-  }, [proposal, reviewer]);
+  }, [load, proposal, reviewer]);
 
-  const canApprove = proposal
-    && proposal.status !== 'materialized'
-    && proposal.requested_execution_mode === 'demo'
-    && reviewer.trim().length > 0
-    && reviewer.trim().length <= 135;
+  const materialization = proposal?.materialization ?? null;
   const requestedDemo = proposal?.requested_execution_mode === 'demo';
   const requestedLive = proposal?.requested_execution_mode === 'live';
+  const canApprove = proposal
+    && proposal.status !== 'materialized'
+    && requestedDemo
+    && reviewer.trim().length > 0
+    && reviewer.trim().length <= 135;
+  const parsedMaxPositionUsd = parsePositiveUsd(maxPositionUsd);
+  const expectationMatchesMaterialization = Boolean(
+    materialization
+    && paperPermission
+    && paperPermission.current_expectation_version === materialization.expectation_version,
+  );
+  const demoAuthorityCurrent = Boolean(
+    paperPermission?.approval_current
+    && materialization
+    && paperPermission.approved_expectation_version === materialization.expectation_version,
+  );
+  const canApproveDemo = Boolean(
+    proposal
+    && proposal.status === 'materialized'
+    && requestedDemo
+    && materialization
+    && paperPermission
+    && expectationMatchesMaterialization
+    && !demoAuthorityCurrent
+    && demoActor.trim()
+    && parsedMaxPositionUsd !== null
+    && !approvingDemo,
+  );
+
+  const confirmDemoAuthority = useCallback(() => {
+    if (!proposal || !materialization || !paperPermission || !canApproveDemo || parsedMaxPositionUsd === null) return;
+    const actor = demoActor.trim();
+    const expectedVersion = materialization.expectation_version;
+    const trackedEventId = materialization.tracked_event_id;
+    Alert.alert(
+      'Hyväksy DEMO-kaupankäynti',
+      `Annat MarketAI:lle kertaluonteisen luvan tehdä ${proposal.payload.instrument}-demokaupan tämän yhden tapahtuman perusteella. Expectation v${expectedVersion}. Enimmäispositio ${parsedMaxPositionUsd} USD. Strategy ja Risk Engine voivat silti estää kaupan tai pienentää positiota. LIVE-kaupankäyntiä tämä ei mahdollista.`,
+      [
+        { text: 'Peruuta', style: 'cancel' },
+        {
+          text: 'Hyväksy DEMO',
+          onPress: () => {
+            setApprovingDemo(true);
+            setPermissionError(null);
+            void approveTrackedEventPaperPermission(
+              trackedEventId,
+              actor,
+              {
+                expected_expectation_version: expectedVersion,
+                max_position_value_usd: parsedMaxPositionUsd,
+              },
+            )
+              .then((permission) => {
+                setPaperPermission(permission);
+                if (permission.max_position_value_usd !== null) {
+                  setMaxPositionUsd(String(permission.max_position_value_usd));
+                }
+              })
+              .catch((err) => {
+                setPermissionError(err instanceof Error ? err.message : 'DEMO-luvan hyväksyntä epäonnistui.');
+              })
+              .finally(() => setApprovingDemo(false));
+          },
+        },
+      ],
+    );
+  }, [canApproveDemo, demoActor, materialization, paperPermission, parsedMaxPositionUsd, proposal]);
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
@@ -217,6 +329,68 @@ export default function AssistantProposalDetailScreen() {
               </Text>
             ) : null}
           </View>
+
+          {proposal.status === 'materialized' && requestedDemo ? (
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>DEMO-kaupankäyntilupa</Text>
+              <Text style={styles.bodyText}>
+                Tämä on erillinen kertaluonteinen kaupankäyntivaltuus. Strategy ja Risk Engine ovat edelleen pakollisia. LIVE pysyy lukittuna.
+              </Text>
+              {materialization ? (
+                <>
+                  <Text style={styles.meta}>Tracked event: {materialization.tracked_event_id}</Text>
+                  <Text style={styles.meta}>Materialisoitu expectation: v{materialization.expectation_version}</Text>
+                </>
+              ) : (
+                <Text style={styles.error}>Canonical materialization-lineage puuttuu. DEMO-lupaa ei voi antaa.</Text>
+              )}
+              {permissionLoading ? <ActivityIndicator color="#8a96a8" /> : null}
+              {permissionError ? <Text style={styles.error}>{permissionError}</Text> : null}
+              {paperPermission && materialization && !expectationMatchesMaterialization ? (
+                <Text style={styles.error}>
+                  Canonical expectation on muuttunut versioon v{paperPermission.current_expectation_version}. Tämä proposal materialisoitiin versiolle v{materialization.expectation_version}; DEMO-lupa vaatii uuden reviewn.
+                </Text>
+              ) : null}
+              {demoAuthorityCurrent ? (
+                <View style={styles.doneBox}>
+                  <Text style={styles.doneText}>
+                    ✓ DEMO-kaupankäyntilupa on voimassa expectation-versiolle v{paperPermission?.approved_expectation_version}.
+                  </Text>
+                </View>
+              ) : (
+                <>
+                  <Text style={styles.inputLabel}>DEMO-LUVAN HYVÄKSYJÄ</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={demoActor}
+                    onChangeText={setDemoActor}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    placeholder="Kirjoita oma hyväksyjäidentiteettisi"
+                    placeholderTextColor="#596476"
+                  />
+                  <Text style={styles.inputLabel}>ENIMMÄISPOSITIO USD</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={maxPositionUsd}
+                    onChangeText={setMaxPositionUsd}
+                    keyboardType="decimal-pad"
+                    placeholder="500"
+                    placeholderTextColor="#596476"
+                  />
+                  <Pressable
+                    style={[styles.approveButton, !canApproveDemo && styles.disabledButton]}
+                    disabled={!canApproveDemo}
+                    onPress={confirmDemoAuthority}
+                  >
+                    <Text style={styles.approveText}>
+                      {approvingDemo ? 'Hyväksytään…' : 'Hyväksy DEMO-kaupankäynti'}
+                    </Text>
+                  </Pressable>
+                </>
+              )}
+            </View>
+          ) : null}
         </>
       ) : null}
     </ScrollView>
