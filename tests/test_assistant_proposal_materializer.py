@@ -14,6 +14,7 @@ from trading_system.assistant_proposal_materializer import (
     AssistantProposalInstrumentResolutionError,
     AssistantProposalMaterializer,
     AssistantProposalOfficialSourceConflict,
+    AssistantProposalReviewedVersionConflict,
 )
 from trading_system.etoro_instrument_resolver import ResolvedEtoroInstrument
 from trading_system.models import EventExpectation
@@ -22,8 +23,7 @@ from trading_system.official_release_source_repository import (
     OfficialReleaseSourceState,
     OfficialReleaseSourceVersionConflict,
 )
-from trading_system.strategy_draft import draft_fingerprint, normalize_draft
-from trading_system.strategy_draft import StrategyDraftPayload
+from trading_system.strategy_draft import StrategyDraftPayload, draft_fingerprint, normalize_draft
 from trading_system.strategy_draft_repository import ExpectationVersionConflict
 
 
@@ -41,6 +41,7 @@ def _payload() -> dict:
         "scheduled_date": "2026-09-07",
         "event_at": "2026-09-07T00:00:00+00:00",
         "event_time_status": "unknown",
+        "base_expectation_version": 1,
         "official_source": {
             "source_kind": "results_page",
             "source_url": "https://www.syrahresources.com.au/investors/reports-presentations",
@@ -79,7 +80,7 @@ def _proposal() -> AssistantEventProposalRecord:
     )
 
 
-def _expectation() -> EventExpectation:
+def _expectation(*, version: int = 1) -> EventExpectation:
     return EventExpectation(
         event_id=EVENT_ID,
         instrument="SYR.ASX",
@@ -95,7 +96,7 @@ def _expectation() -> EventExpectation:
         source_name=None,
         source_url=None,
         source_as_of=None,
-        version=1,
+        version=version,
         updated_at=datetime(2026, 9, 6, tzinfo=UTC),
     )
 
@@ -181,6 +182,7 @@ class FakeExpectations:
 class FakeOfficialSources:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.actors: list[str] = []
         self.state = OfficialReleaseSourceState(source=None, version=0)
         self.raise_conflict = False
         self.latest_after_conflict: OfficialReleaseSourceState | None = None
@@ -193,6 +195,7 @@ class FakeOfficialSources:
 
     def set(self, source, *, expected_version: int, actor: str):
         self.calls.append("source.set")
+        self.actors.append(actor)
         if self.raise_conflict:
             raise OfficialReleaseSourceVersionConflict("conflict")
         self.state = OfficialReleaseSourceState(
@@ -266,7 +269,7 @@ def _harness() -> Harness:
 
 
 class AssistantProposalMaterializerTests(unittest.TestCase):
-    def test_happy_path_uses_canonical_layers_and_preserves_unknown_time(self) -> None:
+    def test_happy_path_uses_reviewed_version_and_reviewer_source_audit(self) -> None:
         h = _harness()
         result = h.materializer.materialize(PROPOSAL_ID)
 
@@ -276,8 +279,24 @@ class AssistantProposalMaterializerTests(unittest.TestCase):
         self.assertEqual(h.proposals.marked, [PROPOSAL_ID])
         self.assertEqual(str(h.events.calls[0][1].value), "unknown")
         self.assertEqual(len(h.approvals.calls), 1)
+        self.assertEqual(h.approvals.calls[0]["expected_base_version"], 1)
         self.assertEqual(h.approvals.calls[0]["approved_via"], f"assistant_proposal:{PROPOSAL_ID}")
         self.assertEqual(h.approvals.calls[0]["approved_by"], "marko")
+        self.assertEqual(
+            h.sources.actors,
+            [f"assistant_proposal:{PROPOSAL_ID}:reviewer:marko"],
+        )
+
+    def test_intervening_expectation_change_fails_before_source_or_approval_write(self) -> None:
+        h = _harness()
+        h.expectations.current = _expectation(version=2)
+
+        with self.assertRaises(AssistantProposalReviewedVersionConflict):
+            h.materializer.materialize(PROPOSAL_ID)
+
+        self.assertEqual(h.sources.calls, [])
+        self.assertEqual(h.approvals.calls, [])
+        self.assertEqual(h.proposals.marked, [])
 
     def test_resolution_failure_happens_before_any_canonical_write(self) -> None:
         h = _harness()
@@ -320,7 +339,7 @@ class AssistantProposalMaterializerTests(unittest.TestCase):
         self.assertEqual(h.approvals.calls, [])
         self.assertEqual(h.proposals.marked, [])
 
-    def test_existing_matching_receipt_is_idempotent_but_source_is_still_ensured(self) -> None:
+    def test_existing_matching_receipt_is_idempotent_and_source_is_still_ensured(self) -> None:
         h = _harness()
         first = h.materializer.materialize(PROPOSAL_ID)
         fingerprint = h.approvals.calls[0]["draft_fingerprint"]
@@ -332,10 +351,10 @@ class AssistantProposalMaterializerTests(unittest.TestCase):
             expectation_version=2,
             draft_fingerprint=fingerprint,
         )
+        h.expectations.current = _expectation(version=2)
         second = h.materializer.materialize(PROPOSAL_ID)
 
-        self.assertTrue(second.retried)
-        self.assertEqual(second.expectation_version, 2)
+        self.assertTrue(first.expectation_version == second.expectation_version == 2)
         self.assertEqual(h.approvals.calls, [])
         self.assertIn("source.get_state", h.sources.calls)
         self.assertEqual(h.proposals.marked, [PROPOSAL_ID])
@@ -462,6 +481,10 @@ class AssistantProposalMaterializerTests(unittest.TestCase):
         result = h.materializer.materialize(PROPOSAL_ID)
         self.assertEqual(result.expectation_version, 2)
         self.assertEqual(len(h.approvals.calls), 1)
+        self.assertEqual(
+            h.sources.actors,
+            [f"assistant_proposal:{PROPOSAL_ID}:reviewer:marko"],
+        )
 
 
 if __name__ == "__main__":
