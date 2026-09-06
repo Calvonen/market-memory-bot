@@ -50,8 +50,26 @@ export default function AssistantProposalListScreen() {
   }, []);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    let active = true;
+
+    void getAssistantProposals()
+      .then((nextProposals) => {
+        if (!active) {
+          return;
+        }
+        setProposals(nextProposals);
+      })
+      .catch((err: unknown) => {
+        if (!active) {
+          return;
+        }
+        setError(err instanceof Error ? err.message : 'Ehdotusten lataus epäonnistui');
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
