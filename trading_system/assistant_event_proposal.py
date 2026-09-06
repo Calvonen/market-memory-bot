@@ -68,6 +68,10 @@ class AssistantEventProposalPayload(BaseModel):
     scheduled_date: date
     event_at: datetime
     event_time_status: Literal["confirmed", "estimated", "unknown"]
+    # Immutable with the reviewed proposal payload. New strategy approval must
+    # CAS against this exact reviewed version, never whatever happens to be
+    # current when materialization eventually runs.
+    base_expectation_version: int = Field(ge=1, le=2147483647)
     official_source: OfficialSourcePayload
     strategy: StrategyDraftPayload
 
