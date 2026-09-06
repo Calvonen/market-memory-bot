@@ -95,6 +95,7 @@ def _scheduled_date_patterns(event: ResultsPageSelectionTarget) -> tuple[re.Patt
         value.strftime("%Y%m%d"),
         value.strftime("%Y/%m/%d"),
         value.strftime("%Y_%m_%d"),
+        value.strftime("%d.%m.%Y"),
     )
     return tuple(
         re.compile(rf"(?<!\d){re.escape(token)}(?!\d)", re.IGNORECASE)
