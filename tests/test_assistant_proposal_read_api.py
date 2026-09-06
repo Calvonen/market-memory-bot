@@ -9,10 +9,12 @@ from trading_system.assistant_proposal_api import build_assistant_proposal_route
 from trading_system.assistant_proposal_read_repository import (
     AssistantProposalMaterializationSummary,
     AssistantProposalReadRecord,
+    canonical_tracked_receipt_identity,
 )
 
 
 PROPOSAL_ID = "00000000-0000-0000-0000-000000000326"
+TRACKED_EVENT_ID = "00000000-0000-0000-0000-000000000273"
 
 
 def _record(
@@ -142,8 +144,8 @@ class AssistantProposalReadApiTests(unittest.TestCase):
         repository.get_result = _record(
             "materialized",
             AssistantProposalMaterializationSummary(
-                event_id="tracked:event-326",
-                tracked_event_id="event-326",
+                event_id=f"tracked:{TRACKED_EVENT_ID}",
+                tracked_event_id=TRACKED_EVENT_ID,
                 expectation_version=4,
             ),
         )
@@ -155,12 +157,23 @@ class AssistantProposalReadApiTests(unittest.TestCase):
         self.assertEqual(
             response.json()["materialization"],
             {
-                "event_id": "tracked:event-326",
-                "tracked_event_id": "event-326",
+                "event_id": f"tracked:{TRACKED_EVENT_ID}",
+                "tracked_event_id": TRACKED_EVENT_ID,
                 "expectation_version": 4,
             },
         )
         self.assertEqual(approval_calls, [])
+
+    def test_tracked_receipt_identity_is_uuid_backed_and_canonicalized(self) -> None:
+        event_id, tracked_event_id = canonical_tracked_receipt_identity(
+            " tracked:00000000-0000-0000-0000-000000000273 "
+        )
+        self.assertEqual(tracked_event_id, TRACKED_EVENT_ID)
+        self.assertEqual(event_id, f"tracked:{TRACKED_EVENT_ID}")
+
+    def test_non_uuid_tracked_receipt_identity_fails_closed(self) -> None:
+        with self.assertRaises(RuntimeError):
+            canonical_tracked_receipt_identity("tracked:not-a-uuid")
 
     def test_missing_detail_returns_404(self) -> None:
         client, repository, _ = self._client()
