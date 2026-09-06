@@ -96,10 +96,16 @@ def _scheduled_date_patterns(event: ResultsPageSelectionTarget) -> tuple[re.Patt
         value.strftime("%Y/%m/%d"),
         value.strftime("%Y_%m_%d"),
     )
-    return tuple(
+    patterns = tuple(
         re.compile(rf"(?<!\d){re.escape(token)}(?!\d)", re.IGNORECASE)
         for token in tokens
     )
+    dotted = re.escape(value.strftime("%d.%m.%Y"))
+    dotted_pattern = re.compile(
+        rf"(?<!\d)(?<!\d\.){dotted}(?!\d)(?!\.\d)",
+        re.IGNORECASE,
+    )
+    return patterns + (dotted_pattern,)
 
 
 def _human_scheduled_date_patterns(
