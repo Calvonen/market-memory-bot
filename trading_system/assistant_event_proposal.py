@@ -166,8 +166,13 @@ class SupabaseAssistantEventProposalRepository:
 
 def validate_proposal_for_materialization(
     proposal: AssistantEventProposalRecord,
+    *,
+    allow_materialized_retry: bool = False,
 ) -> AssistantEventProposalPayload:
-    if proposal.status != "approved_for_materialization":
+    allowed_statuses = {"approved_for_materialization"}
+    if allow_materialized_retry:
+        allowed_statuses.add("materialized")
+    if proposal.status not in allowed_statuses:
         raise AssistantProposalNotReady(
             f"assistant proposal status is {proposal.status}, not approved_for_materialization"
         )
