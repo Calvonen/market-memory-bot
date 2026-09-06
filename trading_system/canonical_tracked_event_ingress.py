@@ -76,6 +76,7 @@ class SupabaseCanonicalTrackedEventIngress:
         tracked: TrackedEtoroInstrument,
         *,
         proposal_id: str,
+        expected_review_round: int,
         expected_base_version: int,
         company_name: str,
         source: str,
@@ -87,7 +88,7 @@ class SupabaseCanonicalTrackedEventIngress:
         event_time_status: TrackedEventTimeStatus,
         actor: str,
     ) -> CanonicalTrackedEventWriteResult:
-        """CAS existing event metadata against the proposal's reviewed version."""
+        """CAS event metadata against one immutable reviewed proposal snapshot."""
         self._validate_inputs(
             event_at=event_at,
             event_date=event_date,
@@ -95,6 +96,8 @@ class SupabaseCanonicalTrackedEventIngress:
             expected_tracked_instrument_id=tracked.tracked_instrument_id,
             calendar_event_id=None,
         )
+        if expected_review_round < 1:
+            raise ValueError("expected_review_round must be positive")
         if expected_base_version < 1:
             raise ValueError("expected_base_version must be positive")
 
@@ -102,6 +105,7 @@ class SupabaseCanonicalTrackedEventIngress:
             "upsert_assistant_proposal_canonical_tracked_event",
             {
                 "input_proposal_id": proposal_id,
+                "input_expected_review_round": expected_review_round,
                 "input_expected_base_version": expected_base_version,
                 "input_company_name": company_name,
                 "input_instrument": tracked.instrument,
