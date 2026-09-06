@@ -164,6 +164,10 @@ class SupabaseAssistantEventProposalRepository:
             message = str(getattr(exc, "message", None) or exc)
             if code == "P0002" or "assistant_proposal_not_found" in message:
                 raise AssistantProposalNotFound("assistant proposal not found") from exc
+            if "assistant_proposal_live_locked" in message:
+                raise AssistantProposalLiveLocked(
+                    "LIVE proposal materialization is locked; only demo proposals are accepted"
+                ) from exc
             if any(
                 marker in message
                 for marker in (
