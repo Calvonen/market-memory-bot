@@ -1,4 +1,4 @@
-/* eslint-disable react-hooks/set-state-in-effect -- Route and authority changes intentionally clear stale approval state synchronously to fail closed. */
+/* eslint-disable react-hooks/set-state-in-effect, react-hooks/refs -- Route and authority changes intentionally clear stale approval state synchronously to fail closed. */
 import { useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
