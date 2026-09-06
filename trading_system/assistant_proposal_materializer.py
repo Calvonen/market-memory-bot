@@ -37,6 +37,10 @@ class AssistantProposalOfficialSourceConflict(AssistantProposalMaterializationEr
     pass
 
 
+class AssistantProposalReviewedVersionConflict(AssistantProposalMaterializationError):
+    pass
+
+
 @dataclass(frozen=True)
 class AssistantProposalMaterializationResult:
     proposal_id: str
@@ -162,22 +166,28 @@ class AssistantProposalMaterializer:
         if mismatches:
             raise AssistantProposalCanonicalIdentityConflict("; ".join(mismatches))
 
-        self._ensure_official_source(event_id, payload)
         approved_via = proposal_approval_via(proposal)
         fingerprint = draft_fingerprint(normalized)
         receipt = self.proposals.find_approval(approved_via=approved_via)
         if receipt is not None:
             version = self._matching_receipt_version(receipt, event_id, fingerprint)
+            self._ensure_official_source(event_id, payload, proposal)
             self.proposals.mark_materialized(proposal.id)
             return AssistantProposalMaterializationResult(
                 proposal.id, tracked_event_id, event_id, version, True
             )
 
+        if current.version != payload.base_expectation_version:
+            raise AssistantProposalReviewedVersionConflict(
+                "current expectation version differs from the reviewed proposal base version"
+            )
+
+        self._ensure_official_source(event_id, payload, proposal)
         retried = False
         try:
             approved = self.approvals.approve(
                 event_id=event_id,
-                expected_base_version=current.version,
+                expected_base_version=payload.base_expectation_version,
                 source_name=normalized["source_name"],
                 source_url=normalized["source_url"],
                 source_as_of=payload.strategy.source_as_of,
@@ -226,7 +236,7 @@ class AssistantProposalMaterializer:
             proposal.id, tracked_event_id, event_id, version, True
         )
 
-    def _ensure_official_source(self, event_id: str, payload: Any) -> None:
+    def _ensure_official_source(self, event_id: str, payload: Any, proposal: Any) -> None:
         desired = OfficialReleaseSource(
             event_id=event_id,
             source_kind=payload.official_source.source_kind,
@@ -242,7 +252,9 @@ class AssistantProposalMaterializer:
             )
         try:
             self.official_sources.set(
-                desired, expected_version=state.version, actor=self.actor
+                desired,
+                expected_version=state.version,
+                actor=_source_audit_actor(proposal),
             )
         except OfficialReleaseSourceVersionConflict:
             latest = self.official_sources.get_state(event_id)
@@ -261,6 +273,16 @@ class AssistantProposalMaterializer:
                 "existing proposal approval receipt does not match this materialization"
             )
         return receipt.expectation_version
+
+
+def _source_audit_actor(proposal: Any) -> str:
+    reviewer = str(proposal.reviewed_by or "").strip()
+    actor = f"assistant_proposal:{proposal.id}:reviewer:{reviewer}"
+    if not reviewer or "\x00" in actor or len(actor) > 200:
+        raise AssistantProposalMaterializationError(
+            "assistant proposal reviewer provenance is invalid for official-source audit"
+        )
+    return actor
 
 
 def _same_source(left: OfficialReleaseSource, right: OfficialReleaseSource) -> bool:
