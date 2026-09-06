@@ -51,10 +51,7 @@ class AssistantProposalMaterializationResult:
 
 
 class AssistantProposalMaterializer:
-    """Compose an approved proposal into tracking/expectation state only.
-
-    There is deliberately no trading-task, RiskEngine or broker dependency here.
-    """
+    """Compose an approved proposal into tracking/expectation state only."""
 
     def __init__(
         self,
@@ -133,18 +130,26 @@ class AssistantProposalMaterializer:
                 "tracked instrument registry returned a different instrument"
             )
 
-        event_write = self.events.register_for_tracked_instrument(
-            tracked,
-            company_name=payload.company_name,
-            source="manual",
-            external_key=proposal.proposal_key,
-            kind=payload.kind,
-            title=payload.title,
-            event_at=payload.event_at,
-            event_date=payload.scheduled_date,
-            event_time_status=TrackedEventTimeStatus(payload.event_time_status),
-            actor=self.actor,
-        )
+        try:
+            event_write = self.events.register_assistant_proposal_for_tracked_instrument(
+                tracked,
+                proposal_id=proposal.id,
+                expected_base_version=payload.base_expectation_version,
+                company_name=payload.company_name,
+                source="manual",
+                external_key=proposal.proposal_key,
+                kind=payload.kind,
+                title=payload.title,
+                event_at=payload.event_at,
+                event_date=payload.scheduled_date,
+                event_time_status=TrackedEventTimeStatus(payload.event_time_status),
+                actor=self.actor,
+            )
+        except Exception as exc:
+            if "expectation_version_conflict" in str(exc):
+                raise AssistantProposalReviewedVersionConflict(str(exc)) from exc
+            raise
+
         tracked_event_id = str(event_write.event_id)
         event_id = f"tracked:{tracked_event_id}"
         target = CalendarReleaseTarget(
@@ -189,7 +194,8 @@ class AssistantProposalMaterializer:
         self._ensure_official_source(event_id, payload, proposal)
         retried = False
         try:
-            approved = self.approvals.approve(
+            approved = self.approvals.approve_assistant_proposal(
+                proposal_id=proposal.id,
                 event_id=event_id,
                 expected_base_version=payload.base_expectation_version,
                 source_name=normalized["source_name"],
