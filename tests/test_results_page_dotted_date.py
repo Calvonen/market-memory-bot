@@ -61,6 +61,21 @@ class ResultsPageDottedDateTests(unittest.TestCase):
 
         self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
 
+    def test_dotted_date_rejects_longer_dotted_numeric_sequence(self):
+        target = ResultsPageSelectionContext(
+            calendar_event_id="calendar:syrah-test",
+            scheduled_date=date(2026, 9, 7),
+        )
+        candidate = ResultsPageReleaseCandidate(
+            event_id="calendar:syrah-test",
+            source_url="https://investor.example.com/v1.07.09.2026.0-release.pdf",
+            source_title="PDF",
+        )
+
+        selection = select_results_page_release_candidate(target, (candidate,))
+
+        self.assertEqual(selection.status, ResultsPageSelectionStatus.NO_MATCH)
+
 
 if __name__ == "__main__":
     unittest.main()
