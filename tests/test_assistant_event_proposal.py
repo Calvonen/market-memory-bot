@@ -52,7 +52,10 @@ def _payload() -> dict:
     }
 
 
-def _proposal(*, mode="demo", status="approved_for_materialization", payload=None, reviewer="marko"):
+def _proposal(
+    *, mode="demo", status="approved_for_materialization", payload=None,
+    reviewer="marko", review_round=1
+):
     return AssistantEventProposalRecord(
         id="00000000-0000-0000-0000-000000000321",
         proposal_key="SYR.ASX:earnings:2026-09-07",
@@ -60,6 +63,7 @@ def _proposal(*, mode="demo", status="approved_for_materialization", payload=Non
         requested_execution_mode=mode,
         status=status,
         reviewed_by=reviewer,
+        review_round=review_round,
     )
 
 
@@ -81,6 +85,8 @@ class AssistantEventProposalTests(unittest.TestCase):
             validate_proposal_for_materialization(_proposal(status="ready_for_review"))
         with self.assertRaises(AssistantProposalNotReady):
             validate_proposal_for_materialization(_proposal(reviewer=None))
+        with self.assertRaises(AssistantProposalNotReady):
+            validate_proposal_for_materialization(_proposal(review_round=0))
 
     def test_strategy_instrument_mismatch_fails_closed(self) -> None:
         payload = _payload()
