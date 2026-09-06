@@ -26,6 +26,9 @@ from trading_system.supabase_event_repository import SupabaseEventExpectationRep
 from trading_system.tracked_instrument_registry import SupabaseTrackedInstrumentRegistry
 
 
+MAX_PREPARATION_REVIEWER_LENGTH = 135
+
+
 @dataclass(frozen=True)
 class AssistantPreparationApprovalResult:
     proposal_id: str
@@ -52,8 +55,13 @@ class AssistantProposalApprovalService:
     def approve_preparation(
         self, proposal_id: str, *, reviewer: str
     ) -> AssistantPreparationApprovalResult:
+        canonical_reviewer = reviewer.strip()
+        if not canonical_reviewer or len(canonical_reviewer) > MAX_PREPARATION_REVIEWER_LENGTH:
+            raise ValueError(
+                f"reviewer must be between 1 and {MAX_PREPARATION_REVIEWER_LENGTH} characters"
+            )
         status, review_round = self.proposals.approve_for_materialization(
-            proposal_id, reviewer=reviewer
+            proposal_id, reviewer=canonical_reviewer
         )
         result: AssistantProposalMaterializationResult = self.materializer.materialize(
             proposal_id
@@ -95,5 +103,6 @@ __all__ = [
     "AssistantProposalMaterializationError",
     "AssistantProposalNotFound",
     "AssistantProposalPreparationApprovalConflict",
+    "MAX_PREPARATION_REVIEWER_LENGTH",
     "build_default_assistant_proposal_approval_service",
 ]
