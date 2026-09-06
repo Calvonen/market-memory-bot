@@ -24,6 +24,7 @@ def _payload() -> dict:
         "scheduled_date": "2026-09-07",
         "event_at": "2026-09-07T00:00:00+00:00",
         "event_time_status": "estimated",
+        "base_expectation_version": 1,
         "official_source": {
             "source_kind": "results_page",
             "source_url": "https://www.syrahresources.com.au/investors/reports-presentations",
@@ -51,7 +52,10 @@ def _payload() -> dict:
     }
 
 
-def _proposal(*, mode="demo", status="approved_for_materialization", payload=None, reviewer="marko"):
+def _proposal(
+    *, mode="demo", status="approved_for_materialization", payload=None,
+    reviewer="marko", review_round=1
+):
     return AssistantEventProposalRecord(
         id="00000000-0000-0000-0000-000000000321",
         proposal_key="SYR.ASX:earnings:2026-09-07",
@@ -59,6 +63,7 @@ def _proposal(*, mode="demo", status="approved_for_materialization", payload=Non
         requested_execution_mode=mode,
         status=status,
         reviewed_by=reviewer,
+        review_round=review_round,
     )
 
 
@@ -68,6 +73,7 @@ class AssistantEventProposalTests(unittest.TestCase):
         self.assertEqual(payload.instrument, "SYR.ASX")
         self.assertEqual(payload.market, "Australia")
         self.assertEqual(payload.title, "Syrah Resources results")
+        self.assertEqual(payload.base_expectation_version, 1)
         self.assertEqual(payload.strategy.event_name, "SYR.ASX earnings")
 
     def test_live_is_visible_metadata_but_fails_closed_for_materialization(self) -> None:
@@ -79,6 +85,8 @@ class AssistantEventProposalTests(unittest.TestCase):
             validate_proposal_for_materialization(_proposal(status="ready_for_review"))
         with self.assertRaises(AssistantProposalNotReady):
             validate_proposal_for_materialization(_proposal(reviewer=None))
+        with self.assertRaises(AssistantProposalNotReady):
+            validate_proposal_for_materialization(_proposal(review_round=0))
 
     def test_strategy_instrument_mismatch_fails_closed(self) -> None:
         payload = _payload()
@@ -109,6 +117,17 @@ class AssistantEventProposalTests(unittest.TestCase):
     def test_kind_must_be_explicit(self) -> None:
         payload = _payload()
         payload.pop("kind")
+        with self.assertRaises(ValidationError):
+            validate_proposal_for_materialization(_proposal(payload=payload))
+
+    def test_reviewed_base_expectation_version_must_be_explicit_and_positive(self) -> None:
+        payload = _payload()
+        payload.pop("base_expectation_version")
+        with self.assertRaises(ValidationError):
+            validate_proposal_for_materialization(_proposal(payload=payload))
+
+        payload = _payload()
+        payload["base_expectation_version"] = 0
         with self.assertRaises(ValidationError):
             validate_proposal_for_materialization(_proposal(payload=payload))
 

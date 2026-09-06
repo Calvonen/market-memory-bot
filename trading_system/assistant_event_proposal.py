@@ -32,6 +32,7 @@ class AssistantEventProposalRecord:
     requested_execution_mode: str
     status: str
     reviewed_by: str | None
+    review_round: int
 
 
 @dataclass(frozen=True)
@@ -48,8 +49,6 @@ class OfficialSourcePayload(BaseModel):
 
     @model_validator(mode="after")
     def _validate_canonical_source(self) -> "OfficialSourcePayload":
-        # Reuse the canonical release-source validator at the proposal boundary
-        # so malformed sources fail before any later materializer side effects.
         OfficialReleaseSource(
             event_id="assistant-proposal-validation",
             source_kind=self.source_kind,
@@ -68,6 +67,7 @@ class AssistantEventProposalPayload(BaseModel):
     scheduled_date: date
     event_at: datetime
     event_time_status: Literal["confirmed", "estimated", "unknown"]
+    base_expectation_version: int = Field(ge=1, le=2147483647)
     official_source: OfficialSourcePayload
     strategy: StrategyDraftPayload
 
@@ -105,7 +105,9 @@ class SupabaseAssistantEventProposalRepository:
     def get(self, proposal_id: str) -> AssistantEventProposalRecord | None:
         response = (
             self.client.table(self.TABLE)
-            .select("id,proposal_key,payload,requested_execution_mode,status,reviewed_by")
+            .select(
+                "id,proposal_key,payload,requested_execution_mode,status,reviewed_by,review_round"
+            )
             .eq("id", proposal_id)
             .limit(1)
             .execute()
@@ -119,6 +121,12 @@ class SupabaseAssistantEventProposalRepository:
         payload = row.get("payload")
         if not isinstance(payload, dict):
             raise RuntimeError("assistant proposal payload is not an object")
+        try:
+            review_round = int(row["review_round"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("assistant proposal review_round is invalid") from exc
+        if review_round < 0:
+            raise RuntimeError("assistant proposal review_round is invalid")
         return AssistantEventProposalRecord(
             id=str(row["id"]),
             proposal_key=str(row["proposal_key"]),
@@ -126,6 +134,7 @@ class SupabaseAssistantEventProposalRepository:
             requested_execution_mode=str(row["requested_execution_mode"]),
             status=str(row["status"]),
             reviewed_by=(str(row["reviewed_by"]) if row.get("reviewed_by") else None),
+            review_round=review_round,
         )
 
     def find_approval(self, *, approved_via: str) -> ExistingProposalApproval | None:
@@ -163,11 +172,26 @@ class SupabaseAssistantEventProposalRepository:
         if current is None or current.status != "materialized":
             raise RuntimeError("assistant proposal materialized status CAS failed")
 
+    def reopen_for_review(self, proposal_id: str) -> None:
+        """Atomically reopen before any proposal-scoped strategy approval commits."""
+        response = self.client.rpc(
+            "reopen_assistant_event_proposal_for_review",
+            {"input_proposal_id": proposal_id},
+        ).execute()
+        rows = response.data or []
+        if not rows or str(rows[0].get("out_status")) != "draft":
+            raise RuntimeError("assistant proposal re-review RPC returned invalid data")
+
 
 def validate_proposal_for_materialization(
     proposal: AssistantEventProposalRecord,
+    *,
+    allow_materialized_retry: bool = False,
 ) -> AssistantEventProposalPayload:
-    if proposal.status != "approved_for_materialization":
+    allowed_statuses = {"approved_for_materialization"}
+    if allow_materialized_retry:
+        allowed_statuses.add("materialized")
+    if proposal.status not in allowed_statuses:
         raise AssistantProposalNotReady(
             f"assistant proposal status is {proposal.status}, not approved_for_materialization"
         )
@@ -177,6 +201,8 @@ def validate_proposal_for_materialization(
         )
     if not proposal.reviewed_by or not proposal.reviewed_by.strip():
         raise AssistantProposalNotReady("approved proposal is missing reviewer identity")
+    if proposal.review_round < 1:
+        raise AssistantProposalNotReady("approved proposal is missing a review snapshot")
 
     payload = AssistantEventProposalPayload.model_validate(proposal.payload)
     if _symbol(payload.strategy.instrument) != _symbol(payload.instrument):
