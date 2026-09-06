@@ -53,18 +53,27 @@ class AssistantProposalApprovalService:
         self.materializer = materializer
 
     def approve_preparation(
-        self, proposal_id: str, *, reviewer: str
+        self,
+        proposal_id: str,
+        *,
+        reviewer: str,
+        expected_review_round: int,
     ) -> AssistantPreparationApprovalResult:
         canonical_reviewer = reviewer.strip()
         if not canonical_reviewer or len(canonical_reviewer) > MAX_PREPARATION_REVIEWER_LENGTH:
             raise ValueError(
                 f"reviewer must be between 1 and {MAX_PREPARATION_REVIEWER_LENGTH} characters"
             )
+        if expected_review_round < 0:
+            raise ValueError("expected_review_round must be non-negative")
         status, review_round = self.proposals.approve_for_materialization(
-            proposal_id, reviewer=canonical_reviewer
+            proposal_id,
+            reviewer=canonical_reviewer,
+            expected_review_round=expected_review_round,
         )
         result: AssistantProposalMaterializationResult = self.materializer.materialize(
-            proposal_id
+            proposal_id,
+            expected_review_round=review_round,
         )
         return AssistantPreparationApprovalResult(
             proposal_id=proposal_id,
@@ -75,7 +84,6 @@ class AssistantProposalApprovalService:
             expectation_version=result.expectation_version,
             retried=result.retried or status == "materialized",
         )
-
 
 
 def build_default_assistant_proposal_approval_service() -> AssistantProposalApprovalService:

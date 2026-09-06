@@ -146,17 +146,20 @@ class SupabaseAssistantEventProposalRepository:
         )
 
     def approve_for_materialization(
-        self, proposal_id: str, *, reviewer: str
+        self, proposal_id: str, *, reviewer: str, expected_review_round: int
     ) -> tuple[str, int]:
         canonical_reviewer = reviewer.strip()
         if not canonical_reviewer or len(canonical_reviewer) > 200:
             raise ValueError("reviewer must be between 1 and 200 characters")
+        if expected_review_round < 0:
+            raise ValueError("expected_review_round must be non-negative")
         try:
             response = self.client.rpc(
                 "approve_assistant_event_proposal_for_materialization",
                 {
                     "input_proposal_id": proposal_id,
                     "input_reviewer": canonical_reviewer,
+                    "input_expected_review_round": expected_review_round,
                 },
             ).execute()
         except Exception as exc:
@@ -175,6 +178,7 @@ class SupabaseAssistantEventProposalRepository:
                     "assistant_proposal_not_ready_for_preparation_approval",
                     "assistant_proposal_review_status_cas_failed",
                     "assistant_proposal_missing_review_snapshot",
+                    "assistant_proposal_review_round_conflict",
                 )
             ):
                 raise AssistantProposalPreparationApprovalConflict(message) from exc
@@ -190,9 +194,18 @@ class SupabaseAssistantEventProposalRepository:
             review_round = int(row.get("out_review_round"))
         except (TypeError, ValueError) as exc:
             raise RuntimeError("assistant proposal preparation approval returned invalid review round") from exc
+
+        # The lifecycle trigger increments review_round exactly once when
+        # ready_for_review transitions to approved_for_materialization. For an
+        # idempotent retry of an already approved/materialized proposal the
+        # round is unchanged. The pre-transition CAS was already checked under
+        # the proposal row lock by the RPC, so these are the only valid return
+        # values for a successful call.
+        valid_review_rounds = {expected_review_round, expected_review_round + 1}
         if (
             status not in {"approved_for_materialization", "materialized"}
             or reviewed_by != canonical_reviewer
+            or review_round not in valid_review_rounds
             or review_round < 1
         ):
             raise RuntimeError("assistant proposal preparation approval returned invalid data")
@@ -234,7 +247,6 @@ class SupabaseAssistantEventProposalRepository:
             raise RuntimeError("assistant proposal materialized status CAS failed")
 
     def reopen_for_review(self, proposal_id: str) -> None:
-        """Atomically reopen before any proposal-scoped strategy approval commits."""
         response = self.client.rpc(
             "reopen_assistant_event_proposal_for_review",
             {"input_proposal_id": proposal_id},
