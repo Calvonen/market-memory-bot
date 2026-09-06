@@ -1,5 +1,5 @@
 import { useLocalSearchParams } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -74,6 +74,12 @@ export default function AssistantProposalDetailScreen() {
   const [approvingDemo, setApprovingDemo] = useState(false);
   const [demoActor, setDemoActor] = useState('');
   const [maxPositionUsd, setMaxPositionUsd] = useState(DEFAULT_DEMO_POSITION_CAP_USD);
+  const proposalIdRef = useRef(proposalId);
+  const trackedEventIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    proposalIdRef.current = proposalId;
+  }, [proposalId]);
 
   const load = useCallback(async () => {
     if (!proposalId) {
@@ -95,9 +101,16 @@ export default function AssistantProposalDetailScreen() {
   useEffect(() => {
     let cancelled = false;
     const materialization = proposal?.materialization;
-    if (proposal?.status !== 'materialized' || !materialization) {
-      setPaperPermission(null);
-      setPermissionError(null);
+    const trackedEventId =
+      proposal?.status === 'materialized' && materialization
+        ? materialization.tracked_event_id
+        : null;
+
+    trackedEventIdRef.current = trackedEventId;
+    setPaperPermission(null);
+    setPermissionError(null);
+
+    if (!trackedEventId) {
       setPermissionLoading(false);
       return () => {
         cancelled = true;
@@ -105,22 +118,28 @@ export default function AssistantProposalDetailScreen() {
     }
 
     setPermissionLoading(true);
-    setPermissionError(null);
-    void getTrackedEventPaperPermission(materialization.tracked_event_id)
+    void getTrackedEventPaperPermission(trackedEventId)
       .then((permission) => {
-        if (cancelled) return;
+        if (cancelled || trackedEventIdRef.current !== trackedEventId) return;
+        if (permission.event_id !== trackedEventId) {
+          setPaperPermission(null);
+          setPermissionError('DEMO-luvan canonical tracked event ei vastaa proposalin materialisointia.');
+          return;
+        }
         setPaperPermission(permission);
         if (permission.max_position_value_usd !== null) {
           setMaxPositionUsd(String(permission.max_position_value_usd));
         }
       })
       .catch((err) => {
-        if (cancelled) return;
+        if (cancelled || trackedEventIdRef.current !== trackedEventId) return;
         setPaperPermission(null);
         setPermissionError(err instanceof Error ? err.message : 'DEMO-luvan lataus epäonnistui.');
       })
       .finally(() => {
-        if (!cancelled) setPermissionLoading(false);
+        if (!cancelled && trackedEventIdRef.current === trackedEventId) {
+          setPermissionLoading(false);
+        }
       });
 
     return () => {
@@ -148,7 +167,18 @@ export default function AssistantProposalDetailScreen() {
         proposal.review_round,
       );
       setApproval(result);
-      await load();
+      setProposal((current) => current && current.id === result.proposal_id ? {
+        ...current,
+        status: 'materialized',
+        reviewed_by: reviewer.trim(),
+        review_round: result.review_round,
+        materialization: {
+          event_id: result.event_id,
+          tracked_event_id: result.tracked_event_id,
+          expectation_version: result.expectation_version,
+        },
+      } : current);
+      void load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Valmistelun hyväksyntä epäonnistui');
     } finally {
@@ -165,13 +195,20 @@ export default function AssistantProposalDetailScreen() {
     && reviewer.trim().length > 0
     && reviewer.trim().length <= 135;
   const parsedMaxPositionUsd = parsePositiveUsd(maxPositionUsd);
-  const expectationMatchesMaterialization = Boolean(
+  const permissionMatchesTrackedEvent = Boolean(
     materialization
+    && paperPermission
+    && paperPermission.event_id === materialization.tracked_event_id,
+  );
+  const expectationMatchesMaterialization = Boolean(
+    permissionMatchesTrackedEvent
+    && materialization
     && paperPermission
     && paperPermission.current_expectation_version === materialization.expectation_version,
   );
   const demoAuthorityCurrent = Boolean(
-    paperPermission?.approval_current
+    permissionMatchesTrackedEvent
+    && paperPermission?.approval_current
     && materialization
     && paperPermission.approved_expectation_version === materialization.expectation_version,
   );
@@ -181,6 +218,7 @@ export default function AssistantProposalDetailScreen() {
     && requestedDemo
     && materialization
     && paperPermission
+    && permissionMatchesTrackedEvent
     && expectationMatchesMaterialization
     && !demoAuthorityCurrent
     && demoActor.trim()
@@ -193,6 +231,7 @@ export default function AssistantProposalDetailScreen() {
     const actor = demoActor.trim();
     const expectedVersion = materialization.expectation_version;
     const trackedEventId = materialization.tracked_event_id;
+    const submittedProposalId = proposal.id;
     Alert.alert(
       'Hyväksy DEMO-kaupankäynti',
       `Annat MarketAI:lle kertaluonteisen luvan tehdä ${proposal.payload.instrument}-demokaupan tämän yhden tapahtuman perusteella. Expectation v${expectedVersion}. Enimmäispositio ${parsedMaxPositionUsd} USD. Strategy ja Risk Engine voivat silti estää kaupan tai pienentää positiota. LIVE-kaupankäyntiä tämä ei mahdollista.`,
@@ -212,15 +251,56 @@ export default function AssistantProposalDetailScreen() {
               },
             )
               .then((permission) => {
+                if (
+                  proposalIdRef.current !== submittedProposalId
+                  || trackedEventIdRef.current !== trackedEventId
+                ) return;
+                if (permission.event_id !== trackedEventId) {
+                  setPaperPermission(null);
+                  setPermissionError('DEMO-luvan canonical tracked event ei vastaa proposalin materialisointia.');
+                  return;
+                }
                 setPaperPermission(permission);
                 if (permission.max_position_value_usd !== null) {
                   setMaxPositionUsd(String(permission.max_position_value_usd));
                 }
               })
-              .catch((err) => {
-                setPermissionError(err instanceof Error ? err.message : 'DEMO-luvan hyväksyntä epäonnistui.');
+              .catch(async (err) => {
+                if (
+                  proposalIdRef.current !== submittedProposalId
+                  || trackedEventIdRef.current !== trackedEventId
+                ) return;
+                const writeError = err instanceof Error ? err.message : 'DEMO-luvan hyväksyntä epäonnistui.';
+                setPermissionError(writeError);
+                try {
+                  const current = await getTrackedEventPaperPermission(trackedEventId);
+                  if (
+                    proposalIdRef.current !== submittedProposalId
+                    || trackedEventIdRef.current !== trackedEventId
+                  ) return;
+                  if (current.event_id !== trackedEventId) {
+                    setPaperPermission(null);
+                    setPermissionError('DEMO-luvan canonical tracked event ei vastaa proposalin materialisointia.');
+                    return;
+                  }
+                  setPaperPermission(current);
+                  if (current.max_position_value_usd !== null) {
+                    setMaxPositionUsd(String(current.max_position_value_usd));
+                  }
+                  setPermissionError(writeError);
+                } catch {
+                  setPaperPermission(null);
+                  setPermissionError(writeError);
+                }
               })
-              .finally(() => setApprovingDemo(false));
+              .finally(() => {
+                if (
+                  proposalIdRef.current === submittedProposalId
+                  && trackedEventIdRef.current === trackedEventId
+                ) {
+                  setApprovingDemo(false);
+                }
+              });
           },
         },
       ],
@@ -346,7 +426,7 @@ export default function AssistantProposalDetailScreen() {
               )}
               {permissionLoading ? <ActivityIndicator color="#8a96a8" /> : null}
               {permissionError ? <Text style={styles.error}>{permissionError}</Text> : null}
-              {paperPermission && materialization && !expectationMatchesMaterialization ? (
+              {paperPermission && materialization && permissionMatchesTrackedEvent && !expectationMatchesMaterialization ? (
                 <Text style={styles.error}>
                   Canonical expectation on muuttunut versioon v{paperPermission.current_expectation_version}. Tämä proposal materialisoitiin versiolle v{materialization.expectation_version}; DEMO-lupa vaatii uuden reviewn.
                 </Text>
