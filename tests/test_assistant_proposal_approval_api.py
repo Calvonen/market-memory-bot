@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import unittest
-from types import SimpleNamespace
 
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
+from trading_system.assistant_event_proposal import AssistantProposalLiveLocked
 from trading_system.assistant_proposal_api import build_assistant_proposal_router
 from trading_system.assistant_proposal_approval_service import (
+    AssistantPreparationApprovalResult,
     AssistantProposalApprovalService,
 )
 from trading_system.assistant_proposal_materializer import (
@@ -21,10 +22,13 @@ PROPOSAL_ID = "00000000-0000-0000-0000-000000000324"
 class FakeApprovalService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.error: Exception | None = None
 
     def approve_preparation(self, proposal_id: str, *, reviewer: str):
         self.calls.append((proposal_id, reviewer))
-        return SimpleNamespace(
+        if self.error is not None:
+            raise self.error
+        return AssistantPreparationApprovalResult(
             proposal_id=proposal_id,
             status="materialized",
             review_round=2,
@@ -104,6 +108,16 @@ class AssistantProposalApprovalApiTests(unittest.TestCase):
         self.assertEqual(payload["event_id"], "tracked:event-324")
         self.assertEqual(payload["expectation_version"], 3)
         self.assertIs(payload["trading_authority_granted"], False)
+
+    def test_locked_live_proposal_is_a_conflict_not_retryable_service_failure(self) -> None:
+        client, service, _ = self._client()
+        service.error = AssistantProposalLiveLocked("LIVE proposal materialization is locked")
+        response = client.post(
+            f"/api/v1/assistant-proposals/{PROPOSAL_ID}/approve-preparation",
+            headers={"X-MarketAI-Control-Key": "control-secret"},
+            json={"reviewer": "marko"},
+        )
+        self.assertEqual(response.status_code, 409)
 
     def test_service_approves_preparation_before_materializing(self) -> None:
         proposals = FakeProposals()
