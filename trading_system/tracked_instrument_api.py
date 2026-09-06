@@ -11,6 +11,9 @@ from trading_system.assistant_proposal_approval_service import (
     AssistantProposalApprovalService,
     build_default_assistant_proposal_approval_service,
 )
+from trading_system.assistant_proposal_read_repository import (
+    SupabaseAssistantProposalReadRepository,
+)
 
 
 class TrackInstrumentRequest(BaseModel):
@@ -43,6 +46,7 @@ def build_tracked_instrument_router(
 ) -> APIRouter:
     router = APIRouter()
     assistant_approval_service: AssistantProposalApprovalService | None = None
+    assistant_read_repository: SupabaseAssistantProposalReadRepository | None = None
 
     def get_assistant_approval_service() -> AssistantProposalApprovalService:
         nonlocal assistant_approval_service
@@ -50,13 +54,23 @@ def build_tracked_instrument_router(
             assistant_approval_service = build_default_assistant_proposal_approval_service()
         return assistant_approval_service
 
-    # The assistant proposal endpoint belongs to the same control plane as
-    # tracked-instrument mutations. Its service is lazy so ordinary API startup
-    # and read-only requests do not require eToro/Supabase materializer config.
+    def get_assistant_read_repository() -> SupabaseAssistantProposalReadRepository:
+        nonlocal assistant_read_repository
+        if assistant_read_repository is None:
+            assistant_read_repository = SupabaseAssistantProposalReadRepository.from_env()
+        return assistant_read_repository
+
+    # Assistant proposal control and read paths stay lazy so ordinary API
+    # startup does not construct eToro/materializer dependencies. Read requests
+    # only create the Supabase read repository.
     router.include_router(
         build_assistant_proposal_router(
             require_control=require_control,
             get_approval_service=get_assistant_approval_service,
+            require_read=require_read,
+            get_read_repository=(
+                get_assistant_read_repository if require_read is not None else None
+            ),
         )
     )
 
