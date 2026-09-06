@@ -261,7 +261,8 @@ class AssistantProposalMaterializer:
                 "event already has a different approved official release source"
             )
         try:
-            self.official_sources.set(
+            self.official_sources.set_for_assistant_proposal(
+                proposal.id,
                 desired,
                 expected_version=state.version,
                 actor=_source_audit_actor(proposal),
