@@ -37,6 +37,7 @@ AssistantProposalStatus = Literal[
 
 class AssistantPreparationApprovalRequest(BaseModel):
     reviewer: str = Field(min_length=1, max_length=MAX_PREPARATION_REVIEWER_LENGTH)
+    expected_review_round: int = Field(ge=0)
 
     @field_validator("reviewer", mode="before")
     @classmethod
@@ -64,9 +65,7 @@ def build_assistant_proposal_router(
 
         @router.get("")
         def list_proposals(
-            proposal_status: AssistantProposalStatus | None = Query(
-                default=None, alias="status"
-            ),
+            proposal_status: AssistantProposalStatus | None = Query(default=None, alias="status"),
             limit: int = Query(default=50, ge=1, le=100),
             x_marketai_key: str | None = Header(default=None, alias="X-MarketAI-Key"),
         ) -> list[dict]:
@@ -74,18 +73,11 @@ def build_assistant_proposal_router(
             try:
                 if proposal_status is not None and proposal_status not in ALL_STATUSES:
                     raise HTTPException(status_code=422, detail="Invalid assistant proposal status")
-                return [
-                    asdict(record)
-                    for record in get_read_repository().list(
-                        status=proposal_status, limit=limit
-                    )
-                ]
+                return [asdict(record) for record in get_read_repository().list(status=proposal_status, limit=limit)]
             except HTTPException:
                 raise
             except Exception as exc:
-                raise HTTPException(
-                    status_code=503, detail="Assistant proposal read failed"
-                ) from exc
+                raise HTTPException(status_code=503, detail="Assistant proposal read failed") from exc
 
         @router.get("/{proposal_id}")
         def get_proposal(
@@ -97,9 +89,7 @@ def build_assistant_proposal_router(
             try:
                 record = get_read_repository().get(canonical_id)
             except Exception as exc:
-                raise HTTPException(
-                    status_code=503, detail="Assistant proposal read failed"
-                ) from exc
+                raise HTTPException(status_code=503, detail="Assistant proposal read failed") from exc
             if record is None:
                 raise HTTPException(status_code=404, detail="Assistant proposal not found")
             return asdict(record)
@@ -108,14 +98,14 @@ def build_assistant_proposal_router(
     def approve_preparation(
         proposal_id: str,
         request: AssistantPreparationApprovalRequest,
-        x_marketai_control_key: str | None = Header(
-            default=None, alias="X-MarketAI-Control-Key"
-        ),
+        x_marketai_control_key: str | None = Header(default=None, alias="X-MarketAI-Control-Key"),
     ) -> dict:
         require_control(x_marketai_control_key)
         try:
             result = get_approval_service().approve_preparation(
-                proposal_id, reviewer=request.reviewer
+                proposal_id,
+                reviewer=request.reviewer,
+                expected_review_round=request.expected_review_round,
             )
         except AssistantProposalNotFound as exc:
             raise HTTPException(status_code=404, detail="Assistant proposal not found") from exc
@@ -130,10 +120,7 @@ def build_assistant_proposal_router(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except RuntimeError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=str(exc),
-            ) from exc
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
         payload = asdict(result)
         payload["trading_authority_granted"] = False
