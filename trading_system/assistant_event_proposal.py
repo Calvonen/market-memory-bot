@@ -170,11 +170,14 @@ class SupabaseAssistantEventProposalRepository:
     def reopen_for_review(self, proposal_id: str) -> None:
         """Re-open the same durable proposal identity after a stale review conflict.
 
-        The database lifecycle trigger permits only an
-        approved_for_materialization -> draft transition here, resets reviewer
-        metadata, keeps proposal_key immutable, and preserves the old decision
-        in the review audit table. Payload edits happen only after this CAS.
+        Re-review is only valid before a strategy approval has committed. If the
+        proposal-scoped approval receipt already exists, callers must recover
+        that committed approval instead of creating a new review cycle.
         """
+        if self.find_approval(approved_via=f"assistant_proposal:{proposal_id}") is not None:
+            raise RuntimeError(
+                "assistant proposal already has a strategy approval receipt; use retry recovery"
+            )
         response = (
             self.client.table(self.TABLE)
             .update({"status": "draft"})
