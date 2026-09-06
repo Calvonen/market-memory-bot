@@ -79,7 +79,14 @@ class AssistantProposalMaterializer:
         proposal = self.proposals.get(proposal_id)
         if proposal is None:
             raise AssistantProposalMaterializationError("assistant proposal not found")
-        payload = validate_proposal_for_materialization(proposal)
+
+        is_terminal_retry = proposal.status == "materialized"
+        payload = validate_proposal_for_materialization(
+            proposal,
+            allow_materialized_retry=is_terminal_retry,
+        )
+        if is_terminal_retry:
+            return self._recover_materialized_retry(proposal, payload)
 
         resolved = self.resolver.resolve(
             InstrumentResolutionRequest(
@@ -197,6 +204,26 @@ class AssistantProposalMaterializer:
         self.proposals.mark_materialized(proposal.id)
         return AssistantProposalMaterializationResult(
             proposal.id, tracked_event_id, event_id, version, retried
+        )
+
+    def _recover_materialized_retry(self, proposal: Any, payload: Any) -> AssistantProposalMaterializationResult:
+        receipt = self.proposals.find_approval(
+            approved_via=proposal_approval_via(proposal)
+        )
+        if receipt is None:
+            raise AssistantProposalCanonicalIdentityConflict(
+                "materialized proposal has no strategy approval receipt"
+            )
+        event_id = receipt.event_id.strip()
+        if not event_id.startswith("tracked:") or not event_id.removeprefix("tracked:").strip():
+            raise AssistantProposalCanonicalIdentityConflict(
+                "materialized proposal receipt has invalid tracked event identity"
+            )
+        fingerprint = draft_fingerprint(normalize_draft(event_id, payload.strategy))
+        version = self._matching_receipt_version(receipt, event_id, fingerprint)
+        tracked_event_id = event_id.removeprefix("tracked:")
+        return AssistantProposalMaterializationResult(
+            proposal.id, tracked_event_id, event_id, version, True
         )
 
     def _ensure_official_source(self, event_id: str, payload: Any) -> None:
