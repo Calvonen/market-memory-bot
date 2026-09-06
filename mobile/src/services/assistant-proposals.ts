@@ -25,6 +25,12 @@ export type AssistantProposalPayload = {
   strategy: Record<string, unknown>;
 };
 
+export type AssistantProposalMaterialization = {
+  event_id: string;
+  tracked_event_id: string;
+  expectation_version: number;
+};
+
 export type AssistantProposal = {
   id: string;
   proposal_key: string;
@@ -35,6 +41,7 @@ export type AssistantProposal = {
   review_round: number;
   created_at: string;
   updated_at: string;
+  materialization: AssistantProposalMaterialization | null;
 };
 
 export type AssistantPreparationApprovalResult = {

@@ -1,5 +1,5 @@
 import { useLocalSearchParams } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -18,6 +18,11 @@ import {
   AssistantProposal,
   getAssistantProposal,
 } from '@/services/assistant-proposals';
+import {
+  approveTrackedEventPaperPermission,
+  getTrackedEventPaperPermission,
+  type TrackedEventPaperPermission,
+} from '@/services/tracked-events';
 
 type StrategyView = {
   summary?: string;
@@ -28,6 +33,13 @@ type StrategyView = {
   invalidation_conditions?: string[];
   triggers?: Record<string, unknown>;
 };
+
+const DEFAULT_DEMO_POSITION_CAP_USD = '500';
+
+function parsePositiveUsd(value: string): number | null {
+  const parsed = Number(value.trim().replace(',', '.'));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
 
 function DetailList({ title, items }: { title: string; items?: string[] }) {
   if (!items?.length) return null;
@@ -56,6 +68,45 @@ export default function AssistantProposalDetailScreen() {
   const [approving, setApproving] = useState(false);
   const [approval, setApproval] = useState<AssistantPreparationApprovalResult | null>(null);
   const [reviewer, setReviewer] = useState('');
+  const [paperPermission, setPaperPermission] = useState<TrackedEventPaperPermission | null>(null);
+  const [permissionError, setPermissionError] = useState<string | null>(null);
+  const [permissionLoading, setPermissionLoading] = useState(false);
+  const [approvingDemo, setApprovingDemo] = useState(false);
+  const [demoActor, setDemoActor] = useState('');
+  const [maxPositionUsd, setMaxPositionUsd] = useState(DEFAULT_DEMO_POSITION_CAP_USD);
+  const proposalIdRef = useRef(proposalId);
+  const trackedEventIdRef = useRef<string | null>(null);
+  const preparationApprovalRequestRef = useRef(0);
+  const demoApprovalRequestRef = useRef(0);
+
+  // Refs are authority guards for native-alert callbacks and must reflect the
+  // current render synchronously, before passive effects have a chance to run.
+  if (proposalIdRef.current !== proposalId) {
+    proposalIdRef.current = proposalId;
+    preparationApprovalRequestRef.current += 1;
+    demoApprovalRequestRef.current += 1;
+    trackedEventIdRef.current = null;
+  }
+
+  const materialization = proposal?.materialization ?? null;
+  const renderedTrackedEventId =
+    proposal?.id === proposalId && proposal.status === 'materialized' && materialization
+      ? materialization.tracked_event_id
+      : null;
+  if (trackedEventIdRef.current !== renderedTrackedEventId) {
+    trackedEventIdRef.current = renderedTrackedEventId;
+    demoApprovalRequestRef.current += 1;
+  }
+
+  useEffect(() => {
+    setApproving(false);
+    setApprovingDemo(false);
+    setProposal(null);
+    setApproval(null);
+    setPaperPermission(null);
+    setPermissionError(null);
+    setPermissionLoading(false);
+  }, [proposalId]);
 
   const load = useCallback(async () => {
     if (!proposalId) {
@@ -64,8 +115,11 @@ export default function AssistantProposalDetailScreen() {
     }
     try {
       setError(null);
-      setProposal(await getAssistantProposal(proposalId));
+      const loaded = await getAssistantProposal(proposalId);
+      if (proposalIdRef.current !== proposalId) return;
+      setProposal(loaded);
     } catch (err) {
+      if (proposalIdRef.current !== proposalId) return;
       setError(err instanceof Error ? err.message : 'Ehdotuksen lataus epäonnistui');
     }
   }, [proposalId]);
@@ -73,6 +127,51 @@ export default function AssistantProposalDetailScreen() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const trackedEventId = renderedTrackedEventId;
+
+    setApprovingDemo(false);
+    setPaperPermission(null);
+    setPermissionError(null);
+
+    if (!trackedEventId) {
+      setPermissionLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setPermissionLoading(true);
+    void getTrackedEventPaperPermission(trackedEventId)
+      .then((permission) => {
+        if (cancelled || trackedEventIdRef.current !== trackedEventId) return;
+        if (permission.event_id !== trackedEventId) {
+          setPaperPermission(null);
+          setPermissionError('DEMO-luvan canonical tracked event ei vastaa proposalin materialisointia.');
+          return;
+        }
+        setPaperPermission(permission);
+        if (permission.max_position_value_usd !== null) {
+          setMaxPositionUsd(String(permission.max_position_value_usd));
+        }
+      })
+      .catch((err) => {
+        if (cancelled || trackedEventIdRef.current !== trackedEventId) return;
+        setPaperPermission(null);
+        setPermissionError(err instanceof Error ? err.message : 'DEMO-luvan lataus epäonnistui.');
+      })
+      .finally(() => {
+        if (!cancelled && trackedEventIdRef.current === trackedEventId) {
+          setPermissionLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [renderedTrackedEventId]);
 
   const strategy = useMemo(
     () => (proposal?.payload.strategy ?? {}) as StrategyView,
@@ -84,36 +183,187 @@ export default function AssistantProposalDetailScreen() {
   );
 
   const approve = useCallback(async () => {
-    if (!proposal || !reviewer.trim()) return;
+    if (!proposal || proposal.id !== proposalId || !reviewer.trim()) return;
+    const submittedProposalId = proposal.id;
+    const requestToken = preparationApprovalRequestRef.current + 1;
+    preparationApprovalRequestRef.current = requestToken;
     setApproving(true);
     try {
       setError(null);
       const result = await approveAssistantProposalPreparation(
-        proposal.id,
+        submittedProposalId,
         reviewer.trim(),
         proposal.review_round,
       );
+      if (
+        preparationApprovalRequestRef.current !== requestToken
+        || proposalIdRef.current !== submittedProposalId
+        || result.proposal_id !== submittedProposalId
+      ) return;
       setApproval(result);
-      setProposal((current) => current ? {
+      setProposal((current) => current && current.id === result.proposal_id ? {
         ...current,
         status: 'materialized',
         reviewed_by: reviewer.trim(),
         review_round: result.review_round,
+        materialization: {
+          event_id: result.event_id,
+          tracked_event_id: result.tracked_event_id,
+          expectation_version: result.expectation_version,
+        },
       } : current);
+      void load();
     } catch (err) {
+      if (
+        preparationApprovalRequestRef.current !== requestToken
+        || proposalIdRef.current !== submittedProposalId
+      ) return;
       setError(err instanceof Error ? err.message : 'Valmistelun hyväksyntä epäonnistui');
     } finally {
-      setApproving(false);
+      if (preparationApprovalRequestRef.current === requestToken) {
+        setApproving(false);
+      }
     }
-  }, [proposal, reviewer]);
+  }, [load, proposal, proposalId, reviewer]);
 
-  const canApprove = proposal
-    && proposal.status !== 'materialized'
-    && proposal.requested_execution_mode === 'demo'
-    && reviewer.trim().length > 0
-    && reviewer.trim().length <= 135;
   const requestedDemo = proposal?.requested_execution_mode === 'demo';
   const requestedLive = proposal?.requested_execution_mode === 'live';
+  const proposalMatchesRoute = Boolean(proposal && proposal.id === proposalId);
+  const canApprove = proposalMatchesRoute
+    && proposal
+    && proposal.status !== 'materialized'
+    && requestedDemo
+    && reviewer.trim().length > 0
+    && reviewer.trim().length <= 135;
+  const parsedMaxPositionUsd = parsePositiveUsd(maxPositionUsd);
+  const permissionMatchesTrackedEvent = Boolean(
+    materialization
+    && paperPermission
+    && paperPermission.event_id === materialization.tracked_event_id,
+  );
+  const expectationMatchesMaterialization = Boolean(
+    permissionMatchesTrackedEvent
+    && materialization
+    && paperPermission
+    && paperPermission.current_expectation_version === materialization.expectation_version,
+  );
+  const demoAuthorityCurrent = Boolean(
+    permissionMatchesTrackedEvent
+    && paperPermission?.approval_current
+    && materialization
+    && paperPermission.approved_expectation_version === materialization.expectation_version,
+  );
+  const canApproveDemo = Boolean(
+    proposalMatchesRoute
+    && proposal
+    && proposal.status === 'materialized'
+    && requestedDemo
+    && materialization
+    && paperPermission
+    && permissionMatchesTrackedEvent
+    && expectationMatchesMaterialization
+    && !demoAuthorityCurrent
+    && demoActor.trim()
+    && parsedMaxPositionUsd !== null
+    && !approvingDemo,
+  );
+
+  const confirmDemoAuthority = useCallback(() => {
+    if (
+      !proposal
+      || proposal.id !== proposalId
+      || !materialization
+      || !paperPermission
+      || !canApproveDemo
+      || parsedMaxPositionUsd === null
+    ) return;
+    const actor = demoActor.trim();
+    const expectedVersion = materialization.expectation_version;
+    const trackedEventId = materialization.tracked_event_id;
+    const submittedProposalId = proposal.id;
+    const confirmationRouteId = proposalId;
+    Alert.alert(
+      'Hyväksy DEMO-kaupankäynti',
+      `Annat MarketAI:lle kertaluonteisen luvan tehdä ${proposal.payload.instrument}-demokaupan tämän yhden tapahtuman perusteella. Expectation v${expectedVersion}. Enimmäispositio ${parsedMaxPositionUsd} USD. Strategy ja Risk Engine voivat silti estää kaupan tai pienentää positiota. LIVE-kaupankäyntiä tämä ei mahdollista.`,
+      [
+        { text: 'Peruuta', style: 'cancel' },
+        {
+          text: 'Hyväksy DEMO',
+          onPress: () => {
+            if (
+              confirmationRouteId !== submittedProposalId
+              || proposalIdRef.current !== confirmationRouteId
+              || trackedEventIdRef.current !== trackedEventId
+            ) return;
+            const requestToken = demoApprovalRequestRef.current + 1;
+            demoApprovalRequestRef.current = requestToken;
+            setApprovingDemo(true);
+            setPermissionError(null);
+            void approveTrackedEventPaperPermission(
+              trackedEventId,
+              actor,
+              {
+                expected_expectation_version: expectedVersion,
+                max_position_value_usd: parsedMaxPositionUsd,
+              },
+            )
+              .then((permission) => {
+                if (
+                  demoApprovalRequestRef.current !== requestToken
+                  || proposalIdRef.current !== submittedProposalId
+                  || trackedEventIdRef.current !== trackedEventId
+                ) return;
+                if (permission.event_id !== trackedEventId) {
+                  setPaperPermission(null);
+                  setPermissionError('DEMO-luvan canonical tracked event ei vastaa proposalin materialisointia.');
+                  return;
+                }
+                setPaperPermission(permission);
+                if (permission.max_position_value_usd !== null) {
+                  setMaxPositionUsd(String(permission.max_position_value_usd));
+                }
+              })
+              .catch(async (err) => {
+                if (
+                  demoApprovalRequestRef.current !== requestToken
+                  || proposalIdRef.current !== submittedProposalId
+                  || trackedEventIdRef.current !== trackedEventId
+                ) return;
+                const writeError = err instanceof Error ? err.message : 'DEMO-luvan hyväksyntä epäonnistui.';
+                setPermissionError(writeError);
+                try {
+                  const current = await getTrackedEventPaperPermission(trackedEventId);
+                  if (
+                    demoApprovalRequestRef.current !== requestToken
+                    || proposalIdRef.current !== submittedProposalId
+                    || trackedEventIdRef.current !== trackedEventId
+                  ) return;
+                  if (current.event_id !== trackedEventId) {
+                    setPaperPermission(null);
+                    setPermissionError('DEMO-luvan canonical tracked event ei vastaa proposalin materialisointia.');
+                    return;
+                  }
+                  setPaperPermission(current);
+                  if (current.max_position_value_usd !== null) {
+                    setMaxPositionUsd(String(current.max_position_value_usd));
+                  }
+                  setPermissionError(writeError);
+                } catch {
+                  if (demoApprovalRequestRef.current !== requestToken) return;
+                  setPaperPermission(null);
+                  setPermissionError(writeError);
+                }
+              })
+              .finally(() => {
+                if (demoApprovalRequestRef.current === requestToken) {
+                  setApprovingDemo(false);
+                }
+              });
+          },
+        },
+      ],
+    );
+  }, [canApproveDemo, demoActor, materialization, paperPermission, parsedMaxPositionUsd, proposal, proposalId]);
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
@@ -217,6 +467,68 @@ export default function AssistantProposalDetailScreen() {
               </Text>
             ) : null}
           </View>
+
+          {proposal.status === 'materialized' && requestedDemo ? (
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>DEMO-kaupankäyntilupa</Text>
+              <Text style={styles.bodyText}>
+                Tämä on erillinen kertaluonteinen kaupankäyntivaltuus. Strategy ja Risk Engine ovat edelleen pakollisia. LIVE pysyy lukittuna.
+              </Text>
+              {materialization ? (
+                <>
+                  <Text style={styles.meta}>Tracked event: {materialization.tracked_event_id}</Text>
+                  <Text style={styles.meta}>Materialisoitu expectation: v{materialization.expectation_version}</Text>
+                </>
+              ) : (
+                <Text style={styles.error}>Canonical materialization-lineage puuttuu. DEMO-lupaa ei voi antaa.</Text>
+              )}
+              {permissionLoading ? <ActivityIndicator color="#8a96a8" /> : null}
+              {permissionError ? <Text style={styles.error}>{permissionError}</Text> : null}
+              {paperPermission && materialization && permissionMatchesTrackedEvent && !expectationMatchesMaterialization ? (
+                <Text style={styles.error}>
+                  Canonical expectation on muuttunut versioon v{paperPermission.current_expectation_version}. Tämä proposal materialisoitiin versiolle v{materialization.expectation_version}; DEMO-lupa vaatii uuden reviewn.
+                </Text>
+              ) : null}
+              {demoAuthorityCurrent ? (
+                <View style={styles.doneBox}>
+                  <Text style={styles.doneText}>
+                    ✓ DEMO-kaupankäyntilupa on voimassa expectation-versiolle v{paperPermission?.approved_expectation_version}.
+                  </Text>
+                </View>
+              ) : (
+                <>
+                  <Text style={styles.inputLabel}>DEMO-LUVAN HYVÄKSYJÄ</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={demoActor}
+                    onChangeText={setDemoActor}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    placeholder="Kirjoita oma hyväksyjäidentiteettisi"
+                    placeholderTextColor="#596476"
+                  />
+                  <Text style={styles.inputLabel}>ENIMMÄISPOSITIO USD</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={maxPositionUsd}
+                    onChangeText={setMaxPositionUsd}
+                    keyboardType="decimal-pad"
+                    placeholder="500"
+                    placeholderTextColor="#596476"
+                  />
+                  <Pressable
+                    style={[styles.approveButton, !canApproveDemo && styles.disabledButton]}
+                    disabled={!canApproveDemo}
+                    onPress={confirmDemoAuthority}
+                  >
+                    <Text style={styles.approveText}>
+                      {approvingDemo ? 'Hyväksytään…' : 'Hyväksy DEMO-kaupankäynti'}
+                    </Text>
+                  </Pressable>
+                </>
+              )}
+            </View>
+          ) : null}
         </>
       ) : null}
     </ScrollView>
