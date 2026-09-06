@@ -249,30 +249,11 @@ begin
     raise exception 'trading_task_instrument_mismatch';
   end if;
 
-  -- Canonical lock order is lineage first (salt 1), then execution/analysis
-  -- state (salt 0). Expectation writers contend on salt 1, while task claims
-  -- and analysis writes use salt 0. Holding both keeps the displayed version,
-  -- task replacement and approval in one serialized decision.
-  perform pg_advisory_xact_lock(hashtextextended(canonical_source_event_id, 1));
-  perform pg_advisory_xact_lock(hashtextextended(canonical_source_event_id, 0));
-
-  select version into current_version
-  from public.current_event_expectations
-  where event_id = canonical_source_event_id
-  limit 1;
-  if not found then
-    raise exception 'trading_task_expectation_not_found';
-  end if;
-  if current_version <> input_expected_expectation_version then
-    raise exception 'trading_task_expectation_version_changed';
-  end if;
-
-  -- Assistant-origin canonical events are identifiable by the immutable
-  -- proposal_key copied into tracked_market_events.external_key. If such a
-  -- proposal exists, PAPER authority is forbidden until final materialization
-  -- has committed the immutable strategy approval receipt for this exact
-  -- canonical event/version. This closes the partial-materialization gap while
-  -- leaving ordinary tracked events unchanged.
+  -- Check assistant provenance before taking the canonical lineage locks. A
+  -- materialized proposal is terminal and its approval receipt is immutable,
+  -- so no proposal-row lock is needed here. This preserves the established
+  -- lineage->execution lock order and avoids inverting it against the
+  -- materializer, which locks the proposal before the lineage.
   select count(*) into proposal_count
   from public.assistant_event_proposals
   where proposal_key = event_row.external_key;
@@ -282,8 +263,7 @@ begin
   elsif proposal_count = 1 then
     select * into proposal_row
     from public.assistant_event_proposals
-    where proposal_key = event_row.external_key
-    for update;
+    where proposal_key = event_row.external_key;
 
     if proposal_row.requested_execution_mode <> 'demo' then
       raise exception 'assistant_proposal_live_locked';
@@ -308,10 +288,33 @@ begin
     if receipt_event_id is distinct from canonical_source_event_id then
       raise exception 'assistant_proposal_paper_authority_event_lineage_mismatch';
     end if;
-    if receipt_expectation_version is distinct from current_version
-       or receipt_expectation_version is distinct from input_expected_expectation_version then
+    if receipt_expectation_version is distinct from input_expected_expectation_version then
       raise exception 'assistant_proposal_paper_authority_expectation_lineage_mismatch';
     end if;
+  end if;
+
+  -- Canonical lock order is lineage first (salt 1), then execution/analysis
+  -- state (salt 0). Expectation writers contend on salt 1, while task claims
+  -- and analysis writes use salt 0. Holding both keeps the displayed version,
+  -- task replacement and approval in one serialized decision.
+  perform pg_advisory_xact_lock(hashtextextended(canonical_source_event_id, 1));
+  perform pg_advisory_xact_lock(hashtextextended(canonical_source_event_id, 0));
+
+  select version into current_version
+  from public.current_event_expectations
+  where event_id = canonical_source_event_id
+  limit 1;
+  if not found then
+    raise exception 'trading_task_expectation_not_found';
+  end if;
+  if current_version <> input_expected_expectation_version then
+    raise exception 'trading_task_expectation_version_changed';
+  end if;
+
+  -- Re-check assistant receipt lineage against the now-locked canonical
+  -- expectation version. The receipt is immutable once materialized.
+  if proposal_count = 1 and receipt_expectation_version is distinct from current_version then
+    raise exception 'assistant_proposal_paper_authority_expectation_lineage_mismatch';
   end if;
 
   select * into active_task
