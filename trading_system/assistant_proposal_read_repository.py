@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 VISIBLE_STATUSES = (
     "ready_for_review",
@@ -131,12 +132,17 @@ class SupabaseAssistantProposalReadRepository:
             raise RuntimeError(
                 "materialized assistant proposal approval receipt is missing or ambiguous"
             )
-        event_id = str(rows[0].get("event_id") or "").strip()
-        if not event_id.startswith("tracked:"):
+        raw_event_id = str(rows[0].get("event_id") or "").strip()
+        if not raw_event_id.startswith("tracked:"):
             raise RuntimeError("materialized assistant proposal receipt event id is invalid")
-        tracked_event_id = event_id.removeprefix("tracked:").strip()
-        if not tracked_event_id:
-            raise RuntimeError("materialized assistant proposal receipt event id is invalid")
+        raw_tracked_event_id = raw_event_id.removeprefix("tracked:").strip()
+        try:
+            tracked_event_id = str(UUID(raw_tracked_event_id))
+        except (ValueError, AttributeError) as exc:
+            raise RuntimeError(
+                "materialized assistant proposal receipt event id is invalid"
+            ) from exc
+        event_id = f"tracked:{tracked_event_id}"
         try:
             expectation_version = int(rows[0]["expectation_version"])
         except (KeyError, TypeError, ValueError) as exc:
