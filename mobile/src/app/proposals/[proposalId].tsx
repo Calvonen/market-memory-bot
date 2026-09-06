@@ -55,7 +55,6 @@ export default function AssistantProposalDetailScreen() {
   const [error, setError] = useState<string | null>(null);
   const [approving, setApproving] = useState(false);
   const [approval, setApproval] = useState<AssistantPreparationApprovalResult | null>(null);
-  // Reviewer identity is audit data. Never guess or prefill it with a person name.
   const [reviewer, setReviewer] = useState('');
 
   const load = useCallback(async () => {
@@ -89,9 +88,18 @@ export default function AssistantProposalDetailScreen() {
     setApproving(true);
     try {
       setError(null);
-      const result = await approveAssistantProposalPreparation(proposal.id, reviewer.trim());
+      const result = await approveAssistantProposalPreparation(
+        proposal.id,
+        reviewer.trim(),
+        proposal.review_round,
+      );
       setApproval(result);
-      setProposal((current) => current ? { ...current, status: 'materialized', reviewed_by: reviewer.trim() } : current);
+      setProposal((current) => current ? {
+        ...current,
+        status: 'materialized',
+        reviewed_by: reviewer.trim(),
+        review_round: result.review_round,
+      } : current);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Valmistelun hyväksyntä epäonnistui');
     } finally {
@@ -144,6 +152,7 @@ export default function AssistantProposalDetailScreen() {
           <View style={styles.card}>
             <Text style={styles.cardTitle}>{proposal.payload.title}</Text>
             <Text style={styles.meta}>Julkaisuaika: {proposal.payload.event_time_status}</Text>
+            <Text style={styles.meta}>Review-kierros: {proposal.review_round}</Text>
             <Text style={styles.meta}>Reviewattu expectation-versio: {proposal.payload.base_expectation_version}</Text>
             <Text style={styles.meta}>Lähde: {proposal.payload.official_source.source_url}</Text>
           </View>
