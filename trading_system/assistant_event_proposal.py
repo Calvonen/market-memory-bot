@@ -67,7 +67,7 @@ class AssistantEventProposalPayload(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     scheduled_date: date
     event_at: datetime
-    event_time_status: Literal["confirmed", "estimated"]
+    event_time_status: Literal["confirmed", "estimated", "unknown"]
     official_source: OfficialSourcePayload
     strategy: StrategyDraftPayload
 
