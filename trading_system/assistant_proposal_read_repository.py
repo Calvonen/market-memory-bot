@@ -19,6 +19,13 @@ ALL_STATUSES = (
 
 
 @dataclass(frozen=True)
+class AssistantProposalMaterializationSummary:
+    event_id: str
+    tracked_event_id: str
+    expectation_version: int
+
+
+@dataclass(frozen=True)
 class AssistantProposalReadRecord:
     id: str
     proposal_key: str
@@ -29,6 +36,7 @@ class AssistantProposalReadRecord:
     review_round: int
     created_at: str
     updated_at: str
+    materialization: AssistantProposalMaterializationSummary | None = None
 
 
 def _record(row: dict[str, Any]) -> AssistantProposalReadRecord:
@@ -89,7 +97,61 @@ class SupabaseAssistantProposalReadRepository:
             return None
         if len(rows) != 1 or not isinstance(rows[0], dict):
             raise RuntimeError("assistant proposal read returned invalid data")
-        return _record(rows[0])
+        record = _record(rows[0])
+        if record.status != "materialized":
+            return record
+        materialization = self._materialization_summary(record.id)
+        return AssistantProposalReadRecord(
+            id=record.id,
+            proposal_key=record.proposal_key,
+            payload=record.payload,
+            requested_execution_mode=record.requested_execution_mode,
+            status=record.status,
+            reviewed_by=record.reviewed_by,
+            review_round=record.review_round,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+            materialization=materialization,
+        )
+
+    def _materialization_summary(
+        self, proposal_id: str
+    ) -> AssistantProposalMaterializationSummary:
+        approved_via = f"assistant_proposal:{proposal_id}"
+        response = (
+            self.client.table("event_strategy_approvals")
+            .select("event_id,expectation_version")
+            .eq("approved_via", approved_via)
+            .order("created_at")
+            .limit(2)
+            .execute()
+        )
+        rows = response.data or []
+        if len(rows) != 1 or not isinstance(rows[0], dict):
+            raise RuntimeError(
+                "materialized assistant proposal approval receipt is missing or ambiguous"
+            )
+        event_id = str(rows[0].get("event_id") or "").strip()
+        if not event_id.startswith("tracked:"):
+            raise RuntimeError("materialized assistant proposal receipt event id is invalid")
+        tracked_event_id = event_id.removeprefix("tracked:").strip()
+        if not tracked_event_id:
+            raise RuntimeError("materialized assistant proposal receipt event id is invalid")
+        try:
+            expectation_version = int(rows[0]["expectation_version"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "materialized assistant proposal receipt expectation version is invalid"
+            ) from exc
+        if expectation_version < 1:
+            raise RuntimeError(
+                "materialized assistant proposal receipt expectation version is invalid"
+            )
+        return AssistantProposalMaterializationSummary(
+            event_id=event_id,
+            tracked_event_id=tracked_event_id,
+            expectation_version=expectation_version,
+        )
 
     def list(self, *, status: str | None = None, limit: int = 50) -> list[AssistantProposalReadRecord]:
         if status is not None and status not in ALL_STATUSES:
