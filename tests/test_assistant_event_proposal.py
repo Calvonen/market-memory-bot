@@ -100,6 +100,25 @@ class AssistantEventProposalTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             validate_proposal_for_materialization(_proposal(payload=payload))
 
+    def test_kind_must_be_explicit(self) -> None:
+        payload = _payload()
+        payload.pop("kind")
+        with self.assertRaises(ValidationError):
+            validate_proposal_for_materialization(_proposal(payload=payload))
+
+    def test_official_source_must_pass_canonical_https_validation(self) -> None:
+        for source_url in (
+            " ",
+            "http://www.syrahresources.com.au/investors/reports-presentations",
+            "https://user:pass@www.syrahresources.com.au/investors/reports-presentations",
+        ):
+            with self.subTest(source_url=source_url):
+                payload = _payload()
+                payload["official_source"] = dict(payload["official_source"])
+                payload["official_source"]["source_url"] = source_url
+                with self.assertRaises(ValidationError):
+                    validate_proposal_for_materialization(_proposal(payload=payload))
+
     def test_retry_audit_key_is_deterministic_and_proposal_scoped(self) -> None:
         self.assertEqual(
             proposal_approval_via(_proposal()),
