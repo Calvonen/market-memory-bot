@@ -194,10 +194,18 @@ class SupabaseAssistantEventProposalRepository:
             review_round = int(row.get("out_review_round"))
         except (TypeError, ValueError) as exc:
             raise RuntimeError("assistant proposal preparation approval returned invalid review round") from exc
+
+        # The lifecycle trigger increments review_round exactly once when
+        # ready_for_review transitions to approved_for_materialization. For an
+        # idempotent retry of an already approved/materialized proposal the
+        # round is unchanged. The pre-transition CAS was already checked under
+        # the proposal row lock by the RPC, so these are the only valid return
+        # values for a successful call.
+        valid_review_rounds = {expected_review_round, expected_review_round + 1}
         if (
             status not in {"approved_for_materialization", "materialized"}
             or reviewed_by != canonical_reviewer
-            or review_round != expected_review_round
+            or review_round not in valid_review_rounds
             or review_round < 1
         ):
             raise RuntimeError("assistant proposal preparation approval returned invalid data")
