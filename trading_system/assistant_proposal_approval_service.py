@@ -72,7 +72,8 @@ class AssistantProposalApprovalService:
             expected_review_round=expected_review_round,
         )
         result: AssistantProposalMaterializationResult = self.materializer.materialize(
-            proposal_id
+            proposal_id,
+            expected_review_round=review_round,
         )
         return AssistantPreparationApprovalResult(
             proposal_id=proposal_id,
