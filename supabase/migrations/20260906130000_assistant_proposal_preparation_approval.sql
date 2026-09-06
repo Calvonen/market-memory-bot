@@ -34,6 +34,13 @@ begin
     raise exception 'assistant_proposal_not_found' using errcode = 'P0002';
   end if;
 
+  -- LIVE remains a visible but locked future mode. Reject it before changing
+  -- review state so preparation approval can never become an indirect LIVE
+  -- authority or leave a permanently approved proposal that cannot materialize.
+  if proposal_row.requested_execution_mode <> 'demo' then
+    raise exception 'assistant_proposal_live_locked' using errcode = '55000';
+  end if;
+
   if proposal_row.status = 'ready_for_review' then
     update public.assistant_event_proposals
     set
