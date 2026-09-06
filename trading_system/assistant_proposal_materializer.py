@@ -103,6 +103,10 @@ class AssistantProposalMaterializer:
             raise AssistantProposalInstrumentResolutionError(
                 "assistant proposal instrument could not be resolved unambiguously"
             )
+        if resolved.instrument_id <= 0:
+            raise AssistantProposalInstrumentResolutionError(
+                "resolved eToro instrument id must be positive"
+            )
         if _symbol(resolved.symbol) != _symbol(payload.instrument):
             raise AssistantProposalCanonicalIdentityConflict(
                 "resolved eToro symbol differs from proposal instrument"
