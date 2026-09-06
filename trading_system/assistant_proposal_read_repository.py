@@ -63,6 +63,20 @@ def _record(row: dict[str, Any]) -> AssistantProposalReadRecord:
     )
 
 
+def canonical_tracked_receipt_identity(raw_event_id: str) -> tuple[str, str]:
+    event_id = raw_event_id.strip()
+    if not event_id.startswith("tracked:"):
+        raise RuntimeError("materialized assistant proposal receipt event id is invalid")
+    raw_tracked_event_id = event_id.removeprefix("tracked:").strip()
+    try:
+        tracked_event_id = str(UUID(raw_tracked_event_id))
+    except (ValueError, AttributeError) as exc:
+        raise RuntimeError(
+            "materialized assistant proposal receipt event id is invalid"
+        ) from exc
+    return f"tracked:{tracked_event_id}", tracked_event_id
+
+
 class SupabaseAssistantProposalReadRepository:
     TABLE = "assistant_event_proposals"
     SELECT = (
@@ -132,17 +146,9 @@ class SupabaseAssistantProposalReadRepository:
             raise RuntimeError(
                 "materialized assistant proposal approval receipt is missing or ambiguous"
             )
-        raw_event_id = str(rows[0].get("event_id") or "").strip()
-        if not raw_event_id.startswith("tracked:"):
-            raise RuntimeError("materialized assistant proposal receipt event id is invalid")
-        raw_tracked_event_id = raw_event_id.removeprefix("tracked:").strip()
-        try:
-            tracked_event_id = str(UUID(raw_tracked_event_id))
-        except (ValueError, AttributeError) as exc:
-            raise RuntimeError(
-                "materialized assistant proposal receipt event id is invalid"
-            ) from exc
-        event_id = f"tracked:{tracked_event_id}"
+        event_id, tracked_event_id = canonical_tracked_receipt_identity(
+            str(rows[0].get("event_id") or "")
+        )
         try:
             expectation_version = int(rows[0]["expectation_version"])
         except (KeyError, TypeError, ValueError) as exc:
