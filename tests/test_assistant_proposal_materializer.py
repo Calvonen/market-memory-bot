@@ -76,6 +76,7 @@ def _proposal(*, status: str = "approved_for_materialization") -> AssistantEvent
         requested_execution_mode="demo",
         status=status,
         reviewed_by="marko",
+        review_round=1,
     )
 
 
@@ -219,16 +220,18 @@ class Harness:
 
 
 class AssistantProposalMaterializerTests(unittest.TestCase):
-    def test_happy_path_passes_source_into_atomic_finalizer(self) -> None:
+    def test_happy_path_passes_snapshot_and_source_into_atomic_finalizer(self) -> None:
         h = Harness()
         result = h.materializer.materialize(PROPOSAL_ID)
 
         self.assertEqual(result.event_id, EVENT_ID)
         self.assertEqual(result.expectation_version, 2)
         self.assertEqual(h.events.calls[0]["proposal_id"], PROPOSAL_ID)
+        self.assertEqual(h.events.calls[0]["expected_review_round"], 1)
         self.assertEqual(h.events.calls[0]["expected_base_version"], 1)
         call = h.approvals.calls[0]
         self.assertEqual(call["proposal_id"], PROPOSAL_ID)
+        self.assertEqual(call["expected_review_round"], 1)
         self.assertEqual(call["expected_base_version"], 1)
         self.assertTrue(call["official_source_needs_set"])
         self.assertEqual(call["official_source_expected_version"], 0)
