@@ -6,6 +6,12 @@ from typing import Callable, Literal
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
+from trading_system.assistant_proposal_api import build_assistant_proposal_router
+from trading_system.assistant_proposal_approval_service import (
+    AssistantProposalApprovalService,
+    build_default_assistant_proposal_approval_service,
+)
+
 
 class TrackInstrumentRequest(BaseModel):
     instrument: str = Field(min_length=1, max_length=80)
@@ -36,6 +42,23 @@ def build_tracked_instrument_router(
     require_read: Callable[[str | None], None] | None = None,
 ) -> APIRouter:
     router = APIRouter()
+    assistant_approval_service: AssistantProposalApprovalService | None = None
+
+    def get_assistant_approval_service() -> AssistantProposalApprovalService:
+        nonlocal assistant_approval_service
+        if assistant_approval_service is None:
+            assistant_approval_service = build_default_assistant_proposal_approval_service()
+        return assistant_approval_service
+
+    # The assistant proposal endpoint belongs to the same control plane as
+    # tracked-instrument mutations. Its service is lazy so ordinary API startup
+    # and read-only requests do not require eToro/Supabase materializer config.
+    router.include_router(
+        build_assistant_proposal_router(
+            require_control=require_control,
+            get_approval_service=get_assistant_approval_service,
+        )
+    )
 
     if require_read is not None:
 
