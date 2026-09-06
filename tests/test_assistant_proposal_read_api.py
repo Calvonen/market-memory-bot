@@ -6,13 +6,19 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from trading_system.assistant_proposal_api import build_assistant_proposal_router
-from trading_system.assistant_proposal_read_repository import AssistantProposalReadRecord
+from trading_system.assistant_proposal_read_repository import (
+    AssistantProposalMaterializationSummary,
+    AssistantProposalReadRecord,
+)
 
 
 PROPOSAL_ID = "00000000-0000-0000-0000-000000000326"
 
 
-def _record(status: str = "ready_for_review") -> AssistantProposalReadRecord:
+def _record(
+    status: str = "ready_for_review",
+    materialization: AssistantProposalMaterializationSummary | None = None,
+) -> AssistantProposalReadRecord:
     return AssistantProposalReadRecord(
         id=PROPOSAL_ID,
         proposal_key="SYR.ASX:earnings:2026-09-07",
@@ -38,6 +44,7 @@ def _record(status: str = "ready_for_review") -> AssistantProposalReadRecord:
         review_round=0,
         created_at="2026-09-06T10:00:00+00:00",
         updated_at="2026-09-06T10:00:00+00:00",
+        materialization=materialization,
     )
 
 
@@ -104,6 +111,7 @@ class AssistantProposalReadApiTests(unittest.TestCase):
         self.assertEqual(repository.list_calls, [(None, 50)])
         self.assertEqual(response.json()[0]["status"], "ready_for_review")
         self.assertEqual(response.json()[0]["payload"]["instrument"], "SYR.ASX")
+        self.assertIsNone(response.json()[0]["materialization"])
         self.assertEqual(approval_calls, [])
 
     def test_explicit_status_filter_and_limit_are_forwarded(self) -> None:
@@ -126,6 +134,32 @@ class AssistantProposalReadApiTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["proposal_key"], "SYR.ASX:earnings:2026-09-07")
         self.assertEqual(payload["payload"]["official_source"]["source_kind"], "results_page")
+        self.assertIsNone(payload["materialization"])
+        self.assertEqual(approval_calls, [])
+
+    def test_materialized_detail_exposes_canonical_materialization_summary(self) -> None:
+        client, repository, approval_calls = self._client()
+        repository.get_result = _record(
+            "materialized",
+            AssistantProposalMaterializationSummary(
+                event_id="tracked:event-326",
+                tracked_event_id="event-326",
+                expectation_version=4,
+            ),
+        )
+        response = client.get(
+            f"/api/v1/assistant-proposals/{PROPOSAL_ID}",
+            headers={"X-MarketAI-Key": "read-secret"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["materialization"],
+            {
+                "event_id": "tracked:event-326",
+                "tracked_event_id": "event-326",
+                "expectation_version": 4,
+            },
+        )
         self.assertEqual(approval_calls, [])
 
     def test_missing_detail_returns_404(self) -> None:
