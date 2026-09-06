@@ -18,12 +18,7 @@ class CanonicalTrackedEventWriteResult:
 
 
 class SupabaseCanonicalTrackedEventIngress:
-    """Producer-neutral Python boundary for canonical tracked-event creation.
-
-    Calendar-bound registrations deliberately do not use this boundary. They
-    must go through promote_calendar_event_to_tracked_runtime(), which owns the
-    calendar-first lock order and validates the calendar identity atomically.
-    """
+    """Producer-neutral Python boundary for canonical tracked-event creation."""
 
     def __init__(self, client: Any) -> None:
         self.client = client
@@ -55,7 +50,6 @@ class SupabaseCanonicalTrackedEventIngress:
         actor: str,
         calendar_event_id: str | None = None,
     ) -> CanonicalTrackedEventWriteResult:
-        """Persist producer metadata against one already-resolved instrument identity."""
         result = self.register(
             company_name=company_name,
             instrument=tracked.instrument,
@@ -70,6 +64,64 @@ class SupabaseCanonicalTrackedEventIngress:
             actor=actor,
             calendar_event_id=calendar_event_id,
             expected_tracked_instrument_id=tracked.tracked_instrument_id,
+        )
+        if result.tracked_instrument_id != tracked.tracked_instrument_id:
+            raise RuntimeError(
+                "canonical tracked event resolved to a different tracked instrument"
+            )
+        return result
+
+    def register_assistant_proposal_for_tracked_instrument(
+        self,
+        tracked: TrackedEtoroInstrument,
+        *,
+        proposal_id: str,
+        expected_base_version: int,
+        company_name: str,
+        source: str,
+        external_key: str,
+        kind: str,
+        title: str,
+        event_at: datetime,
+        event_date: date,
+        event_time_status: TrackedEventTimeStatus,
+        actor: str,
+    ) -> CanonicalTrackedEventWriteResult:
+        """CAS existing event metadata against the proposal's reviewed version."""
+        self._validate_inputs(
+            event_at=event_at,
+            event_date=event_date,
+            event_time_status=event_time_status,
+            expected_tracked_instrument_id=tracked.tracked_instrument_id,
+            calendar_event_id=None,
+        )
+        if expected_base_version < 1:
+            raise ValueError("expected_base_version must be positive")
+
+        response = self.client.rpc(
+            "upsert_assistant_proposal_canonical_tracked_event",
+            {
+                "input_proposal_id": proposal_id,
+                "input_expected_base_version": expected_base_version,
+                "input_company_name": company_name,
+                "input_instrument": tracked.instrument,
+                "input_market": tracked.market,
+                "input_source": source,
+                "input_external_key": external_key,
+                "input_kind": kind,
+                "input_title": title,
+                "input_event_at": event_at.astimezone(UTC).isoformat(),
+                "input_event_date": event_date.isoformat(),
+                "input_event_time_status": event_time_status.value,
+                "input_actor": actor,
+                "input_expected_tracked_instrument_id": tracked.tracked_instrument_id,
+            },
+        ).execute()
+        result = self._parse_result(
+            response.data,
+            event_date=event_date,
+            expected_tracked_instrument_id=tracked.tracked_instrument_id,
+            rpc_name="upsert_assistant_proposal_canonical_tracked_event",
         )
         if result.tracked_instrument_id != tracked.tracked_instrument_id:
             raise RuntimeError(
@@ -94,19 +146,13 @@ class SupabaseCanonicalTrackedEventIngress:
         calendar_event_id: str | None = None,
         expected_tracked_instrument_id: str | None = None,
     ) -> CanonicalTrackedEventWriteResult:
-        if event_at.tzinfo is None or event_at.utcoffset() is None:
-            raise ValueError("event_at must be timezone-aware")
-        if isinstance(event_date, datetime) or not isinstance(event_date, date):
-            raise ValueError("event_date must be a date")
-        if not isinstance(event_time_status, TrackedEventTimeStatus):
-            raise ValueError("event_time_status must be a TrackedEventTimeStatus")
-        if expected_tracked_instrument_id is not None and not expected_tracked_instrument_id.strip():
-            raise ValueError("expected_tracked_instrument_id must not be blank")
-        if calendar_event_id is not None:
-            raise ValueError(
-                "calendar_event_id is not accepted by canonical tracked-event ingress; "
-                "use calendar runtime promotion"
-            )
+        self._validate_inputs(
+            event_at=event_at,
+            event_date=event_date,
+            event_time_status=event_time_status,
+            expected_tracked_instrument_id=expected_tracked_instrument_id,
+            calendar_event_id=calendar_event_id,
+        )
 
         response = self.client.rpc(
             "upsert_canonical_tracked_market_event",
@@ -126,15 +172,51 @@ class SupabaseCanonicalTrackedEventIngress:
                 "input_expected_tracked_instrument_id": expected_tracked_instrument_id,
             },
         ).execute()
-        rows = response.data or []
-        if not rows:
-            raise RuntimeError("upsert_canonical_tracked_market_event returned no rows")
-        row = rows[0]
+        return self._parse_result(
+            response.data,
+            event_date=event_date,
+            expected_tracked_instrument_id=expected_tracked_instrument_id,
+            rpc_name="upsert_canonical_tracked_market_event",
+        )
 
+    @staticmethod
+    def _validate_inputs(
+        *,
+        event_at: datetime,
+        event_date: date,
+        event_time_status: TrackedEventTimeStatus,
+        expected_tracked_instrument_id: str | None,
+        calendar_event_id: str | None,
+    ) -> None:
+        if event_at.tzinfo is None or event_at.utcoffset() is None:
+            raise ValueError("event_at must be timezone-aware")
+        if isinstance(event_date, datetime) or not isinstance(event_date, date):
+            raise ValueError("event_date must be a date")
+        if not isinstance(event_time_status, TrackedEventTimeStatus):
+            raise ValueError("event_time_status must be a TrackedEventTimeStatus")
+        if expected_tracked_instrument_id is not None and not expected_tracked_instrument_id.strip():
+            raise ValueError("expected_tracked_instrument_id must not be blank")
+        if calendar_event_id is not None:
+            raise ValueError(
+                "calendar_event_id is not accepted by canonical tracked-event ingress; "
+                "use calendar runtime promotion"
+            )
+
+    @staticmethod
+    def _parse_result(
+        data: Any,
+        *,
+        event_date: date,
+        expected_tracked_instrument_id: str | None,
+        rpc_name: str,
+    ) -> CanonicalTrackedEventWriteResult:
+        rows = data or []
+        if not rows:
+            raise RuntimeError(f"{rpc_name} returned no rows")
+        row = rows[0]
         persisted_date = date.fromisoformat(str(row["out_event_date"]))
         if persisted_date != event_date:
             raise RuntimeError("canonical tracked event returned a different event_date")
-
         persisted_tracked_instrument_id = str(row["out_tracked_instrument_id"])
         if (
             expected_tracked_instrument_id is not None
@@ -143,7 +225,6 @@ class SupabaseCanonicalTrackedEventIngress:
             raise RuntimeError(
                 "canonical tracked event returned a different tracked instrument"
             )
-
         return CanonicalTrackedEventWriteResult(
             event_id=str(row["out_id"]),
             tracked_instrument_id=persisted_tracked_instrument_id,
