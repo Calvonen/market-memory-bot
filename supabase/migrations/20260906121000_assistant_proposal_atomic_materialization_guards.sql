@@ -93,9 +93,6 @@ begin
       and external_key = input_external_key
     for update;
 
-    -- Use the identical lock key/salt as approve_strategy_draft(). Holding it
-    -- across the version read and canonical event upsert makes the stale-review
-    -- gate atomic with respect to every expectation-version writer.
     perform pg_advisory_xact_lock(
       hashtextextended('tracked:' || existing_event.id::text, 1)
     );
@@ -186,9 +183,6 @@ begin
     raise exception 'assistant_proposal_reviewer_conflict' using errcode = '55000';
   end if;
 
-  -- The proposal row lock is retained while the existing reviewed strategy CAS
-  -- runs. A concurrent re-review RPC therefore cannot pass until this approval
-  -- has either committed (and left a receipt) or rolled back completely.
   return query
   select *
   from public.approve_strategy_draft(
@@ -229,7 +223,7 @@ set search_path = pg_catalog, public
 as $$
 declare
   proposal_row public.assistant_event_proposals%rowtype;
-  approval_via text;
+  expected_approval_via text;
 begin
   select * into proposal_row
   from public.assistant_event_proposals
@@ -243,11 +237,11 @@ begin
     raise exception 'assistant_proposal_not_reopenable' using errcode = '55000';
   end if;
 
-  approval_via := 'assistant_proposal:' || input_proposal_id::text;
+  expected_approval_via := 'assistant_proposal:' || input_proposal_id::text;
   if exists (
     select 1
-    from public.event_strategy_approvals
-    where approved_via = approval_via
+    from public.event_strategy_approvals esa
+    where esa.approved_via = expected_approval_via
   ) then
     raise exception 'assistant_proposal_already_has_strategy_approval' using errcode = '55000';
   end if;
