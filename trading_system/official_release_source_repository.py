@@ -124,6 +124,7 @@ class SupabaseOfficialReleaseSourceRepository:
     TABLE = "event_official_release_sources"
     STATE_RPC = "get_audited_official_release_source_state"
     SET_RPC = "set_event_official_release_source_approved"
+    ASSISTANT_SET_RPC = "set_assistant_event_official_release_source_approved"
     CLEAR_RPC = "clear_event_official_release_source_approved"
 
     def __init__(self, client: Any) -> None:
@@ -238,6 +239,21 @@ class SupabaseOfficialReleaseSourceRepository:
     def get_version(self, event_id: str) -> int:
         return self.get_state(event_id).version
 
+    @classmethod
+    def _source_from_write_response(cls, response: Any) -> OfficialReleaseSource:
+        rows = response.data or []
+        if len(rows) != 1 or not isinstance(rows[0], dict):
+            raise RuntimeError("official release source write did not return exactly one canonical row")
+        row = rows[0]
+        canonical_row = {
+            "event_id": row.get("out_event_id"),
+            "source_kind": row.get("out_source_kind"),
+            "source_url": row.get("out_source_url"),
+            "source_title": row.get("out_source_title"),
+            "version": row.get("out_version"),
+        }
+        return cls._from_row(canonical_row)
+
     def set(
         self,
         source: OfficialReleaseSource,
@@ -262,18 +278,38 @@ class SupabaseOfficialReleaseSourceRepository:
         except Exception as exc:
             _raise_official_release_source_write_error(exc, operation="write")
             raise AssertionError("unreachable")
-        rows = response.data or []
-        if len(rows) != 1 or not isinstance(rows[0], dict):
-            raise RuntimeError("official release source write did not return exactly one canonical row")
-        row = rows[0]
-        canonical_row = {
-            "event_id": row.get("out_event_id"),
-            "source_kind": row.get("out_source_kind"),
-            "source_url": row.get("out_source_url"),
-            "source_title": row.get("out_source_title"),
-            "version": row.get("out_version"),
-        }
-        return self._from_row(canonical_row)
+        return self._source_from_write_response(response)
+
+    def set_for_assistant_proposal(
+        self,
+        proposal_id: str,
+        source: OfficialReleaseSource,
+        *,
+        expected_version: int,
+        actor: str,
+    ) -> OfficialReleaseSource:
+        canonical_proposal_id = proposal_id.strip()
+        if not canonical_proposal_id:
+            raise ValueError("proposal_id is required")
+        self._validate_expected_version(expected_version, allow_zero=True)
+        canonical_actor = self._canonical_actor(actor)
+        try:
+            response = self.client.rpc(
+                self.ASSISTANT_SET_RPC,
+                {
+                    "input_proposal_id": canonical_proposal_id,
+                    "input_event_id": source.event_id,
+                    "input_source_kind": source.source_kind,
+                    "input_source_url": source.source_url,
+                    "input_source_title": source.source_title,
+                    "input_expected_version": expected_version,
+                    "input_actor": canonical_actor,
+                },
+            ).execute()
+        except Exception as exc:
+            _raise_official_release_source_write_error(exc, operation="assistant write")
+            raise AssertionError("unreachable")
+        return self._source_from_write_response(response)
 
     def clear(
         self,
