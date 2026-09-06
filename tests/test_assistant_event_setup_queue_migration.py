@@ -59,6 +59,36 @@ class AssistantEventSetupQueueMigrationTests(unittest.TestCase):
         )
         self.assertIn("assistant_setup_event_at_date_mismatch", self.sql)
 
+    def test_strategy_objects_reject_nested_non_scalar_values(self) -> None:
+        self.assertIn("from jsonb_each(req.strategy_payload->'consensus')", self.sql)
+        self.assertIn("not in ('string', 'number', 'null')", self.sql)
+        self.assertIn("assistant_setup_consensus_value_invalid", self.sql)
+        self.assertIn("from jsonb_each(req.strategy_payload->'triggers')", self.sql)
+        self.assertIn("not in ('string', 'number')", self.sql)
+        self.assertIn("assistant_setup_trigger_value_invalid", self.sql)
+
+    def test_strategy_lists_reject_non_string_elements(self) -> None:
+        for field in (
+            "important_kpis",
+            "bull_case",
+            "base_case",
+            "bear_case",
+            "invalidation_conditions",
+        ):
+            self.assertIn(
+                f"from jsonb_array_elements(req.strategy_payload->'{field}')",
+                self.sql,
+            )
+            self.assertIn(f"assistant_setup_{field}_value_invalid", self.sql)
+
+    def test_strategy_source_metadata_requires_string_or_null(self) -> None:
+        for field in ("source_name", "source_url", "source_as_of"):
+            self.assertIn(
+                f"jsonb_typeof(req.strategy_payload->'{field}') not in ('string', 'null')",
+                self.sql,
+            )
+            self.assertIn(f"assistant_setup_{field}_invalid", self.sql)
+
 
 if __name__ == "__main__":
     unittest.main()
