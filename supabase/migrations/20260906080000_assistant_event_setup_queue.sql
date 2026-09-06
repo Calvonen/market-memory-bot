@@ -51,6 +51,13 @@ begin
     return new;
   end if;
 
+  -- The primary key is the durable proposal identity and is never mutable.
+  if new.id is distinct from old.id then
+    raise exception 'assistant_proposal_id_is_immutable'
+      using errcode = '55000';
+  end if;
+
+  -- Once review begins, the reviewed content and identity are frozen.
   if old.status <> 'draft' and (
     new.proposal_key is distinct from old.proposal_key
     or new.payload is distinct from old.payload
@@ -73,15 +80,18 @@ begin
     end if;
   end if;
 
-  if new.status in ('approved_for_materialization', 'rejected') then
+  -- Reviewer metadata may be written exactly once, on the review decision.
+  if old.status = 'ready_for_review'
+     and new.status in ('approved_for_materialization', 'rejected')
+     and new.status is distinct from old.status then
     if new.reviewed_by is null or btrim(new.reviewed_by) = '' or new.reviewed_at is null then
       raise exception 'assistant_proposal_review_metadata_required'
         using errcode = '22023';
     end if;
   elsif new.reviewed_by is distinct from old.reviewed_by
      or new.reviewed_at is distinct from old.reviewed_at then
-    raise exception 'assistant_proposal_review_metadata_only_on_review'
-      using errcode = '22023';
+    raise exception 'assistant_proposal_review_metadata_is_immutable'
+      using errcode = '55000';
   end if;
 
   new.updated_at := now();
@@ -101,4 +111,4 @@ create index if not exists assistant_event_proposals_status_created_idx
   on public.assistant_event_proposals(status, created_at);
 
 comment on table public.assistant_event_proposals is
-  'Non-execution staging for assistant-prepared plans. Review freezes content; canonical materialization and execution approval happen elsewhere.';
+  'Non-execution staging for assistant-prepared plans. Review freezes content and audit identity; canonical materialization and execution approval happen elsewhere.';
