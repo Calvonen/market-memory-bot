@@ -76,14 +76,33 @@ export default function AssistantProposalDetailScreen() {
   const [maxPositionUsd, setMaxPositionUsd] = useState(DEFAULT_DEMO_POSITION_CAP_USD);
   const proposalIdRef = useRef(proposalId);
   const trackedEventIdRef = useRef<string | null>(null);
+  const preparationApprovalRequestRef = useRef(0);
   const demoApprovalRequestRef = useRef(0);
 
-  useEffect(() => {
+  // Refs are authority guards for native-alert callbacks and must reflect the
+  // current render synchronously, before passive effects have a chance to run.
+  if (proposalIdRef.current !== proposalId) {
     proposalIdRef.current = proposalId;
+    preparationApprovalRequestRef.current += 1;
     demoApprovalRequestRef.current += 1;
     trackedEventIdRef.current = null;
+  }
+
+  const materialization = proposal?.materialization ?? null;
+  const renderedTrackedEventId =
+    proposal?.id === proposalId && proposal.status === 'materialized' && materialization
+      ? materialization.tracked_event_id
+      : null;
+  if (trackedEventIdRef.current !== renderedTrackedEventId) {
+    trackedEventIdRef.current = renderedTrackedEventId;
+    demoApprovalRequestRef.current += 1;
+  }
+
+  useEffect(() => {
+    setApproving(false);
     setApprovingDemo(false);
     setProposal(null);
+    setApproval(null);
     setPaperPermission(null);
     setPermissionError(null);
     setPermissionLoading(false);
@@ -111,17 +130,9 @@ export default function AssistantProposalDetailScreen() {
 
   useEffect(() => {
     let cancelled = false;
-    const materialization = proposal?.materialization;
-    const trackedEventId =
-      proposal?.status === 'materialized' && materialization
-        ? materialization.tracked_event_id
-        : null;
+    const trackedEventId = renderedTrackedEventId;
 
-    if (trackedEventIdRef.current !== trackedEventId) {
-      demoApprovalRequestRef.current += 1;
-      setApprovingDemo(false);
-    }
-    trackedEventIdRef.current = trackedEventId;
+    setApprovingDemo(false);
     setPaperPermission(null);
     setPermissionError(null);
 
@@ -160,7 +171,7 @@ export default function AssistantProposalDetailScreen() {
     return () => {
       cancelled = true;
     };
-  }, [proposal?.id, proposal?.materialization?.tracked_event_id, proposal?.status]);
+  }, [renderedTrackedEventId]);
 
   const strategy = useMemo(
     () => (proposal?.payload.strategy ?? {}) as StrategyView,
@@ -173,15 +184,22 @@ export default function AssistantProposalDetailScreen() {
 
   const approve = useCallback(async () => {
     if (!proposal || proposal.id !== proposalId || !reviewer.trim()) return;
+    const submittedProposalId = proposal.id;
+    const requestToken = preparationApprovalRequestRef.current + 1;
+    preparationApprovalRequestRef.current = requestToken;
     setApproving(true);
     try {
       setError(null);
       const result = await approveAssistantProposalPreparation(
-        proposal.id,
+        submittedProposalId,
         reviewer.trim(),
         proposal.review_round,
       );
-      if (proposalIdRef.current !== result.proposal_id) return;
+      if (
+        preparationApprovalRequestRef.current !== requestToken
+        || proposalIdRef.current !== submittedProposalId
+        || result.proposal_id !== submittedProposalId
+      ) return;
       setApproval(result);
       setProposal((current) => current && current.id === result.proposal_id ? {
         ...current,
@@ -196,14 +214,18 @@ export default function AssistantProposalDetailScreen() {
       } : current);
       void load();
     } catch (err) {
-      if (proposalIdRef.current !== proposal.id) return;
+      if (
+        preparationApprovalRequestRef.current !== requestToken
+        || proposalIdRef.current !== submittedProposalId
+      ) return;
       setError(err instanceof Error ? err.message : 'Valmistelun hyväksyntä epäonnistui');
     } finally {
-      if (proposalIdRef.current === proposal.id) setApproving(false);
+      if (preparationApprovalRequestRef.current === requestToken) {
+        setApproving(false);
+      }
     }
   }, [load, proposal, proposalId, reviewer]);
 
-  const materialization = proposal?.materialization ?? null;
   const requestedDemo = proposal?.requested_execution_mode === 'demo';
   const requestedLive = proposal?.requested_execution_mode === 'live';
   const proposalMatchesRoute = Boolean(proposal && proposal.id === proposalId);
@@ -259,6 +281,7 @@ export default function AssistantProposalDetailScreen() {
     const expectedVersion = materialization.expectation_version;
     const trackedEventId = materialization.tracked_event_id;
     const submittedProposalId = proposal.id;
+    const confirmationRouteId = proposalId;
     Alert.alert(
       'Hyväksy DEMO-kaupankäynti',
       `Annat MarketAI:lle kertaluonteisen luvan tehdä ${proposal.payload.instrument}-demokaupan tämän yhden tapahtuman perusteella. Expectation v${expectedVersion}. Enimmäispositio ${parsedMaxPositionUsd} USD. Strategy ja Risk Engine voivat silti estää kaupan tai pienentää positiota. LIVE-kaupankäyntiä tämä ei mahdollista.`,
@@ -268,7 +291,8 @@ export default function AssistantProposalDetailScreen() {
           text: 'Hyväksy DEMO',
           onPress: () => {
             if (
-              proposalIdRef.current !== submittedProposalId
+              confirmationRouteId !== submittedProposalId
+              || proposalIdRef.current !== confirmationRouteId
               || trackedEventIdRef.current !== trackedEventId
             ) return;
             const requestToken = demoApprovalRequestRef.current + 1;
