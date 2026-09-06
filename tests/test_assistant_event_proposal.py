@@ -24,6 +24,7 @@ def _payload() -> dict:
         "scheduled_date": "2026-09-07",
         "event_at": "2026-09-07T00:00:00+00:00",
         "event_time_status": "estimated",
+        "base_expectation_version": 1,
         "official_source": {
             "source_kind": "results_page",
             "source_url": "https://www.syrahresources.com.au/investors/reports-presentations",
@@ -68,6 +69,7 @@ class AssistantEventProposalTests(unittest.TestCase):
         self.assertEqual(payload.instrument, "SYR.ASX")
         self.assertEqual(payload.market, "Australia")
         self.assertEqual(payload.title, "Syrah Resources results")
+        self.assertEqual(payload.base_expectation_version, 1)
         self.assertEqual(payload.strategy.event_name, "SYR.ASX earnings")
 
     def test_live_is_visible_metadata_but_fails_closed_for_materialization(self) -> None:
@@ -109,6 +111,17 @@ class AssistantEventProposalTests(unittest.TestCase):
     def test_kind_must_be_explicit(self) -> None:
         payload = _payload()
         payload.pop("kind")
+        with self.assertRaises(ValidationError):
+            validate_proposal_for_materialization(_proposal(payload=payload))
+
+    def test_reviewed_base_expectation_version_must_be_explicit_and_positive(self) -> None:
+        payload = _payload()
+        payload.pop("base_expectation_version")
+        with self.assertRaises(ValidationError):
+            validate_proposal_for_materialization(_proposal(payload=payload))
+
+        payload = _payload()
+        payload["base_expectation_version"] = 0
         with self.assertRaises(ValidationError):
             validate_proposal_for_materialization(_proposal(payload=payload))
 
