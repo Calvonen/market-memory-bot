@@ -76,9 +76,17 @@ export default function AssistantProposalDetailScreen() {
   const [maxPositionUsd, setMaxPositionUsd] = useState(DEFAULT_DEMO_POSITION_CAP_USD);
   const proposalIdRef = useRef(proposalId);
   const trackedEventIdRef = useRef<string | null>(null);
+  const demoApprovalRequestRef = useRef(0);
 
   useEffect(() => {
     proposalIdRef.current = proposalId;
+    demoApprovalRequestRef.current += 1;
+    trackedEventIdRef.current = null;
+    setApprovingDemo(false);
+    setProposal(null);
+    setPaperPermission(null);
+    setPermissionError(null);
+    setPermissionLoading(false);
   }, [proposalId]);
 
   const load = useCallback(async () => {
@@ -88,8 +96,11 @@ export default function AssistantProposalDetailScreen() {
     }
     try {
       setError(null);
-      setProposal(await getAssistantProposal(proposalId));
+      const loaded = await getAssistantProposal(proposalId);
+      if (proposalIdRef.current !== proposalId) return;
+      setProposal(loaded);
     } catch (err) {
+      if (proposalIdRef.current !== proposalId) return;
       setError(err instanceof Error ? err.message : 'Ehdotuksen lataus epäonnistui');
     }
   }, [proposalId]);
@@ -106,6 +117,10 @@ export default function AssistantProposalDetailScreen() {
         ? materialization.tracked_event_id
         : null;
 
+    if (trackedEventIdRef.current !== trackedEventId) {
+      demoApprovalRequestRef.current += 1;
+      setApprovingDemo(false);
+    }
     trackedEventIdRef.current = trackedEventId;
     setPaperPermission(null);
     setPermissionError(null);
@@ -145,7 +160,7 @@ export default function AssistantProposalDetailScreen() {
     return () => {
       cancelled = true;
     };
-  }, [proposal?.materialization, proposal?.status]);
+  }, [proposal?.id, proposal?.materialization?.tracked_event_id, proposal?.status]);
 
   const strategy = useMemo(
     () => (proposal?.payload.strategy ?? {}) as StrategyView,
@@ -157,7 +172,7 @@ export default function AssistantProposalDetailScreen() {
   );
 
   const approve = useCallback(async () => {
-    if (!proposal || !reviewer.trim()) return;
+    if (!proposal || proposal.id !== proposalId || !reviewer.trim()) return;
     setApproving(true);
     try {
       setError(null);
@@ -166,6 +181,7 @@ export default function AssistantProposalDetailScreen() {
         reviewer.trim(),
         proposal.review_round,
       );
+      if (proposalIdRef.current !== result.proposal_id) return;
       setApproval(result);
       setProposal((current) => current && current.id === result.proposal_id ? {
         ...current,
@@ -180,16 +196,19 @@ export default function AssistantProposalDetailScreen() {
       } : current);
       void load();
     } catch (err) {
+      if (proposalIdRef.current !== proposal.id) return;
       setError(err instanceof Error ? err.message : 'Valmistelun hyväksyntä epäonnistui');
     } finally {
-      setApproving(false);
+      if (proposalIdRef.current === proposal.id) setApproving(false);
     }
-  }, [load, proposal, reviewer]);
+  }, [load, proposal, proposalId, reviewer]);
 
   const materialization = proposal?.materialization ?? null;
   const requestedDemo = proposal?.requested_execution_mode === 'demo';
   const requestedLive = proposal?.requested_execution_mode === 'live';
-  const canApprove = proposal
+  const proposalMatchesRoute = Boolean(proposal && proposal.id === proposalId);
+  const canApprove = proposalMatchesRoute
+    && proposal
     && proposal.status !== 'materialized'
     && requestedDemo
     && reviewer.trim().length > 0
@@ -213,7 +232,8 @@ export default function AssistantProposalDetailScreen() {
     && paperPermission.approved_expectation_version === materialization.expectation_version,
   );
   const canApproveDemo = Boolean(
-    proposal
+    proposalMatchesRoute
+    && proposal
     && proposal.status === 'materialized'
     && requestedDemo
     && materialization
@@ -227,7 +247,14 @@ export default function AssistantProposalDetailScreen() {
   );
 
   const confirmDemoAuthority = useCallback(() => {
-    if (!proposal || !materialization || !paperPermission || !canApproveDemo || parsedMaxPositionUsd === null) return;
+    if (
+      !proposal
+      || proposal.id !== proposalId
+      || !materialization
+      || !paperPermission
+      || !canApproveDemo
+      || parsedMaxPositionUsd === null
+    ) return;
     const actor = demoActor.trim();
     const expectedVersion = materialization.expectation_version;
     const trackedEventId = materialization.tracked_event_id;
@@ -240,6 +267,12 @@ export default function AssistantProposalDetailScreen() {
         {
           text: 'Hyväksy DEMO',
           onPress: () => {
+            if (
+              proposalIdRef.current !== submittedProposalId
+              || trackedEventIdRef.current !== trackedEventId
+            ) return;
+            const requestToken = demoApprovalRequestRef.current + 1;
+            demoApprovalRequestRef.current = requestToken;
             setApprovingDemo(true);
             setPermissionError(null);
             void approveTrackedEventPaperPermission(
@@ -252,7 +285,8 @@ export default function AssistantProposalDetailScreen() {
             )
               .then((permission) => {
                 if (
-                  proposalIdRef.current !== submittedProposalId
+                  demoApprovalRequestRef.current !== requestToken
+                  || proposalIdRef.current !== submittedProposalId
                   || trackedEventIdRef.current !== trackedEventId
                 ) return;
                 if (permission.event_id !== trackedEventId) {
@@ -267,7 +301,8 @@ export default function AssistantProposalDetailScreen() {
               })
               .catch(async (err) => {
                 if (
-                  proposalIdRef.current !== submittedProposalId
+                  demoApprovalRequestRef.current !== requestToken
+                  || proposalIdRef.current !== submittedProposalId
                   || trackedEventIdRef.current !== trackedEventId
                 ) return;
                 const writeError = err instanceof Error ? err.message : 'DEMO-luvan hyväksyntä epäonnistui.';
@@ -275,7 +310,8 @@ export default function AssistantProposalDetailScreen() {
                 try {
                   const current = await getTrackedEventPaperPermission(trackedEventId);
                   if (
-                    proposalIdRef.current !== submittedProposalId
+                    demoApprovalRequestRef.current !== requestToken
+                    || proposalIdRef.current !== submittedProposalId
                     || trackedEventIdRef.current !== trackedEventId
                   ) return;
                   if (current.event_id !== trackedEventId) {
@@ -289,15 +325,13 @@ export default function AssistantProposalDetailScreen() {
                   }
                   setPermissionError(writeError);
                 } catch {
+                  if (demoApprovalRequestRef.current !== requestToken) return;
                   setPaperPermission(null);
                   setPermissionError(writeError);
                 }
               })
               .finally(() => {
-                if (
-                  proposalIdRef.current === submittedProposalId
-                  && trackedEventIdRef.current === trackedEventId
-                ) {
+                if (demoApprovalRequestRef.current === requestToken) {
                   setApprovingDemo(false);
                 }
               });
@@ -305,7 +339,7 @@ export default function AssistantProposalDetailScreen() {
         },
       ],
     );
-  }, [canApproveDemo, demoActor, materialization, paperPermission, parsedMaxPositionUsd, proposal]);
+  }, [canApproveDemo, demoActor, materialization, paperPermission, parsedMaxPositionUsd, proposal, proposalId]);
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
