@@ -7,7 +7,10 @@ from fastapi import APIRouter, Header, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
 from trading_system.assistant_event_proposal import (
+    AssistantProposalIdentityConflict,
+    AssistantProposalLiveLocked,
     AssistantProposalNotFound,
+    AssistantProposalNotReady,
     AssistantProposalPreparationApprovalConflict,
 )
 from trading_system.assistant_proposal_approval_service import (
@@ -49,9 +52,13 @@ def build_assistant_proposal_router(
             )
         except AssistantProposalNotFound as exc:
             raise HTTPException(status_code=404, detail="Assistant proposal not found") from exc
-        except AssistantProposalPreparationApprovalConflict as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except AssistantProposalMaterializationError as exc:
+        except (
+            AssistantProposalPreparationApprovalConflict,
+            AssistantProposalLiveLocked,
+            AssistantProposalNotReady,
+            AssistantProposalIdentityConflict,
+            AssistantProposalMaterializationError,
+        ) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
