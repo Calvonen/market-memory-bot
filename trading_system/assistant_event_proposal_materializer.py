@@ -12,11 +12,8 @@ from trading_system.calendar_release_worker import (
     CalendarReleaseTarget,
     SupabaseCalendarReleaseTargetRepository,
 )
-from trading_system.canonical_tracked_event_ingress import (
-    SupabaseCanonicalTrackedEventIngress,
-)
+from trading_system.canonical_tracked_event_ingress import SupabaseCanonicalTrackedEventIngress
 from trading_system.etoro_instrument_resolver import (
-    EtoroInstrumentResolver,
     InstrumentResolutionRequest,
     ResolvedEtoroInstrument,
 )
@@ -134,9 +131,7 @@ class SupabaseAssistantEventProposalRepository:
     def get(self, proposal_id: str) -> AssistantEventProposalRecord | None:
         response = (
             self.client.table(self.TABLE)
-            .select(
-                "id,proposal_key,payload,requested_execution_mode,status,reviewed_by"
-            )
+            .select("id,proposal_key,payload,requested_execution_mode,status,reviewed_by")
             .eq("id", proposal_id)
             .limit(1)
             .execute()
@@ -197,7 +192,7 @@ class SupabaseAssistantEventProposalRepository:
 
 
 class AssistantEventProposalMaterializer:
-    """Turn one user-approved proposal into canonical tracking state.
+    """Materialize one user-reviewed proposal through canonical boundaries only.
 
     This boundary never creates trading tasks and never grants PAPER/DEMO or
     LIVE execution authority. LIVE proposals fail closed. Strategy persistence
@@ -324,18 +319,6 @@ class AssistantEventProposalMaterializer:
             raise AssistantProposalIdentityConflict("; ".join(mismatches))
         fingerprint = draft_fingerprint(normalized)
 
-        existing = self.proposals.find_approval(approved_via=approved_via)
-        if existing is not None:
-            self._validate_existing_approval(existing, event_id, fingerprint)
-            self.proposals.mark_materialized(proposal.id)
-            return AssistantProposalMaterializationResult(
-                proposal_id=proposal.id,
-                tracked_event_id=event_write.event_id,
-                event_id=event_id,
-                expectation_version=existing.expectation_version,
-                action="recovered_retry",
-            )
-
         desired_source = OfficialReleaseSource(
             event_id=event_id,
             source_kind=payload.official_source.source_kind,
@@ -351,6 +334,21 @@ class AssistantEventProposalMaterializer:
             )
         else:
             self._validate_official_source(source_state.source, desired_source)
+
+        # The strategy approval audit is the durable retry receipt. Always
+        # validate/ensure the official source above before honoring it, so a
+        # recovery after a partial earlier run cannot skip release-source setup.
+        existing = self.proposals.find_approval(approved_via=approved_via)
+        if existing is not None:
+            self._validate_existing_approval(existing, event_id, fingerprint)
+            self.proposals.mark_materialized(proposal.id)
+            return AssistantProposalMaterializationResult(
+                proposal_id=proposal.id,
+                tracked_event_id=event_write.event_id,
+                event_id=event_id,
+                expectation_version=existing.expectation_version,
+                action="recovered_retry",
+            )
 
         try:
             approval = self.approvals.approve(
@@ -392,13 +390,13 @@ class AssistantEventProposalMaterializer:
 
     @staticmethod
     def _validate_draft_outer_identity(payload: AssistantEventProposalPayload) -> None:
+        # event_name is intentionally NOT compared with proposal.title here.
+        # Generic release shells own their canonical event_name (currently
+        # "<instrument> earnings"). identity_mismatches() below validates it
+        # against the actual persisted shell before strategy approval.
         if _symbol(payload.strategy.instrument) != _symbol(payload.instrument):
             raise AssistantProposalIdentityConflict(
                 "strategy instrument differs from proposal instrument"
-            )
-        if payload.strategy.event_name.strip() != payload.title.strip():
-            raise AssistantProposalIdentityConflict(
-                "strategy event_name differs from proposal title"
             )
         if payload.strategy.scheduled_date != payload.scheduled_date:
             raise AssistantProposalIdentityConflict(
