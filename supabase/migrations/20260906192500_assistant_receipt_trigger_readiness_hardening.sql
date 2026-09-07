@@ -1,5 +1,5 @@
--- Tighten v5 readiness: a replica-only trigger does not protect ordinary
--- service-role RPC inserts. Accept only origin-enabled or always-enabled states.
+-- Tighten v5 readiness: the receipt guard must fire for ordinary service-role
+-- INSERTs, row-by-row, before the authority row is written.
 
 begin;
 
@@ -66,6 +66,10 @@ as $$
           and not tgisinternal
           and tgenabled in ('O', 'A')
           and tgfoid = to_regprocedure('public.guard_assistant_proposal_receipt_snapshot()')
+          -- PostgreSQL tgtype bitmask 1 (ROW) + 2 (BEFORE) + 4 (INSERT) = 7.
+          -- Requiring exactly 7 rejects statement-level, AFTER, UPDATE-only,
+          -- DELETE, TRUNCATE, or mixed-event drifted trigger definitions.
+          and tgtype = 7
       )
       and to_regprocedure(
         'public.upsert_assistant_proposal_canonical_tracked_event(uuid, integer, integer, text, text, text, text, text, text, text, timestamptz, date, text, text, text)'
