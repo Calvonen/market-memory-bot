@@ -59,6 +59,7 @@ declare
   current_version integer;
   proposal_event_at_text text;
   proposal_event_at timestamptz;
+  proposal_local_event_at timestamp;
   proposal_event_time_status text;
 begin
   if input_expected_review_round is null or input_expected_review_round < 1 then
@@ -87,15 +88,19 @@ begin
     raise exception 'assistant_proposal_external_key_conflict' using errcode = '55000';
   end if;
 
-  -- event_at is mandatory in the validated proposal payload. Re-read it from
-  -- the locked proposal row instead of trusting only the application argument.
   proposal_event_at_text := proposal_row.payload ->> 'event_at';
   proposal_event_time_status := proposal_row.payload ->> 'event_time_status';
   if proposal_event_at_text is null or btrim(proposal_event_at_text) = '' then
     raise exception 'assistant_proposal_event_at_missing' using errcode = '22023';
   end if;
+
   begin
     proposal_event_at := proposal_event_at_text::timestamptz;
+    proposal_local_event_at := regexp_replace(
+      proposal_event_at_text,
+      '(Z|[+-][0-9]{2}(?::?[0-9]{2})?)$',
+      ''
+    )::timestamp;
   exception when others then
     raise exception 'assistant_proposal_event_at_invalid' using errcode = '22023';
   end;
@@ -107,19 +112,15 @@ begin
     raise exception 'assistant_proposal_event_time_status_identity_conflict' using errcode = '55000';
   end if;
 
-  -- Never create or reuse canonical runtime state for an event whose reviewed
-  -- timestamp has already been reached. The pre-event lifecycle cannot be
-  -- completed safely after this boundary.
   if proposal_event_at <= clock_timestamp() then
     raise exception 'assistant_proposal_event_at_not_future' using errcode = '55000';
   end if;
 
-  -- For date-only estimates the assistant must not encode "unknown time" as
-  -- local 00:00. That sentinel can translate to the previous civil day in the
-  -- user timezone and falsely make the event look already started. Require a
-  -- genuinely reviewed time before materialization instead of inventing one.
+  -- Inspect the local wall-clock component after removing the timezone suffix.
+  -- This catches equivalent valid spellings such as +10:00, +1000, Z, and a
+  -- space instead of T instead of relying on one exact ISO rendering.
   if proposal_event_time_status in ('estimated', 'unknown')
-     and proposal_event_at_text ~ 'T00:00:00(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$' then
+     and proposal_local_event_at::time = time '00:00:00' then
     raise exception 'assistant_proposal_ambiguous_midnight_event_at' using errcode = '55000';
   end if;
 
@@ -161,6 +162,12 @@ begin
       raise exception 'expectation_version_conflict: expected % but current is %',
         input_expected_base_version, current_version using errcode = 'P0001';
     end if;
+  end if;
+
+  -- The locks above can block long enough for a near-term event to begin.
+  -- Recheck immediately before the canonical write while those locks are held.
+  if proposal_event_at <= clock_timestamp() then
+    raise exception 'assistant_proposal_event_at_not_future' using errcode = '55000';
   end if;
 
   return query
@@ -249,21 +256,22 @@ begin
     raise exception 'trading_task_instrument_mismatch';
   end if;
 
-  -- Check assistant provenance before taking the canonical lineage locks. A
-  -- materialized proposal is terminal and its approval receipt is immutable,
-  -- so no proposal-row lock is needed here. This preserves the established
-  -- lineage->execution lock order and avoids inverting it against the
-  -- materializer, which locks the proposal before the lineage.
+  -- Assistant proposals materialize tracked events through the dedicated ingress
+  -- with source='manual' and external_key=proposal_key. Match both halves of the
+  -- canonical unique identity so an unrelated source reusing the same key keeps
+  -- the ordinary PAPER behavior.
   select count(*) into proposal_count
   from public.assistant_event_proposals
-  where proposal_key = event_row.external_key;
+  where proposal_key = event_row.external_key
+    and event_row.source = 'manual';
 
   if proposal_count > 1 then
     raise exception 'assistant_proposal_paper_authority_ambiguous_lineage';
   elsif proposal_count = 1 then
     select * into proposal_row
     from public.assistant_event_proposals
-    where proposal_key = event_row.external_key;
+    where proposal_key = event_row.external_key
+      and event_row.source = 'manual';
 
     if proposal_row.requested_execution_mode <> 'demo' then
       raise exception 'assistant_proposal_live_locked';
@@ -293,10 +301,6 @@ begin
     end if;
   end if;
 
-  -- Canonical lock order is lineage first (salt 1), then execution/analysis
-  -- state (salt 0). Expectation writers contend on salt 1, while task claims
-  -- and analysis writes use salt 0. Holding both keeps the displayed version,
-  -- task replacement and approval in one serialized decision.
   perform pg_advisory_xact_lock(hashtextextended(canonical_source_event_id, 1));
   perform pg_advisory_xact_lock(hashtextextended(canonical_source_event_id, 0));
 
@@ -311,8 +315,6 @@ begin
     raise exception 'trading_task_expectation_version_changed';
   end if;
 
-  -- Re-check assistant receipt lineage against the now-locked canonical
-  -- expectation version. The receipt is immutable once materialized.
   if proposal_count = 1 and receipt_expectation_version is distinct from current_version then
     raise exception 'assistant_proposal_paper_authority_expectation_lineage_mismatch';
   end if;
@@ -325,7 +327,6 @@ begin
   limit 1
   for update;
 
-  -- Exact retry of an already committed permission is idempotent.
   if found
      and active_task.state = 'approved'
      and active_task.source_event_id = canonical_source_event_id
@@ -335,10 +336,6 @@ begin
     return active_task;
   end if;
 
-  -- A changed cap, stale lineage, or pending predecessor is historical intent,
-  -- not authority for this newly confirmed permission. Reuse the canonical
-  -- cancellation boundary so an active execution lease or unresolved broker
-  -- attempt blocks replacement instead of orphaning a possible external order.
   if found then
     perform public.cancel_trading_task(active_task.id, actor);
   end if;
