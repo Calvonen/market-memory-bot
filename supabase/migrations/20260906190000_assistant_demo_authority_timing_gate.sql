@@ -68,6 +68,9 @@ begin
   if input_expected_base_version is null or input_expected_base_version < 1 then
     raise exception 'assistant_proposal_expected_base_version_invalid' using errcode = '22023';
   end if;
+  if input_source is distinct from 'manual' then
+    raise exception 'assistant_proposal_source_must_be_manual' using errcode = '22023';
+  end if;
 
   select * into proposal_row
   from public.assistant_event_proposals
