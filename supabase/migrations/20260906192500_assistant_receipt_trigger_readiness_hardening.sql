@@ -1,5 +1,7 @@
 -- Tighten v5 readiness: the receipt guard must fire for ordinary service-role
--- INSERTs, row-by-row, before the authority row is written.
+-- INSERTs, row-by-row, before the authority row is written. The materialization
+-- transition guard must also remain active so terminal assistant status cannot
+-- bypass durable lineage.
 
 begin;
 
@@ -58,6 +60,7 @@ as $$
       ),
     to_regprocedure('public.assistant_normalize_symbol(text)') is not null
       and to_regprocedure('public.guard_assistant_proposal_receipt_snapshot()') is not null
+      and to_regprocedure('public.guard_assistant_proposal_materialized_lineage()') is not null
       and exists (
         select 1
         from pg_trigger
@@ -70,6 +73,18 @@ as $$
           -- Requiring exactly 7 rejects statement-level, AFTER, UPDATE-only,
           -- DELETE, TRUNCATE, or mixed-event drifted trigger definitions.
           and tgtype = 7
+      )
+      and exists (
+        select 1
+        from pg_trigger
+        where tgrelid = 'public.assistant_event_proposals'::regclass
+          and tgname = 'assistant_proposal_materialized_lineage_guard'
+          and not tgisinternal
+          and tgenabled in ('O', 'A')
+          and tgfoid = to_regprocedure('public.guard_assistant_proposal_materialized_lineage()')
+          -- ROW + BEFORE + UPDATE = 19. UPDATE OF status is even narrower; a
+          -- broader BEFORE UPDATE row trigger would still fail closed safely.
+          and tgtype = 19
       )
       and to_regprocedure(
         'public.upsert_assistant_proposal_canonical_tracked_event(uuid, integer, integer, text, text, text, text, text, text, text, timestamptz, date, text, text, text)'
