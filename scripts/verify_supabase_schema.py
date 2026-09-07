@@ -38,6 +38,18 @@ REQUIRED_CHECKS: tuple[tuple[str, str], ...] = (
         "transition_calendar_event_status_function_exists",
         "transition_calendar_event_status() function",
     ),
+    (
+        "assistant_materialization_lineage_table_exists",
+        "assistant_proposal_materializations durable lineage table",
+    ),
+    (
+        "assistant_materialization_lineage_acl_locked",
+        "assistant materialization lineage direct-write ACL lock",
+    ),
+    (
+        "assistant_lineage_enforcement_exists",
+        "assistant immutable-review receipt and lineage enforcement",
+    ),
 )
 
 REQUIRED_OFFICIAL_RELEASE_SOURCE_CHECKS: tuple[tuple[str, str], ...] = (
@@ -369,9 +381,9 @@ def main() -> int:
         return 1
 
     print(
-        "Supabase schema gate passed: strategy/calendar, official-release-source, "
-        "persistent tracked-event runtime, and canonical tracked-instrument "
-        "dependencies are present."
+        "Supabase schema gate passed: strategy/calendar, durable assistant lineage, "
+        "official-release-source, persistent tracked-event runtime, and canonical "
+        "tracked-instrument dependencies are present."
     )
     return 0
 
