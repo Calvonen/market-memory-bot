@@ -69,7 +69,23 @@ SYDNEY_MARKET_SESSION_PROFILE = MarketSessionProfile(
     provider_symbol_suffix=".AX",
 )
 
-GROUNDED_MARKET_SESSION_PROFILES = (SYDNEY_MARKET_SESSION_PROFILE,)
+# Production-grounded by the SRC.L tracked-event preflight on 2026-09-07.
+# eToro persisted the exact market label "LSE_AIM" and the broker symbol
+# "SRC.L". London AIM shares use the London exchange session and the same .L
+# suffix in the market-data provider namespace, so no ticker/country inference
+# or aliasing is needed here.
+LSE_AIM_MARKET_SESSION_PROFILE = MarketSessionProfile(
+    etoro_market="LSE_AIM",
+    market_timezone="Europe/London",
+    calendar_id="XLON",
+    broker_symbol_suffix=".L",
+    provider_symbol_suffix=".L",
+)
+
+GROUNDED_MARKET_SESSION_PROFILES = (
+    SYDNEY_MARKET_SESSION_PROFILE,
+    LSE_AIM_MARKET_SESSION_PROFILE,
+)
 
 
 def resolve_market_session_profile(
