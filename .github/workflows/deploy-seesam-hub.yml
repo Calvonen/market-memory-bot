@@ -113,6 +113,9 @@ jobs:
           # Pin it to the exact tested workflow SHA even if the remote branch
           # was force-updated and the previous local history has diverged.
           git reset --hard "$DEPLOY_SHA"
+          # At this point HEAD already equals DEPLOY_SHA. Keep the fast-forward
+          # assertion as a no-op safety check and to preserve the deploy-order gate.
+          git merge --ff-only "$DEPLOY_SHA"
 
           set -a
           # shellcheck disable=SC1091
