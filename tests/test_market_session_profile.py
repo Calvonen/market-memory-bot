@@ -4,6 +4,7 @@ import unittest
 
 from trading_system.market_session_profile import (
     GROUNDED_MARKET_SESSION_PROFILES,
+    LSE_AIM_MARKET_SESSION_PROFILE,
     SYDNEY_MARKET_SESSION_PROFILE,
     MarketSessionProfile,
     has_grounded_market_session_profile,
@@ -33,13 +34,27 @@ class MarketSessionProfileTests(unittest.TestCase):
         self.assertEqual(SYDNEY_MARKET_SESSION_PROFILE.etoro_market, "Sydney")
         self.assertEqual(SYDNEY_MARKET_SESSION_PROFILE.market_timezone, "Australia/Sydney")
         self.assertEqual(SYDNEY_MARKET_SESSION_PROFILE.calendar_id, "XASX")
-        self.assertEqual(GROUNDED_MARKET_SESSION_PROFILES, (SYDNEY_MARKET_SESSION_PROFILE,))
 
         resolved = resolve_market_session_profile(
             "Sydney",
             profiles=GROUNDED_MARKET_SESSION_PROFILES,
         )
         self.assertIs(resolved, SYDNEY_MARKET_SESSION_PROFILE)
+
+    def test_grounded_lse_aim_profile_uses_london_timezone_and_session(self) -> None:
+        self.assertEqual(LSE_AIM_MARKET_SESSION_PROFILE.etoro_market, "LSE_AIM")
+        self.assertEqual(LSE_AIM_MARKET_SESSION_PROFILE.market_timezone, "Europe/London")
+        self.assertEqual(LSE_AIM_MARKET_SESSION_PROFILE.calendar_id, "XLON")
+        self.assertEqual(
+            GROUNDED_MARKET_SESSION_PROFILES,
+            (SYDNEY_MARKET_SESSION_PROFILE, LSE_AIM_MARKET_SESSION_PROFILE),
+        )
+
+        resolved = resolve_market_session_profile(
+            "LSE_AIM",
+            profiles=GROUNDED_MARKET_SESSION_PROFILES,
+        )
+        self.assertIs(resolved, LSE_AIM_MARKET_SESSION_PROFILE)
 
     def test_grounded_profiles_do_not_alias_or_infer_other_australian_labels(self) -> None:
         for label in ("sydney", "Australia", "ASX", "XASX"):
@@ -117,6 +132,14 @@ class ResolveProviderSymbolTests(unittest.TestCase):
             "WDS.AX",
         )
 
+    def test_lse_aim_keeps_the_grounded_london_provider_suffix(self) -> None:
+        self.assertEqual(LSE_AIM_MARKET_SESSION_PROFILE.broker_symbol_suffix, ".L")
+        self.assertEqual(LSE_AIM_MARKET_SESSION_PROFILE.provider_symbol_suffix, ".L")
+        self.assertEqual(
+            resolve_provider_symbol("SRC.L", profile=LSE_AIM_MARKET_SESSION_PROFILE),
+            "SRC.L",
+        )
+
     def test_policy_covers_every_sydney_instrument_not_just_the_first_one(self) -> None:
         for broker, provider in (
             ("WDS.ASX", "WDS.AX"),
@@ -181,8 +204,9 @@ class ResolveProviderSymbolTests(unittest.TestCase):
 
 
 class HasGroundedMarketSessionProfileTests(unittest.TestCase):
-    def test_grounded_sydney_is_the_only_currently_rolled_out_market(self) -> None:
+    def test_grounded_production_markets_are_rolled_out(self) -> None:
         self.assertTrue(has_grounded_market_session_profile("Sydney"))
+        self.assertTrue(has_grounded_market_session_profile("LSE_AIM"))
 
     def test_markets_awaiting_grounding_report_false_instead_of_raising(self) -> None:
         for label in ("London", "NASDAQ", "NYSE", "Helsinki"):
@@ -190,7 +214,19 @@ class HasGroundedMarketSessionProfileTests(unittest.TestCase):
                 self.assertFalse(has_grounded_market_session_profile(label))
 
     def test_never_aliases_or_infers_from_ticker_country_or_calendar_market(self) -> None:
-        for label in ("sydney", "SYDNEY", " Sydney", "Sydney ", "Australia", "ASX", "XASX"):
+        for label in (
+            "sydney",
+            "SYDNEY",
+            " Sydney",
+            "Sydney ",
+            "Australia",
+            "ASX",
+            "XASX",
+            "lse_aim",
+            "LSE AIM",
+            "London",
+            "XLON",
+        ):
             with self.subTest(label=label):
                 self.assertFalse(has_grounded_market_session_profile(label))
 
