@@ -1,7 +1,6 @@
 -- Canonicalize queued assistant proposal symbols before the v5 receipt-hardening
--- migration creates its normalizing trigger. `ready_for_review` content is
--- otherwise immutable under the lifecycle guard, so perform this one-time
--- migration backfill with that single guard disabled inside the same transaction.
+-- migration. Also install the same normalizer trigger here so live writes between
+-- this migration and 1920 cannot reintroduce noncanonical ready_for_review rows.
 
 begin;
 
@@ -44,7 +43,7 @@ $$;
 
 -- This is a migration-only canonicalization of rows that have not yet produced
 -- an immutable approved snapshot. Disable only the lifecycle trigger that would
--- reject a content-preserving identity normalization on ready_for_review rows.
+-- reject identity normalization on an existing ready_for_review row.
 alter table public.assistant_event_proposals
   disable trigger assistant_event_proposals_lifecycle_guard;
 
@@ -70,5 +69,47 @@ where p.status in ('draft', 'ready_for_review')
 
 alter table public.assistant_event_proposals
   enable trigger assistant_event_proposals_lifecycle_guard;
+
+-- Install normalization before this migration commits. The trigger name sorts
+-- before the lifecycle guard, so any live INSERT/UPDATE in the gap before 1920
+-- is canonicalized first and cannot recreate the queued-row migration failure.
+create or replace function public.normalize_assistant_proposal_symbols()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  normalized_top text;
+  normalized_strategy text;
+begin
+  if new.status not in ('draft', 'ready_for_review') then
+    return new;
+  end if;
+
+  normalized_top := public.assistant_normalize_symbol(new.payload ->> 'instrument');
+  normalized_strategy := public.assistant_normalize_symbol(new.payload #>> '{strategy,instrument}');
+
+  if nullif(normalized_top, '') is null or nullif(normalized_strategy, '') is null then
+    raise exception 'assistant_proposal_instrument_missing' using errcode = '22023';
+  end if;
+  if normalized_top is distinct from normalized_strategy then
+    raise exception 'assistant_proposal_strategy_instrument_conflict' using errcode = '55000';
+  end if;
+
+  new.payload := jsonb_set(new.payload, '{instrument}', to_jsonb(normalized_top), false);
+  new.payload := jsonb_set(new.payload, '{strategy,instrument}', to_jsonb(normalized_strategy), false);
+  return new;
+end;
+$$;
+
+revoke all on function public.normalize_assistant_proposal_symbols()
+  from public, anon, authenticated;
+
+drop trigger if exists aa_normalize_assistant_proposal_symbols
+  on public.assistant_event_proposals;
+create trigger aa_normalize_assistant_proposal_symbols
+before insert or update on public.assistant_event_proposals
+for each row execute function public.normalize_assistant_proposal_symbols();
 
 commit;
