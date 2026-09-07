@@ -198,7 +198,11 @@ class AssistantProposalMaterializer:
             event_id, payload
         )
         approved_via = proposal_approval_via(proposal)
+        # Kept as a caller-side diagnostic token only. Schema v5 independently
+        # derives and overwrites the authoritative assistant receipt fingerprint
+        # from the immutable DB review snapshot + durable event lineage.
         fingerprint = draft_fingerprint(normalized)
+        expected_receipt_version = payload.base_expectation_version + 1
         retried = False
         try:
             approved = self.approvals.approve_assistant_proposal(
@@ -234,7 +238,11 @@ class AssistantProposalMaterializer:
             receipt = self.proposals.find_approval(approved_via=approved_via)
             if receipt is None:
                 raise AssistantProposalReviewedVersionConflict(str(exc)) from exc
-            version = self._matching_receipt_version(receipt, event_id, fingerprint)
+            version = self._matching_receipt_version(
+                receipt,
+                event_id,
+                expected_receipt_version,
+            )
             retried = True
         except Exception as exc:
             if "assistant_proposal_review_round_conflict" in str(exc):
@@ -259,8 +267,11 @@ class AssistantProposalMaterializer:
             raise AssistantProposalCanonicalIdentityConflict(
                 "materialized proposal receipt has invalid tracked event identity"
             )
-        fingerprint = draft_fingerprint(normalize_draft(event_id, payload.strategy))
-        version = self._matching_receipt_version(receipt, event_id, fingerprint)
+        version = self._matching_receipt_version(
+            receipt,
+            event_id,
+            payload.base_expectation_version + 1,
+        )
         tracked_event_id = event_id.removeprefix("tracked:")
         return AssistantProposalMaterializationResult(
             proposal.id, tracked_event_id, event_id, version, True
@@ -286,9 +297,20 @@ class AssistantProposalMaterializer:
 
     @staticmethod
     def _matching_receipt_version(
-        receipt: ExistingProposalApproval, event_id: str, fingerprint: str
+        receipt: ExistingProposalApproval,
+        event_id: str,
+        expected_version: int,
     ) -> int:
-        if receipt.event_id != event_id or receipt.draft_fingerprint != fingerprint:
+        # On schema v5 the DB, not this caller, derives the authoritative
+        # assistant receipt fingerprint from the immutable review snapshot.
+        # Recovery therefore binds to the exact event + expected version and
+        # requires the DB-derived SHA-256 receipt shape rather than comparing it
+        # with the legacy caller-computed strategy fingerprint.
+        if (
+            receipt.event_id != event_id
+            or receipt.expectation_version != expected_version
+            or re.fullmatch(r"[0-9a-f]{64}", receipt.draft_fingerprint) is None
+        ):
             raise AssistantProposalCanonicalIdentityConflict(
                 "existing proposal approval receipt does not match this materialization"
             )
