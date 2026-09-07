@@ -60,6 +60,14 @@ create trigger aa_normalize_assistant_proposal_symbols
 before insert or update on public.assistant_event_proposals
 for each row execute function public.normalize_assistant_proposal_symbols();
 
+-- Normalize proposals that were already queued before this v5 migration. A
+-- no-op payload assignment deliberately fires the trigger above so both draft
+-- and ready_for_review rows use the same canonical identity rule before any
+-- immutable approval snapshot can be created.
+update public.assistant_event_proposals
+set payload = payload
+where status in ('draft', 'ready_for_review');
+
 -- Existing immutable approved snapshots cannot be silently rewritten. Refuse a
 -- deployment if one contains a symbol that does not already satisfy the new
 -- canonical rule; it must be explicitly reopened/reviewed instead.
@@ -334,6 +342,8 @@ as $$
         where tgrelid = 'public.event_strategy_approvals'::regclass
           and tgname = 'assistant_proposal_receipt_snapshot_guard'
           and not tgisinternal
+          and tgenabled <> 'D'
+          and tgfoid = to_regprocedure('public.guard_assistant_proposal_receipt_snapshot()')
       )
       and to_regprocedure(
         'public.upsert_assistant_proposal_canonical_tracked_event(uuid, integer, integer, text, text, text, text, text, text, text, timestamptz, date, text, text, text)'
