@@ -43,6 +43,9 @@ STRATEGY_PRESENT_ROW = {
     "transition_calendar_event_status_function_exists": True,
     "calendar_candidate_upsert_version_matches": True,
     "calendar_candidate_upsert_implementation_version": 3,
+    "assistant_materialization_lineage_table_exists": True,
+    "assistant_materialization_lineage_acl_locked": True,
+    "assistant_lineage_enforcement_exists": True,
 }
 
 OFFICIAL_SOURCE_PRESENT_ROW = {
